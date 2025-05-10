@@ -1,6 +1,6 @@
-import { Board, getPiece, setPiece } from "../model/board";
-import { Player, Piece } from "../model/piece";
-import { Square, Row, Column } from "../model/square";
+import { type Board, getPiece, setPiece } from "../model/board";
+import type { Player } from "../model/piece";
+import type { Column, Row, Square } from "../model/square";
 import { generateMoves } from "./moveGenerator";
 
 // 盤上のマスをすべて列挙

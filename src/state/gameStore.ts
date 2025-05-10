@@ -7,7 +7,7 @@ import { devtools, persist, subscribeWithSelector } from "zustand/middleware";
 // --- 初期値の仮実装 ---
 const initialBoard: Board = {
     /* 後で 初期値入れる */
-} as any;
+};
 
 interface GameState {
     board: Board;

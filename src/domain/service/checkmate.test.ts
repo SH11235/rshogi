@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { Board } from "../model/board";
-import { Piece } from "../model/piece";
-import { Square } from "../model/square";
+import { describe, expect, it } from "vitest";
+import type { Board } from "../model/board";
+import type { Piece } from "../model/piece";
+import type { Square } from "../model/square";
 import { isCheckmate } from "./checkmate";
 
 // 駒配置ユーティリティ
