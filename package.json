@@ -18,11 +18,13 @@
         "@duckdb/duckdb-wasm": "^1.29.1-dev132.0",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
+        "immer": "^10.1.1",
         "lucide-react": "^0.503.0",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "recharts": "^2.15.3",
-        "tailwind-merge": "^3.2.0"
+        "tailwind-merge": "^3.2.0",
+        "zustand": "^5.0.4"
     },
     "devDependencies": {
         "@biomejs/biome": "^1.9.4",
