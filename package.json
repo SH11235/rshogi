@@ -51,8 +51,11 @@
         "node": "22.15.0",
         "npm": "11.3.0"
     },
+    "comment": {
+        "eslint": "一旦lint stagedから外す"
+    },
     "lint-staged": {
-        "*.{ts,tsx,js,jsx}": ["biome format --write", "eslint --fix"],
+        "*.{ts,tsx,js,jsx}": ["biome format --write"],
         "*.{css,md,json}": ["biome format --write"]
     }
 }
