@@ -64,7 +64,7 @@
         "eslint": "一旦lint stagedから外す"
     },
     "lint-staged": {
-        "*.{ts,tsx,js,jsx}": ["biome format --write"],
+        "*.{ts,tsx,js,jsx}": ["biome check --apply ."],
         "*.{css,md,json}": ["biome format --write"]
     }
 }
