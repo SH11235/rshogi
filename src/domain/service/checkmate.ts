@@ -1,7 +1,7 @@
 import { type Board, getPiece, setPiece } from "../model/board";
 import type { Player } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
-import { generateMoves } from "./moveGenerator";
+import { generateMoves } from "./moveService";
 
 // 盤上のマスをすべて列挙
 const allSquares: Square[] = Array.from({ length: 9 * 9 }, (_, i) => ({

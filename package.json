@@ -11,7 +11,7 @@
         "lint:biome:fix": "biome lint --fix",
         "preview": "vite preview",
         "format": "biome format --write .",
-        "format:check": "biome check --apply .",
+        "format:check": "biome check --write .",
         "typecheck": "tsc --noEmit",
         "prepare": "husky",
         "test": "vitest run",
@@ -64,7 +64,7 @@
         "eslint": "一旦lint stagedから外す"
     },
     "lint-staged": {
-        "*.{ts,tsx,js,jsx}": ["biome check --apply ."],
+        "*.{ts,tsx,js,jsx}": ["biome check --write ."],
         "*.{css,md,json}": ["biome format --write"]
     }
 }
