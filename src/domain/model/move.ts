@@ -1,5 +1,5 @@
-import { Square } from "./square";
-import { Piece } from "./piece";
+import type { Piece } from "./piece";
+import type { Square } from "./square";
 
 /**
  * 通常の指し手（盤上の駒を動かす）

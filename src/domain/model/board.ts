@@ -1,5 +1,5 @@
-import { Square } from "./square";
-import { Piece } from "./piece";
+import type { Piece } from "./piece";
+import type { Square } from "./square";
 
 export type Board = {
     [key: string]: Piece | null;

@@ -1,8 +1,8 @@
+import type { Board } from "@/domain/model/board";
+import type { Move } from "@/domain/model/move";
+import { produce } from "immer";
 import { create } from "zustand";
 import { devtools, persist, subscribeWithSelector } from "zustand/middleware";
-import { produce } from "immer";
-import { Board } from "@/domain/model/board";
-import { Move } from "@/domain/model/move";
 
 // --- 初期値の仮実装 ---
 const initialBoard: Board = {
