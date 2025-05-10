@@ -1,0 +1,56 @@
+{
+    "name": "shogi",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc -b && vite build",
+        "lint": "eslint .",
+        "lint:biome": "biome lint",
+        "preview": "vite preview",
+        "format": "biome format --write .",
+        "format:check": "biome format .",
+        "typecheck": "tsc --noEmit",
+        "prepare": "husky"
+    },
+    "dependencies": {
+        "@duckdb/duckdb-wasm": "^1.29.1-dev132.0",
+        "class-variance-authority": "^0.7.1",
+        "clsx": "^2.1.1",
+        "lucide-react": "^0.503.0",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
+        "recharts": "^2.15.3",
+        "tailwind-merge": "^3.2.0"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^1.9.4",
+        "@eslint/js": "^9.22.0",
+        "@tailwindcss/vite": "^4.1.5",
+        "@types/node": "^22.15.3",
+        "@types/react": "^19.0.10",
+        "@types/react-dom": "^19.0.4",
+        "@vitejs/plugin-react-swc": "^3.8.0",
+        "eslint": "^9.22.0",
+        "eslint-plugin-react-hooks": "^5.2.0",
+        "eslint-plugin-react-refresh": "^0.4.19",
+        "globals": "^16.0.0",
+        "husky": "^9.1.7",
+        "lint-staged": "^15.5.1",
+        "tailwindcss": "^4.1.5",
+        "tw-animate-css": "^1.2.8",
+        "typescript": "~5.7.2",
+        "typescript-eslint": "^8.26.1",
+        "vite": "^6.3.1",
+        "vite-tsconfig-paths": "^5.1.4"
+    },
+    "volta": {
+        "node": "22.15.0",
+        "npm": "11.3.0"
+    },
+    "lint-staged": {
+        "*.{ts,tsx,js,jsx}": ["biome format --write", "eslint --fix"],
+        "*.{css,md,json}": ["biome format --write"]
+    }
+}
