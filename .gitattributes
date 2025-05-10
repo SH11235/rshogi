@@ -1,0 +1,1 @@
+packages/rust-core/converted_openings/opening_book_full.bin filter=lfs diff=lfs merge=lfs -text
