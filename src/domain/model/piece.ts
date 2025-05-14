@@ -1,7 +1,10 @@
 export type Player = "black" | "white";
 
 // 駒の基本種類（日本語表記）
-export type PieceKind = "歩" | "香" | "桂" | "銀" | "金" | "角" | "飛" | "王";
+export type PieceKind = "歩" | "香" | "桂" | "銀" | "金" | "角" | "飛" | "王" | "玉";
+
+// 持ち駒になる駒
+export type HandKind = "歩" | "香" | "桂" | "銀" | "金" | "角" | "飛";
 
 // 成れる駒
 export const promotableKinds = ["歩", "香", "桂", "銀", "角", "飛"] as const;
@@ -16,6 +19,7 @@ export const promotedLabelMap = {
     角: "馬",
     飛: "龍",
     王: "王",
+    玉: "玉",
 } as const;
 
 // 駒型定義（成・不成、持ち主）
