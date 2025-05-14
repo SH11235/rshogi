@@ -81,11 +81,19 @@ export function applyMove(
         newHands[mover][kind] -= 1;
         newBoard = setPiece(newBoard, move.to, { ...move.piece, owner: mover, promoted: false });
     } else {
-        const _exhaustive: never = move;
-        throw new Error("未定義の Move タイプ");
+        /* ---------- それ以外（未定義の Move タイプ） ---------- */
+        assertNever(move);
     }
 
     return { board: newBoard, hands: newHands, nextTurn };
+}
+
+/**
+ * exhaustive check 用ユーティリティ。
+ * 引数が never 型でなければコンパイルエラーになる。
+ */
+function assertNever(_value: never): never {
+    throw new Error("未定義の Move タイプ");
 }
 
 /** Undo 用 – 1 手戻して盤・持ち駒を復元 */

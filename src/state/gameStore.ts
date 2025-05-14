@@ -37,7 +37,7 @@ const initialState: Omit<GameState, "makeMove" | "undo" | "redo" | "reset"> = {
 export const useGameStore = create<GameState>()(
     persist(
         devtools(
-            subscribeWithSelector((set, get) => ({
+            subscribeWithSelector((set) => ({
                 ...initialState, // ← データ部を展開
 
                 /*----- 指し手適用 -----*/
