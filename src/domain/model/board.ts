@@ -1,9 +1,7 @@
 import type { Piece } from "./piece";
-import type { Square } from "./square";
+import type { Square, SquareKey } from "./square";
 
-export type Board = {
-    [key: string]: Piece | null;
-};
+export type Board = Record<SquareKey, Piece | null>;
 
 export const getPiece = (board: Board, square: Square): Piece | null =>
     board[`${square.row}${square.column}`] || null;

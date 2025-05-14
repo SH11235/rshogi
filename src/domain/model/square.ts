@@ -6,5 +6,7 @@ export type Square = {
     column: Column;
 };
 
+export type SquareKey = `${Row}${Column}`;
+
 export const isSameSquare = (a: Square, b: Square): boolean =>
     a.row === b.row && a.column === b.column;
