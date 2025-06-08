@@ -13,7 +13,7 @@ const place = (board: Board, key: string, piece: Piece): Board => ({
 
 describe("useGameStore makeMove", () => {
     it("updates result when move results in checkmate", () => {
-        let board: Board = {};
+        let board: Board = {} as Board;
         board = place(board, "55", { kind: "王", promoted: false, owner: "black" });
         board = place(board, "45", { kind: "飛", promoted: false, owner: "white" });
         board = place(board, "54", { kind: "銀", promoted: false, owner: "white" });
