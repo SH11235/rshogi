@@ -23,14 +23,14 @@ describe("Checkmate detection tests", () => {
                 promoted: false,
                 owner: "white",
             },
-        };
+        } as Board;
 
         const result = isCheckmate(board, "black");
         expect(result).toBe(false);
     });
 
     it("王の逃げ道がある場合は詰みでない", () => {
-        let board: Board = {};
+        let board: Board = {} as Board;
         board = place(
             board,
             { row: 5, column: 5 },
@@ -55,7 +55,7 @@ describe("Checkmate detection tests", () => {
     });
 
     it("逃げ道がなく、詰みである場合", () => {
-        let board: Board = {};
+        let board: Board = {} as Board;
         board = place(
             board,
             { row: 5, column: 5 },
@@ -113,7 +113,7 @@ describe("Checkmate detection tests", () => {
                 promoted: false,
                 owner: "white",
             },
-        };
+        } as Board;
 
         const result = isCheckmate(board, "white");
         expect(result).toBe(false);

@@ -50,8 +50,11 @@ export function applyMove(
 ): ApplyMoveResult {
     // Board は浅い構造なのでスプレッドで OK
     let newBoard: Board = { ...board };
-    // Hands はネストしているので深いコピーを取る
-    const newHands: Hands = structuredClone(hands);
+    // Hands はネストしているため plain object 化してから deep copy する
+    const newHands: Hands = structuredClone({
+        black: { ...hands.black },
+        white: { ...hands.white },
+    });
 
     const mover = currentTurn;
     const nextTurn = toggleSide(currentTurn);
@@ -105,7 +108,11 @@ export function revertMove(
 ): ApplyMoveResult {
     const mover = toggleSide(currentTurn); // 元の指し手側
     let newBoard: Board = { ...board };
-    const newHands: Hands = structuredClone(hands);
+    // Hands はネストしているため plain object 化してから deep copy する
+    const newHands: Hands = structuredClone({
+        black: { ...hands.black },
+        white: { ...hands.white },
+    });
 
     if (move.type === "move") {
         const dstPiece = getPiece(board, move.to);
