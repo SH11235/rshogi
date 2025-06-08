@@ -105,4 +105,17 @@ describe("Checkmate detection tests", () => {
         const result = isCheckmate(board, "black");
         expect(result).toBe(true); // 王がどこにも動けない
     });
+
+    it("玉を使用する後手の王が無攻撃なら詰みでない", () => {
+        const board: Board = {
+            "55": {
+                kind: "玉",
+                promoted: false,
+                owner: "white",
+            },
+        };
+
+        const result = isCheckmate(board, "white");
+        expect(result).toBe(false);
+    });
 });
