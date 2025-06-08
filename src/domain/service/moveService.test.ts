@@ -213,4 +213,16 @@ describe("generateMoves", () => {
         expect(targets).not.toContain("33");
         expect(targets).toContain("77");
     });
+
+    it("generates king moves for 玉", () => {
+        let board: Board = { ...nullBoard };
+        board = setPiece(board, sq(5, 5), makePiece("玉", "white"));
+
+        const moves = generateMoves(board, sq(5, 5));
+        const targets = moves.map((m) => `${m.to.row}${m.to.column}`);
+        expect(targets.length).toBe(8);
+        for (const t of ["44", "45", "46", "54", "56", "64", "65", "66"]) {
+            expect(targets).toContain(t);
+        }
+    });
 });

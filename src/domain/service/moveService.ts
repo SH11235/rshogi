@@ -252,6 +252,7 @@ function getMoveVectors(piece: Piece): Vec[] {
                 v.push(...king.filter(([dr, dc]) => Math.abs(dr) === 1 && Math.abs(dc) === 1));
             break;
         case "王":
+        case "玉":
             v.push(...king);
             break;
     }
