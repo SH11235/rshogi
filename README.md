@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Node.js**: The project uses Node.js `v24.x` and `npm` `v11.x` as specified by Volta in `package.json`.
+- **Node.js**: The project uses Node.js `v24.x` and `npm` `v11.x` as specified by [Volta](https://docs.volta.sh/guide/getting-started) in `package.json`.
 - Ensure these versions are installed before continuing.
 
 ## Install Dependencies
