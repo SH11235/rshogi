@@ -51,7 +51,7 @@ export function applyMove(
     // Board は浅い構造なのでスプレッドで OK
     let newBoard: Board = { ...board };
     // Hands はネストしているので深いコピーを取る
-    const newHands: Hands = JSON.parse(JSON.stringify(hands));
+    const newHands: Hands = structuredClone(hands);
 
     const mover = currentTurn;
     const nextTurn = toggleSide(currentTurn);
@@ -105,7 +105,7 @@ export function revertMove(
 ): ApplyMoveResult {
     const mover = toggleSide(currentTurn); // 元の指し手側
     let newBoard: Board = { ...board };
-    const newHands: Hands = JSON.parse(JSON.stringify(hands));
+    const newHands: Hands = structuredClone(hands);
 
     if (move.type === "move") {
         const dstPiece = getPiece(board, move.to);
