@@ -3,6 +3,7 @@ import type { Board } from "../model/board";
 import type { Piece } from "../model/piece";
 import type { Square } from "../model/square";
 import { isCheckmate } from "./checkmate";
+import { createEmptyHands } from "./moveService";
 
 // 駒配置ユーティリティ
 const place = (board: Board, square: Square, piece: Piece): Board => ({
@@ -25,7 +26,8 @@ describe("Checkmate detection tests", () => {
             },
         } as Board;
 
-        const result = isCheckmate(board, "black");
+        const hands = createEmptyHands();
+        const result = isCheckmate(board, hands, "black");
         expect(result).toBe(false);
     });
 
@@ -50,7 +52,8 @@ describe("Checkmate detection tests", () => {
             },
         );
 
-        const result = isCheckmate(board, "black");
+        const hands = createEmptyHands();
+        const result = isCheckmate(board, hands, "black");
         expect(result).toBe(false); // 王は左や右に逃げられる
     });
 
@@ -102,7 +105,8 @@ describe("Checkmate detection tests", () => {
             { kind: "金", promoted: false, owner: "white" },
         ); // 右下
 
-        const result = isCheckmate(board, "black");
+        const hands = createEmptyHands();
+        const result = isCheckmate(board, hands, "black");
         expect(result).toBe(true); // 王がどこにも動けない
     });
 
@@ -115,7 +119,64 @@ describe("Checkmate detection tests", () => {
             },
         } as Board;
 
-        const result = isCheckmate(board, "white");
+        const hands = createEmptyHands();
+        const result = isCheckmate(board, hands, "white");
         expect(result).toBe(false);
+    });
+
+    it("駒打ちで王手を防いで詰みを回避できる", () => {
+        let board: Board = {} as Board;
+        board = place(
+            board,
+            { row: 5, column: 5 },
+            { kind: "王", promoted: false, owner: "black" },
+        );
+        board = place(
+            board,
+            { row: 1, column: 5 },
+            { kind: "飛", promoted: false, owner: "white" },
+        );
+        board = place(
+            board,
+            { row: 5, column: 4 },
+            { kind: "銀", promoted: false, owner: "white" },
+        );
+        board = place(
+            board,
+            { row: 5, column: 6 },
+            { kind: "銀", promoted: false, owner: "white" },
+        );
+        board = place(
+            board,
+            { row: 6, column: 5 },
+            { kind: "桂", promoted: false, owner: "white" },
+        );
+        board = place(
+            board,
+            { row: 6, column: 4 },
+            { kind: "金", promoted: false, owner: "white" },
+        );
+        board = place(
+            board,
+            { row: 6, column: 6 },
+            { kind: "金", promoted: false, owner: "white" },
+        );
+        board = place(
+            board,
+            { row: 4, column: 4 },
+            { kind: "歩", promoted: false, owner: "black" },
+        );
+        board = place(
+            board,
+            { row: 4, column: 6 },
+            { kind: "歩", promoted: false, owner: "black" },
+        );
+
+        const noHand = createEmptyHands();
+        expect(isCheckmate(board, noHand, "black")).toBe(true);
+
+        const hands = createEmptyHands();
+        hands.black.金 = 1;
+        expect(isCheckmate(board, hands, "black")).toBe(false);
     });
 });

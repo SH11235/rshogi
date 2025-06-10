@@ -62,7 +62,7 @@ export const useGameStore = create<GameState>()(
                             s.turn = nextTurn;
 
                             // ③ 勝敗判定
-                            if (isCheckmate(board, nextTurn)) {
+                            if (isCheckmate(board, hands, nextTurn)) {
                                 s.result = {
                                     winner: toggleSide(nextTurn),
                                     reason: "checkmate",

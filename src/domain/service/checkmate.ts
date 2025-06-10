@@ -1,7 +1,9 @@
 import { type Board, getPiece, setPiece } from "../model/board";
 import type { Player } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
+import { generateAllDropMoves } from "./generateDropMoves";
 import { generateMoves } from "./moveService";
+import type { Hands } from "./moveService";
 
 // 盤上のマスをすべて列挙
 const allSquares: Square[] = Array.from({ length: 9 * 9 }, (_, i) => ({
@@ -14,10 +16,7 @@ const findKingSquare = (board: Board, player: Player): Square | null => {
     return (
         allSquares.find((sq) => {
             const piece = getPiece(board, sq);
-            return (
-                (piece?.kind === "王" || piece?.kind === "玉") &&
-                piece.owner === player
-            );
+            return (piece?.kind === "王" || piece?.kind === "玉") && piece.owner === player;
         }) || null
     );
 };
@@ -42,7 +41,7 @@ export const isInCheck = (board: Board, player: Player): boolean => {
 };
 
 // 指定プレイヤーの合法手が1つもないか調べる（詰み判定に使用）
-const hasAnyLegalMove = (board: Board, player: Player): boolean => {
+const hasAnyLegalMove = (board: Board, hands: Hands, player: Player): boolean => {
     for (const from of allSquares) {
         const piece = getPiece(board, from);
         if (piece?.owner !== player) continue;
@@ -53,6 +52,14 @@ const hasAnyLegalMove = (board: Board, player: Player): boolean => {
             if (!isInCheck(nextBoard, player)) {
                 return true;
             }
+        }
+    }
+
+    const dropMoves = generateAllDropMoves(board, hands, player);
+    for (const drop of dropMoves) {
+        const nextBoard = setPiece(board, drop.to, drop.piece);
+        if (!isInCheck(nextBoard, player)) {
+            return true;
         }
     }
     return false;
@@ -66,6 +73,6 @@ const simulateMove = (board: Board, from: Square, to: Square): Board => {
 };
 
 // プレイヤーが詰みか？
-export const isCheckmate = (board: Board, player: Player): boolean => {
-    return isInCheck(board, player) && !hasAnyLegalMove(board, player);
+export const isCheckmate = (board: Board, hands: Hands, player: Player): boolean => {
+    return isInCheck(board, player) && !hasAnyLegalMove(board, hands, player);
 };
