@@ -96,6 +96,7 @@ export function applyMove(
  * 引数が never 型でなければコンパイルエラーになる。
  */
 function assertNever(_value: never): never {
+    void _value;
     throw new Error("未定義の Move タイプ");
 }
 
@@ -228,10 +229,18 @@ function getMoveVectors(piece: Piece): Vec[] {
 
     switch (piece.kind) {
         case "歩":
-            piece.promoted ? v.push(...gold) : add(f, 0);
+            if (piece.promoted) {
+                v.push(...gold);
+            } else {
+                add(f, 0);
+            }
             break;
         case "香":
-            piece.promoted ? v.push(...gold) : add(f, 0, true);
+            if (piece.promoted) {
+                v.push(...gold);
+            } else {
+                add(f, 0, true);
+            }
             break;
         case "桂":
             if (piece.promoted) {
@@ -244,7 +253,11 @@ function getMoveVectors(piece: Piece): Vec[] {
             }
             break;
         case "銀":
-            piece.promoted ? v.push(...gold) : v.push(...silver);
+            if (piece.promoted) {
+                v.push(...gold);
+            } else {
+                v.push(...silver);
+            }
             break;
         case "金":
             v.push(...gold);
