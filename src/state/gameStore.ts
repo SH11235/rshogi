@@ -2,13 +2,8 @@ import { initialBoard } from "@/domain/initialBoard";
 import type { Board } from "@/domain/model/board";
 import type { Move } from "@/domain/model/move";
 import type { HandKind, Player } from "@/domain/model/piece";
-import {
-    applyMove,
-    createEmptyHands,
-    replayMoves,
-    toggleSide,
-} from "@/domain/service/moveService";
 import { isCheckmate } from "@/domain/service/checkmate";
+import { applyMove, createEmptyHands, replayMoves, toggleSide } from "@/domain/service/moveService";
 import { produce } from "immer";
 import { create } from "zustand";
 import { devtools, persist, subscribeWithSelector } from "zustand/middleware";
@@ -67,7 +62,7 @@ export const useGameStore = create<GameState>()(
                             s.turn = nextTurn;
 
                             // ③ 勝敗判定
-                            if (isCheckmate(board, nextTurn)) {
+                            if (isCheckmate(board, hands, nextTurn)) {
                                 s.result = {
                                     winner: toggleSide(nextTurn),
                                     reason: "checkmate",

@@ -2,16 +2,13 @@ import { type Board, getPiece } from "../model/board";
 import type { DropMove } from "../model/move";
 import type { HandKind, Player } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
+import type { Hands } from "./moveService";
 
 /**
  * Generate possible drop moves for a given player and piece kind.
  * Currently only implements the nifu rule for pawns.
  */
-export function generateDropMoves(
-    board: Board,
-    player: Player,
-    kind: HandKind,
-): DropMove[] {
+export function generateDropMoves(board: Board, player: Player, kind: HandKind): DropMove[] {
     const moves: DropMove[] = [];
     for (let r = 1 as Row; r <= 9; r++) {
         for (let c = 1 as Column; c <= 9; c++) {
@@ -33,6 +30,22 @@ export function generateDropMoves(
                 to: square,
                 piece: { kind, owner: player, promoted: false },
             });
+        }
+    }
+    return moves;
+}
+
+const handKinds: readonly HandKind[] = ["歩", "香", "桂", "銀", "金", "角", "飛"] as const;
+
+/**
+ * Generate drop moves for all pieces currently in the player's hand.
+ */
+export function generateAllDropMoves(board: Board, hands: Hands, player: Player): DropMove[] {
+    const moves: DropMove[] = [];
+    const hand = hands[player];
+    for (const kind of handKinds) {
+        if (hand[kind] > 0) {
+            moves.push(...generateDropMoves(board, player, kind));
         }
     }
     return moves;
