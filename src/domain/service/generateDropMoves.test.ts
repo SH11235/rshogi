@@ -1,17 +1,13 @@
-import { describe, expect, it } from "vitest";
 import type { Board } from "@/domain/model/board";
 import { setPiece } from "@/domain/model/board";
 import type { Piece } from "@/domain/model/piece";
 import type { Column, Row, Square } from "@/domain/model/square";
 import { generateDropMoves } from "@/domain/service/generateDropMoves";
+import { describe, expect, it } from "vitest";
 
 const sq = (row: Row, col: Column): Square => ({ row, column: col });
 
-const makePiece = (
-    kind: Piece["kind"],
-    owner: Piece["owner"],
-    promoted = false,
-): Piece => ({
+const makePiece = (kind: Piece["kind"], owner: Piece["owner"], promoted = false): Piece => ({
     kind,
     owner,
     promoted,
@@ -124,5 +120,25 @@ describe("generateDropMoves", () => {
         board = setPiece(board, sq(7, 5), makePiece("歩", "black"));
         const moves = generateDropMoves(board, "black", "角");
         expect(moves.some((m) => m.to.column === 5)).toBe(true);
+    });
+
+    it("prevents pawn and lance drops on last rank", () => {
+        const board: Board = { ...nullBoard };
+        const pawnBlack = generateDropMoves(board, "black", "歩");
+        const pawnWhite = generateDropMoves(board, "white", "歩");
+        const lanceBlack = generateDropMoves(board, "black", "香");
+        const lanceWhite = generateDropMoves(board, "white", "香");
+        expect(pawnBlack.some((m) => m.to.row === 1)).toBe(false);
+        expect(pawnWhite.some((m) => m.to.row === 9)).toBe(false);
+        expect(lanceBlack.some((m) => m.to.row === 1)).toBe(false);
+        expect(lanceWhite.some((m) => m.to.row === 9)).toBe(false);
+    });
+
+    it("prevents knight drops on last two ranks", () => {
+        const board: Board = { ...nullBoard };
+        const movesBlack = generateDropMoves(board, "black", "桂");
+        const movesWhite = generateDropMoves(board, "white", "桂");
+        expect(movesBlack.some((m) => m.to.row === 1 || m.to.row === 2)).toBe(false);
+        expect(movesWhite.some((m) => m.to.row === 8 || m.to.row === 9)).toBe(false);
     });
 });

@@ -7,16 +7,24 @@ import type { Column, Row, Square } from "../model/square";
  * Generate possible drop moves for a given player and piece kind.
  * Currently only implements the nifu rule for pawns.
  */
-export function generateDropMoves(
-    board: Board,
-    player: Player,
-    kind: HandKind,
-): DropMove[] {
+export function generateDropMoves(board: Board, player: Player, kind: HandKind): DropMove[] {
     const moves: DropMove[] = [];
     for (let r = 1 as Row; r <= 9; r++) {
         for (let c = 1 as Column; c <= 9; c++) {
             const square: Square = { row: r as Row, column: c as Column };
             if (getPiece(board, square)) continue;
+
+            // ----- piece specific drop restrictions -----
+            if (kind === "歩" || kind === "香") {
+                const lastRank = player === "black" ? 1 : 9;
+                if (r === lastRank) continue; // cannot drop on last rank
+            }
+            if (kind === "桂") {
+                const last1 = player === "black" ? 1 : 9;
+                const last2 = player === "black" ? 2 : 8;
+                if (r === last1 || r === last2) continue; // cannot drop on last two ranks
+            }
+
             if (kind === "歩") {
                 let blocked = false;
                 for (let rr = 1 as Row; rr <= 9; rr++) {
@@ -28,6 +36,7 @@ export function generateDropMoves(
                 }
                 if (blocked) continue;
             }
+
             moves.push({
                 type: "drop",
                 to: square,
