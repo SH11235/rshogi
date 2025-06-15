@@ -1,14 +1,14 @@
 import type { Board } from "@/domain/model/board";
 import { setPiece } from "@/domain/model/board";
-import type { Piece } from "@/domain/model/piece";
+import type { Piece, PieceType } from "@/domain/model/piece";
 import type { Column, Row, Square } from "@/domain/model/square";
 import { generateDropMoves } from "@/domain/service/generateDropMoves";
 import { describe, expect, it } from "vitest";
 
 const sq = (row: Row, col: Column): Square => ({ row, column: col });
 
-const makePiece = (kind: Piece["kind"], owner: Piece["owner"], promoted = false): Piece => ({
-    kind,
+const makePiece = (type: PieceType, owner: Piece["owner"], promoted = false): Piece => ({
+    type,
     owner,
     promoted,
 });
@@ -104,20 +104,20 @@ describe("generateDropMoves", () => {
         expect(moves).toContainEqual({
             type: "drop",
             to: sq(5, 5),
-            piece: makePiece("銀", "black"),
+            piece: makePiece("silver", "black"),
         });
     });
 
     it("nifu prevents pawn drop in occupied column", () => {
         let board: Board = { ...nullBoard };
-        board = setPiece(board, sq(7, 5), makePiece("歩", "black"));
+        board = setPiece(board, sq(7, 5), makePiece("pawn", "black"));
         const moves = generateDropMoves(board, "black", "歩");
         expect(moves.some((m) => m.to.column === 5)).toBe(false);
     });
 
     it("other piece drops unaffected by nifu", () => {
         let board: Board = { ...nullBoard };
-        board = setPiece(board, sq(7, 5), makePiece("歩", "black"));
+        board = setPiece(board, sq(7, 5), makePiece("pawn", "black"));
         const moves = generateDropMoves(board, "black", "角");
         expect(moves.some((m) => m.to.column === 5)).toBe(true);
     });

@@ -15,12 +15,12 @@ describe("Checkmate detection tests", () => {
     it("王手されていない場合は詰みでない", () => {
         const board: Board = {
             "55": {
-                kind: "王",
+                type: "king",
                 promoted: false,
                 owner: "black",
             },
             "11": {
-                kind: "歩",
+                type: "pawn",
                 promoted: false,
                 owner: "white",
             },
@@ -37,7 +37,7 @@ describe("Checkmate detection tests", () => {
             board,
             { row: 5, column: 5 },
             {
-                kind: "王",
+                type: "king",
                 promoted: false,
                 owner: "black",
             },
@@ -46,7 +46,7 @@ describe("Checkmate detection tests", () => {
             board,
             { row: 6, column: 5 },
             {
-                kind: "飛",
+                type: "rook",
                 promoted: false,
                 owner: "white",
             },
@@ -62,47 +62,47 @@ describe("Checkmate detection tests", () => {
         board = place(
             board,
             { row: 5, column: 5 },
-            { kind: "王", promoted: false, owner: "black" },
+            { type: "king", promoted: false, owner: "black" },
         );
         board = place(
             board,
             { row: 4, column: 5 },
-            { kind: "飛", promoted: false, owner: "white" },
+            { type: "rook", promoted: false, owner: "white" },
         ); // 上
         board = place(
             board,
             { row: 5, column: 4 },
-            { kind: "銀", promoted: false, owner: "white" },
+            { type: "silver", promoted: false, owner: "white" },
         ); // 左
         board = place(
             board,
             { row: 5, column: 6 },
-            { kind: "銀", promoted: false, owner: "white" },
+            { type: "silver", promoted: false, owner: "white" },
         ); // 右
         board = place(
             board,
             { row: 6, column: 5 },
-            { kind: "桂", promoted: false, owner: "white" },
+            { type: "knight", promoted: false, owner: "white" },
         ); // 下
         board = place(
             board,
             { row: 4, column: 4 },
-            { kind: "金", promoted: false, owner: "white" },
+            { type: "gold", promoted: false, owner: "white" },
         ); // 左上
         board = place(
             board,
             { row: 4, column: 6 },
-            { kind: "金", promoted: false, owner: "white" },
+            { type: "gold", promoted: false, owner: "white" },
         ); // 右上
         board = place(
             board,
             { row: 6, column: 4 },
-            { kind: "金", promoted: false, owner: "white" },
+            { type: "gold", promoted: false, owner: "white" },
         ); // 左下
         board = place(
             board,
             { row: 6, column: 6 },
-            { kind: "金", promoted: false, owner: "white" },
+            { type: "gold", promoted: false, owner: "white" },
         ); // 右下
 
         const hands = createEmptyHands();
@@ -113,7 +113,7 @@ describe("Checkmate detection tests", () => {
     it("玉を使用する後手の王が無攻撃なら詰みでない", () => {
         const board: Board = {
             "55": {
-                kind: "玉",
+                type: "gyoku",
                 promoted: false,
                 owner: "white",
             },
@@ -129,47 +129,47 @@ describe("Checkmate detection tests", () => {
         board = place(
             board,
             { row: 5, column: 5 },
-            { kind: "王", promoted: false, owner: "black" },
+            { type: "king", promoted: false, owner: "black" },
         );
         board = place(
             board,
             { row: 1, column: 5 },
-            { kind: "飛", promoted: false, owner: "white" },
+            { type: "rook", promoted: false, owner: "white" },
         );
         board = place(
             board,
             { row: 5, column: 4 },
-            { kind: "銀", promoted: false, owner: "white" },
+            { type: "silver", promoted: false, owner: "white" },
         );
         board = place(
             board,
             { row: 5, column: 6 },
-            { kind: "銀", promoted: false, owner: "white" },
+            { type: "silver", promoted: false, owner: "white" },
         );
         board = place(
             board,
             { row: 6, column: 5 },
-            { kind: "桂", promoted: false, owner: "white" },
+            { type: "knight", promoted: false, owner: "white" },
         );
         board = place(
             board,
             { row: 6, column: 4 },
-            { kind: "金", promoted: false, owner: "white" },
+            { type: "gold", promoted: false, owner: "white" },
         );
         board = place(
             board,
             { row: 6, column: 6 },
-            { kind: "金", promoted: false, owner: "white" },
+            { type: "gold", promoted: false, owner: "white" },
         );
         board = place(
             board,
             { row: 4, column: 4 },
-            { kind: "歩", promoted: false, owner: "black" },
+            { type: "pawn", promoted: false, owner: "black" },
         );
         board = place(
             board,
             { row: 4, column: 6 },
-            { kind: "歩", promoted: false, owner: "black" },
+            { type: "pawn", promoted: false, owner: "black" },
         );
 
         const noHand = createEmptyHands();

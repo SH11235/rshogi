@@ -1,47 +1,71 @@
 import type { Board } from "@/domain/model/board";
-import type { Piece, PieceKind } from "@/domain/model/piece";
+import { type Piece, type PieceType, createPiece } from "@/domain/model/piece";
 import type { Column, Row, SquareKey } from "@/domain/model/square";
 
-const make = (kind: Piece["kind"], owner: Piece["owner"]): Piece => ({
-    kind,
-    owner,
-    promoted: false,
-});
+/** 駒を作成するヘルパー */
+const makePiece = (type: PieceType, owner: Piece["owner"]): Piece =>
+    createPiece(type, owner, false);
 
 /** 行列 → SquareKey 変換ヘルパ */
 const key = (row: Row, col: Column): SquareKey => `${row}${col}` as SquareKey;
 
-export const initialBoard: Board = (() => {
+export const modernInitialBoard: Board = (() => {
     const board = {} as Record<SquareKey, Piece | null>;
 
-    const row9: PieceKind[] = ["香", "桂", "銀", "金", "王", "金", "銀", "桂", "香"];
+    // 先手（black）の初期配置
+    const blackBackRank: PieceType[] = [
+        "lance",
+        "knight",
+        "silver",
+        "gold",
+        "king",
+        "gold",
+        "silver",
+        "knight",
+        "lance",
+    ];
 
     // ❶ 先手（black）側
-    row9.forEach((kind, i) => {
-        board[key(9, (i + 1) as Column)] = make(kind, "black");
+    blackBackRank.forEach((type, i) => {
+        board[key(9, (i + 1) as Column)] = makePiece(type, "black");
     });
 
-    board[key(8, 8)] = make("飛", "black");
-    board[key(8, 2)] = make("角", "black");
+    board[key(8, 8)] = makePiece("rook", "black");
+    board[key(8, 2)] = makePiece("bishop", "black");
 
     for (let c = 1 as Column; c <= 9; c++) {
-        board[key(7, c)] = make("歩", "black");
+        board[key(7, c)] = makePiece("pawn", "black");
     }
 
-    // ❷ 後手（white）側
-    const row1: PieceKind[] = ["香", "桂", "銀", "金", "玉", "金", "銀", "桂", "香"];
-    row1.forEach((kind, i) => {
-        board[key(1, (i + 1) as Column)] = make(kind, "white");
+    // ❂ 後手（white）側
+    const whiteBackRank: PieceType[] = [
+        "lance",
+        "knight",
+        "silver",
+        "gold",
+        "gyoku",
+        "gold",
+        "silver",
+        "knight",
+        "lance",
+    ];
+    whiteBackRank.forEach((type, i) => {
+        board[key(1, (i + 1) as Column)] = makePiece(type, "white");
     });
-    board[key(2, 8)] = make("飛", "white");
-    board[key(2, 2)] = make("角", "white");
+
+    board[key(2, 8)] = makePiece("rook", "white");
+    board[key(2, 2)] = makePiece("bishop", "white");
+
     for (let c = 1 as Column; c <= 9; c++) {
-        board[key(3, c)] = make("歩", "white");
+        board[key(3, c)] = makePiece("pawn", "white");
     }
 
     // ❸ 残りマスを null で埋める
-    for (let r = 1 as Row; r <= 9; r++)
-        for (let c = 1 as Column; c <= 9; c++) board[key(r, c)] ??= null;
+    for (let r = 1 as Row; r <= 9; r++) {
+        for (let c = 1 as Column; c <= 9; c++) {
+            board[key(r, c)] ??= null;
+        }
+    }
 
     return board as Board;
 })();
