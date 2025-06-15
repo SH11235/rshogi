@@ -8,11 +8,14 @@ on:
 
 jobs:
   build:
-    name: Node.js 24 CI
+    name: Build and Test
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # PR時の変更検出のため
+          fetch-depth: 2
 
       - name: Use Node.js 24
         uses: actions/setup-node@v4
@@ -22,8 +25,30 @@ jobs:
 
       - run: npm ci
 
-      - name: Type Check
-        run: npm run typecheck
+      # PRでは変更があったパッケージのみチェック
+      - name: Build (Affected)
+        if: github.event_name == 'pull_request'
+        run: npm run build -- --filter='[HEAD^1]'
 
-      - name: Run Tests
+      - name: Build (All)
+        if: github.event_name == 'push'
+        run: npm run build
+
+      - name: Lint (Affected)
+        if: github.event_name == 'pull_request'
+        run: npm run lint -- --filter='[HEAD^1]'
+
+      - name: Lint (All)
+        if: github.event_name == 'push'
+        run: npm run lint
+
+      - name: Test (Affected)
+        if: github.event_name == 'pull_request'
+        run: npm run test -- --filter='[HEAD^1]'
+
+      - name: Test (All)
+        if: github.event_name == 'push'
         run: npm run test
+
+      - name: Format Check
+        run: npm run format:check
