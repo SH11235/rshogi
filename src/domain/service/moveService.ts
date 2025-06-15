@@ -5,7 +5,17 @@
 
 import { type Board, getPiece, setPiece } from "../model/board";
 import type { Move, NormalMove } from "../model/move";
-import { type HandKind, type Piece, type Player, promote } from "../model/piece";
+import {
+    type Piece,
+    type Player,
+    createLegacyPiece,
+    isKnight,
+    isLance,
+    isLegacyPiece,
+    isPawn,
+    isRoyalPiece,
+    promote,
+} from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
 import { isCheckmate } from "./checkmate";
 
@@ -15,11 +25,11 @@ import { isCheckmate } from "./checkmate";
 
 /**
  * hands.black["歩"] === 2 なら「先手が歩を２枚所持」を意味する。
- * 王は持ち駒にならないため HandKind をキーに採用。
+ * 王は持ち駒にならないため文字列をキーに採用。
  */
 export type Hands = {
-    black: Record<HandKind, number>;
-    white: Record<HandKind, number>;
+    black: Record<string, number>;
+    white: Record<string, number>;
 };
 
 export const createEmptyHands = (): Hands => ({
@@ -36,7 +46,7 @@ export const toggleSide = (p: Player): Player => (p === "black" ? "white" : "bla
 export function hasNifuViolation(board: Board, column: Column, player: Player): boolean {
     for (let row = 1; row <= 9; row++) {
         const piece = getPiece(board, { row: row as Row, column });
-        if (piece && piece.owner === player && piece.kind === "歩" && !piece.promoted) {
+        if (piece && piece.owner === player && isPawn(piece) && !piece.promoted) {
             return true;
         }
     }
@@ -50,17 +60,17 @@ export function isDeadPiece(piece: Piece, toRow: Row): boolean {
     // 先手は上向き（row数値が小さい方向）、後手は下向き（row数値が大きい方向）
     const isBlack = piece.owner === "black";
 
-    switch (piece.kind) {
-        case "歩":
-        case "香":
-            // 歩と香は最奥段（先手なら1段目、後手なら9段目）で動けなくなる
-            return isBlack ? toRow === 1 : toRow === 9;
-        case "桂":
-            // 桂は最奥2段（先手なら1,2段目、後手なら8,9段目）で動けなくなる
-            return isBlack ? toRow <= 2 : toRow >= 8;
-        default:
-            return false;
+    if (isPawn(piece) || isLance(piece)) {
+        // 歩と香は最奥段（先手なら1段目、後手なら9段目）で動けなくなる
+        return isBlack ? toRow === 1 : toRow === 9;
     }
+
+    if (isKnight(piece)) {
+        // 桂は最奥2段（先手なら1,2段目、後手なら8,9段目）で動けなくなる
+        return isBlack ? toRow <= 2 : toRow >= 8;
+    }
+
+    return false;
 }
 
 /**
@@ -68,7 +78,7 @@ export function isDeadPiece(piece: Piece, toRow: Row): boolean {
  */
 export function isUchifuzume(board: Board, dropSquare: Square, player: Player): boolean {
     // 仮に歩を打った盤面を作成
-    const testBoard = setPiece(board, dropSquare, { kind: "歩", owner: player, promoted: false });
+    const testBoard = setPiece(board, dropSquare, createLegacyPiece("歩", player, false));
 
     // 相手が詰みかチェック
     const opponent = toggleSide(player);
@@ -78,7 +88,7 @@ export function isUchifuzume(board: Board, dropSquare: Square, player: Player): 
     for (let row = 1; row <= 9; row++) {
         for (let col = 1; col <= 9; col++) {
             const piece = getPiece(testBoard, { row: row as Row, column: col as Column });
-            if (piece && (piece.kind === "王" || piece.kind === "玉") && piece.owner === opponent) {
+            if (piece && isRoyalPiece(piece) && piece.owner === opponent) {
                 hasOpponentKing = true;
                 break;
             }
@@ -133,7 +143,11 @@ export function applyMove(
         if (dstPiece && dstPiece.owner === mover) throw new Error("自駒へは移動不可");
 
         // 取った駒を持ち駒へ
-        if (dstPiece) newHands[mover][dstPiece.kind as HandKind] += 1;
+        if (dstPiece) {
+            if (isLegacyPiece(dstPiece)) {
+                newHands[mover][dstPiece.kind] += 1;
+            }
+        }
 
         // 移動
         newBoard = setPiece(newBoard, move.from, null);
@@ -148,7 +162,7 @@ export function applyMove(
         newBoard = setPiece(newBoard, move.to, placed);
     } else if (move.type === "drop") {
         /* ---------- 打ち手（持ち駒を置く） ---------- */
-        const kind = move.piece.kind as HandKind;
+        const kind = isLegacyPiece(move.piece) ? move.piece.kind : "歩";
         if (newHands[mover][kind] <= 0) throw new Error("その駒を持っていません");
         if (getPiece(board, move.to)) throw new Error("マスが空いていません");
 
@@ -210,11 +224,15 @@ export function revertMove(
         newBoard = setPiece(newBoard, move.to, move.captured);
         newBoard = setPiece(newBoard, move.from, original);
 
-        if (move.captured) newHands[mover][move.captured.kind as HandKind] -= 1;
+        if (move.captured && isLegacyPiece(move.captured)) {
+            newHands[mover][move.captured.kind] -= 1;
+        }
     } else {
         // 打ち手を戻す
         newBoard = setPiece(newBoard, move.to, null);
-        newHands[mover][move.piece.kind as HandKind] += 1;
+        if (isLegacyPiece(move.piece)) {
+            newHands[mover][move.piece.kind] += 1;
+        }
     }
 
     return { board: newBoard, hands: newHands, nextTurn: mover };
@@ -311,6 +329,11 @@ function getMoveVectors(piece: Piece): Vec[] {
         [-1, 1, false],
         [-1, -1, false],
     ];
+
+    // レガシー形式の場合のみ駒の動きを生成
+    if (!isLegacyPiece(piece)) {
+        return [];
+    }
 
     switch (piece.kind) {
         case "歩":

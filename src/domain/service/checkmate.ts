@@ -1,5 +1,6 @@
 import { type Board, getPiece, setPiece } from "../model/board";
 import type { Player } from "../model/piece";
+import { isRoyalPiece } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
 import { generateMoves } from "./moveService";
 
@@ -14,7 +15,7 @@ const findKingSquare = (board: Board, player: Player): Square | null => {
     return (
         allSquares.find((sq) => {
             const piece = getPiece(board, sq);
-            return (piece?.kind === "王" || piece?.kind === "玉") && piece.owner === player;
+            return piece && isRoyalPiece(piece) && piece.owner === player;
         }) || null
     );
 };

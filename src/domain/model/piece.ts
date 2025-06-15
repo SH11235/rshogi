@@ -143,47 +143,6 @@ export const getPieceName = (piece: Piece, locale: "ja" | "en" = "ja"): string =
     return PIECE_NAMES[locale][pieceType];
 };
 
-// レガシー互換性のためのヘルパー（段階的移行用）
-/** @deprecated Use piece.type instead */
-export const getPieceKind = (piece: Piece): string => {
-    if (isLegacyPiece(piece)) {
-        return piece.kind;
-    }
-    return PIECE_NAMES.ja[piece.type];
-};
-
-/** @deprecated Use getPieceName(piece, 'ja') instead */
-export const getPieceLabel = (piece: Piece): string => {
-    return getPieceName(piece, "ja");
-};
-
-// 後方互換性のための型エイリアス
-/** @deprecated Use PieceType instead */
-export type PieceKind = string;
-
-/** @deprecated Use HandPieceType instead */
-export type HandKind = string;
-
-/** @deprecated Use PromotablePieceType instead */
-export type PromotableKind = string;
-
-// レガシー定数（段階的移行用）
-/** @deprecated Use PROMOTABLE_PIECE_TYPES instead */
-export const promotableKinds = ["歩", "香", "桂", "銀", "角", "飛"] as const;
-
-/** @deprecated Use PROMOTED_PIECE_NAMES.ja instead */
-export const promotedLabelMap = {
-    歩: "と",
-    香: "成香",
-    桂: "成桂",
-    銀: "成銀",
-    金: "金",
-    角: "馬",
-    飛: "龍",
-    王: "王",
-    玉: "玉",
-} as const;
-
 // 日本語から新形式への変換ヘルパー（移行期間用）
 export const convertLegacyPieceType = (legacyKind: string): PieceType => {
     const conversionMap: Record<string, PieceType> = {

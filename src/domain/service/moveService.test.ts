@@ -20,7 +20,7 @@ import type { Column, Row, Square } from "../model/square";
 //----------------------------------------------------------------
 const sq = (row: Row, col: Column): Square => ({ row, column: col });
 
-const makePiece = (kind: Piece["kind"], owner: Piece["owner"], promoted = false): Piece => ({
+const makePiece = (kind: string, owner: Piece["owner"], promoted = false): Piece => ({
     kind,
     owner,
     promoted,
