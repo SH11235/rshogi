@@ -14,10 +14,7 @@ const findKingSquare = (board: Board, player: Player): Square | null => {
     return (
         allSquares.find((sq) => {
             const piece = getPiece(board, sq);
-            return (
-                (piece?.kind === "王" || piece?.kind === "玉") &&
-                piece.owner === player
-            );
+            return (piece?.kind === "王" || piece?.kind === "玉") && piece.owner === player;
         }) || null
     );
 };

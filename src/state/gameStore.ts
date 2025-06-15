@@ -2,13 +2,8 @@ import { initialBoard } from "@/domain/initialBoard";
 import type { Board } from "@/domain/model/board";
 import type { Move } from "@/domain/model/move";
 import type { HandKind, Player } from "@/domain/model/piece";
-import {
-    applyMove,
-    createEmptyHands,
-    replayMoves,
-    toggleSide,
-} from "@/domain/service/moveService";
 import { isCheckmate } from "@/domain/service/checkmate";
+import { applyMove, createEmptyHands, replayMoves, toggleSide } from "@/domain/service/moveService";
 import { produce } from "immer";
 import { create } from "zustand";
 import { devtools, persist, subscribeWithSelector } from "zustand/middleware";
@@ -122,7 +117,11 @@ export const useGameStore = create<GameState>()(
             name: "shogi-game",
             version: 2,
             // 棋譜はストレージに持たせなくても良い場合が多いので除外
-            partialize: ({ history, cursor, ...rest }) => rest,
+            partialize: (state) => {
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                const { history, cursor, ...rest } = state;
+                return rest;
+            },
         },
     ),
 );

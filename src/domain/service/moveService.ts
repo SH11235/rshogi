@@ -7,6 +7,7 @@ import { type Board, getPiece, setPiece } from "../model/board";
 import type { Move, NormalMove } from "../model/move";
 import { type HandKind, type Piece, type Player, promote } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
+import { isCheckmate } from "./checkmate";
 
 //--------------------------------------------------------
 // 持ち駒ヘルパー
@@ -28,6 +29,69 @@ export const createEmptyHands = (): Hands => ({
 
 /** 手番を反転するユーティリティ */
 export const toggleSide = (p: Player): Player => (p === "black" ? "white" : "black");
+
+/**
+ * 二歩チェック: 指定した筋に同じプレイヤーの歩があるかチェック
+ */
+export function hasNifuViolation(board: Board, column: Column, player: Player): boolean {
+    for (let row = 1; row <= 9; row++) {
+        const piece = getPiece(board, { row: row as Row, column });
+        if (piece && piece.owner === player && piece.kind === "歩" && !piece.promoted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * 行き所のない駒チェック: 指定位置に駒を置いた場合、その駒が動けなくなるかチェック
+ */
+export function isDeadPiece(piece: Piece, toRow: Row): boolean {
+    // 先手は上向き（row数値が小さい方向）、後手は下向き（row数値が大きい方向）
+    const isBlack = piece.owner === "black";
+
+    switch (piece.kind) {
+        case "歩":
+        case "香":
+            // 歩と香は最奥段（先手なら1段目、後手なら9段目）で動けなくなる
+            return isBlack ? toRow === 1 : toRow === 9;
+        case "桂":
+            // 桂は最奥2段（先手なら1,2段目、後手なら8,9段目）で動けなくなる
+            return isBlack ? toRow <= 2 : toRow >= 8;
+        default:
+            return false;
+    }
+}
+
+/**
+ * 打ち歩詰めチェック: 歩を打って相手が詰みになるかチェック
+ */
+export function isUchifuzume(board: Board, dropSquare: Square, player: Player): boolean {
+    // 仮に歩を打った盤面を作成
+    const testBoard = setPiece(board, dropSquare, { kind: "歩", owner: player, promoted: false });
+
+    // 相手が詰みかチェック
+    const opponent = toggleSide(player);
+
+    // 相手の王がいるか確認
+    let hasOpponentKing = false;
+    for (let row = 1; row <= 9; row++) {
+        for (let col = 1; col <= 9; col++) {
+            const piece = getPiece(testBoard, { row: row as Row, column: col as Column });
+            if (piece && (piece.kind === "王" || piece.kind === "玉") && piece.owner === opponent) {
+                hasOpponentKing = true;
+                break;
+            }
+        }
+    }
+
+    // 相手の王がいない場合は打ち歩詰めではない
+    if (!hasOpponentKing) {
+        return false;
+    }
+
+    return isCheckmate(testBoard, opponent);
+}
 
 //--------------------------------------------------------
 // 1️⃣ 1 手を適用する applyMove / 戻す revertMove
@@ -73,13 +137,35 @@ export function applyMove(
 
         // 移動
         newBoard = setPiece(newBoard, move.from, null);
-        const placed: Piece = move.promote ? promote(srcPiece) : { ...srcPiece };
+
+        // 成りの強制判定: 行き所のない位置に移動する場合は強制的に成る
+        let mustPromote = false;
+        if (!srcPiece.promoted && isDeadPiece(srcPiece, move.to.row)) {
+            mustPromote = true;
+        }
+
+        const placed: Piece = move.promote || mustPromote ? promote(srcPiece) : { ...srcPiece };
         newBoard = setPiece(newBoard, move.to, placed);
     } else if (move.type === "drop") {
         /* ---------- 打ち手（持ち駒を置く） ---------- */
         const kind = move.piece.kind as HandKind;
         if (newHands[mover][kind] <= 0) throw new Error("その駒を持っていません");
         if (getPiece(board, move.to)) throw new Error("マスが空いていません");
+
+        // 二歩チェック
+        if (kind === "歩" && hasNifuViolation(board, move.to.column, mover)) {
+            throw new Error("二歩です");
+        }
+
+        // 行き所のない駒チェック
+        if (isDeadPiece(move.piece, move.to.row)) {
+            throw new Error("行き所のない駒です");
+        }
+
+        // 打ち歩詰めチェック
+        if (kind === "歩" && isUchifuzume(board, move.to, mover)) {
+            throw new Error("打ち歩詰めです");
+        }
 
         newHands[mover][kind] -= 1;
         newBoard = setPiece(newBoard, move.to, { ...move.piece, owner: mover, promoted: false });
@@ -95,8 +181,8 @@ export function applyMove(
  * exhaustive check 用ユーティリティ。
  * 引数が never 型でなければコンパイルエラーになる。
  */
-function assertNever(_value: never): never {
-    throw new Error("未定義の Move タイプ");
+function assertNever(value: never): never {
+    throw new Error(`未定義の Move タイプ: ${value}`);
 }
 
 /** Undo 用 – 1 手戻して盤・持ち駒を復元 */
@@ -228,10 +314,18 @@ function getMoveVectors(piece: Piece): Vec[] {
 
     switch (piece.kind) {
         case "歩":
-            piece.promoted ? v.push(...gold) : add(f, 0);
+            if (piece.promoted) {
+                v.push(...gold);
+            } else {
+                add(f, 0);
+            }
             break;
         case "香":
-            piece.promoted ? v.push(...gold) : add(f, 0, true);
+            if (piece.promoted) {
+                v.push(...gold);
+            } else {
+                add(f, 0, true);
+            }
             break;
         case "桂":
             if (piece.promoted) {
@@ -244,7 +338,11 @@ function getMoveVectors(piece: Piece): Vec[] {
             }
             break;
         case "銀":
-            piece.promoted ? v.push(...gold) : v.push(...silver);
+            if (piece.promoted) {
+                v.push(...gold);
+            } else {
+                v.push(...silver);
+            }
             break;
         case "金":
             v.push(...gold);
