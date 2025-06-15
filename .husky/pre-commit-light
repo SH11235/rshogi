@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# 軽量版：フォーマットとlintのみ（最速）
+echo "📝 Quick format and lint check..."
+lint-staged
+
+echo "✅ Quick pre-commit check completed!"

@@ -1,10 +1,15 @@
-import { modernInitialBoard } from "@/domain/initialBoard";
-import type { Board } from "@/domain/model/board";
-import type { Move } from "@/domain/model/move";
-import type { Player } from "@/domain/model/piece";
-import { isCheckmate } from "@/domain/service/checkmate";
-import { applyMove, createEmptyHands, replayMoves, toggleSide } from "@/domain/service/moveService";
 import { produce } from "immer";
+import {
+    type Board,
+    type Move,
+    type Player,
+    applyMove,
+    createEmptyHands,
+    isCheckmate,
+    modernInitialBoard,
+    replayMoves,
+    toggleSide,
+} from "shogi-core";
 import { create } from "zustand";
 import { devtools, persist, subscribeWithSelector } from "zustand/middleware";
 

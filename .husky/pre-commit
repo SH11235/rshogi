@@ -1,1 +1,16 @@
+
+echo "🔍 Running pre-commit checks..."
+
+# 1. lint-staged でフォーマットとlint
+echo "📝 Formatting and linting staged files..."
 lint-staged
+
+# 2. 影響のあるパッケージの型チェック（高速）
+echo "🔍 Type checking affected packages..."
+npm run typecheck:affected
+
+# 3. 影響のあるパッケージのテスト（オプション：重い場合はコメントアウト）
+# echo "🧪 Testing affected packages..."
+# npm run test:affected
+
+echo "✅ Pre-commit checks completed!"

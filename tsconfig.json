@@ -2,19 +2,22 @@
   "files": [],
   "references": [
     {
-      "path": "./tsconfig.app.json"
+      "path": "./packages/core"
     },
     {
-      "path": "./tsconfig.node.json"
+      "path": "./packages/types"
+    },
+    {
+      "path": "./packages/web"
+    },
+    {
+      "path": "./packages/server"
+    },
+    {
+      "path": "./packages/discord-bot"
+    },
+    {
+      "path": "./packages/desktop"
     }
-  ],
-  "compilerOptions": {
-    "baseUrl": ".",
-    "types": ["vitest/globals"],
-    "paths": {
-      "@/*": [
-        "src/*"
-      ]
-    }
-  }
+  ]
 }

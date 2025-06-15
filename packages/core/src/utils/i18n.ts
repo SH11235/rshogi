@@ -1,4 +1,4 @@
-import { PIECE_NAMES, PROMOTED_PIECE_NAMES, type PieceType } from "@/domain/model/piece";
+import { PIECE_NAMES, PROMOTED_PIECE_NAMES, type PieceType } from "../domain/model/piece";
 
 // サポートする言語
 export type SupportedLocale = "ja" | "en";

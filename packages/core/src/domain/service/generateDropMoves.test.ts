@@ -1,9 +1,9 @@
-import type { Board } from "@/domain/model/board";
-import { setPiece } from "@/domain/model/board";
-import type { Piece, PieceType } from "@/domain/model/piece";
-import type { Column, Row, Square } from "@/domain/model/square";
-import { generateDropMoves } from "@/domain/service/generateDropMoves";
 import { describe, expect, it } from "vitest";
+import type { Board } from "../model/board";
+import { setPiece } from "../model/board";
+import type { Piece, PieceType } from "../model/piece";
+import type { Column, Row, Square } from "../model/square";
+import { generateDropMoves } from "./generateDropMoves";
 
 const sq = (row: Row, col: Column): Square => ({ row, column: col });
 

@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+echo "🔄 Running post-commit checks (background)..."
+
+# バックグラウンドで影響のあるテストを実行
+(
+  echo "🧪 Running tests for affected packages..."
+  npm run test:affected > .test-results.log 2>&1
+  if [ $? -eq 0 ]; then
+    echo "✅ All tests passed!"
+  else
+    echo "❌ Some tests failed. Check .test-results.log"
+  fi
+) &
+
+echo "🚀 Background checks started. Continue working!"

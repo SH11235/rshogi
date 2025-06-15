@@ -1,7 +1,9 @@
-import type { Board } from "@/domain/model/board";
-import { setPiece } from "@/domain/model/board";
-import type { Move } from "@/domain/model/move";
-import type { Piece, PieceType } from "@/domain/model/piece";
+import { describe, expect, it } from "vitest";
+import type { Board } from "../model/board";
+import { setPiece } from "../model/board";
+import type { Move } from "../model/move";
+import type { Piece, PieceType } from "../model/piece";
+import type { Column, Row, Square } from "../model/square";
 import {
     applyMove,
     createEmptyHands,
@@ -11,9 +13,7 @@ import {
     isUchifuzume,
     revertMove,
     toggleSide,
-} from "@/domain/service/moveService";
-import { describe, expect, it } from "vitest";
-import type { Column, Row, Square } from "../model/square";
+} from "./moveService";
 
 //----------------------------------------------------------------
 // Helper utilities for tests

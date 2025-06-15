@@ -1,0 +1,21 @@
+{
+  "name": "shogi-types",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write ."
+  },
+  "dependencies": {
+    "shogi-core": "file:../core"
+  },
+  "devDependencies": {
+    "typescript": "~5.7.2",
+    "@biomejs/biome": "^1.9.4"
+  }
+}

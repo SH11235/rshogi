@@ -1,0 +1,27 @@
+{
+  "name": "@shogi/discord-bot",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/bot.ts",
+    "build": "tsc",
+    "start": "node dist/bot.js",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "echo 'Discord Bot package: No tests yet'",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "shogi-core": "file:../core",
+    "shogi-types": "file:../types",
+    "discord.js": "^14.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "tsx": "^4.19.3",
+    "typescript": "~5.7.2",
+    "@biomejs/biome": "^1.9.4",
+    "vitest": "^3.1.3"
+  }
+}

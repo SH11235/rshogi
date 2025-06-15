@@ -1,0 +1,32 @@
+{
+  "name": "@shogi/desktop",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "echo 'Desktop package: Tauri setup required'",
+    "build": "echo 'Desktop package: Tauri setup required - skipping build'",
+    "lint": "echo 'Desktop package: No source files to lint'",
+    "lint:fix": "echo 'Desktop package: No source files to lint'",
+    "test": "echo 'Desktop package: No tests yet'",
+    "test:watch": "echo 'Desktop package: No tests yet'"
+  },
+  "dependencies": {
+    "shogi-core": "file:../core",
+    "shogi-types": "file:../types",
+    "@tauri-apps/api": "^2.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zustand": "^5.0.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react-swc": "^3.8.0",
+    "typescript": "~5.7.2",
+    "@biomejs/biome": "^1.9.4",
+    "vite": "^6.3.1",
+    "vitest": "^3.1.3"
+  }
+}

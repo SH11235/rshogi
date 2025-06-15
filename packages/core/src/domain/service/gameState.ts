@@ -1,8 +1,8 @@
-import { modernInitialBoard } from "@/domain/initialBoard";
-import type { Board } from "@/domain/model/board";
-import type { Move } from "@/domain/model/move";
-import type { Piece, Player } from "@/domain/model/piece";
-import type { Square } from "@/domain/model/square";
+import { modernInitialBoard } from "../initialBoard";
+import type { Board } from "../model/board";
+import type { Move } from "../model/move";
+import type { Piece, Player } from "../model/piece";
+import type { Square } from "../model/square";
 
 // 持ち駒の型定義（moveService から独立）
 export type Hands = {

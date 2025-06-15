@@ -1,0 +1,34 @@
+{
+  "name": "@shogi/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "echo 'Server package: No tests yet'",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "shogi-core": "file:../core",
+    "shogi-types": "file:../types",
+    "express": "^5.0.1",
+    "ws": "^8.18.0",
+    "cors": "^2.8.5",
+    "uuid": "^11.0.4"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.5.13",
+    "@types/cors": "^2.8.17",
+    "@types/uuid": "^10.0.0",
+    "@types/node": "^22.15.17",
+    "tsx": "^4.19.3",
+    "typescript": "~5.7.2",
+    "@biomejs/biome": "^1.9.4",
+    "vitest": "^3.1.3"
+  }
+}

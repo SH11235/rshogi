@@ -1,6 +1,6 @@
-import type { Board } from "@/domain/model/board";
-import { type Piece, type PieceType, createPiece } from "@/domain/model/piece";
-import type { Column, Row, SquareKey } from "@/domain/model/square";
+import type { Board } from "./model/board";
+import { type Piece, type PieceType, createPiece } from "./model/piece";
+import type { Column, Row, SquareKey } from "./model/square";
 
 /** 駒を作成するヘルパー */
 const makePiece = (type: PieceType, owner: Piece["owner"]): Piece =>

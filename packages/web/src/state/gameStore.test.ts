@@ -1,7 +1,4 @@
-import type { Board } from "@/domain/model/board";
-import type { Move } from "@/domain/model/move";
-import type { Piece } from "@/domain/model/piece";
-import { createEmptyHands } from "@/domain/service/moveService";
+import { type Board, type Move, type Piece, createEmptyHands } from "shogi-core";
 import { describe, expect, it } from "vitest";
 import { useGameStore } from "./gameStore";
 
