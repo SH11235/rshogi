@@ -152,6 +152,24 @@ export const convertToJapaneseName = (pieceType: PieceType): string => {
     return PIECE_NAMES.ja[pieceType];
 };
 
+// UI表示用の日本語駒名タイプ（成駒含む）
+export type PieceTypeDefinition =
+    | "歩"
+    | "香"
+    | "桂"
+    | "銀"
+    | "金"
+    | "角"
+    | "飛"
+    | "王"
+    | "玉"
+    | "と"
+    | "成香"
+    | "成桂"
+    | "成銀"
+    | "馬"
+    | "龍";
+
 // 後方互換性のためのエイリアス（段階的に削除予定）
 export const createModernPiece = createPiece;
 export type ModernPiece = Piece;

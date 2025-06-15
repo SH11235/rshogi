@@ -11,5 +11,6 @@ export default defineConfig({
         include: ["src/**/*.test.{ts,tsx}"],
         globals: true, // expect, vi を毎回 import しなくて済む
         coverage: { provider: "v8" },
+        setupFiles: ["./src/test/setup.ts"],
     },
 });

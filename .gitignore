@@ -28,3 +28,6 @@ dist-ssr
 # TypeScript build info
 *.tsbuildinfo
 tsconfig.tsbuildinfo
+
+*storybook.log
+storybook-static

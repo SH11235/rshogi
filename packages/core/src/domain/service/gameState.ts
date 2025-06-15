@@ -43,7 +43,9 @@ export type GameStatus =
     | "sennichite"
     | "perpetual_check"
     | "timeout"
-    | "resigned";
+    | "resigned"
+    | "black_win"
+    | "white_win";
 
 export type GameMetadata = {
     readonly gameId: string;
