@@ -1,5 +1,17 @@
 import { cn } from "@/lib/utils";
+import { useState } from "react";
 import type { GameStatus, Move, Player } from "shogi-core";
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+    AlertDialogTrigger,
+} from "./ui/alert-dialog";
 
 interface GameInfoProps {
     currentPlayer: Player;
@@ -11,6 +23,7 @@ interface GameInfoProps {
 export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: GameInfoProps) {
     const moveCount = moveHistory.length;
     const turn = Math.floor(moveCount / 2) + 1;
+    const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
 
     const getStatusMessage = () => {
         switch (gameStatus) {
@@ -58,6 +71,20 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
     };
 
     const isGameOver = !["playing", "check"].includes(gameStatus);
+    const hasMovesPlayed = moveCount > 0;
+
+    const handleResetClick = () => {
+        if (hasMovesPlayed && !isGameOver) {
+            setIsResetDialogOpen(true);
+        } else {
+            onReset();
+        }
+    };
+
+    const handleConfirmReset = () => {
+        onReset();
+        setIsResetDialogOpen(false);
+    };
 
     return (
         <div className="p-6 bg-white rounded-lg shadow-md max-w-md mx-auto">
@@ -90,19 +117,37 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
 
             {/* 操作ボタン */}
             <div className="flex gap-2 justify-center">
-                <button
-                    type="button"
-                    onClick={onReset}
-                    className={cn(
-                        "px-6 py-2 rounded-lg font-medium transition-colors",
-                        isGameOver
-                            ? "bg-green-500 text-white hover:bg-green-600 focus:ring-green-500"
-                            : "bg-blue-500 text-white hover:bg-blue-600 focus:ring-blue-500",
-                        "focus:outline-none focus:ring-2 focus:ring-offset-2",
-                    )}
-                >
-                    {isGameOver ? "新しいゲーム" : "リセット"}
-                </button>
+                <AlertDialog open={isResetDialogOpen} onOpenChange={setIsResetDialogOpen}>
+                    <AlertDialogTrigger asChild>
+                        <button
+                            type="button"
+                            onClick={handleResetClick}
+                            className={cn(
+                                "px-6 py-2 rounded-lg font-medium transition-colors",
+                                isGameOver
+                                    ? "bg-green-500 text-white hover:bg-green-600 focus:ring-green-500"
+                                    : "bg-blue-500 text-white hover:bg-blue-600 focus:ring-blue-500",
+                                "focus:outline-none focus:ring-2 focus:ring-offset-2",
+                            )}
+                        >
+                            {isGameOver ? "新しいゲーム" : "リセット"}
+                        </button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                        <AlertDialogHeader>
+                            <AlertDialogTitle>ゲームをリセットしますか？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                                現在の対局がリセットされ、すべての手順が失われます。この操作は元に戻せません。
+                            </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                            <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                            <AlertDialogAction onClick={handleConfirmReset}>
+                                リセットする
+                            </AlertDialogAction>
+                        </AlertDialogFooter>
+                    </AlertDialogContent>
+                </AlertDialog>
             </div>
         </div>
     );
