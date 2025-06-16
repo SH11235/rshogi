@@ -12,6 +12,7 @@ function App() {
         selectedSquare,
         validMoves,
         gameStatus,
+        moveHistory,
         selectSquare,
         resetGame,
     } = useGameStore();
@@ -48,6 +49,7 @@ function App() {
                     <GameInfo
                         currentPlayer={currentPlayer}
                         gameStatus={gameStatus}
+                        moveHistory={moveHistory}
                         onReset={resetGame}
                     />
                 </div>

@@ -25,14 +25,25 @@ export function Board({ board, selectedSquare, validMoves, onSquareClick }: Boar
                 type="button"
                 key={squareKey}
                 className={cn(
-                    "w-16 h-16 border border-gray-800 flex items-center justify-center cursor-pointer transition-all",
+                    "w-16 h-16 border border-gray-800 flex items-center justify-center cursor-pointer transition-all duration-200",
                     "hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500",
-                    isSelected && "bg-blue-200 hover:bg-blue-300",
-                    isValidMove && "bg-green-100 hover:bg-green-200",
+                    // 選択中の駒のハイライト
+                    isSelected && "bg-blue-200 hover:bg-blue-300 ring-2 ring-blue-400",
+                    // 有効な移動先のハイライト
+                    isValidMove &&
+                        !isSelected &&
+                        "bg-green-100 hover:bg-green-200 ring-1 ring-green-300",
+                    // 駒がある場合のホバー効果
+                    piece && !isSelected && !isValidMove && "hover:bg-yellow-50",
                 )}
                 onClick={() => onSquareClick(square)}
+                aria-label={`Square ${row}-${col}${piece ? ` with ${piece.type} piece` : ""}`}
             >
                 {piece && <Piece piece={piece} />}
+                {/* 有効な移動先にドットを表示 */}
+                {isValidMove && !piece && (
+                    <div className="w-3 h-3 bg-green-500 rounded-full opacity-60" />
+                )}
             </button>
         );
     };

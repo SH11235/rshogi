@@ -135,6 +135,12 @@ const board = useGameStore((state) => state.board);
 - ❌ Importing test utilities (they're global)
 - ❌ Creating files without tests when adding new components
 
+## Task Management
+
+- **Task List**: See `packages/web/.claude/task-list.md` for detailed progress tracking
+- **Completed Tasks**: Mark with ✅ and completion date in task-list.md
+- **Active Tasks**: Update todo list via TodoWrite tool during development
+
 ## Emergency Fixes
 
 ### Build Failing
