@@ -22,41 +22,57 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run typecheck` - Run TypeScript type checking without emitting files
 - `npm run knip` - Check for unused dependencies and exports
 
+### Storybook
+- `npm run storybook` - Start Storybook development server
+- `npm run build-storybook` - Build Storybook for production
+
 ## Architecture
 
 This is a Shogi (Japanese Chess) web application built with React and TypeScript. The codebase follows Domain-Driven Design principles with clear separation of concerns:
 
-### Domain Layer (`/src/domain/`)
-The core game logic is isolated from UI concerns:
-- `model/` - Domain entities (Board, Piece, Move, Square)
-- `service/` - Game rules and logic (move validation, checkmate detection)
-- `initialBoard.ts` - Initial game state
-- `utils/` - Utility functions for notation
+### Monorepo Structure
+- `packages/core/` - Shared domain logic and types (imported as "shogi-core")
+- `packages/web/` - React web application
+- Dependencies: web package depends on core package for game logic
 
-### State Management (`/src/state/`)
-Uses Zustand with persist middleware for game state management:
-- `gameStore.ts` - Central store managing board state, move history, turn tracking, captured pieces (hands), and game results
-- Supports undo/redo functionality through cursor-based history navigation
+### Current Implementation (packages/web/)
 
-### Key Domain Concepts
-- **Board**: Record of square keys to pieces (e.g., "11" → piece or null)
-- **Square**: Position on the 9x9 board (row: 1-9, column: 1-9)
-- **Piece**: Japanese pieces (歩=Pawn, 香=Lance, 桂=Knight, 銀=Silver, 金=Gold, 角=Bishop, 飛=Rook, 王/玉=King)
-- **Move**: Either a board move (from/to squares) or a drop move (placing captured piece)
-- **Hands**: Captured pieces available for dropping back onto the board
+#### Components (`/src/components/`)
+- `Board.tsx` - 9x9 shogi board with square click handling
+- `Piece.tsx` - Individual piece rendering with Japanese characters
+- `GameInfo.tsx` - Game status, turn indicator, and controls
+- `CapturedPieces.tsx` - Display captured pieces (hands) for both players
+- `ui/` - shadcn/ui component library (Button, Card, Input, Table)
 
-### Testing Strategy
-- Tests are co-located with source files (`.test.ts`)
-- Comprehensive unit tests for domain logic
-- Uses Vitest with happy-dom for DOM testing
-- Global test utilities (expect, vi) available without imports
+#### State Management (`/src/stores/`)
+- `gameStore.ts` - Zustand store with game state, move validation, and history
+- Centralized state for board, current player, selected square, valid moves, hands
 
-### Development Notes
-- TypeScript strict mode is enabled
+#### Key Domain Concepts
+- **Board**: Record<SquareKey, Piece | null> (e.g., "11" → piece or null)
+- **Square**: Position {row: 1-9, column: 1-9}
+- **Piece**: Japanese pieces with owner and promoted status
+- **Move**: NormalMove (board moves) or DropMove (placing captured pieces)
+- **Hands**: Captured pieces available for dropping
+
+#### UI Library & Styling
+- **shadcn/ui**: Modern component library with Radix UI primitives
+- **Tailwind CSS**: Utility-first CSS framework
+- **Storybook**: Component development and documentation tool
+- Components: Button, Card, Input, Table (configured and tested)
+
+#### Testing Strategy
+- **Framework**: Vitest with @testing-library/react
+- **Coverage**: 83 tests across 8 test files
+- **Test Types**: Unit tests for utils, component tests, store integration tests
+- **Co-location**: Tests next to source files (`.test.ts/.test.tsx`)
+- **Setup**: Global test utilities, happy-dom environment
+
+#### Development Notes
+- TypeScript strict mode enabled, NO "any" type usage allowed
 - Path alias `@/*` maps to `src/*`
-- Biome is used for formatting (4 spaces, 100 char line width)
-- Pre-commit hooks run formatting via Husky and lint-staged
-- Node.js version is managed by Volta (v24.0.1)
+- Biome for linting and formatting (4 spaces, 100 char line width)
+- ESLint rules: prefer for-of over forEach, explicit button types
 
 ## Code Quality Standards
 
@@ -68,3 +84,17 @@ Uses Zustand with persist middleware for game state management:
 4. **Format check**: `npm run format:check` - Applies automatic code formatting
 
 These checks must all pass before considering a task complete. This ensures code quality and prevents build failures in CI/CD pipelines.
+
+### Type Safety Requirements
+- **NO "any" type usage** - Use proper TypeScript types always
+- **Use type guards** for union types (Move, etc.)
+- **Explicit button types** - Always specify `type="button"`
+- **Prefer for-of over forEach** - Especially in test files
+
+## Additional Documentation
+
+For detailed references to reduce token usage, see:
+- **packages/web/.claude/file-structure.md** - File locations and import patterns
+- **packages/web/.claude/type-definitions.md** - Key TypeScript types reference
+- **packages/web/.claude/common-patterns.md** - Code patterns and best practices
+- **packages/web/.claude/quick-reference.md** - Essential commands and workflows

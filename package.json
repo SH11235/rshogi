@@ -34,7 +34,7 @@
     "npm": "11.3.0"
   },
   "lint-staged": {
-    "**/*.{ts,tsx,js,jsx,css,md,json}": [
+    "**/*.{ts,tsx,js,jsx,css,json}": [
       "biome check --write --files-ignore-unknown=true"
     ]
   }
