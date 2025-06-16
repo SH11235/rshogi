@@ -24,8 +24,29 @@ jobs:
           node-version: "24"
           cache: "npm"
 
+      # Enhanced npm cache with package-lock hash
+      - name: Cache node modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.npm
+            node_modules
+            packages/*/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      # Turbo cache setup for build optimization
+      - name: Setup Turbo cache
+        uses: actions/cache@v3
+        with:
+          path: .turbo
+          key: ${{ runner.os }}-turbo-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-turbo-
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --prefer-offline --no-audit --ignore-scripts
 
       # 条件分岐でAffected vs All を切り替え
       - name: Build (Affected)
