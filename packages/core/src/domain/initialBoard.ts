@@ -30,8 +30,8 @@ export const modernInitialBoard: Board = (() => {
         board[key(9, (i + 1) as Column)] = makePiece(type, "black");
     });
 
-    board[key(8, 8)] = makePiece("rook", "black");
-    board[key(8, 2)] = makePiece("bishop", "black");
+    board[key(8, 2)] = makePiece("rook", "black");
+    board[key(8, 8)] = makePiece("bishop", "black");
 
     for (let c = 1 as Column; c <= 9; c++) {
         board[key(7, c)] = makePiece("pawn", "black");
