@@ -38,6 +38,8 @@ export const BlackEmpty: Story = {
     args: {
         hands: emptyHands,
         player: "black",
+        currentPlayer: "black",
+        selectedDropPiece: null,
     },
 };
 
@@ -45,6 +47,8 @@ export const WhiteEmpty: Story = {
     args: {
         hands: emptyHands,
         player: "white",
+        currentPlayer: "black",
+        selectedDropPiece: null,
     },
 };
 
@@ -52,6 +56,8 @@ export const BlackWithPieces: Story = {
     args: {
         hands: sampleHands,
         player: "black",
+        currentPlayer: "black",
+        selectedDropPiece: null,
     },
 };
 
@@ -59,6 +65,8 @@ export const WhiteWithPieces: Story = {
     args: {
         hands: sampleHands,
         player: "white",
+        currentPlayer: "black",
+        selectedDropPiece: null,
     },
 };
 
@@ -66,6 +74,8 @@ export const BlackFull: Story = {
     args: {
         hands: fullHands,
         player: "black",
+        currentPlayer: "black",
+        selectedDropPiece: null,
     },
 };
 
@@ -73,14 +83,26 @@ export const WhiteFull: Story = {
     args: {
         hands: fullHands,
         player: "white",
+        currentPlayer: "black",
+        selectedDropPiece: null,
     },
 };
 
 export const BothPlayers: Story = {
     render: () => (
         <div className="space-y-4">
-            <CapturedPieces hands={sampleHands} player="black" />
-            <CapturedPieces hands={sampleHands} player="white" />
+            <CapturedPieces
+                hands={sampleHands}
+                player="black"
+                currentPlayer="black"
+                selectedDropPiece={null}
+            />
+            <CapturedPieces
+                hands={sampleHands}
+                player="white"
+                currentPlayer="black"
+                selectedDropPiece={null}
+            />
         </div>
     ),
 };

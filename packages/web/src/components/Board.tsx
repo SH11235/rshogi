@@ -6,10 +6,17 @@ interface BoardProps {
     board: BoardType;
     selectedSquare: Square | null;
     validMoves: Square[];
+    validDropSquares: Square[];
     onSquareClick: (square: Square) => void;
 }
 
-export function Board({ board, selectedSquare, validMoves, onSquareClick }: BoardProps) {
+export function Board({
+    board,
+    selectedSquare,
+    validMoves,
+    validDropSquares,
+    onSquareClick,
+}: BoardProps) {
     const renderSquare = (row: number, col: number) => {
         const square: Square = {
             row: row as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
@@ -19,6 +26,7 @@ export function Board({ board, selectedSquare, validMoves, onSquareClick }: Boar
         const piece = board[squareKey as keyof BoardType];
         const isSelected = selectedSquare?.row === row && selectedSquare?.column === col;
         const isValidMove = validMoves.some((m) => m.row === row && m.column === col);
+        const isValidDrop = validDropSquares.some((m) => m.row === row && m.column === col);
 
         return (
             <button
@@ -33,8 +41,13 @@ export function Board({ board, selectedSquare, validMoves, onSquareClick }: Boar
                     isValidMove &&
                         !isSelected &&
                         "bg-green-100 hover:bg-green-200 ring-1 ring-green-300",
+                    // 有効なドロップ先のハイライト
+                    isValidDrop &&
+                        !isSelected &&
+                        !isValidMove &&
+                        "bg-purple-100 hover:bg-purple-200 ring-1 ring-purple-300",
                     // 駒がある場合のホバー効果
-                    piece && !isSelected && !isValidMove && "hover:bg-yellow-50",
+                    piece && !isSelected && !isValidMove && !isValidDrop && "hover:bg-yellow-50",
                 )}
                 onClick={() => onSquareClick(square)}
                 aria-label={`Square ${row}-${col}${piece ? ` with ${piece.type} piece` : ""}`}
@@ -44,6 +57,8 @@ export function Board({ board, selectedSquare, validMoves, onSquareClick }: Boar
                 {isValidMove && !piece && (
                     <div className="w-3 h-3 bg-green-500 rounded-full opacity-60" />
                 )}
+                {/* 有効なドロップ先に四角を表示 */}
+                {isValidDrop && !piece && <div className="w-4 h-4 bg-purple-500 opacity-60" />}
             </button>
         );
     };

@@ -5,6 +5,13 @@ import { Board } from "./Board";
 
 describe("Board component", () => {
     const mockOnSquareClick = vi.fn();
+    const defaultProps = {
+        board: modernInitialBoard,
+        selectedSquare: null,
+        validMoves: [],
+        validDropSquares: [],
+        onSquareClick: mockOnSquareClick,
+    };
 
     // Helper to create empty board that satisfies Board type
     const createEmptyBoard = (): BoardType => {
@@ -33,14 +40,7 @@ describe("Board component", () => {
     });
 
     it("renders 9x9 grid correctly", () => {
-        render(
-            <Board
-                board={modernInitialBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} />);
 
         // Should have 81 squares (9x9)
         const squares = screen.getAllByRole("button");
@@ -48,14 +48,7 @@ describe("Board component", () => {
     });
 
     it("displays pieces correctly", () => {
-        render(
-            <Board
-                board={modernInitialBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} />);
 
         // Check for some initial pieces
         expect(screen.getAllByText("歩")).toHaveLength(18); // 9 for each side
@@ -64,14 +57,7 @@ describe("Board component", () => {
     });
 
     it("handles square clicks correctly", () => {
-        render(
-            <Board
-                board={modernInitialBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} />);
 
         const squares = screen.getAllByRole("button");
         const firstSquare = squares[0];
@@ -83,14 +69,7 @@ describe("Board component", () => {
     });
 
     it("squares are keyboard accessible", () => {
-        render(
-            <Board
-                board={modernInitialBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} />);
 
         const squares = screen.getAllByRole("button");
         const firstSquare = squares[0];
@@ -103,14 +82,7 @@ describe("Board component", () => {
     it("highlights selected square", () => {
         const selectedSquare = { row: 7 as const, column: 7 as const };
 
-        render(
-            <Board
-                board={modernInitialBoard}
-                selectedSquare={selectedSquare}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} selectedSquare={selectedSquare} />);
 
         // Find the selected square and check its styling
         const squares = screen.getAllByRole("button");
@@ -129,10 +101,9 @@ describe("Board component", () => {
 
         render(
             <Board
-                board={modernInitialBoard}
+                {...defaultProps}
                 selectedSquare={{ row: 7 as const, column: 7 as const }}
                 validMoves={validMoves}
-                onSquareClick={mockOnSquareClick}
             />,
         );
 
@@ -147,14 +118,7 @@ describe("Board component", () => {
 
     it("renders empty board correctly", () => {
         const emptyBoard = createEmptyBoard();
-        render(
-            <Board
-                board={emptyBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} board={emptyBoard} />);
 
         // Should still have 81 squares
         const squares = screen.getAllByRole("button");
@@ -166,14 +130,7 @@ describe("Board component", () => {
     });
 
     it("renders column numbers correctly", () => {
-        render(
-            <Board
-                board={modernInitialBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} />);
 
         // Should show column numbers 1-9
         for (let i = 1; i <= 9; i++) {
@@ -187,14 +144,7 @@ describe("Board component", () => {
             "51": createPiece("rook", "white"),
         });
 
-        render(
-            <Board
-                board={customBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} board={customBoard} />);
 
         expect(screen.getByText("王")).toBeInTheDocument();
         expect(screen.getByText("飛")).toBeInTheDocument();
@@ -205,14 +155,7 @@ describe("Board component", () => {
     });
 
     it("calculates square coordinates correctly", () => {
-        render(
-            <Board
-                board={modernInitialBoard}
-                selectedSquare={null}
-                validMoves={[]}
-                onSquareClick={mockOnSquareClick}
-            />,
-        );
+        render(<Board {...defaultProps} />);
 
         const squares = screen.getAllByRole("button");
 

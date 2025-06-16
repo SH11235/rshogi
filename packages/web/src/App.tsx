@@ -2,6 +2,7 @@ import "./App.css";
 import { Board } from "./components/Board";
 import { CapturedPieces } from "./components/CapturedPieces";
 import { GameInfo } from "./components/GameInfo";
+import { PromotionDialog } from "./components/PromotionDialog";
 import { useGameStore } from "./stores/gameStore";
 
 function App() {
@@ -10,10 +11,16 @@ function App() {
         hands,
         currentPlayer,
         selectedSquare,
+        selectedDropPiece,
         validMoves,
+        validDropSquares,
         gameStatus,
         moveHistory,
+        promotionPending,
         selectSquare,
+        selectDropPiece,
+        confirmPromotion,
+        cancelPromotion,
         resetGame,
     } = useGameStore();
 
@@ -25,7 +32,13 @@ function App() {
                 <div className="flex flex-col lg:flex-row gap-8 justify-center items-start">
                     {/* 後手の持ち駒 */}
                     <div className="order-2 lg:order-1">
-                        <CapturedPieces hands={hands} player="white" />
+                        <CapturedPieces
+                            hands={hands}
+                            player="white"
+                            currentPlayer={currentPlayer}
+                            selectedDropPiece={selectedDropPiece}
+                            onPieceClick={selectDropPiece}
+                        />
                     </div>
 
                     {/* 将棋盤 */}
@@ -34,13 +47,20 @@ function App() {
                             board={board}
                             selectedSquare={selectedSquare}
                             validMoves={validMoves}
+                            validDropSquares={validDropSquares}
                             onSquareClick={selectSquare}
                         />
                     </div>
 
                     {/* 先手の持ち駒 */}
                     <div className="order-3">
-                        <CapturedPieces hands={hands} player="black" />
+                        <CapturedPieces
+                            hands={hands}
+                            player="black"
+                            currentPlayer={currentPlayer}
+                            selectedDropPiece={selectedDropPiece}
+                            onPieceClick={selectDropPiece}
+                        />
                     </div>
                 </div>
 
@@ -53,6 +73,16 @@ function App() {
                         onReset={resetGame}
                     />
                 </div>
+
+                {/* プロモーションダイアログ */}
+                {promotionPending && (
+                    <PromotionDialog
+                        piece={promotionPending.piece}
+                        isOpen={true}
+                        onConfirm={confirmPromotion}
+                        onCancel={cancelPromotion}
+                    />
+                )}
             </div>
         </div>
     );
