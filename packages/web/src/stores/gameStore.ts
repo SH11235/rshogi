@@ -83,6 +83,7 @@ interface GameState {
     validMoves: Square[];
     validDropSquares: Square[];
     moveHistory: Move[];
+    historyCursor: number; // 現在表示している履歴位置
     gameStatus: GameStatus;
     promotionPending: PromotionPendingMove | null;
 
@@ -93,6 +94,40 @@ interface GameState {
     confirmPromotion: (promote: boolean) => void;
     cancelPromotion: () => void;
     resetGame: () => void;
+    // 履歴操作機能
+    undo: () => void;
+    redo: () => void;
+    goToMove: (moveIndex: number) => void;
+    canUndo: () => boolean;
+    canRedo: () => boolean;
+}
+
+// 初期状態から指定した手数まで再構築する関数
+function reconstructGameState(moveHistory: Move[], targetMoveIndex: number) {
+    let board = structuredClone(modernInitialBoard);
+    let hands = structuredClone(initialHands());
+    let currentPlayer: Player = "black";
+
+    for (let i = 0; i <= targetMoveIndex; i++) {
+        if (i >= moveHistory.length) break;
+
+        const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
+        board = result.board;
+        hands = result.hands;
+        currentPlayer = currentPlayer === "black" ? "white" : "black";
+    }
+
+    // ゲーム状態判定
+    let gameStatus: GameStatus = "playing";
+    if (isInCheck(board, currentPlayer)) {
+        if (isCheckmate(board, hands, currentPlayer)) {
+            gameStatus = "checkmate";
+        } else {
+            gameStatus = "check";
+        }
+    }
+
+    return { board, hands, currentPlayer, gameStatus };
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -104,6 +139,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     validMoves: [],
     validDropSquares: [],
     moveHistory: [],
+    historyCursor: -1, // -1は最新の状態を示す
     gameStatus: "playing",
     promotionPending: null,
 
@@ -303,6 +339,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 selectedDropPiece: null,
                 validDropSquares: [],
                 moveHistory: [...moveHistory, move],
+                historyCursor: -1, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
             });
 
@@ -354,6 +391,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 selectedSquare: null,
                 validMoves: [],
                 moveHistory: [...moveHistory, move],
+                historyCursor: -1, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
             });
         } catch (error) {
@@ -384,8 +422,93 @@ export const useGameStore = create<GameState>((set, get) => ({
             validMoves: [],
             validDropSquares: [],
             moveHistory: [],
+            historyCursor: -1,
             gameStatus: "playing",
             promotionPending: null,
         });
+    },
+
+    // 履歴操作機能
+    undo: () => {
+        const { moveHistory, historyCursor } = get();
+        if (moveHistory.length === 0) return;
+
+        const newCursor = historyCursor === -1 ? moveHistory.length - 2 : historyCursor - 1;
+        if (newCursor < -1) return;
+
+        const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
+            moveHistory,
+            newCursor,
+        );
+
+        set({
+            board,
+            hands,
+            currentPlayer,
+            gameStatus,
+            historyCursor: newCursor,
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            promotionPending: null,
+        });
+    },
+
+    redo: () => {
+        const { moveHistory, historyCursor } = get();
+        if (historyCursor === -1 || historyCursor >= moveHistory.length - 1) return;
+
+        const newCursor = historyCursor + 1;
+        const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
+            moveHistory,
+            newCursor,
+        );
+
+        set({
+            board,
+            hands,
+            currentPlayer,
+            gameStatus,
+            historyCursor: newCursor,
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            promotionPending: null,
+        });
+    },
+
+    goToMove: (moveIndex: number) => {
+        const { moveHistory } = get();
+        if (moveIndex < -1 || moveIndex >= moveHistory.length) return;
+
+        const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
+            moveHistory,
+            moveIndex,
+        );
+
+        set({
+            board,
+            hands,
+            currentPlayer,
+            gameStatus,
+            historyCursor: moveIndex,
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            promotionPending: null,
+        });
+    },
+
+    canUndo: () => {
+        const { moveHistory, historyCursor } = get();
+        return moveHistory.length > 0 && (historyCursor > -1 || moveHistory.length > 0);
+    },
+
+    canRedo: () => {
+        const { moveHistory, historyCursor } = get();
+        return historyCursor !== -1 && historyCursor < moveHistory.length - 1;
     },
 }));
