@@ -11,4 +11,10 @@ export default defineConfig({
             "@": path.resolve(__dirname, "./src"),
         },
     },
+    base: process.env.NODE_ENV === "production" ? "/shogi/" : "/",
+    build: {
+        outDir: "dist",
+        assetsDir: "assets",
+        sourcemap: false,
+    },
 });

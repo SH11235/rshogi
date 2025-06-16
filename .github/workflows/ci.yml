@@ -7,25 +7,27 @@ on:
     branches: [main]
 
 jobs:
-  build:
-    name: Build and Test
+  quality-check:
+    name: Quality Check
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           # PR時の変更検出のため
           fetch-depth: 2
 
-      - name: Use Node.js 24
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: 'npm'
+          node-version: "24"
+          cache: "npm"
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      # PRでは変更があったパッケージのみチェック
+      # 条件分岐でAffected vs All を切り替え
       - name: Build (Affected)
         if: github.event_name == 'pull_request'
         run: npm run build -- --filter='[HEAD^1]'
@@ -52,3 +54,7 @@ jobs:
 
       - name: Format Check
         run: npm run format:check
+
+      - name: Type Check
+        if: github.event_name == 'push'
+        run: npm run typecheck
