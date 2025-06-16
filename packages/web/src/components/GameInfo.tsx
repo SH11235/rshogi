@@ -87,15 +87,20 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
     };
 
     return (
-        <div className="p-6 bg-white rounded-lg shadow-md max-w-md mx-auto">
+        <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md max-w-xs sm:max-w-md mx-auto">
             {/* ゲーム状態表示 */}
-            <div className="mb-4 text-center">
-                <h2 className={cn("text-2xl font-bold mb-2", getStatusColor())}>
+            <div className="mb-3 sm:mb-4 text-center">
+                <h2
+                    className={cn(
+                        "text-lg sm:text-xl lg:text-2xl font-bold mb-2",
+                        getStatusColor(),
+                    )}
+                >
                     {getStatusMessage()}
                 </h2>
 
                 {/* 手数表示 */}
-                <div className="flex justify-center gap-4 text-sm text-gray-600 mb-3">
+                <div className="flex justify-center gap-2 sm:gap-4 text-xs sm:text-sm text-gray-600 mb-2 sm:mb-3">
                     <span>第{turn}手</span>
                     <span>•</span>
                     <span>総手数: {moveCount}</span>
@@ -103,13 +108,13 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
 
                 {/* 追加の状態情報 */}
                 {gameStatus === "check" && (
-                    <div className="text-red-500 text-sm font-medium bg-red-50 px-3 py-1 rounded-full">
+                    <div className="text-red-500 text-xs sm:text-sm font-medium bg-red-50 px-2 sm:px-3 py-1 rounded-full">
                         🔥 王手がかかっています
                     </div>
                 )}
 
                 {isGameOver && (
-                    <div className="text-gray-500 text-sm bg-gray-50 px-3 py-1 rounded-full">
+                    <div className="text-gray-500 text-xs sm:text-sm bg-gray-50 px-2 sm:px-3 py-1 rounded-full">
                         ゲーム終了
                     </div>
                 )}
@@ -123,7 +128,8 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
                             type="button"
                             onClick={handleResetClick}
                             className={cn(
-                                "px-6 py-2 rounded-lg font-medium transition-colors",
+                                "px-4 sm:px-6 py-2 rounded-lg font-medium transition-colors text-sm sm:text-base",
+                                "touch-manipulation active:scale-95",
                                 isGameOver
                                     ? "bg-green-500 text-white hover:bg-green-600 focus:ring-green-500"
                                     : "bg-blue-500 text-white hover:bg-blue-600 focus:ring-blue-500",

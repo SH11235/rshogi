@@ -33,8 +33,11 @@ export function Board({
                 type="button"
                 key={squareKey}
                 className={cn(
-                    "w-16 h-16 border border-gray-800 flex items-center justify-center cursor-pointer transition-all duration-200",
-                    "hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500",
+                    // レスポンシブサイズ: モバイルで小さく、デスクトップで大きく
+                    "w-10 h-10 sm:w-12 sm:h-12 lg:w-16 lg:h-16 border border-gray-800 flex items-center justify-center cursor-pointer transition-all duration-200",
+                    // タッチ操作の改善
+                    "touch-manipulation active:scale-95",
+                    "hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1",
                     // 選択中の駒のハイライト
                     isSelected && "bg-blue-200 hover:bg-blue-300 ring-2 ring-blue-400",
                     // 有効な移動先のハイライト
@@ -50,15 +53,27 @@ export function Board({
                     piece && !isSelected && !isValidMove && !isValidDrop && "hover:bg-yellow-50",
                 )}
                 onClick={() => onSquareClick(square)}
+                onTouchStart={(e) => {
+                    // タッチ開始時のフィードバック（iOS Safariの遅延を軽減）
+                    e.currentTarget.style.backgroundColor = "rgba(0, 0, 0, 0.1)";
+                }}
+                onTouchEnd={(e) => {
+                    // タッチ終了時にスタイルをリセット
+                    setTimeout(() => {
+                        e.currentTarget.style.backgroundColor = "";
+                    }, 100);
+                }}
                 aria-label={`Square ${row}-${col}${piece ? ` with ${piece.type} piece` : ""}`}
             >
                 {piece && <Piece piece={piece} />}
-                {/* 有効な移動先にドットを表示 */}
+                {/* 有効な移動先にドットを表示（レスポンシブサイズ） */}
                 {isValidMove && !piece && (
-                    <div className="w-3 h-3 bg-green-500 rounded-full opacity-60" />
+                    <div className="w-2 h-2 sm:w-3 sm:h-3 bg-green-500 rounded-full opacity-60" />
                 )}
-                {/* 有効なドロップ先に四角を表示 */}
-                {isValidDrop && !piece && <div className="w-4 h-4 bg-purple-500 opacity-60" />}
+                {/* 有効なドロップ先に四角を表示（レスポンシブサイズ） */}
+                {isValidDrop && !piece && (
+                    <div className="w-2 h-2 sm:w-3 sm:h-3 lg:w-4 lg:h-4 bg-purple-500 opacity-60" />
+                )}
             </button>
         );
     };
@@ -72,10 +87,10 @@ export function Board({
                     ),
                 )}
             </div>
-            {/* 座標表示 */}
-            <div className="flex justify-around mt-1 text-sm font-medium">
+            {/* 座標表示（レスポンシブサイズ） */}
+            <div className="flex justify-around mt-1 text-xs sm:text-sm font-medium">
                 {Array.from({ length: 9 }, (_, i) => (
-                    <div key={`col-${9 - i}`} className="w-16 text-center">
+                    <div key={`col-${9 - i}`} className="w-10 sm:w-12 lg:w-16 text-center">
                         {9 - i}
                     </div>
                 ))}

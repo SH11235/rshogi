@@ -75,16 +75,16 @@ export function MoveHistory({
     onGoToMove,
 }: MoveHistoryProps) {
     return (
-        <Card className="w-full max-w-md">
-            <CardHeader className="pb-3">
-                <CardTitle className="text-lg font-bold">棋譜</CardTitle>
-                <div className="flex gap-2">
+        <Card className="w-full max-w-xs sm:max-w-md">
+            <CardHeader className="pb-2 sm:pb-3">
+                <CardTitle className="text-base sm:text-lg font-bold">棋譜</CardTitle>
+                <div className="flex gap-1 sm:gap-2">
                     <Button
                         onClick={onUndo}
                         disabled={!canUndo}
                         size="sm"
                         variant="outline"
-                        className="flex-1"
+                        className="flex-1 text-xs sm:text-sm touch-manipulation"
                     >
                         ← 戻る
                     </Button>
@@ -93,20 +93,20 @@ export function MoveHistory({
                         disabled={!canRedo}
                         size="sm"
                         variant="outline"
-                        className="flex-1"
+                        className="flex-1 text-xs sm:text-sm touch-manipulation"
                     >
                         進む →
                     </Button>
                 </div>
             </CardHeader>
             <CardContent className="pt-0">
-                <div className="max-h-64 overflow-y-auto space-y-1">
+                <div className="max-h-48 sm:max-h-64 overflow-y-auto space-y-1">
                     {/* 初期状態 */}
                     <button
                         type="button"
                         onClick={() => onGoToMove(-1)}
                         className={cn(
-                            "w-full text-left px-2 py-1 rounded text-sm transition-colors",
+                            "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation",
                             historyCursor === -1
                                 ? "bg-blue-100 text-blue-900 font-medium"
                                 : "hover:bg-gray-100",
@@ -127,7 +127,7 @@ export function MoveHistory({
                                 type="button"
                                 onClick={() => onGoToMove(index)}
                                 className={cn(
-                                    "w-full text-left px-2 py-1 rounded text-sm transition-colors",
+                                    "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation",
                                     isCurrentMove
                                         ? "bg-blue-100 text-blue-900 font-medium"
                                         : "hover:bg-gray-100",
@@ -139,7 +139,9 @@ export function MoveHistory({
                     })}
 
                     {moveHistory.length === 0 && (
-                        <p className="text-sm text-gray-500 italic">まだ手が指されていません</p>
+                        <p className="text-xs sm:text-sm text-gray-500 italic">
+                            まだ手が指されていません
+                        </p>
                     )}
                 </div>
             </CardContent>
