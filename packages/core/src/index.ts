@@ -8,6 +8,7 @@ export * from "./domain/model/square";
 export * from "./domain/service/moveService";
 export * from "./domain/service/checkmate";
 export * from "./domain/service/generateDropMoves";
+export * from "./domain/service/legalMoves";
 export {
     type GameState,
     type GameStatus,

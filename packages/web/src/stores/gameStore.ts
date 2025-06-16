@@ -8,7 +8,8 @@ import {
     type Player,
     type Square,
     applyMove,
-    generateMoves,
+    generateLegalDropMovesForPiece,
+    generateLegalMoves,
     initialHands,
     isCheckmate,
     isInCheck,
@@ -56,80 +57,15 @@ function mustPromote(piece: Piece, to: Square): boolean {
     return false;
 }
 
-// ドロップ可能位置を計算
+// ドロップ可能位置を計算（王手放置チェック含む）
 function getValidDropSquares(
     board: Board,
     hands: Hands,
     pieceType: PieceType,
     player: Player,
 ): Square[] {
-    const validSquares: Square[] = [];
-    const playerHands = hands[player];
-
-    // 日本語名に変換（持ち駒のキーに使用）
-    const pieceNameMap: Record<PieceType, string> = {
-        pawn: "歩",
-        lance: "香",
-        knight: "桂",
-        silver: "銀",
-        gold: "金",
-        bishop: "角",
-        rook: "飛",
-        king: "王",
-        gyoku: "玉",
-    };
-
-    const japaneseName = pieceNameMap[pieceType];
-
-    // その駒を持っているかチェック
-    if (!japaneseName || playerHands[japaneseName] <= 0) {
-        return validSquares;
-    }
-
-    for (let row = 1; row <= 9; row++) {
-        for (let col = 1; col <= 9; col++) {
-            const square: Square = {
-                row: row as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
-                column: col as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
-            };
-            const squareKey = `${row}${col}` as keyof Board;
-
-            // 空いているマスかチェック
-            if (board[squareKey] !== null) continue;
-
-            // 行き所のない駒チェック
-            const isBlack = player === "black";
-            if (pieceType === "pawn" || pieceType === "lance") {
-                if (isBlack ? row === 1 : row === 9) continue;
-            }
-            if (pieceType === "knight") {
-                if (isBlack ? row <= 2 : row >= 8) continue;
-            }
-
-            // 二歩チェック（歩の場合）
-            if (pieceType === "pawn") {
-                let hasNifu = false;
-                for (let checkRow = 1; checkRow <= 9; checkRow++) {
-                    const checkKey = `${checkRow}${col}` as keyof Board;
-                    const piece = board[checkKey];
-                    if (
-                        piece &&
-                        piece.owner === player &&
-                        piece.type === "pawn" &&
-                        !piece.promoted
-                    ) {
-                        hasNifu = true;
-                        break;
-                    }
-                }
-                if (hasNifu) continue;
-            }
-
-            validSquares.push(square);
-        }
-    }
-
-    return validSquares;
+    // 合法手生成機能を使用
+    return generateLegalDropMovesForPiece(board, hands, pieceType, player);
 }
 
 interface PromotionPendingMove {
@@ -212,8 +148,9 @@ export const useGameStore = create<GameState>((set, get) => ({
         // 自分の駒を選択
         if (piece && piece.owner === currentPlayer) {
             try {
-                const moves = generateMoves(board, square);
-                const validMoves = moves.map((m) => m.to);
+                const { hands } = get();
+                // 王手放置チェックを含む合法手のみを生成
+                const validMoves = generateLegalMoves(board, hands, square, currentPlayer);
                 set({
                     selectedSquare: square,
                     validMoves,
@@ -222,11 +159,11 @@ export const useGameStore = create<GameState>((set, get) => ({
                     validDropSquares: [],
                 });
                 console.log(
-                    `Selected piece at ${square.row}${square.column}, valid moves:`,
+                    `Selected piece at ${square.row}${square.column}, legal moves:`,
                     validMoves,
                 );
             } catch (error) {
-                console.error("Error generating moves:", error);
+                console.error("Error generating legal moves:", error);
                 set({ selectedSquare: null, validMoves: [] });
             }
         }
