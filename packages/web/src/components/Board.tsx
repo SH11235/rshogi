@@ -63,7 +63,7 @@ export function Board({
                         e.currentTarget.style.backgroundColor = "";
                     }, 100);
                 }}
-                aria-label={`Square ${row}-${col}${piece ? ` with ${piece.type} piece` : ""}`}
+                aria-label={`Square ${col}${kanjiNumbers[row - 1]}${piece ? ` with ${piece.type} piece` : ""}`}
             >
                 {piece && <Piece piece={piece} />}
                 {/* 有効な移動先にドットを表示（レスポンシブサイズ） */}
@@ -78,8 +78,20 @@ export function Board({
         );
     };
 
+    // 漢数字変換
+    const kanjiNumbers = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
     return (
-        <div className="inline-block border-2 border-gray-900 bg-white">
+        <div className="inline-block border-2 border-gray-900 bg-white relative">
+            {/* 列の座標表示（上部） - 将棋の正しい列番号：左から右へ9-1 */}
+            <div className="flex justify-around mb-1 text-xs sm:text-sm font-medium">
+                {Array.from({ length: 9 }, (_, i) => (
+                    <div key={`col-${9 - i}`} className="w-10 sm:w-12 lg:w-16 text-center">
+                        {9 - i}
+                    </div>
+                ))}
+            </div>
+
             <div className="grid grid-cols-9 gap-0">
                 {Array.from({ length: 9 }, (_, rowIndex) =>
                     Array.from({ length: 9 }, (_, colIndex) =>
@@ -87,11 +99,17 @@ export function Board({
                     ),
                 )}
             </div>
-            {/* 座標表示（レスポンシブサイズ） */}
-            <div className="flex justify-around mt-1 text-xs sm:text-sm font-medium">
+
+            {/* 行の座標表示（右側） - 将棋の正しい段表示：上から下へ一-九 */}
+            <div
+                className="absolute -right-6 sm:-right-8 flex flex-col justify-around text-xs sm:text-sm font-medium"
+                style={{ top: "1.5rem", height: "calc(100% - 1.5rem)" }}
+            >
                 {Array.from({ length: 9 }, (_, i) => (
-                    <div key={`col-${9 - i}`} className="w-10 sm:w-12 lg:w-16 text-center">
-                        {9 - i}
+                    <div key={`row-${i + 1}`} className="h-10 sm:h-12 lg:h-16 flex items-center">
+                        <div className="bg-white border border-gray-300 px-1 py-0.5 text-center min-w-[1.5rem] sm:min-w-[2rem]">
+                            {kanjiNumbers[i]}
+                        </div>
                     </div>
                 ))}
             </div>

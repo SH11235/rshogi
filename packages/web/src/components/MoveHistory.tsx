@@ -18,6 +18,9 @@ function formatMove(move: Move, moveNumber: number): string {
     const isBlack = move.piece.owner === "black";
     const prefix = isBlack ? "☗" : "☖";
 
+    // 漢数字変換（段の表示用）
+    const kanjiNumbers = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
     if (move.type === "drop") {
         return `${prefix}${moveNumber}. ${
             move.piece.type === "pawn"
@@ -35,7 +38,7 @@ function formatMove(move: Move, moveNumber: number): string {
                           : move.piece.type === "rook"
                             ? "飛"
                             : move.piece.type
-        }打${move.to.column}${move.to.row}`;
+        }打${move.to.column}${kanjiNumbers[move.to.row]}`;
     }
 
     const pieceChar =
@@ -62,7 +65,7 @@ function formatMove(move: Move, moveNumber: number): string {
     const promotion = move.promote ? "成" : "";
     const capture = move.captured ? "x" : "";
 
-    return `${prefix}${moveNumber}. ${pieceChar}${capture}${move.to.column}${move.to.row}${promotion}`;
+    return `${prefix}${moveNumber}. ${pieceChar}${capture}${move.to.column}${kanjiNumbers[move.to.row]}${promotion}`;
 }
 
 export function MoveHistory({

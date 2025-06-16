@@ -53,7 +53,7 @@ function App() {
 
                     {/* 将棋盤とゲーム情報を並べる */}
                     <div className="flex flex-col sm:flex-row gap-4">
-                        <div className="flex-1 flex justify-center">
+                        <div className="flex-1 flex justify-center pr-6 sm:pr-8">
                             <Board
                                 board={board}
                                 selectedSquare={selectedSquare}
@@ -109,7 +109,7 @@ function App() {
                     </div>
 
                     {/* 将棋盤 */}
-                    <div className="flex-shrink-0">
+                    <div className="flex-shrink-0 pr-6 xl:pr-8">
                         <Board
                             board={board}
                             selectedSquare={selectedSquare}
