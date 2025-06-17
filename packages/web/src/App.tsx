@@ -4,7 +4,6 @@ import { CapturedPieces } from "./components/CapturedPieces";
 import { GameInfo } from "./components/GameInfo";
 import { MoveHistory } from "./components/MoveHistory";
 import { PromotionDialog } from "./components/PromotionDialog";
-import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
 
 function App() {
@@ -33,14 +32,6 @@ function App() {
         canUndo,
         canRedo,
     } = useGameStore();
-
-    // キーボードショートカットを設定
-    useKeyboardShortcuts({
-        onUndo: undo,
-        onRedo: redo,
-        canUndo: canUndo(),
-        canRedo: canRedo(),
-    });
 
     return (
         <div className="min-h-screen bg-gray-100 py-4 sm:py-8">
