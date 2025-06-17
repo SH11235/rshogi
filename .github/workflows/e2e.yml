@@ -31,7 +31,7 @@ jobs:
           cache: "npm"
 
       - name: Cache node modules
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.npm
@@ -73,7 +73,7 @@ jobs:
           CI: true
 
       - name: Upload test results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: playwright-report
@@ -81,7 +81,7 @@ jobs:
           retention-days: 7
 
       - name: Upload test videos
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: playwright-videos
