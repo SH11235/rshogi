@@ -19,11 +19,13 @@ function App() {
         moveHistory,
         historyCursor,
         promotionPending,
+        resignedPlayer,
         selectSquare,
         selectDropPiece,
         confirmPromotion,
         cancelPromotion,
         resetGame,
+        resign,
         undo,
         redo,
         goToMove,
@@ -68,7 +70,9 @@ function App() {
                                     currentPlayer={currentPlayer}
                                     gameStatus={gameStatus}
                                     moveHistory={moveHistory}
+                                    resignedPlayer={resignedPlayer}
                                     onReset={resetGame}
+                                    onResign={resign}
                                 />
                                 <MoveHistory
                                     moveHistory={moveHistory}
@@ -132,7 +136,9 @@ function App() {
                             currentPlayer={currentPlayer}
                             gameStatus={gameStatus}
                             moveHistory={moveHistory}
+                            resignedPlayer={resignedPlayer}
                             onReset={resetGame}
+                            onResign={resign}
                         />
                         <MoveHistory
                             moveHistory={moveHistory}

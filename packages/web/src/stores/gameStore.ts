@@ -86,6 +86,7 @@ interface GameState {
     historyCursor: number; // 現在表示している履歴位置
     gameStatus: GameStatus;
     promotionPending: PromotionPendingMove | null;
+    resignedPlayer: Player | null; // 投了したプレイヤー
 
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
@@ -94,6 +95,7 @@ interface GameState {
     confirmPromotion: (promote: boolean) => void;
     cancelPromotion: () => void;
     resetGame: () => void;
+    resign: () => void;
     // 履歴操作機能
     undo: () => void;
     redo: () => void;
@@ -142,6 +144,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     historyCursor: -1, // -1は最新の状態を示す
     gameStatus: "playing",
     promotionPending: null,
+    resignedPlayer: null,
 
     selectSquare: (square: Square) => {
         const {
@@ -326,7 +329,8 @@ export const useGameStore = create<GameState>((set, get) => ({
             let newStatus: GameStatus = "playing";
             if (isInCheck(result.board, nextPlayer)) {
                 if (isCheckmate(result.board, result.hands, nextPlayer)) {
-                    newStatus = "checkmate";
+                    // 詰みなので、現在のプレイヤー（手を指した方）の勝ち
+                    newStatus = currentPlayer === "black" ? "black_win" : "white_win";
                 } else {
                     newStatus = "check";
                 }
@@ -378,7 +382,8 @@ export const useGameStore = create<GameState>((set, get) => ({
             let newStatus: GameStatus = "playing";
             if (isInCheck(result.board, nextPlayer)) {
                 if (isCheckmate(result.board, result.hands, nextPlayer)) {
-                    newStatus = "checkmate";
+                    // 詰みなので、現在のプレイヤー（手を指した方）の勝ち
+                    newStatus = currentPlayer === "black" ? "black_win" : "white_win";
                 } else {
                     newStatus = "check";
                 }
@@ -425,6 +430,28 @@ export const useGameStore = create<GameState>((set, get) => ({
             historyCursor: -1,
             gameStatus: "playing",
             promotionPending: null,
+            resignedPlayer: null,
+        });
+    },
+
+    resign: () => {
+        const { currentPlayer, gameStatus } = get();
+
+        // ゲーム中でない場合は投了できない
+        if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        // 現在のプレイヤーが投了したので、相手の勝ち
+        const winStatus = currentPlayer === "black" ? "white_win" : "black_win";
+
+        set({
+            gameStatus: winStatus,
+            resignedPlayer: currentPlayer,
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
         });
     },
 

@@ -17,13 +17,23 @@ interface GameInfoProps {
     currentPlayer: Player;
     gameStatus: GameStatus;
     moveHistory: Move[];
+    resignedPlayer: Player | null;
     onReset: () => void;
+    onResign?: () => void;
 }
 
-export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: GameInfoProps) {
+export function GameInfo({
+    currentPlayer,
+    gameStatus,
+    moveHistory,
+    resignedPlayer,
+    onReset,
+    onResign,
+}: GameInfoProps) {
     const moveCount = moveHistory.length;
     const turn = Math.floor(moveCount / 2) + 1;
     const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
+    const [isResignDialogOpen, setIsResignDialogOpen] = useState(false);
 
     const getStatusMessage = () => {
         switch (gameStatus) {
@@ -47,6 +57,38 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
                 return "投了";
             default:
                 return currentPlayer === "black" ? "先手番" : "後手番";
+        }
+    };
+
+    // 勝敗理由の詳細メッセージを取得
+    const getDetailedMessage = () => {
+        switch (gameStatus) {
+            case "black_win":
+                if (resignedPlayer === "white") {
+                    return "後手が投了しました";
+                }
+                if (moveCount > 0) {
+                    return "詰みにより勝利";
+                }
+                return "";
+            case "white_win":
+                if (resignedPlayer === "black") {
+                    return "先手が投了しました";
+                }
+                if (moveCount > 0) {
+                    return "詰みにより勝利";
+                }
+                return "";
+            case "sennichite":
+                return "同一局面が4回現れました";
+            case "perpetual_check":
+                return "同一手順による連続王手";
+            case "timeout":
+                return "持ち時間が切れました";
+            case "resigned":
+                return "投了しました";
+            default:
+                return "";
         }
     };
 
@@ -86,6 +128,13 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
         setIsResetDialogOpen(false);
     };
 
+    const handleConfirmResign = () => {
+        if (onResign) {
+            onResign();
+        }
+        setIsResignDialogOpen(false);
+    };
+
     return (
         <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md max-w-xs sm:max-w-md mx-auto">
             {/* ゲーム状態表示 */}
@@ -98,6 +147,11 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
                 >
                     {getStatusMessage()}
                 </h2>
+
+                {/* 詳細メッセージ */}
+                {getDetailedMessage() && (
+                    <p className="text-xs sm:text-sm text-gray-600 mb-2">{getDetailedMessage()}</p>
+                )}
 
                 {/* 手数表示 */}
                 <div className="flex justify-center gap-2 sm:gap-4 text-xs sm:text-sm text-gray-600 mb-2 sm:mb-3">
@@ -114,14 +168,58 @@ export function GameInfo({ currentPlayer, gameStatus, moveHistory, onReset }: Ga
                 )}
 
                 {isGameOver && (
-                    <div className="text-gray-500 text-xs sm:text-sm bg-gray-50 px-2 sm:px-3 py-1 rounded-full">
-                        ゲーム終了
+                    <div className="mt-2 space-y-1">
+                        <div className="text-gray-500 text-xs sm:text-sm bg-gray-50 px-2 sm:px-3 py-1 rounded-full">
+                            🏁 ゲーム終了
+                        </div>
+                        {(gameStatus === "black_win" || gameStatus === "white_win") && (
+                            <div className="text-xs sm:text-sm text-gray-600">
+                                第{turn}手までで決着
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
 
             {/* 操作ボタン */}
             <div className="flex gap-2 justify-center">
+                {/* 投了ボタン - ゲーム中のみ表示 */}
+                {onResign && !isGameOver && moveCount > 0 && (
+                    <AlertDialog open={isResignDialogOpen} onOpenChange={setIsResignDialogOpen}>
+                        <AlertDialogTrigger asChild>
+                            <button
+                                type="button"
+                                className={cn(
+                                    "px-4 sm:px-6 py-2 rounded-lg font-medium transition-colors text-sm sm:text-base",
+                                    "touch-manipulation active:scale-95",
+                                    "bg-red-500 text-white hover:bg-red-600 focus:ring-red-500",
+                                    "focus:outline-none focus:ring-2 focus:ring-offset-2",
+                                )}
+                            >
+                                投了
+                            </button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>投了しますか？</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                    投了すると相手の勝ちとなり、対局が終了します。この操作は取り消せません。
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                                <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                                <AlertDialogAction
+                                    onClick={handleConfirmResign}
+                                    className="bg-red-500 hover:bg-red-600"
+                                >
+                                    投了する
+                                </AlertDialogAction>
+                            </AlertDialogFooter>
+                        </AlertDialogContent>
+                    </AlertDialog>
+                )}
+
+                {/* リセット/新しいゲームボタン */}
                 <AlertDialog open={isResetDialogOpen} onOpenChange={setIsResetDialogOpen}>
                     <AlertDialogTrigger asChild>
                         <button
