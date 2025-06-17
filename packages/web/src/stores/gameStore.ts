@@ -96,6 +96,7 @@ interface GameState {
     cancelPromotion: () => void;
     resetGame: () => void;
     resign: () => void;
+    importGame: (moves: Move[]) => void;
     // 履歴操作機能
     undo: () => void;
     redo: () => void;
@@ -465,6 +466,38 @@ export const useGameStore = create<GameState>((set, get) => ({
             validMoves: [],
             validDropSquares: [],
         });
+    },
+
+    importGame: (moves: Move[]) => {
+        // ゲームをリセットしてから棋譜を読み込む
+        set({
+            board: modernInitialBoard,
+            hands: structuredClone(initialHands()),
+            currentPlayer: "black",
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            moveHistory: moves,
+            historyCursor: moves.length - 1, // 最終手の状態に設定
+            gameStatus: "playing",
+            promotionPending: null,
+            resignedPlayer: null,
+        });
+
+        // 最終局面まで再構築
+        if (moves.length > 0) {
+            const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
+                moves,
+                moves.length - 1,
+            );
+            set({
+                board,
+                hands,
+                currentPlayer,
+                gameStatus,
+            });
+        }
     },
 
     // 履歴操作機能

@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { exportToKif, parseKifMoves, validateKifFormat } from "@/utils/kif";
+import { useRef, useState } from "react";
 import type { GameStatus, Move, Player } from "shogi-core";
 import {
     AlertDialog,
@@ -20,6 +21,7 @@ interface GameInfoProps {
     resignedPlayer: Player | null;
     onReset: () => void;
     onResign?: () => void;
+    onImportGame?: (moves: Move[]) => void;
 }
 
 export function GameInfo({
@@ -29,11 +31,13 @@ export function GameInfo({
     resignedPlayer,
     onReset,
     onResign,
+    onImportGame,
 }: GameInfoProps) {
     const moveCount = moveHistory.length;
     const turn = Math.floor(moveCount / 2) + 1;
     const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
     const [isResignDialogOpen, setIsResignDialogOpen] = useState(false);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     const getStatusMessage = () => {
         switch (gameStatus) {
@@ -135,6 +139,73 @@ export function GameInfo({
         setIsResignDialogOpen(false);
     };
 
+    // 棋譜エクスポート
+    const handleExportKif = () => {
+        if (moveHistory.length === 0) {
+            alert("エクスポートする棋譜がありません");
+            return;
+        }
+
+        const kifContent = exportToKif(moveHistory, {
+            开始日时: new Date().toLocaleString("ja-JP"),
+            先手: "先手",
+            后手: "後手",
+            棋战: "自由対局",
+            手合割: "平手",
+        });
+
+        const blob = new Blob([kifContent], { type: "text/plain;charset=utf-8" });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `shogi_game_${new Date().toISOString().split("T")[0]}.kif`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+    };
+
+    // 棋譜インポート
+    const handleImportKif = () => {
+        fileInputRef.current?.click();
+    };
+
+    const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const content = e.target?.result as string;
+
+            // KIF形式のバリデーション
+            const validation = validateKifFormat(content);
+            if (!validation.valid) {
+                alert(`KIFファイルの形式が無効です: ${validation.error}`);
+                return;
+            }
+
+            try {
+                const moves = parseKifMoves(content);
+                if (moves.length === 0) {
+                    alert("棋譜から手順を読み取れませんでした");
+                    return;
+                }
+
+                if (onImportGame) {
+                    onImportGame(moves);
+                }
+            } catch (error) {
+                console.error("KIF parsing error:", error);
+                alert("棋譜の解析中にエラーが発生しました");
+            }
+        };
+
+        reader.readAsText(file, "utf-8");
+        // ファイル選択をリセット
+        event.target.value = "";
+    };
+
     return (
         <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md max-w-xs sm:max-w-md mx-auto">
             {/* ゲーム状態表示 */}
@@ -180,6 +251,47 @@ export function GameInfo({
                     </div>
                 )}
             </div>
+
+            {/* 棋譜エクスポート/インポートボタン */}
+            {moveHistory.length > 0 && (
+                <div className="mb-3 flex gap-2 justify-center">
+                    <button
+                        type="button"
+                        onClick={handleExportKif}
+                        className={cn(
+                            "px-3 sm:px-4 py-1.5 rounded-md font-medium transition-colors text-xs sm:text-sm",
+                            "touch-manipulation active:scale-95",
+                            "bg-gray-100 text-gray-700 hover:bg-gray-200",
+                            "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500",
+                        )}
+                    >
+                        📥 棋譜保存
+                    </button>
+                    {onImportGame && (
+                        <>
+                            <button
+                                type="button"
+                                onClick={handleImportKif}
+                                className={cn(
+                                    "px-3 sm:px-4 py-1.5 rounded-md font-medium transition-colors text-xs sm:text-sm",
+                                    "touch-manipulation active:scale-95",
+                                    "bg-gray-100 text-gray-700 hover:bg-gray-200",
+                                    "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500",
+                                )}
+                            >
+                                📤 棋譜読込
+                            </button>
+                            <input
+                                type="file"
+                                ref={fileInputRef}
+                                onChange={handleFileSelect}
+                                accept=".kif"
+                                style={{ display: "none" }}
+                            />
+                        </>
+                    )}
+                </div>
+            )}
 
             {/* 操作ボタン */}
             <div className="flex gap-2 justify-center">

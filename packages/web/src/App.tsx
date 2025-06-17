@@ -26,6 +26,7 @@ function App() {
         cancelPromotion,
         resetGame,
         resign,
+        importGame,
         undo,
         redo,
         goToMove,
@@ -73,6 +74,7 @@ function App() {
                                     resignedPlayer={resignedPlayer}
                                     onReset={resetGame}
                                     onResign={resign}
+                                    onImportGame={importGame}
                                 />
                                 <MoveHistory
                                     moveHistory={moveHistory}
@@ -139,6 +141,7 @@ function App() {
                             resignedPlayer={resignedPlayer}
                             onReset={resetGame}
                             onResign={resign}
+                            onImportGame={importGame}
                         />
                         <MoveHistory
                             moveHistory={moveHistory}
