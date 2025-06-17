@@ -9,7 +9,7 @@ export default defineConfig({
         alias: { "@": path.resolve(__dirname, "src") },
     },
     test: {
-        environment: "happy-dom", // DOM 必要な場合／Node だけなら 'node'
+        environment: "jsdom", // DOM environment using jsdom for better stability
         include: ["src/**/*.test.{ts,tsx}", "src/__tests__/**/*.test.{ts,tsx}"],
         exclude: ["src/__tests__/utils/**"],
         globals: true, // expect, vi を毎回 import しなくて済む

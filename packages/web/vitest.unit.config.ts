@@ -9,7 +9,7 @@ export default defineConfig({
         alias: { "@": path.resolve(__dirname, "src") },
     },
     test: {
-        environment: "happy-dom",
+        environment: "jsdom",
         include: ["src/**/*.test.{ts,tsx}"],
         exclude: ["src/__tests__/**"],
         globals: true,

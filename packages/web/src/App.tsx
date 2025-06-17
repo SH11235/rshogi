@@ -71,6 +71,7 @@ function App() {
                                     currentPlayer={currentPlayer}
                                     gameStatus={gameStatus}
                                     moveHistory={moveHistory}
+                                    historyCursor={historyCursor}
                                     resignedPlayer={resignedPlayer}
                                     onReset={resetGame}
                                     onResign={resign}
@@ -138,6 +139,7 @@ function App() {
                             currentPlayer={currentPlayer}
                             gameStatus={gameStatus}
                             moveHistory={moveHistory}
+                            historyCursor={historyCursor}
                             resignedPlayer={resignedPlayer}
                             onReset={resetGame}
                             onResign={resign}

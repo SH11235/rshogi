@@ -15,6 +15,8 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={[]}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
@@ -42,6 +44,8 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="black"
                 gameStatus="checkmate"
                 moveHistory={moveHistory}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
@@ -69,6 +73,8 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="white"
                 gameStatus="playing"
                 moveHistory={moveHistory}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
@@ -105,6 +111,8 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="white"
                 gameStatus="playing"
                 moveHistory={moveHistory}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
@@ -135,6 +143,8 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="white"
                 gameStatus="playing"
                 moveHistory={moveHistory}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
@@ -154,6 +164,8 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={[]}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
@@ -165,6 +177,8 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="black"
                 gameStatus="checkmate"
                 moveHistory={[]}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
@@ -194,11 +208,13 @@ describe("GameInfo Reset Functionality", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={moveHistory}
+                historyCursor={-1}
+                resignedPlayer={null}
                 onReset={mockReset}
             />,
         );
 
-        expect(screen.getByText("第2手")).toBeInTheDocument();
+        expect(screen.getByText("第3手")).toBeInTheDocument();
         expect(screen.getByText("総手数: 2")).toBeInTheDocument();
     });
 });

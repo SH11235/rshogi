@@ -19,6 +19,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -37,6 +38,7 @@ describe("GameInfo component", () => {
                 currentPlayer="white"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -53,6 +55,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="black_win"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -69,6 +72,7 @@ describe("GameInfo component", () => {
                 currentPlayer="white"
                 gameStatus="white_win"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -85,6 +89,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="draw"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -101,6 +106,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="check"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -117,6 +123,7 @@ describe("GameInfo component", () => {
                 currentPlayer="white"
                 gameStatus="checkmate"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -133,6 +140,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -151,6 +159,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -167,6 +176,7 @@ describe("GameInfo component", () => {
                 currentPlayer="white"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -183,6 +193,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="check"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -199,6 +210,7 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
+                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
@@ -338,7 +350,7 @@ describe("GameInfo component", () => {
 
             expect(screen.getByText("先手の勝ち！")).toBeInTheDocument();
             expect(screen.getByText("詰みにより勝利")).toBeInTheDocument();
-            expect(screen.getByText("第1手までで決着")).toBeInTheDocument();
+            expect(screen.getByText("第2手までで決着")).toBeInTheDocument();
         });
 
         it("displays resignation victory details for black win", () => {
@@ -366,7 +378,7 @@ describe("GameInfo component", () => {
 
             expect(screen.getByText("先手の勝ち！")).toBeInTheDocument();
             expect(screen.getByText("後手が投了しました")).toBeInTheDocument();
-            expect(screen.getByText("第1手までで決着")).toBeInTheDocument();
+            expect(screen.getByText("第2手までで決着")).toBeInTheDocument();
         });
 
         it("displays checkmate victory details for white win", () => {
@@ -402,7 +414,7 @@ describe("GameInfo component", () => {
 
             expect(screen.getByText("後手の勝ち！")).toBeInTheDocument();
             expect(screen.getByText("詰みにより勝利")).toBeInTheDocument();
-            expect(screen.getByText("第2手までで決着")).toBeInTheDocument();
+            expect(screen.getByText("第3手までで決着")).toBeInTheDocument();
         });
 
         it("displays resignation victory details for white win", () => {
@@ -438,7 +450,7 @@ describe("GameInfo component", () => {
 
             expect(screen.getByText("後手の勝ち！")).toBeInTheDocument();
             expect(screen.getByText("先手が投了しました")).toBeInTheDocument();
-            expect(screen.getByText("第2手までで決着")).toBeInTheDocument();
+            expect(screen.getByText("第3手までで決着")).toBeInTheDocument();
         });
 
         it("displays other game end statuses correctly", () => {

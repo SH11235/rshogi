@@ -18,6 +18,7 @@ interface GameInfoProps {
     currentPlayer: Player;
     gameStatus: GameStatus;
     moveHistory: Move[];
+    historyCursor: number;
     resignedPlayer: Player | null;
     onReset: () => void;
     onResign?: () => void;
@@ -28,13 +29,18 @@ export function GameInfo({
     currentPlayer,
     gameStatus,
     moveHistory,
+    historyCursor,
     resignedPlayer,
     onReset,
     onResign,
     onImportGame,
 }: GameInfoProps) {
     const moveCount = moveHistory.length;
-    const turn = Math.floor(moveCount / 2) + 1;
+    // Calculate turn based on current position in history
+    // When historyCursor is -1 (latest position), show next move number
+    // When historyCursor >= 0, show the position after that move
+    const turn =
+        historyCursor === -1 || historyCursor === undefined ? moveCount + 1 : historyCursor + 2;
     const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
     const [isResignDialogOpen, setIsResignDialogOpen] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
