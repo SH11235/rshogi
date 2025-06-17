@@ -14,6 +14,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:mcp": "npx @playwright/mcp",
+    "test:mcp:vision": "npx @playwright/mcp --vision",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build"
   },
@@ -35,6 +39,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@playwright/mcp": "^0.0.29",
+    "@playwright/test": "^1.53.0",
     "@storybook/addon-docs": "^9.0.10",
     "@storybook/addon-onboarding": "^9.0.10",
     "@storybook/react-vite": "^9.0.10",

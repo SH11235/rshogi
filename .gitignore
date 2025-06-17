@@ -31,3 +31,8 @@ tsconfig.tsbuildinfo
 
 *storybook.log
 storybook-static
+
+# Playwright
+playwright-report/
+playwright/.cache/
+test-results/
