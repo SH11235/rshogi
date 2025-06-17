@@ -10,9 +10,12 @@ export default defineConfig({
     },
     test: {
         environment: "happy-dom", // DOM 必要な場合／Node だけなら 'node'
-        include: ["src/**/*.test.{ts,tsx}"],
+        include: ["src/**/*.test.{ts,tsx}", "src/__tests__/**/*.{ts,tsx}"],
         globals: true, // expect, vi を毎回 import しなくて済む
         coverage: { provider: "v8" },
         setupFiles: ["./src/test/setup.ts"],
+        typecheck: {
+            tsconfig: "./tsconfig.test.json",
+        },
     },
 });

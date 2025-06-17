@@ -2,6 +2,7 @@ import { type RenderOptions, type Screen, render } from "@testing-library/react"
 import type { UserEvent } from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import { type Board as BoardType, createPiece, modernInitialBoard } from "shogi-core";
+import { expect } from "vitest";
 
 // Custom render function for integration tests
 export function renderWithGameContext(ui: ReactElement, options?: RenderOptions) {
@@ -120,8 +121,9 @@ export async function waitForGameState(
     }
 
     if (expectedState.status) {
+        const status = expectedState.status;
         await waitFor(() => {
-            expect(screen.getByText(expectedState.status)).toBeInTheDocument();
+            expect(screen.getByText(status)).toBeInTheDocument();
         });
     }
 }
@@ -227,12 +229,16 @@ export function mockTouchDevice() {
         value: 5,
     });
 
-    // Add touch event support
-    window.TouchEvent = class extends Event {
-        constructor(type: string, options: TouchEventInit = {}) {
-            super(type, options);
-        }
-    };
+    // Add touch event support for testing
+    Object.defineProperty(window, "TouchEvent", {
+        writable: true,
+        configurable: true,
+        value: class extends Event {
+            constructor(type: string, options: TouchEventInit = {}) {
+                super(type, options);
+            }
+        },
+    });
 }
 
 export { modernInitialBoard };
