@@ -6,9 +6,9 @@ vi.mock("@/utils/kif", () => ({
     exportToKif: vi.fn((moves: Move[]) => `mock KIF content with ${moves.length} moves`),
     parseKifMoves: vi.fn(() => [
         {
-            type: "drop",
-            to: { row: 5, column: 5 },
-            piece: { type: "pawn", owner: "black", promoted: false },
+            type: "drop" as const,
+            to: { row: 5 as const, column: 5 as const },
+            piece: { type: "pawn" as const, owner: "black" as const, promoted: false },
         },
     ]),
     validateKifFormat: vi.fn(() => ({ valid: true })),
@@ -95,10 +95,10 @@ describe("KIF Export/Import Utilities Integration", () => {
             vi.mocked(exportToKif).mockReturnValue("mocked KIF content");
 
             const gameInfo = {
-                开始日时: "2024-01-01 12:00:00",
+                開始日時: "2024-01-01 12:00:00",
                 先手: "Player1",
-                后手: "Player2",
-                棋战: "Test Game",
+                後手: "Player2",
+                棋戦: "Test Game",
                 手合割: "平手",
             };
 
@@ -137,11 +137,11 @@ describe("KIF Export/Import Utilities Integration", () => {
             const { parseKifMoves } = await import("@/utils/kif");
 
             const kifContent = "mock KIF content";
-            const expectedMoves = [
+            const expectedMoves: Move[] = [
                 {
-                    type: "drop",
-                    to: { row: 5, column: 5 },
-                    piece: { type: "pawn", owner: "black", promoted: false },
+                    type: "drop" as const,
+                    to: { row: 5 as const, column: 5 as const },
+                    piece: { type: "pawn" as const, owner: "black" as const, promoted: false },
                 },
             ];
 

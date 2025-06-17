@@ -117,8 +117,8 @@ describe("KIF format utilities", () => {
         it("should include game info in header", () => {
             const gameInfo = {
                 先手: "テストプレイヤー1",
-                后手: "テストプレイヤー2",
-                棋战: "テスト対局",
+                後手: "テストプレイヤー2",
+                棋戦: "テスト対局",
             };
 
             const result = exportToKif([], gameInfo);
@@ -197,7 +197,7 @@ describe("KIF format utilities", () => {
             expect(moves[2].piece.owner).toBe("black"); // 奇数手は先手
         });
 
-        it("should ignore non-drop moves (implementation limitation)", () => {
+        it("should parse both regular moves and drop moves", () => {
             const kifContent = `# KIF形式棋譜ファイル
 手数----指手---------消費時間--
   1 ７六歩
@@ -206,10 +206,12 @@ describe("KIF format utilities", () => {
 
             const moves = parseKifMoves(kifContent);
 
-            // 打でない手は無視される（現在の実装制限）
-            expect(moves).toHaveLength(1);
-            expect(moves[0].type).toBe("drop");
-            expect(moves[0].to).toEqual({ row: 5, column: 5 });
+            // 通常の移動と駒打ちの両方を処理
+            expect(moves).toHaveLength(2);
+            expect(moves[0].type).toBe("move");
+            expect(moves[0].to).toEqual({ row: 6, column: 7 });
+            expect(moves[1].type).toBe("drop");
+            expect(moves[1].to).toEqual({ row: 5, column: 5 });
         });
 
         it("should handle different piece types", () => {
@@ -307,13 +309,16 @@ describe("KIF format utilities", () => {
 
             const moves = parseKifMoves(realKifContent);
 
-            // 現在の実装では駒打ちのみサポートなので、打った手のみ解析される
-            // 10手目: ２三歩打, 17手目: ８七歩打, 24手目: ８二歩打, 47手目: ３四歩打, 55手目: ３二歩打, 58手目: ３七歩打, 61手目: ５二金打
-            expect(moves.length).toBe(7); // 7つの駒打ちがある
+            // 実装が改善され、通常の移動と駒打ちの両方を解析できるようになった
+            expect(moves.length).toBeGreaterThan(7); // 駒打ちだけでなく通常の移動も含む
 
             // 駒打ちの手をチェック
             const dropMoves = moves.filter((move) => move.type === "drop");
-            expect(dropMoves.length).toBe(7);
+            expect(dropMoves.length).toBe(7); // 7つの駒打ちがある
+
+            // 通常の移動もチェック
+            const normalMoves = moves.filter((move) => move.type === "move");
+            expect(normalMoves.length).toBeGreaterThan(0); // 通常の移動も解析されている
 
             // 10手目: ２三歩打 (後手)
             expect(dropMoves[0].type).toBe("drop");

@@ -153,10 +153,10 @@ export function GameInfo({
         }
 
         const kifContent = exportToKif(moveHistory, {
-            开始日时: new Date().toLocaleString("ja-JP"),
+            開始日時: new Date().toLocaleString("ja-JP"),
             先手: "先手",
-            后手: "後手",
-            棋战: "自由対局",
+            後手: "後手",
+            棋戦: "自由対局",
             手合割: "平手",
         });
 
