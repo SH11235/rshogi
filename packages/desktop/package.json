@@ -9,6 +9,7 @@
     "lint": "echo 'Desktop package: No source files to lint'",
     "lint:fix": "echo 'Desktop package: No source files to lint'",
     "test": "echo 'Desktop package: No tests yet'",
+    "test:unit": "echo 'Desktop package: No tests yet'",
     "test:watch": "echo 'Desktop package: No tests yet'"
   },
   "dependencies": {

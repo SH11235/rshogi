@@ -9,10 +9,10 @@ export default defineConfig({
         alias: { "@": path.resolve(__dirname, "src") },
     },
     test: {
-        environment: "happy-dom", // DOM 必要な場合／Node だけなら 'node'
-        include: ["src/**/*.test.{ts,tsx}", "src/__tests__/**/*.test.{ts,tsx}"],
-        exclude: ["src/__tests__/utils/**"],
-        globals: true, // expect, vi を毎回 import しなくて済む
+        environment: "happy-dom",
+        include: ["src/**/*.test.{ts,tsx}"],
+        exclude: ["src/__tests__/**"],
+        globals: true,
         coverage: { provider: "v8" },
         setupFiles: ["./src/test/setup.ts"],
         typecheck: {

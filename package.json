@@ -10,6 +10,7 @@
     "build": "turbo build",
     "dev": "turbo dev",
     "test": "turbo test",
+    "test:unit": "turbo test:unit",
     "test:affected": "turbo test --filter='[HEAD~1]'",
     "lint": "turbo lint",
     "lint:fix": "turbo lint:fix",

@@ -13,6 +13,10 @@
             "dependsOn": ["^build"],
             "inputs": ["src/**/*.{ts,tsx,js,jsx}", "**/*.test.{ts,tsx,js,jsx}"]
         },
+        "test:unit": {
+            "dependsOn": ["^build"],
+            "inputs": ["src/**/*.{ts,tsx,js,jsx}", "src/**/*.test.{ts,tsx,js,jsx}"]
+        },
         "lint": {
             "inputs": ["src/**/*.{ts,tsx,js,jsx}", "*.{ts,tsx,js,jsx}", "biome.json", ".eslintrc*"],
             "outputs": []

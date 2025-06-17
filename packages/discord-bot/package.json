@@ -10,6 +10,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "echo 'Discord Bot package: No tests yet'",
+    "test:unit": "echo 'Discord Bot package: No tests yet'",
     "test:watch": "vitest"
   },
   "dependencies": {

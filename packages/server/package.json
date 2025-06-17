@@ -10,6 +10,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "echo 'Server package: No tests yet'",
+    "test:unit": "echo 'Server package: No tests yet'",
     "test:watch": "vitest"
   },
   "dependencies": {
