@@ -88,6 +88,7 @@ export function MoveHistory({
                         size="sm"
                         variant="outline"
                         className="flex-1 text-xs sm:text-sm touch-manipulation"
+                        title="戻る (Ctrl+Z)"
                     >
                         ← 戻る
                     </Button>
@@ -97,6 +98,7 @@ export function MoveHistory({
                         size="sm"
                         variant="outline"
                         className="flex-1 text-xs sm:text-sm touch-manipulation"
+                        title="進む (Ctrl+Y)"
                     >
                         進む →
                     </Button>
@@ -146,6 +148,14 @@ export function MoveHistory({
                             まだ手が指されていません
                         </p>
                     )}
+                </div>
+
+                {/* キーボードショートカットのヒント */}
+                <div className="mt-2 pt-2 border-t border-gray-200">
+                    <p className="text-xs text-gray-500 text-center">
+                        💡 <span className="font-mono">Ctrl+Z</span> 戻る /{" "}
+                        <span className="font-mono">Ctrl+Y</span> 進む
+                    </p>
                 </div>
             </CardContent>
         </Card>
