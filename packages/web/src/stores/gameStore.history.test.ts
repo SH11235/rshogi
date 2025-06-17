@@ -1,3 +1,4 @@
+import { HISTORY_CURSOR } from "@/constants/history";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useGameStore } from "./gameStore";
 
@@ -21,7 +22,7 @@ describe("gameStore history navigation", () => {
             useGameStore.getState().undo();
 
             // undoで開始局面（historyCursor: -2）に戻る
-            expect(useGameStore.getState().historyCursor).toBe(-2);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.INITIAL_POSITION);
             expect(useGameStore.getState().currentPlayer).toBe("black");
             expect(useGameStore.getState().canRedo()).toBe(true); // 初期位置からredoできる
 
@@ -70,7 +71,7 @@ describe("gameStore history navigation", () => {
             // undoを実行しても何も変わらない
             useGameStore.getState().undo();
 
-            expect(useGameStore.getState().historyCursor).toBe(-1);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.LATEST_POSITION);
             expect(useGameStore.getState().moveHistory.length).toBe(0);
         });
 
@@ -111,9 +112,9 @@ describe("gameStore history navigation", () => {
             expect(useGameStore.getState().currentPlayer).toBe("white");
 
             // 開始局面に移動
-            useGameStore.getState().goToMove(-1);
+            useGameStore.getState().goToMove(HISTORY_CURSOR.LATEST_POSITION);
 
-            expect(useGameStore.getState().historyCursor).toBe(-1);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.LATEST_POSITION);
             expect(useGameStore.getState().currentPlayer).toBe("black");
 
             // 最終手に移動
@@ -137,7 +138,7 @@ describe("gameStore history navigation", () => {
 
             // 無効なインデックス
             useGameStore.getState().goToMove(10); // 存在しない手
-            useGameStore.getState().goToMove(-5); // 無効な負の値
+            useGameStore.getState().goToMove(-5); // 無効な負の値（INITIAL_POSITIONより小さい）
 
             // 状態が変わらない
             expect(useGameStore.getState().historyCursor).toBe(beforeMove.historyCursor);
@@ -214,7 +215,7 @@ describe("gameStore history navigation", () => {
 
             // 履歴が正しく切り詰められる
             expect(useGameStore.getState().moveHistory.length).toBe(3);
-            expect(useGameStore.getState().historyCursor).toBe(-1); // 最新状態
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.LATEST_POSITION); // 最新状態
 
             // 最後の手が新しい手になっている
             const lastMove = useGameStore.getState().moveHistory[2];
@@ -236,7 +237,7 @@ describe("gameStore history navigation", () => {
             useGameStore.getState().selectSquare({ row: 6, column: 2 }); // 先手2手目
 
             expect(useGameStore.getState().moveHistory.length).toBe(3);
-            expect(useGameStore.getState().historyCursor).toBe(-1);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.LATEST_POSITION);
 
             // 1手目にジャンプ
             useGameStore.getState().goToMove(0);
@@ -244,7 +245,7 @@ describe("gameStore history navigation", () => {
 
             // undo: 0 → -2 (初期位置)
             useGameStore.getState().undo();
-            expect(useGameStore.getState().historyCursor).toBe(-2);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.INITIAL_POSITION);
             expect(useGameStore.getState().canRedo()).toBe(true);
 
             // redo: -2 → 0 (1手目)
@@ -266,11 +267,11 @@ describe("gameStore history navigation", () => {
             useGameStore.getState().selectSquare({ row: 4, column: 3 }); // 後手1手目
 
             expect(useGameStore.getState().moveHistory.length).toBe(2);
-            expect(useGameStore.getState().historyCursor).toBe(-1);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.LATEST_POSITION);
 
             // 初期位置にジャンプ（開始局面ボタン）
-            useGameStore.getState().goToMove(-2);
-            expect(useGameStore.getState().historyCursor).toBe(-2);
+            useGameStore.getState().goToMove(HISTORY_CURSOR.INITIAL_POSITION);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.INITIAL_POSITION);
             expect(useGameStore.getState().canUndo()).toBe(false);
             expect(useGameStore.getState().canRedo()).toBe(true);
 
@@ -280,7 +281,7 @@ describe("gameStore history navigation", () => {
 
             // undo: 0 → -2 (初期位置)
             useGameStore.getState().undo();
-            expect(useGameStore.getState().historyCursor).toBe(-2);
+            expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.INITIAL_POSITION);
         });
     });
 });

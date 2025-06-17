@@ -1,3 +1,4 @@
+import { HISTORY_CURSOR } from "@/constants/history";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +20,7 @@ vi.mock("./stores/gameStore", () => ({
         validDropSquares: [],
         gameStatus: "playing",
         moveHistory: [],
-        historyCursor: -1,
+        historyCursor: HISTORY_CURSOR.LATEST_POSITION,
         promotionPending: null,
         resignedPlayer: null,
         selectSquare: mockSelectSquare,

@@ -1,3 +1,4 @@
+import { HISTORY_CURSOR } from "@/constants/history";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useGameStore } from "./gameStore";
 
@@ -73,7 +74,7 @@ describe("gameStore move history", () => {
 
         // 未来の履歴（元の3手目）が削除され、新しい手が追加される
         expect(useGameStore.getState().moveHistory.length).toBe(3);
-        expect(useGameStore.getState().historyCursor).toBe(-1); // 最新状態
+        expect(useGameStore.getState().historyCursor).toBe(HISTORY_CURSOR.LATEST_POSITION); // 最新状態
 
         // 最後の手が新しい手になっている
         const lastMove = useGameStore.getState().moveHistory[2];

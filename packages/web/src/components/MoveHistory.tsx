@@ -1,3 +1,4 @@
+import { HISTORY_CURSOR } from "@/constants/history";
 import { cn } from "@/lib/utils";
 import type { Move } from "shogi-core";
 import { Button } from "./ui/button";
@@ -109,10 +110,10 @@ export function MoveHistory({
                     {/* 初期状態 */}
                     <button
                         type="button"
-                        onClick={() => onGoToMove(-2)}
+                        onClick={() => onGoToMove(HISTORY_CURSOR.INITIAL_POSITION)}
                         className={cn(
                             "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation",
-                            historyCursor === -2
+                            historyCursor === HISTORY_CURSOR.INITIAL_POSITION
                                 ? "bg-blue-100 text-blue-900 font-medium"
                                 : "hover:bg-gray-100",
                         )}
@@ -125,7 +126,8 @@ export function MoveHistory({
                         const moveNumber = index + 1;
                         const isCurrentMove =
                             historyCursor === index ||
-                            (historyCursor === -1 && index === moveHistory.length - 1);
+                            (historyCursor === HISTORY_CURSOR.LATEST_POSITION &&
+                                index === moveHistory.length - 1);
                         const moveKey = `${index}-${move.type}-${move.to.row}${move.to.column}`;
 
                         return (
