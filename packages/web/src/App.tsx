@@ -62,7 +62,7 @@ function App() {
                                 onSquareClick={selectSquare}
                             />
                         </div>
-                        <div className="flex-shrink-0 sm:w-80">
+                        <div className="flex-shrink-0 w-80 sm:w-96 mx-auto sm:mx-0">
                             <div className="space-y-4">
                                 <GameInfo
                                     currentPlayer={currentPlayer}

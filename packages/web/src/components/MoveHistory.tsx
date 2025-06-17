@@ -78,7 +78,7 @@ export function MoveHistory({
     onGoToMove,
 }: MoveHistoryProps) {
     return (
-        <Card className="w-full max-w-xs sm:max-w-md">
+        <Card className="w-80 sm:w-96">
             <CardHeader className="pb-2 sm:pb-3">
                 <CardTitle className="text-base sm:text-lg font-bold">棋譜</CardTitle>
                 <div className="flex gap-1 sm:gap-2">
