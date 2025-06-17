@@ -292,7 +292,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     makeDrop: (pieceType: PieceType, to: Square) => {
-        const { board, hands, currentPlayer, moveHistory } = get();
+        const { board, hands, currentPlayer, moveHistory, historyCursor } = get();
 
         try {
             const pieceNameMap: Record<PieceType, string> = {
@@ -336,13 +336,19 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
+            // 履歴の途中から新しい手を指す場合、未来の履歴を削除
+            const newMoveHistory =
+                historyCursor === -1
+                    ? [...moveHistory, move]
+                    : [...moveHistory.slice(0, historyCursor + 1), move];
+
             set({
                 board: result.board,
                 hands: result.hands,
                 currentPlayer: nextPlayer,
                 selectedDropPiece: null,
                 validDropSquares: [],
-                moveHistory: [...moveHistory, move],
+                moveHistory: newMoveHistory,
                 historyCursor: -1, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
             });
@@ -356,7 +362,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     makeMove: (from: Square, to: Square, promote = false) => {
-        const { board, hands, currentPlayer, moveHistory } = get();
+        const { board, hands, currentPlayer, moveHistory, historyCursor } = get();
 
         try {
             const fromKey = `${from.row}${from.column}` as keyof Board;
@@ -389,13 +395,19 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
+            // 履歴の途中から新しい手を指す場合、未来の履歴を削除
+            const newMoveHistory =
+                historyCursor === -1
+                    ? [...moveHistory, move]
+                    : [...moveHistory.slice(0, historyCursor + 1), move];
+
             set({
                 board: result.board,
                 hands: result.hands,
                 currentPlayer: nextPlayer,
                 selectedSquare: null,
                 validMoves: [],
-                moveHistory: [...moveHistory, move],
+                moveHistory: newMoveHistory,
                 historyCursor: -1, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
             });
@@ -531,7 +543,11 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     canUndo: () => {
         const { moveHistory, historyCursor } = get();
-        return moveHistory.length > 0 && (historyCursor > -1 || moveHistory.length > 0);
+        if (moveHistory.length === 0) return false;
+
+        // 最新状態(-1)なら最後の手まで戻れる、そうでなければさらに1つ戻れるかチェック
+        const newCursor = historyCursor === -1 ? moveHistory.length - 2 : historyCursor - 1;
+        return newCursor >= -1;
     },
 
     canRedo: () => {

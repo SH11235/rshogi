@@ -122,7 +122,7 @@ export function MoveHistory({
 
                     {/* 手順リスト */}
                     {moveHistory.map((move, index) => {
-                        const moveNumber = Math.floor(index / 2) + 1;
+                        const moveNumber = index + 1;
                         const isCurrentMove = historyCursor === index;
                         const moveKey = `${index}-${move.type}-${move.to.row}${move.to.column}`;
 
