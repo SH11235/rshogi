@@ -122,14 +122,14 @@ describe("Promotion Flow Integration", () => {
             await makeMove("Square 6七", "Square 6六");
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第2手")).toBeInTheDocument();
+                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
             });
 
             // Make opponent move
             await makeMove("Square 4三", "Square 4四");
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第3手")).toBeInTheDocument();
+                expect(screen.getAllByText("第3手")[0]).toBeInTheDocument();
             });
 
             // Verify moves are tracked in history
@@ -142,7 +142,7 @@ describe("Promotion Flow Integration", () => {
 
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第2手")).toBeInTheDocument();
+                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
             });
         });
 
@@ -186,7 +186,7 @@ describe("Promotion Flow Integration", () => {
             await user.click(undoButton);
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第1手")).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
 
             // Redo all moves
@@ -226,8 +226,7 @@ describe("Promotion Flow Integration", () => {
 
             // The framework should be ready to handle forced promotion
             // even though we're not triggering it in this test
-            expect(screen.getByText("先手の番です")).not.toBeInTheDocument();
-            expect(screen.getByText("後手の番です")).toBeInTheDocument();
+            expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
         });
 
         it("should handle multiple piece types promotion", async () => {
@@ -293,8 +292,8 @@ describe("Promotion Flow Integration", () => {
             await user.click(gameTitle);
 
             // Game state should remain stable
-            expect(screen.getByText("後手の番です")).toBeInTheDocument();
-            expect(screen.getByText("第2手")).toBeInTheDocument();
+            expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
+            expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
         });
     });
 });

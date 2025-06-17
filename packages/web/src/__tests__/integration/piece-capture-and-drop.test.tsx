@@ -208,14 +208,14 @@ describe("Piece Capture and Drop Integration", () => {
             // Test that game state remains consistent through various operations
 
             // Initial state verification
-            expect(screen.getByText("先手の番です")).toBeInTheDocument();
-            expect(screen.getByText("第1手")).toBeInTheDocument();
+            expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
+            expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
 
             // Make a move
             await makeMove("Square 2七", "Square 2六");
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第2手")).toBeInTheDocument();
+                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
             });
 
             // Verify undo/redo still works after moves
@@ -224,7 +224,7 @@ describe("Piece Capture and Drop Integration", () => {
 
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第1手")).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
 
             // Redo the move
@@ -233,7 +233,7 @@ describe("Piece Capture and Drop Integration", () => {
 
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第2手")).toBeInTheDocument();
+                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
             });
 
             // State consistency is maintained

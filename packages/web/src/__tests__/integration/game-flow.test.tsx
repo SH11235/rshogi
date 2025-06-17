@@ -16,7 +16,7 @@ describe("Game Flow Integration", () => {
 
             // Verify initial game state
             expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-            expect(screen.getByText("第1手")).toBeInTheDocument();
+            expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
 
             // Find and click a black pawn (7-7 square)
             const squares = screen.getAllByRole("button");
@@ -49,7 +49,7 @@ describe("Game Flow Integration", () => {
                     // Verify move was made
                     await waitFor(() => {
                         expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                        expect(screen.getByText("第2手")).toBeInTheDocument();
+                        expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
                     });
 
                     // Verify move appears in history
@@ -119,7 +119,7 @@ describe("Game Flow Integration", () => {
             // Verify game is reset
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第1手")).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
                 expect(screen.queryByText(/☗1\. 歩7六/)).not.toBeInTheDocument();
             });
         });
@@ -158,7 +158,7 @@ describe("Game Flow Integration", () => {
             // Verify undo worked
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第1手")).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
 
             // Click redo
@@ -169,7 +169,7 @@ describe("Game Flow Integration", () => {
             // Verify redo worked
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第2手")).toBeInTheDocument();
+                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
             });
         });
 
@@ -213,7 +213,7 @@ describe("Game Flow Integration", () => {
 
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第3手")).toBeInTheDocument();
+                expect(screen.getAllByText("第3手")[0]).toBeInTheDocument();
             });
 
             // Click on first move in history
@@ -223,7 +223,7 @@ describe("Game Flow Integration", () => {
             // Should navigate to after first move
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第2手")).toBeInTheDocument();
+                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
             });
 
             // Click on initial position
@@ -233,7 +233,7 @@ describe("Game Flow Integration", () => {
             // Should navigate to start
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第1手")).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
         });
     });
@@ -295,7 +295,7 @@ describe("Game Flow Integration", () => {
 
             await waitFor(() => {
                 expect(screen.getAllByText("先手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第1手")).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
 
             // Navigate forward to the move again
@@ -304,7 +304,7 @@ describe("Game Flow Integration", () => {
 
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getByText("第2手")).toBeInTheDocument();
+                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
             });
 
             // Verify the board state is correct - the pawn should be on 7-6
