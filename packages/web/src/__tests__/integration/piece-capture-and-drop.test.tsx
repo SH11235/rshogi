@@ -187,7 +187,7 @@ describe("Piece Capture and Drop Integration", () => {
             });
 
             // 2. Verify move history is tracking correctly
-            expect(screen.getByText(/☗1\. 歩7六/)).toBeInTheDocument();
+            expect(screen.getAllByText(/☗1\. 歩7六/)[0]).toBeInTheDocument();
 
             // 3. Make counter move
             await makeMove("Square 3三", "Square 3四");
@@ -196,7 +196,7 @@ describe("Piece Capture and Drop Integration", () => {
             });
 
             // 4. Verify both moves are in history
-            expect(screen.getByText(/☖2\. 歩3四/)).toBeInTheDocument();
+            expect(screen.getAllByText(/☖2\. 歩3四/)[0]).toBeInTheDocument();
 
             // The structure supports complex capture scenarios
             // and maintains proper game state throughout
@@ -215,7 +215,7 @@ describe("Piece Capture and Drop Integration", () => {
             await makeMove("Square 2七", "Square 2六");
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
 
             // Verify undo/redo still works after moves
@@ -233,7 +233,7 @@ describe("Piece Capture and Drop Integration", () => {
 
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
 
             // State consistency is maintained

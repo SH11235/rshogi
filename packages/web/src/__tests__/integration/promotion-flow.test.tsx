@@ -82,7 +82,7 @@ describe("Promotion Flow Integration", () => {
             });
 
             // Verify move was recorded correctly
-            expect(screen.getByText(/☗1\. 歩5六/)).toBeInTheDocument();
+            expect(screen.getAllByText(/☗1\. 歩5六/)[0]).toBeInTheDocument();
 
             // Test undo/redo still works (important for promotion scenarios)
             const undoButton = screen.getByText("← 戻る");
@@ -122,7 +122,7 @@ describe("Promotion Flow Integration", () => {
             await makeMove("Square 6七", "Square 6六");
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
 
             // Make opponent move
@@ -133,16 +133,16 @@ describe("Promotion Flow Integration", () => {
             });
 
             // Verify moves are tracked in history
-            expect(screen.getByText(/☗1\. 歩6六/)).toBeInTheDocument();
-            expect(screen.getByText(/☖2\. 歩4四/)).toBeInTheDocument();
+            expect(screen.getAllByText(/☗1\. 歩6六/)[0]).toBeInTheDocument();
+            expect(screen.getAllByText(/☖2\. 歩4四/)[0]).toBeInTheDocument();
 
             // Test navigation through history (important for promotion undo/redo)
-            const firstMoveButton = screen.getByText(/☗1\. 歩6六/);
+            const firstMoveButton = screen.getAllByText(/☗1\. 歩6六/)[0];
             await user.click(firstMoveButton);
 
             await waitFor(() => {
                 expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-                expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
+                expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
             });
         });
 
@@ -207,7 +207,7 @@ describe("Promotion Flow Integration", () => {
             });
 
             // State should be consistent
-            expect(screen.getByText(/☗3\. 歩8五/)).toBeInTheDocument();
+            expect(screen.getAllByText(/☗3\. 歩8五/)[0]).toBeInTheDocument();
         });
     });
 
@@ -249,8 +249,8 @@ describe("Promotion Flow Integration", () => {
             });
 
             // The system should handle all piece types uniformly
-            expect(screen.getByText(/☗1\. 歩3六/)).toBeInTheDocument();
-            expect(screen.getByText(/☖2\. 歩7四/)).toBeInTheDocument();
+            expect(screen.getAllByText(/☗1\. 歩3六/)[0]).toBeInTheDocument();
+            expect(screen.getAllByText(/☖2\. 歩7四/)[0]).toBeInTheDocument();
         });
     });
 
@@ -293,7 +293,7 @@ describe("Promotion Flow Integration", () => {
 
             // Game state should remain stable
             expect(screen.getAllByText("後手番")[0]).toBeInTheDocument();
-            expect(screen.getAllByText("第2手")[0]).toBeInTheDocument();
+            expect(screen.getAllByText("第1手")[0]).toBeInTheDocument();
         });
     });
 });

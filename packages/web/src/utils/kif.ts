@@ -111,20 +111,37 @@ export function parseKifMoves(kifContent: string): Move[] {
             break;
         }
 
+        // 投了の判定
+        if (trimmedLine.includes("投了")) {
+            break;
+        }
+
         if (!inMoveSection || !trimmedLine) {
             continue;
         }
 
-        // 手の解析（簡単な形式のみ）
+        // 手の解析（実際のKIF形式に対応）
+        // 形式例: "  10 ２三歩打     ( 0:01/00:00:05)" or "   1 ２六歩(27)   ( 0:03/00:00:03)"
         const moveMatch = trimmedLine.match(
-            /^\s*(\d+)\s+(\d)([一二三四五六七八九])([歩香桂銀金角飛王玉])([打取成]?)/,
+            /^\s*(\d+)\s+([１２３４５６７８９])([一二三四五六七八九])([歩香桂銀金角飛王玉])([打取成]?).*$/,
         );
 
         if (moveMatch) {
             const [, moveNumStr, colStr, rowKanji, pieceKanji, action] = moveMatch;
 
-            // 列の変換
-            const column = Number.parseInt(colStr, 10);
+            // 列の変換（全角数字から半角数字へ）
+            const kanjiToHalfWidth: Record<string, number> = {
+                "１": 1,
+                "２": 2,
+                "３": 3,
+                "４": 4,
+                "５": 5,
+                "６": 6,
+                "７": 7,
+                "８": 8,
+                "９": 9,
+            };
+            const column = kanjiToHalfWidth[colStr];
 
             // 行の変換（漢数字）
             const kanjiToNumber: Record<string, number> = {
