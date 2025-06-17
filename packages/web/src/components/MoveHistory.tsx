@@ -109,10 +109,10 @@ export function MoveHistory({
                     {/* 初期状態 */}
                     <button
                         type="button"
-                        onClick={() => onGoToMove(-1)}
+                        onClick={() => onGoToMove(-2)}
                         className={cn(
                             "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation",
-                            historyCursor === -1
+                            historyCursor === -2
                                 ? "bg-blue-100 text-blue-900 font-medium"
                                 : "hover:bg-gray-100",
                         )}
@@ -123,7 +123,9 @@ export function MoveHistory({
                     {/* 手順リスト */}
                     {moveHistory.map((move, index) => {
                         const moveNumber = index + 1;
-                        const isCurrentMove = historyCursor === index;
+                        const isCurrentMove =
+                            historyCursor === index ||
+                            (historyCursor === -1 && index === moveHistory.length - 1);
                         const moveKey = `${index}-${move.type}-${move.to.row}${move.to.column}`;
 
                         return (

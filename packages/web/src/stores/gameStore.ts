@@ -111,13 +111,18 @@ function reconstructGameState(moveHistory: Move[], targetMoveIndex: number) {
     let hands = structuredClone(initialHands());
     let currentPlayer: Player = "black";
 
-    for (let i = 0; i <= targetMoveIndex; i++) {
-        if (i >= moveHistory.length) break;
+    // -2 は初期位置を表す（何も手を適用しない）
+    if (targetMoveIndex === -2) {
+        // 初期状態をそのまま返す
+    } else {
+        for (let i = 0; i <= targetMoveIndex; i++) {
+            if (i >= moveHistory.length) break;
 
-        const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
-        board = result.board;
-        hands = result.hands;
-        currentPlayer = currentPlayer === "black" ? "white" : "black";
+            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
+            board = result.board;
+            hands = result.hands;
+            currentPlayer = result.nextTurn;
+        }
     }
 
     // ゲーム状態判定
@@ -506,11 +511,13 @@ export const useGameStore = create<GameState>((set, get) => ({
         if (moveHistory.length === 0) return;
 
         const newCursor = historyCursor === -1 ? moveHistory.length - 2 : historyCursor - 1;
-        if (newCursor < -1) return;
+        // 初期位置に戻る場合は -2 を使用（-1以下の場合）
+        const finalCursor = newCursor <= -1 ? -2 : newCursor;
+        if (finalCursor < -2) return;
 
         const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
             moveHistory,
-            newCursor,
+            finalCursor,
         );
 
         set({
@@ -518,7 +525,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             hands,
             currentPlayer,
             gameStatus,
-            historyCursor: newCursor,
+            historyCursor: finalCursor,
             selectedSquare: null,
             selectedDropPiece: null,
             validMoves: [],
@@ -529,9 +536,13 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     redo: () => {
         const { moveHistory, historyCursor } = get();
-        if (historyCursor === -1 || historyCursor >= moveHistory.length - 1) return;
+        // 最新位置（-1）からはredoできない
+        if (historyCursor === -1) return;
+        // 最後の手からはredoできない
+        if (historyCursor >= moveHistory.length - 1) return;
 
-        const newCursor = historyCursor + 1;
+        // 初期位置（-2）からは最初の手（0）に進む
+        const newCursor = historyCursor === -2 ? 0 : historyCursor + 1;
         const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
             moveHistory,
             newCursor,
@@ -553,7 +564,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     goToMove: (moveIndex: number) => {
         const { moveHistory } = get();
-        if (moveIndex < -1 || moveIndex >= moveHistory.length) return;
+        if (moveIndex < -2 || moveIndex >= moveHistory.length) return;
 
         const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
             moveHistory,
@@ -578,13 +589,21 @@ export const useGameStore = create<GameState>((set, get) => ({
         const { moveHistory, historyCursor } = get();
         if (moveHistory.length === 0) return false;
 
+        // 初期位置（-2）からはundoできない
+        if (historyCursor === -2) return false;
+
         // 最新状態(-1)なら最後の手まで戻れる、そうでなければさらに1つ戻れるかチェック
         const newCursor = historyCursor === -1 ? moveHistory.length - 2 : historyCursor - 1;
-        return newCursor >= -1;
+        return newCursor >= -2;
     },
 
     canRedo: () => {
         const { moveHistory, historyCursor } = get();
-        return historyCursor !== -1 && historyCursor < moveHistory.length - 1;
+        // 初期位置（-2）からは、手が存在する場合にredoできる
+        if (historyCursor === -2) return moveHistory.length > 0;
+        // 最新位置（-1）からはredoできない
+        if (historyCursor === -1) return false;
+        // その他の位置からは、最後の手でなければredoできる
+        return historyCursor < moveHistory.length - 1;
     },
 }));

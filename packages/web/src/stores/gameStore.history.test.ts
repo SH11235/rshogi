@@ -20,11 +20,10 @@ describe("gameStore history navigation", () => {
             // 戻る
             useGameStore.getState().undo();
 
-            // undoで開始局面（historyCursor: -1）に戻ると、canRedoがtrueになるかは実装依存
-            // historyCursor=-1からはredoできないという実装の場合もある
-            expect(useGameStore.getState().historyCursor).toBe(-1);
+            // undoで開始局面（historyCursor: -2）に戻る
+            expect(useGameStore.getState().historyCursor).toBe(-2);
             expect(useGameStore.getState().currentPlayer).toBe("black");
-            // canRedoのテストは実装の動作を確認してから調整
+            expect(useGameStore.getState().canRedo()).toBe(true); // 初期位置からredoできる
 
             // 手動で1手目の状態に移動してテスト
             useGameStore.getState().goToMove(0);
@@ -219,8 +218,69 @@ describe("gameStore history navigation", () => {
 
             // 最後の手が新しい手になっている
             const lastMove = useGameStore.getState().moveHistory[2];
-            expect(lastMove.from).toEqual({ row: 7, column: 6 });
-            expect(lastMove.to).toEqual({ row: 6, column: 6 });
+            if (lastMove.type === "move") {
+                expect(lastMove.from).toEqual({ row: 7, column: 6 });
+                expect(lastMove.to).toEqual({ row: 6, column: 6 });
+            }
+        });
+    });
+
+    describe("goToMove interaction with undo/redo", () => {
+        it("should work correctly after using goToMove to jump to a specific move", () => {
+            // 3手指す
+            useGameStore.getState().selectSquare({ row: 7, column: 7 });
+            useGameStore.getState().selectSquare({ row: 6, column: 7 }); // 先手1手目
+            useGameStore.getState().selectSquare({ row: 3, column: 3 });
+            useGameStore.getState().selectSquare({ row: 4, column: 3 }); // 後手1手目
+            useGameStore.getState().selectSquare({ row: 7, column: 2 });
+            useGameStore.getState().selectSquare({ row: 6, column: 2 }); // 先手2手目
+
+            expect(useGameStore.getState().moveHistory.length).toBe(3);
+            expect(useGameStore.getState().historyCursor).toBe(-1);
+
+            // 1手目にジャンプ
+            useGameStore.getState().goToMove(0);
+            expect(useGameStore.getState().historyCursor).toBe(0);
+
+            // undo: 0 → -2 (初期位置)
+            useGameStore.getState().undo();
+            expect(useGameStore.getState().historyCursor).toBe(-2);
+            expect(useGameStore.getState().canRedo()).toBe(true);
+
+            // redo: -2 → 0 (1手目)
+            useGameStore.getState().redo();
+            expect(useGameStore.getState().historyCursor).toBe(0);
+            expect(useGameStore.getState().canRedo()).toBe(true);
+
+            // redo: 0 → 1 (2手目)
+            useGameStore.getState().redo();
+            expect(useGameStore.getState().historyCursor).toBe(1);
+            expect(useGameStore.getState().canRedo()).toBe(true);
+        });
+
+        it("should work correctly when clicking initial position button", () => {
+            // 2手指す
+            useGameStore.getState().selectSquare({ row: 7, column: 7 });
+            useGameStore.getState().selectSquare({ row: 6, column: 7 }); // 先手1手目
+            useGameStore.getState().selectSquare({ row: 3, column: 3 });
+            useGameStore.getState().selectSquare({ row: 4, column: 3 }); // 後手1手目
+
+            expect(useGameStore.getState().moveHistory.length).toBe(2);
+            expect(useGameStore.getState().historyCursor).toBe(-1);
+
+            // 初期位置にジャンプ（開始局面ボタン）
+            useGameStore.getState().goToMove(-2);
+            expect(useGameStore.getState().historyCursor).toBe(-2);
+            expect(useGameStore.getState().canUndo()).toBe(false);
+            expect(useGameStore.getState().canRedo()).toBe(true);
+
+            // redo: -2 → 0 (1手目)
+            useGameStore.getState().redo();
+            expect(useGameStore.getState().historyCursor).toBe(0);
+
+            // undo: 0 → -2 (初期位置)
+            useGameStore.getState().undo();
+            expect(useGameStore.getState().historyCursor).toBe(-2);
         });
     });
 });
