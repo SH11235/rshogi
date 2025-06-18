@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "shogi-core": "file:../core",
-    "shogi-types": "file:../types",
     "discord.js": "^14.17.0"
   },
   "devDependencies": {

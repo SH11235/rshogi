@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "shogi-core": "file:../core",
-    "shogi-types": "file:../types",
     "express": "^5.0.1",
     "ws": "^8.18.0",
     "cors": "^2.8.5",

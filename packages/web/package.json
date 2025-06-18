@@ -25,18 +25,13 @@
     "knip": "knip"
   },
   "dependencies": {
-    "@duckdb/duckdb-wasm": "^1.29.1-dev132.0",
     "@radix-ui/react-alert-dialog": "^1.1.14",
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "immer": "^10.1.1",
-    "lucide-react": "^0.503.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "recharts": "^2.15.3",
     "shogi-core": "file:../core",
-    "shogi-types": "file:../types",
     "tailwind-merge": "^3.3.1",
     "zustand": "^5.0.4"
   },
@@ -56,15 +51,12 @@
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react-swc": "^3.8.0",
     "@vitest/coverage-v8": "^3.1.3",
-    "esbuild": "^0.25.4",
     "jsdom": "^26.1.0",
     "knip": "^5.61.1",
     "storybook": "^9.0.10",
     "tailwindcss": "^4.1.5",
-    "tw-animate-css": "^1.3.4",
     "typescript": "~5.7.2",
     "vite": "^6.3.1",
-    "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^3.1.3"
   }
 }
