@@ -1,20 +1,23 @@
-import type { Move } from "shogi-core";
+import { modernInitialBoard } from "../initialBoard";
+import type { Board } from "../model/board";
+import { getPiece } from "../model/board";
+import type { Move } from "../model/move";
+import type { PieceType, Player } from "../model/piece";
+import type { Square } from "../model/square";
 import {
-    type Board,
-    type Player,
-    type Square,
-    applyMove,
-    createEmptyHands,
-    generateMoves,
-    getPiece,
-    modernInitialBoard,
-} from "shogi-core";
+    fullWidthToHalfWidth,
+    kanjiToNumber,
+    kanjiToPieceType,
+    numberToKanji,
+    pieceTypeToKanji,
+} from "../utils/notation";
+import { applyMove, generateMoves, initialHands } from "./moveService";
 
 /**
  * KIF形式の棋譜エクスポート/インポート機能
  */
 
-interface KifGameInfo {
+export interface KifGameInfo {
     開始日時?: string;
     終了日時?: string;
     先手?: string;
@@ -23,29 +26,9 @@ interface KifGameInfo {
     手合割?: string;
 }
 
-// 駒の種類を日本語に変換
-function pieceTypeToKanji(pieceType: string): string {
-    const pieceMap: Record<string, string> = {
-        pawn: "歩",
-        lance: "香",
-        knight: "桂",
-        silver: "銀",
-        gold: "金",
-        bishop: "角",
-        rook: "飛",
-        king: "王",
-        gyoku: "玉",
-    };
-    return pieceMap[pieceType] || pieceType;
-}
-
-// 数字を漢数字に変換
-function numberToKanji(num: number): string {
-    const kanjiNumbers = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
-    return kanjiNumbers[num] || num.toString();
-}
-
-// KIF形式での手の表現
+/**
+ * KIF形式での手の表現
+ */
 function formatMoveForKif(move: Move, moveIndex: number): string {
     const moveNumber = moveIndex + 1;
 
@@ -102,7 +85,7 @@ export function exportToKif(moveHistory: Move[], gameInfo: Partial<KifGameInfo> 
 function findPossibleSources(
     board: Board,
     to: Square,
-    pieceType: string,
+    pieceType: PieceType,
     player: Player,
     captured: boolean,
 ): Square[] {
@@ -148,7 +131,7 @@ function findPossibleSources(
 function inferSourceFromKifMove(
     board: Board,
     to: Square,
-    pieceType: string,
+    pieceType: PieceType,
     player: Player,
     kifMoveText: string,
     captured: boolean,
@@ -169,31 +152,8 @@ function inferSourceFromKifMove(
     if (sourceMatch) {
         const [, colStr, rowKanji] = sourceMatch;
 
-        const kanjiToHalfWidth: Record<string, number> = {
-            "１": 1,
-            "２": 2,
-            "３": 3,
-            "４": 4,
-            "５": 5,
-            "６": 6,
-            "７": 7,
-            "８": 8,
-            "９": 9,
-        };
-        const kanjiToNumber: Record<string, number> = {
-            一: 1,
-            二: 2,
-            三: 3,
-            四: 4,
-            五: 5,
-            六: 6,
-            七: 7,
-            八: 8,
-            九: 9,
-        };
-
-        const sourceColumn = kanjiToHalfWidth[colStr];
-        const sourceRow = kanjiToNumber[rowKanji];
+        const sourceColumn = fullWidthToHalfWidth(colStr);
+        const sourceRow = kanjiToNumber(rowKanji);
 
         if (sourceColumn && sourceRow) {
             const source: Square = {
@@ -230,7 +190,7 @@ export function parseKifMoves(kifContent: string): Move[] {
 
     // 現在の盤面状態を管理（移動元推定のため）
     let currentBoard = modernInitialBoard;
-    let currentHands = createEmptyHands();
+    let currentHands = initialHands();
     let currentPlayer: Player = "black";
 
     // 手数行を探す
@@ -269,46 +229,13 @@ export function parseKifMoves(kifContent: string): Move[] {
             const [, moveNumStr, colStr, rowKanji, pieceKanji, action] = moveMatch;
 
             // 列の変換（全角数字から半角数字へ）
-            const kanjiToHalfWidth: Record<string, number> = {
-                "１": 1,
-                "２": 2,
-                "３": 3,
-                "４": 4,
-                "５": 5,
-                "６": 6,
-                "７": 7,
-                "８": 8,
-                "９": 9,
-            };
-            const column = kanjiToHalfWidth[colStr];
+            const column = fullWidthToHalfWidth(colStr);
 
             // 行の変換（漢数字）
-            const kanjiToNumber: Record<string, number> = {
-                一: 1,
-                二: 2,
-                三: 3,
-                四: 4,
-                五: 5,
-                六: 6,
-                七: 7,
-                八: 8,
-                九: 9,
-            };
-            const row = kanjiToNumber[rowKanji];
+            const row = kanjiToNumber(rowKanji);
 
             // 駒の種類変換
-            const kanjiToPieceType: Record<string, string> = {
-                歩: "pawn",
-                香: "lance",
-                桂: "knight",
-                銀: "silver",
-                金: "gold",
-                角: "bishop",
-                飛: "rook",
-                王: "king",
-                玉: "gyoku",
-            };
-            const pieceType = kanjiToPieceType[pieceKanji];
+            const pieceType = kanjiToPieceType(pieceKanji);
 
             if (column && row && pieceType && column >= 1 && column <= 9 && row >= 1 && row <= 9) {
                 const moveIndex = Number.parseInt(moveNumStr, 10) - 1;
@@ -326,16 +253,7 @@ export function parseKifMoves(kifContent: string): Move[] {
                         type: "drop",
                         to,
                         piece: {
-                            type: pieceType as
-                                | "pawn"
-                                | "lance"
-                                | "knight"
-                                | "silver"
-                                | "gold"
-                                | "bishop"
-                                | "rook"
-                                | "king"
-                                | "gyoku",
+                            type: pieceType,
                             owner: currentPlayer,
                             promoted: false,
                         },

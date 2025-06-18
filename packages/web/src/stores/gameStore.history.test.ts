@@ -1,4 +1,4 @@
-import { HISTORY_CURSOR } from "@/constants/history";
+import { HISTORY_CURSOR } from "shogi-core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useGameStore } from "./gameStore";
 

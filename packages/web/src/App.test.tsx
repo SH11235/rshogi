@@ -1,6 +1,6 @@
-import { HISTORY_CURSOR } from "@/constants/history";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { HISTORY_CURSOR } from "shogi-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 

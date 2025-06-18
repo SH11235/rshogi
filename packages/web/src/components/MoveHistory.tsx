@@ -1,5 +1,5 @@
-import { HISTORY_CURSOR } from "@/constants/history";
 import { cn } from "@/lib/utils";
+import { HISTORY_CURSOR, formatMove } from "shogi-core";
 import type { Move } from "shogi-core";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
@@ -12,61 +12,6 @@ interface MoveHistoryProps {
     onUndo: () => void;
     onRedo: () => void;
     onGoToMove: (moveIndex: number) => void;
-}
-
-// 手を日本語記法に変換する関数
-function formatMove(move: Move, moveNumber: number): string {
-    const isBlack = move.piece.owner === "black";
-    const prefix = isBlack ? "☗" : "☖";
-
-    // 漢数字変換（段の表示用）
-    const kanjiNumbers = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
-
-    if (move.type === "drop") {
-        return `${prefix}${moveNumber}. ${
-            move.piece.type === "pawn"
-                ? "歩"
-                : move.piece.type === "lance"
-                  ? "香"
-                  : move.piece.type === "knight"
-                    ? "桂"
-                    : move.piece.type === "silver"
-                      ? "銀"
-                      : move.piece.type === "gold"
-                        ? "金"
-                        : move.piece.type === "bishop"
-                          ? "角"
-                          : move.piece.type === "rook"
-                            ? "飛"
-                            : move.piece.type
-        }打${move.to.column}${kanjiNumbers[move.to.row]}`;
-    }
-
-    const pieceChar =
-        move.piece.type === "pawn"
-            ? "歩"
-            : move.piece.type === "lance"
-              ? "香"
-              : move.piece.type === "knight"
-                ? "桂"
-                : move.piece.type === "silver"
-                  ? "銀"
-                  : move.piece.type === "gold"
-                    ? "金"
-                    : move.piece.type === "bishop"
-                      ? "角"
-                      : move.piece.type === "rook"
-                        ? "飛"
-                        : move.piece.type === "king"
-                          ? "王"
-                          : move.piece.type === "gyoku"
-                            ? "玉"
-                            : move.piece.type;
-
-    const promotion = move.promote ? "成" : "";
-    const capture = move.captured ? "x" : "";
-
-    return `${prefix}${moveNumber}. ${pieceChar}${capture}${move.to.column}${kanjiNumbers[move.to.row]}${promotion}`;
 }
 
 export function MoveHistory({

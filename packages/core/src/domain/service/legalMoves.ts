@@ -1,5 +1,5 @@
 import { type Board, getPiece } from "../model/board";
-import type { Piece, Player } from "../model/piece";
+import type { Piece, PieceType, Player } from "../model/piece";
 import { canPromote } from "../model/piece";
 import type { Square } from "../model/square";
 import { isInCheck } from "./checkmate";
@@ -125,7 +125,7 @@ export const generateLegalDropMoves = (board: Board, hands: Hands, player: Playe
 export const generateLegalDropMovesForPiece = (
     board: Board,
     hands: Hands,
-    pieceType: string,
+    pieceType: PieceType,
     player: Player,
 ): Square[] => {
     const allDrops = generateAllDropMoves(board, hands, player);

@@ -2,17 +2,21 @@ import type { Move } from "shogi-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the KIF utilities
-vi.mock("@/utils/kif", () => ({
-    exportToKif: vi.fn((moves: Move[]) => `mock KIF content with ${moves.length} moves`),
-    parseKifMoves: vi.fn(() => [
-        {
-            type: "drop" as const,
-            to: { row: 5 as const, column: 5 as const },
-            piece: { type: "pawn" as const, owner: "black" as const, promoted: false },
-        },
-    ]),
-    validateKifFormat: vi.fn(() => ({ valid: true })),
-}));
+vi.mock("shogi-core", async () => {
+    const actual = await vi.importActual<typeof import("shogi-core")>("shogi-core");
+    return {
+        ...actual,
+        exportToKif: vi.fn((moves: Move[]) => `mock KIF content with ${moves.length} moves`),
+        parseKifMoves: vi.fn(() => [
+            {
+                type: "drop" as const,
+                to: { row: 5 as const, column: 5 as const },
+                piece: { type: "pawn" as const, owner: "black" as const, promoted: false },
+            },
+        ]),
+        validateKifFormat: vi.fn(() => ({ valid: true })),
+    };
+});
 
 // Mock window.URL and Blob
 const mockCreateObjectURL = vi.fn(() => "mock-url");
@@ -90,7 +94,7 @@ describe("KIF Export/Import Utilities Integration", () => {
 
     describe("Export utility integration", () => {
         it("should call exportToKif with correct parameters", async () => {
-            const { exportToKif } = await import("@/utils/kif");
+            const { exportToKif } = await import("shogi-core");
 
             vi.mocked(exportToKif).mockReturnValue("mocked KIF content");
 
@@ -119,7 +123,7 @@ describe("KIF Export/Import Utilities Integration", () => {
 
     describe("Import utility integration", () => {
         it("should validate KIF format correctly", async () => {
-            const { validateKifFormat } = await import("@/utils/kif");
+            const { validateKifFormat } = await import("shogi-core");
 
             const validContent = `# KIF形式棋譜ファイル
 手数----指手---------消費時間--
@@ -134,7 +138,7 @@ describe("KIF Export/Import Utilities Integration", () => {
         });
 
         it("should parse KIF moves correctly", async () => {
-            const { parseKifMoves } = await import("@/utils/kif");
+            const { parseKifMoves } = await import("shogi-core");
 
             const kifContent = "mock KIF content";
             const expectedMoves: Move[] = [
@@ -154,7 +158,7 @@ describe("KIF Export/Import Utilities Integration", () => {
         });
 
         it("should handle invalid KIF format", async () => {
-            const { validateKifFormat } = await import("@/utils/kif");
+            const { validateKifFormat } = await import("shogi-core");
 
             vi.mocked(validateKifFormat).mockReturnValue({
                 valid: false,

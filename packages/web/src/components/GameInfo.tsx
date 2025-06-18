@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
-import { exportToKif, parseKifMoves, validateKifFormat } from "@/utils/kif";
 import { useRef, useState } from "react";
+import { exportToKif, parseKifMoves, validateKifFormat } from "shogi-core";
 import type { GameStatus, Move, Player } from "shogi-core";
 import {
     AlertDialog,

@@ -1,7 +1,7 @@
-import { HISTORY_CURSOR } from "@/constants/history";
 import {
     type Board,
     type GameStatus,
+    HISTORY_CURSOR,
     type Hands,
     type Move,
     type Piece,
@@ -9,54 +9,17 @@ import {
     type Player,
     type Square,
     applyMove,
+    canPromoteByPosition,
     generateLegalDropMovesForPiece,
     generateLegalMoves,
     initialHands,
     isCheckmate,
     isInCheck,
     modernInitialBoard,
+    mustPromote,
+    reconstructGameState,
 } from "shogi-core";
 import { create } from "zustand";
-
-// 成り可能判定のヘルパー関数
-function canPromote(piece: Piece, from: Square, to: Square): boolean {
-    // 既に成っている駒は成れない
-    if (piece.promoted) return false;
-
-    // 王は成れない
-    if (piece.type === "king" || piece.type === "gyoku") return false;
-
-    // 金は成れない
-    if (piece.type === "gold") return false;
-
-    // 成り可能な条件：敵陣に入る、敵陣から移動する、敵陣内で移動する
-    const isBlack = piece.owner === "black";
-    const enemyZone = isBlack ? [1, 2, 3] : [7, 8, 9];
-
-    const fromInEnemyZone = enemyZone.includes(from.row);
-    const toInEnemyZone = enemyZone.includes(to.row);
-
-    return fromInEnemyZone || toInEnemyZone;
-}
-
-// 成りを強制される場合の判定
-function mustPromote(piece: Piece, to: Square): boolean {
-    if (piece.promoted) return false;
-
-    const isBlack = piece.owner === "black";
-
-    // 歩、香：最奥段で行き場がなくなる
-    if (piece.type === "pawn" || piece.type === "lance") {
-        return isBlack ? to.row === 1 : to.row === 9;
-    }
-
-    // 桂：最奥2段で行き場がなくなる
-    if (piece.type === "knight") {
-        return isBlack ? to.row <= 2 : to.row >= 8;
-    }
-
-    return false;
-}
 
 // ドロップ可能位置を計算（王手放置チェック含む）
 function getValidDropSquares(
@@ -104,39 +67,6 @@ interface GameState {
     goToMove: (moveIndex: number) => void;
     canUndo: () => boolean;
     canRedo: () => boolean;
-}
-
-// 初期状態から指定した手数まで再構築する関数
-function reconstructGameState(moveHistory: Move[], targetMoveIndex: number) {
-    let board = structuredClone(modernInitialBoard);
-    let hands = structuredClone(initialHands());
-    let currentPlayer: Player = "black";
-
-    // 初期位置の場合は何も手を適用しない
-    if (targetMoveIndex === HISTORY_CURSOR.INITIAL_POSITION) {
-        // 初期状態をそのまま返す
-    } else {
-        for (let i = 0; i <= targetMoveIndex; i++) {
-            if (i >= moveHistory.length) break;
-
-            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
-            board = result.board;
-            hands = result.hands;
-            currentPlayer = result.nextTurn;
-        }
-    }
-
-    // ゲーム状態判定
-    let gameStatus: GameStatus = "playing";
-    if (isInCheck(board, currentPlayer)) {
-        if (isCheckmate(board, hands, currentPlayer)) {
-            gameStatus = "checkmate";
-        } else {
-            gameStatus = "check";
-        }
-    }
-
-    return { board, hands, currentPlayer, gameStatus };
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -230,7 +160,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                         get().makeMove(selectedSquare, square, true);
                     }
                     // 成り可能な場合はダイアログを表示
-                    else if (canPromote(movingPiece, selectedSquare, square)) {
+                    else if (canPromoteByPosition(movingPiece, selectedSquare, square)) {
                         console.log("Showing promotion dialog");
                         set({
                             promotionPending: {

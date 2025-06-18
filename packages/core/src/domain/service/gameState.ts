@@ -1,8 +1,11 @@
 import { modernInitialBoard } from "../initialBoard";
 import type { Board } from "../model/board";
+import { HISTORY_CURSOR } from "../model/history";
 import type { Move } from "../model/move";
 import type { Piece, Player } from "../model/piece";
 import type { Square } from "../model/square";
+import { isCheckmate, isInCheck } from "./checkmate";
+import { applyMove, initialHands } from "./moveService";
 
 // 持ち駒の型定義（moveService から独立）
 export type Hands = {
@@ -240,3 +243,42 @@ export const findRepetition = (gameState: GameState): number => {
 
     return count;
 };
+
+/**
+ * 初期状態から指定した手数まで再構築する関数
+ *
+ * @param moveHistory 手の履歴
+ * @param targetMoveIndex 再構築対象の手数インデックス
+ * @returns 再構築されたゲーム状態
+ */
+export function reconstructGameState(moveHistory: Move[], targetMoveIndex: number) {
+    let board = structuredClone(modernInitialBoard);
+    let hands = structuredClone(initialHands());
+    let currentPlayer: Player = "black";
+
+    // 初期位置の場合は何も手を適用しない
+    if (targetMoveIndex === HISTORY_CURSOR.INITIAL_POSITION) {
+        // 初期状態をそのまま返す
+    } else {
+        for (let i = 0; i <= targetMoveIndex; i++) {
+            if (i >= moveHistory.length) break;
+
+            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
+            board = result.board;
+            hands = result.hands;
+            currentPlayer = result.nextTurn;
+        }
+    }
+
+    // ゲーム状態判定
+    let gameStatus: GameStatus = "playing";
+    if (isInCheck(board, currentPlayer)) {
+        if (isCheckmate(board, hands, currentPlayer)) {
+            gameStatus = "checkmate";
+        } else {
+            gameStatus = "check";
+        }
+    }
+
+    return { board, hands, currentPlayer, gameStatus };
+}
