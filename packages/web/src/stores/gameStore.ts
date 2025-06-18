@@ -1,3 +1,5 @@
+import { audioManager } from "@/services/audioManager";
+import type { SoundType } from "@/types/audio";
 import {
     type Board,
     type GameStatus,
@@ -20,6 +22,13 @@ import {
     reconstructGameState,
 } from "shogi-core";
 import { create } from "zustand";
+
+// 音声再生ヘルパー関数
+function playGameSound(soundType: SoundType): void {
+    audioManager.play(soundType).catch((error) => {
+        console.debug(`Failed to play ${soundType} sound:`, error);
+    });
+}
 
 // ドロップ可能位置を計算（王手放置チェック含む）
 function getValidDropSquares(
@@ -269,8 +278,10 @@ export const useGameStore = create<GameState>((set, get) => ({
                 if (isCheckmate(result.board, result.hands, nextPlayer)) {
                     // 詰みなので、現在のプレイヤー（手を指した方）の勝ち
                     newStatus = currentPlayer === "black" ? "black_win" : "white_win";
+                    playGameSound("gameEnd");
                 } else {
                     newStatus = "check";
+                    playGameSound("check");
                 }
             }
 
@@ -290,6 +301,11 @@ export const useGameStore = create<GameState>((set, get) => ({
                 historyCursor: HISTORY_CURSOR.LATEST_POSITION, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
             });
+
+            // 駒音を再生（王手・詰みの音を再生してない場合のみ）
+            if (newStatus === "playing") {
+                playGameSound("piece");
+            }
 
             console.log(`Dropped ${pieceType} at ${to.row}${to.column}`);
         } catch (error) {
@@ -328,8 +344,10 @@ export const useGameStore = create<GameState>((set, get) => ({
                 if (isCheckmate(result.board, result.hands, nextPlayer)) {
                     // 詰みなので、現在のプレイヤー（手を指した方）の勝ち
                     newStatus = currentPlayer === "black" ? "black_win" : "white_win";
+                    playGameSound("gameEnd");
                 } else {
                     newStatus = "check";
+                    playGameSound("check");
                 }
             }
 
@@ -349,6 +367,11 @@ export const useGameStore = create<GameState>((set, get) => ({
                 historyCursor: HISTORY_CURSOR.LATEST_POSITION, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
             });
+
+            // 駒音を再生（王手・詰みの音を再生してない場合のみ）
+            if (newStatus === "playing") {
+                playGameSound("piece");
+            }
         } catch (error) {
             console.error("Invalid move:", error);
         }
@@ -412,6 +435,9 @@ export const useGameStore = create<GameState>((set, get) => ({
             validMoves: [],
             validDropSquares: [],
         });
+
+        // ゲーム終了音を再生
+        playGameSound("gameEnd");
     },
 
     importGame: (moves: Move[]) => {

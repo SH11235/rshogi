@@ -1,4 +1,5 @@
 import "./App.css";
+import { AudioTestPanel } from "./components/AudioTestPanel";
 import { Board } from "./components/Board";
 import { CapturedPieces } from "./components/CapturedPieces";
 import { GameInfo } from "./components/GameInfo";
@@ -188,6 +189,11 @@ function App() {
                         onCancel={cancelPromotion}
                     />
                 )}
+
+                {/* 開発用音声テストパネル */}
+                <div className="mt-8">
+                    <AudioTestPanel />
+                </div>
             </div>
         </div>
     );
