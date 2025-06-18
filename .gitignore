@@ -36,3 +36,6 @@ storybook-static
 playwright-report/
 playwright/.cache/
 test-results/
+
+# Coverage
+packages/web/coverage/
