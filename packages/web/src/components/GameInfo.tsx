@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { exportToKif, parseKifMoves, validateKifFormat } from "shogi-core";
 import type { GameStatus, Move, Player } from "shogi-core";
 import { KeyboardHelp } from "./KeyboardHelp";
+import { SettingsButton } from "./SettingsButton";
 import {
     AlertDialog,
     AlertDialogAction,
@@ -300,9 +301,10 @@ export function GameInfo({
                 </div>
             )}
 
-            {/* キーボードヘルプボタン */}
-            <div className="mb-3 flex justify-center">
+            {/* ヘルプ・設定ボタン */}
+            <div className="mb-3 flex gap-2 justify-center">
                 <KeyboardHelp />
+                <SettingsButton />
             </div>
 
             {/* 操作ボタン */}

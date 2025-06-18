@@ -1,0 +1,32 @@
+{
+    "files": {
+        "ignore": [
+            "coverage/**",
+            "dist/**",
+            "node_modules/**",
+            "storybook-static/**",
+            "*.json",
+            ".vscode/**"
+        ]
+    },
+    "formatter": {
+        "indentStyle": "space",
+        "indentWidth": 4,
+        "lineWidth": 100
+    },
+    "linter": {
+        "enabled": true,
+        "rules": {
+            "recommended": true,
+            "suspicious": {
+                "noExplicitAny": "warn"
+            }
+        }
+    },
+    "javascript": {
+        "formatter": {
+            "quoteStyle": "double",
+            "trailingCommas": "all"
+        }
+    }
+}
