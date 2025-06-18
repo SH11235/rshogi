@@ -58,6 +58,7 @@ interface GameState {
     makeDrop: (pieceType: PieceType, to: Square) => void;
     confirmPromotion: (promote: boolean) => void;
     cancelPromotion: () => void;
+    clearSelections: () => void;
     resetGame: () => void;
     resign: () => void;
     importGame: (moves: Move[]) => void;
@@ -364,6 +365,15 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     cancelPromotion: () => {
         set({ promotionPending: null });
+    },
+
+    clearSelections: () => {
+        set({
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+        });
     },
 
     resetGame: () => {

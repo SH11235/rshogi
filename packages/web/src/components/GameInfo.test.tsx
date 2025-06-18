@@ -217,8 +217,11 @@ describe("GameInfo component", () => {
             />,
         );
 
-        const button = screen.getByRole("button");
-        expect(button).toHaveAttribute("type", "button");
+        const buttons = screen.getAllByRole("button");
+        // Check that all buttons have correct type attribute
+        for (const button of buttons) {
+            expect(button).toHaveAttribute("type", "button");
+        }
     });
 
     describe("Resignation functionality", () => {

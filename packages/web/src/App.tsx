@@ -4,6 +4,7 @@ import { CapturedPieces } from "./components/CapturedPieces";
 import { GameInfo } from "./components/GameInfo";
 import { MoveHistory } from "./components/MoveHistory";
 import { PromotionDialog } from "./components/PromotionDialog";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
         selectDropPiece,
         confirmPromotion,
         cancelPromotion,
+        clearSelections,
         resetGame,
         resign,
         importGame,
@@ -33,6 +35,23 @@ function App() {
         canUndo,
         canRedo,
     } = useGameStore();
+
+    // キーボードショートカットの設定
+    useKeyboardShortcuts({
+        onUndo: canUndo() ? undo : undefined,
+        onRedo: canRedo() ? redo : undefined,
+        onReset: resetGame,
+        onEscape: () => {
+            // プロモーションダイアログをキャンセル
+            if (promotionPending) {
+                cancelPromotion();
+            } else {
+                // 選択状態をクリア
+                clearSelections();
+            }
+        },
+        onEnter: promotionPending ? () => confirmPromotion(true) : undefined,
+    });
 
     return (
         <div className="min-h-screen bg-gray-100 py-4 sm:py-8">
