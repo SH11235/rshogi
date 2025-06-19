@@ -9,33 +9,62 @@ const mockSelectSquare = vi.fn();
 const mockResetGame = vi.fn();
 const mockImportGame = vi.fn();
 
+const mockState = {
+    board: {}, // Simple mock board
+    hands: { black: {}, white: {} },
+    currentPlayer: "black",
+    selectedSquare: null,
+    selectedDropPiece: null,
+    validMoves: [],
+    validDropSquares: [],
+    gameStatus: "playing",
+    moveHistory: [],
+    historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+    promotionPending: null,
+    resignedPlayer: null,
+    timer: {
+        config: {
+            mode: null,
+            basicTime: 0,
+            byoyomiTime: 0,
+            fischerIncrement: 0,
+            perMoveLimit: 0,
+        },
+        blackTime: 0,
+        whiteTime: 0,
+        blackInByoyomi: false,
+        whiteInByoyomi: false,
+        activePlayer: null,
+        isPaused: false,
+        lastTickTime: 0,
+        blackWarningLevel: "normal",
+        whiteWarningLevel: "normal",
+        hasTimedOut: false,
+        timedOutPlayer: null,
+    },
+    selectSquare: mockSelectSquare,
+    selectDropPiece: vi.fn(),
+    confirmPromotion: vi.fn(),
+    cancelPromotion: vi.fn(),
+    resetGame: mockResetGame,
+    importGame: mockImportGame,
+    resign: vi.fn(),
+    undo: vi.fn(),
+    redo: vi.fn(),
+    goToMove: vi.fn(),
+    canUndo: vi.fn(() => false),
+    canRedo: vi.fn(() => false),
+    pauseTimer: vi.fn(),
+    resumeTimer: vi.fn(),
+};
+
+// GameStateの部分型を定義
+type PartialGameState = typeof mockState;
+
 vi.mock("./stores/gameStore", () => ({
-    useGameStore: () => ({
-        board: {}, // Simple mock board
-        hands: { black: {}, white: {} },
-        currentPlayer: "black",
-        selectedSquare: null,
-        selectedDropPiece: null,
-        validMoves: [],
-        validDropSquares: [],
-        gameStatus: "playing",
-        moveHistory: [],
-        historyCursor: HISTORY_CURSOR.LATEST_POSITION,
-        promotionPending: null,
-        resignedPlayer: null,
-        selectSquare: mockSelectSquare,
-        selectDropPiece: vi.fn(),
-        confirmPromotion: vi.fn(),
-        cancelPromotion: vi.fn(),
-        resetGame: mockResetGame,
-        importGame: mockImportGame,
-        resign: vi.fn(),
-        undo: vi.fn(),
-        redo: vi.fn(),
-        goToMove: vi.fn(),
-        canUndo: vi.fn(() => false),
-        canRedo: vi.fn(() => false),
-    }),
+    useGameStore: <T,>(selector?: (state: PartialGameState) => T) => {
+        return selector ? selector(mockState) : mockState;
+    },
 }));
 
 describe("App component", () => {

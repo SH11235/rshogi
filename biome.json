@@ -14,6 +14,9 @@
             },
             "correctness": {
                 "noUnusedImports": "error"
+            },
+            "suspicious": {
+                "noExplicitAny": "warn"
             }
         }
     },
@@ -28,7 +31,8 @@
             ".turbo/**",
             ".vscode/**",
             "**/test-results/**",
-            "**/playwright-report/**"
+            "**/playwright-report/**",
+            "**/coverage/**"
         ]
     }
 }
