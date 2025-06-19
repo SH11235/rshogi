@@ -1,9 +1,11 @@
 import { cn } from "@/lib/utils";
+import { useGameStore } from "@/stores/gameStore";
 import { useRef, useState } from "react";
 import { exportToKif, parseKifMoves, validateKifFormat } from "shogi-core";
 import type { GameStatus, Move, Player } from "shogi-core";
 import { KeyboardHelp } from "./KeyboardHelp";
-import { SettingsButton } from "./SettingsButton";
+import { TimerDisplay } from "./TimerDisplay";
+import { TimerSettingsDialog } from "./TimerSettingsDialog";
 import {
     AlertDialog,
     AlertDialogAction,
@@ -46,6 +48,10 @@ export function GameInfo({
     const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
     const [isResignDialogOpen, setIsResignDialogOpen] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const [isTimerSettingsOpen, setIsTimerSettingsOpen] = useState(false);
+    const timer = useGameStore((state) => state.timer);
+    const pauseTimer = useGameStore((state) => state.pauseTimer);
+    const resumeTimer = useGameStore((state) => state.resumeTimer);
 
     const getStatusMessage = () => {
         switch (gameStatus) {
@@ -79,6 +85,9 @@ export function GameInfo({
                 if (resignedPlayer === "white") {
                     return "後手が投了しました";
                 }
+                if (timer.hasTimedOut && timer.timedOutPlayer === "white") {
+                    return "後手の時間切れ";
+                }
                 if (moveCount > 0) {
                     return "詰みにより勝利";
                 }
@@ -86,6 +95,9 @@ export function GameInfo({
             case "white_win":
                 if (resignedPlayer === "black") {
                     return "先手が投了しました";
+                }
+                if (timer.hasTimedOut && timer.timedOutPlayer === "black") {
+                    return "先手の時間切れ";
                 }
                 if (moveCount > 0) {
                     return "詰みにより勝利";
@@ -216,6 +228,20 @@ export function GameInfo({
 
     return (
         <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md max-w-xs sm:max-w-md mx-auto">
+            {/* タイマー表示 */}
+            {timer.config.mode && (
+                <div className="mb-4 grid grid-cols-2 gap-4">
+                    <div className="text-center">
+                        <div className="text-sm text-gray-600 mb-1">先手</div>
+                        <TimerDisplay player="black" />
+                    </div>
+                    <div className="text-center">
+                        <div className="text-sm text-gray-600 mb-1">後手</div>
+                        <TimerDisplay player="white" />
+                    </div>
+                </div>
+            )}
+
             {/* ゲーム状態表示 */}
             <div className="mb-3 sm:mb-4 text-center">
                 <h2
@@ -301,10 +327,42 @@ export function GameInfo({
                 </div>
             )}
 
-            {/* ヘルプ・設定ボタン */}
+            {/* ヘルプ・タイマーボタン */}
             <div className="mb-3 flex gap-2 justify-center">
                 <KeyboardHelp />
-                <SettingsButton />
+                {!timer.config.mode && (
+                    <button
+                        type="button"
+                        onClick={() => setIsTimerSettingsOpen(true)}
+                        className={cn(
+                            "p-2 rounded-lg transition-colors",
+                            "touch-manipulation active:scale-95",
+                            "bg-gray-100 hover:bg-gray-200 text-gray-700",
+                            "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500",
+                        )}
+                        title="タイマー設定"
+                    >
+                        ⏱️
+                    </button>
+                )}
+                {timer.config.mode && !isGameOver && (
+                    <button
+                        type="button"
+                        onClick={timer.isPaused ? resumeTimer : pauseTimer}
+                        className={cn(
+                            "p-2 rounded-lg transition-colors",
+                            "touch-manipulation active:scale-95",
+                            timer.isPaused
+                                ? "bg-green-100 hover:bg-green-200 text-green-700"
+                                : "bg-yellow-100 hover:bg-yellow-200 text-yellow-700",
+                            "focus:outline-none focus:ring-2 focus:ring-offset-2",
+                            timer.isPaused ? "focus:ring-green-500" : "focus:ring-yellow-500",
+                        )}
+                        title={timer.isPaused ? "再開" : "一時停止"}
+                    >
+                        {timer.isPaused ? "▶️" : "⏸️"}
+                    </button>
+                )}
             </div>
 
             {/* 操作ボタン */}
@@ -379,6 +437,13 @@ export function GameInfo({
                     </AlertDialogContent>
                 </AlertDialog>
             </div>
+
+            {/* タイマー設定ダイアログ */}
+            <TimerSettingsDialog
+                open={isTimerSettingsOpen}
+                onOpenChange={setIsTimerSettingsOpen}
+                isGameInProgress={hasMovesPlayed && !isGameOver}
+            />
         </div>
     );
 }

@@ -1,6 +1,12 @@
 import { audioManager } from "@/services/audioManager";
 import type { SoundType } from "@/types/audio";
 import {
+    type TimerActions,
+    type TimerConfig,
+    type TimerState,
+    getWarningLevel,
+} from "@/types/timer";
+import {
     type Board,
     type GameStatus,
     HISTORY_CURSOR,
@@ -61,6 +67,9 @@ interface GameState {
     promotionPending: PromotionPendingMove | null;
     resignedPlayer: Player | null; // 投了したプレイヤー
 
+    // タイマー状態
+    timer: TimerState;
+
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
     makeMove: (from: Square, to: Square, promote?: boolean) => void;
@@ -79,6 +88,33 @@ interface GameState {
     canRedo: () => boolean;
 }
 
+// タイマーアクションをGameStateに統合
+interface GameState extends TimerActions {}
+
+// タイマーの初期状態
+function createInitialTimerState(): TimerState {
+    return {
+        config: {
+            mode: null,
+            basicTime: 0,
+            byoyomiTime: 0,
+            fischerIncrement: 0,
+            perMoveLimit: 0,
+        },
+        blackTime: 0,
+        whiteTime: 0,
+        blackInByoyomi: false,
+        whiteInByoyomi: false,
+        activePlayer: null,
+        isPaused: false,
+        lastTickTime: 0,
+        blackWarningLevel: "normal",
+        whiteWarningLevel: "normal",
+        hasTimedOut: false,
+        timedOutPlayer: null,
+    };
+}
+
 export const useGameStore = create<GameState>((set, get) => ({
     board: modernInitialBoard,
     hands: structuredClone(initialHands()),
@@ -92,6 +128,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     gameStatus: "playing",
     promotionPending: null,
     resignedPlayer: null,
+    timer: createInitialTimerState(),
 
     selectSquare: (square: Square) => {
         const {
@@ -270,7 +307,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             };
 
             const result = applyMove(board, hands, currentPlayer, move);
-            const nextPlayer = currentPlayer === "black" ? "white" : "black";
+            const nextPlayer = result.nextTurn;
 
             // ゲーム状態判定
             let newStatus: GameStatus = "playing";
@@ -307,6 +344,12 @@ export const useGameStore = create<GameState>((set, get) => ({
                 playGameSound("piece");
             }
 
+            // タイマーが有効な場合、タイマーを切り替え
+            const { timer } = get();
+            if (timer.config.mode && timer.activePlayer) {
+                get().switchTimer();
+            }
+
             console.log(`Dropped ${pieceType} at ${to.row}${to.column}`);
         } catch (error) {
             console.error("Invalid drop:", error);
@@ -336,7 +379,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             };
 
             const result = applyMove(board, hands, currentPlayer, move);
-            const nextPlayer = currentPlayer === "black" ? "white" : "black";
+            const nextPlayer = result.nextTurn;
 
             // ゲーム状態判定
             let newStatus: GameStatus = "playing";
@@ -371,6 +414,12 @@ export const useGameStore = create<GameState>((set, get) => ({
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
             if (newStatus === "playing") {
                 playGameSound("piece");
+            }
+
+            // タイマーが有効な場合、タイマーを切り替え
+            const { timer } = get();
+            if (timer.config.mode && timer.activePlayer) {
+                get().switchTimer();
             }
         } catch (error) {
             console.error("Invalid move:", error);
@@ -413,6 +462,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             gameStatus: "playing",
             promotionPending: null,
             resignedPlayer: null,
+            timer: createInitialTimerState(),
         });
     },
 
@@ -581,5 +631,184 @@ export const useGameStore = create<GameState>((set, get) => ({
         if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) return false;
         // その他の位置からは、最後の手でなければredoできる
         return historyCursor < moveHistory.length - 1;
+    },
+
+    // タイマーアクション
+    initializeTimer: (config: TimerConfig) => {
+        const basicTimeMs = config.basicTime * 1000;
+        const isPerMove = config.mode === "perMove";
+        const perMoveTimeMs = config.perMoveLimit * 1000;
+
+        set({
+            timer: {
+                config,
+                blackTime: isPerMove ? perMoveTimeMs : basicTimeMs,
+                whiteTime: isPerMove ? perMoveTimeMs : basicTimeMs,
+                blackInByoyomi: false,
+                whiteInByoyomi: false,
+                activePlayer: null,
+                isPaused: false,
+                lastTickTime: Date.now(),
+                blackWarningLevel: "normal",
+                whiteWarningLevel: "normal",
+                hasTimedOut: false,
+                timedOutPlayer: null,
+            },
+        });
+    },
+
+    startPlayerTimer: (player: Player) => {
+        const { timer } = get();
+        if (!timer.config.mode) return;
+
+        set({
+            timer: {
+                ...timer,
+                activePlayer: player,
+                isPaused: false,
+                lastTickTime: Date.now(),
+            },
+        });
+    },
+
+    switchTimer: () => {
+        const { timer, currentPlayer } = get();
+        if (!timer.config.mode) return;
+
+        const now = Date.now();
+        const { config } = timer;
+        const previousPlayer = timer.activePlayer;
+
+        // フィッシャー方式の場合、現在のプレイヤーに時間を加算
+        if (config.mode === "fischer" && previousPlayer) {
+            const currentTime = previousPlayer === "black" ? timer.blackTime : timer.whiteTime;
+            const newTime = currentTime + config.fischerIncrement * 1000;
+            set({
+                timer: {
+                    ...timer,
+                    [`${previousPlayer}Time`]: newTime,
+                    activePlayer: currentPlayer,
+                    lastTickTime: now,
+                },
+            });
+        }
+        // 一手制限方式の場合、次のプレイヤーの時間をリセット
+        else if (config.mode === "perMove") {
+            set({
+                timer: {
+                    ...timer,
+                    [`${currentPlayer}Time`]: config.perMoveLimit * 1000,
+                    activePlayer: currentPlayer,
+                    lastTickTime: now,
+                },
+            });
+        }
+        // 通常の切り替え
+        else {
+            set({
+                timer: {
+                    ...timer,
+                    activePlayer: currentPlayer,
+                    lastTickTime: now,
+                },
+            });
+        }
+    },
+
+    pauseTimer: () => {
+        const { timer } = get();
+        if (!timer.config.mode || timer.isPaused) return;
+
+        set({
+            timer: {
+                ...timer,
+                isPaused: true,
+            },
+        });
+    },
+
+    resumeTimer: () => {
+        const { timer } = get();
+        if (!timer.config.mode || !timer.isPaused) return;
+
+        set({
+            timer: {
+                ...timer,
+                isPaused: false,
+                lastTickTime: Date.now(),
+            },
+        });
+    },
+
+    resetTimer: () => {
+        set({ timer: createInitialTimerState() });
+    },
+
+    tick: () => {
+        const { timer, gameStatus } = get();
+        if (!timer.config.mode || timer.isPaused || !timer.activePlayer || timer.hasTimedOut)
+            return;
+        if (gameStatus !== "playing" && gameStatus !== "check") return;
+
+        const now = Date.now();
+        const elapsed = now - timer.lastTickTime;
+        const player = timer.activePlayer;
+        const currentTime = player === "black" ? timer.blackTime : timer.whiteTime;
+        const inByoyomi = player === "black" ? timer.blackInByoyomi : timer.whiteInByoyomi;
+        const newTime = Math.max(0, currentTime - elapsed);
+
+        // 基本時間を使い切った場合
+        if (newTime === 0 && !inByoyomi && timer.config.mode === "basic") {
+            // 秒読みに移行
+            set({
+                timer: {
+                    ...timer,
+                    [`${player}Time`]: timer.config.byoyomiTime * 1000,
+                    [`${player}InByoyomi`]: true,
+                    lastTickTime: now,
+                },
+            });
+            get().updateWarningLevels();
+        } else if (newTime === 0 && (inByoyomi || timer.config.mode !== "basic")) {
+            // 時間切れ
+            const winStatus = player === "black" ? "white_win" : "black_win";
+            set({
+                timer: {
+                    ...timer,
+                    hasTimedOut: true,
+                    timedOutPlayer: player,
+                },
+                gameStatus: winStatus,
+            });
+            playGameSound("gameEnd");
+        } else {
+            set({
+                timer: {
+                    ...timer,
+                    [`${player}Time`]: newTime,
+                    lastTickTime: now,
+                },
+            });
+            get().updateWarningLevels();
+        }
+    },
+
+    updateWarningLevels: () => {
+        const { timer } = get();
+        const blackWarningLevel = getWarningLevel(timer.blackTime, timer.blackInByoyomi);
+        const whiteWarningLevel = getWarningLevel(timer.whiteTime, timer.whiteInByoyomi);
+
+        if (
+            blackWarningLevel !== timer.blackWarningLevel ||
+            whiteWarningLevel !== timer.whiteWarningLevel
+        ) {
+            set({
+                timer: {
+                    ...timer,
+                    blackWarningLevel,
+                    whiteWarningLevel,
+                },
+            });
+        }
     },
 }));

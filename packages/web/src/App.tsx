@@ -5,7 +5,6 @@ import { CapturedPieces } from "./components/CapturedPieces";
 import { GameInfo } from "./components/GameInfo";
 import { MoveHistory } from "./components/MoveHistory";
 import { PromotionDialog } from "./components/PromotionDialog";
-import { TimerDisplay } from "./components/TimerDisplay";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
 
@@ -98,7 +97,6 @@ function App() {
                                     onResign={resign}
                                     onImportGame={importGame}
                                 />
-                                <TimerDisplay />
                                 <MoveHistory
                                     moveHistory={moveHistory}
                                     historyCursor={historyCursor}
@@ -167,7 +165,6 @@ function App() {
                             onResign={resign}
                             onImportGame={importGame}
                         />
-                        <TimerDisplay />
                         <MoveHistory
                             moveHistory={moveHistory}
                             historyCursor={historyCursor}
