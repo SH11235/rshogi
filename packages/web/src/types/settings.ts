@@ -96,38 +96,3 @@ export const defaultGameSettings: GameSettings = {
         showLastMove: true,
     },
 };
-
-/**
- * 時間制御のプリセット設定
- */
-export const timeControlPresets: Array<{
-    name: string;
-    description: string;
-    settings: TimeControlSettings;
-}> = [
-    {
-        name: "カジュアル",
-        description: "時間制限なし",
-        settings: { mainTimeMinutes: 10, byoyomiSeconds: 0, enabled: false },
-    },
-    {
-        name: "ブリッツ",
-        description: "3分切れ負け",
-        settings: { mainTimeMinutes: 3, byoyomiSeconds: 0, enabled: true },
-    },
-    {
-        name: "ラピッド",
-        description: "10分+30秒",
-        settings: { mainTimeMinutes: 10, byoyomiSeconds: 30, enabled: true },
-    },
-    {
-        name: "スタンダード",
-        description: "30分+60秒",
-        settings: { mainTimeMinutes: 30, byoyomiSeconds: 60, enabled: true },
-    },
-    {
-        name: "クラシック",
-        description: "90分+60秒",
-        settings: { mainTimeMinutes: 90, byoyomiSeconds: 60, enabled: true },
-    },
-];
