@@ -27,7 +27,6 @@ import {
     mustPromote,
     parseKifMoves,
     parseSfen,
-    reconstructGameState,
 } from "shogi-core";
 import { create } from "zustand";
 
@@ -36,6 +35,44 @@ function playGameSound(soundType: SoundType): void {
     audioManager.play(soundType).catch((error) => {
         console.debug(`Failed to play ${soundType} sound:`, error);
     });
+}
+
+// 初期局面を考慮したゲーム状態再構築
+function reconstructGameStateWithInitial(
+    moveHistory: Move[],
+    targetMoveIndex: number,
+    initialBoard: Board,
+    initialHandsData: Hands,
+) {
+    let board = structuredClone(initialBoard);
+    let hands = structuredClone(initialHandsData);
+    let currentPlayer: Player = "black";
+
+    // 初期位置の場合は何も手を適用しない
+    if (targetMoveIndex === HISTORY_CURSOR.INITIAL_POSITION) {
+        // 初期状態をそのまま返す
+    } else {
+        for (let i = 0; i <= targetMoveIndex; i++) {
+            if (i >= moveHistory.length) break;
+
+            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
+            board = result.board;
+            hands = result.hands;
+            currentPlayer = result.nextTurn;
+        }
+    }
+
+    // ゲーム状態判定
+    let gameStatus: GameStatus = "playing";
+    if (isInCheck(board, currentPlayer)) {
+        if (isCheckmate(board, hands, currentPlayer)) {
+            gameStatus = "checkmate";
+        } else {
+            gameStatus = "check";
+        }
+    }
+
+    return { board, hands, currentPlayer, gameStatus };
 }
 
 // ドロップ可能位置を計算（王手放置チェック含む）
@@ -55,6 +92,14 @@ interface PromotionPendingMove {
     piece: Piece;
 }
 
+// 分岐情報の型定義
+interface BranchInfo {
+    branchPoint: number; // 分岐開始点の手数
+    originalMoves: Move[]; // 本譜の手順
+    branchMoves: Move[]; // 分岐の手順
+    isInBranch: boolean; // 現在分岐中かどうか
+}
+
 interface GameState {
     board: Board;
     hands: Hands;
@@ -68,6 +113,11 @@ interface GameState {
     gameStatus: GameStatus;
     promotionPending: PromotionPendingMove | null;
     resignedPlayer: Player | null; // 投了したプレイヤー
+    branchInfo: BranchInfo | null; // 分岐情報
+    originalMoveHistory: Move[]; // 本譜の保存用
+    initialBoard: Board; // 初期局面
+    initialHandsData: Hands; // 初期持ち駒
+    isTsumeShogi: boolean; // 詰将棋モードかどうか
 
     // タイマー状態
     timer: TimerState;
@@ -89,6 +139,16 @@ interface GameState {
     goToMove: (moveIndex: number) => void;
     canUndo: () => boolean;
     canRedo: () => boolean;
+    // 再生制御機能
+    navigateToMove: (index: number) => void;
+    navigateNext: () => void;
+    navigatePrevious: () => void;
+    navigateFirst: () => void;
+    navigateLast: () => void;
+    returnToMainLine: () => void;
+    isInBranch: () => boolean;
+    canNavigateNext: () => boolean;
+    canNavigatePrevious: () => boolean;
 }
 
 // タイマーアクションをGameStateに統合
@@ -131,6 +191,11 @@ export const useGameStore = create<GameState>((set, get) => ({
     gameStatus: "playing",
     promotionPending: null,
     resignedPlayer: null,
+    branchInfo: null,
+    originalMoveHistory: [],
+    initialBoard: modernInitialBoard,
+    initialHandsData: structuredClone(initialHands()),
+    isTsumeShogi: false,
     timer: createInitialTimerState(),
 
     selectSquare: (square: Square) => {
@@ -325,11 +390,36 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
-            // 履歴の途中から新しい手を指す場合、未来の履歴を削除
-            const newMoveHistory =
-                historyCursor === HISTORY_CURSOR.LATEST_POSITION
-                    ? [...moveHistory, move]
-                    : [...moveHistory.slice(0, historyCursor + 1), move];
+            // 履歴の途中から新しい手を指す場合、分岐を作成
+            const { branchInfo, originalMoveHistory } = get();
+            let newMoveHistory: Move[];
+            let newBranchInfo = branchInfo;
+            let newOriginalMoveHistory = originalMoveHistory;
+
+            if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {
+                // 最新位置から指す場合は通常通り追加
+                newMoveHistory = [...moveHistory, move];
+            } else {
+                // 履歴の途中から指す場合は分岐を作成
+                if (!branchInfo || !branchInfo.isInBranch) {
+                    // 新しい分岐を作成
+                    newOriginalMoveHistory = [...moveHistory]; // 現在の履歴を本譜として保存
+                    newBranchInfo = {
+                        branchPoint: historyCursor,
+                        originalMoves: moveHistory,
+                        branchMoves: [move],
+                        isInBranch: true,
+                    };
+                    newMoveHistory = [...moveHistory.slice(0, historyCursor + 1), move];
+                } else {
+                    // 既に分岐中の場合は分岐を延長
+                    newBranchInfo = {
+                        ...branchInfo,
+                        branchMoves: [...branchInfo.branchMoves, move],
+                    };
+                    newMoveHistory = [...moveHistory.slice(0, historyCursor + 1), move];
+                }
+            }
 
             set({
                 board: result.board,
@@ -340,6 +430,8 @@ export const useGameStore = create<GameState>((set, get) => ({
                 moveHistory: newMoveHistory,
                 historyCursor: HISTORY_CURSOR.LATEST_POSITION, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
+                branchInfo: newBranchInfo,
+                originalMoveHistory: newOriginalMoveHistory,
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
@@ -397,11 +489,36 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
-            // 履歴の途中から新しい手を指す場合、未来の履歴を削除
-            const newMoveHistory =
-                historyCursor === HISTORY_CURSOR.LATEST_POSITION
-                    ? [...moveHistory, move]
-                    : [...moveHistory.slice(0, historyCursor + 1), move];
+            // 履歴の途中から新しい手を指す場合、分岐を作成
+            const { branchInfo, originalMoveHistory } = get();
+            let newMoveHistory: Move[];
+            let newBranchInfo = branchInfo;
+            let newOriginalMoveHistory = originalMoveHistory;
+
+            if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {
+                // 最新位置から指す場合は通常通り追加
+                newMoveHistory = [...moveHistory, move];
+            } else {
+                // 履歴の途中から指す場合は分岐を作成
+                if (!branchInfo || !branchInfo.isInBranch) {
+                    // 新しい分岐を作成
+                    newOriginalMoveHistory = [...moveHistory]; // 現在の履歴を本譜として保存
+                    newBranchInfo = {
+                        branchPoint: historyCursor,
+                        originalMoves: moveHistory,
+                        branchMoves: [move],
+                        isInBranch: true,
+                    };
+                    newMoveHistory = [...moveHistory.slice(0, historyCursor + 1), move];
+                } else {
+                    // 既に分岐中の場合は分岐を延長
+                    newBranchInfo = {
+                        ...branchInfo,
+                        branchMoves: [...branchInfo.branchMoves, move],
+                    };
+                    newMoveHistory = [...moveHistory.slice(0, historyCursor + 1), move];
+                }
+            }
 
             set({
                 board: result.board,
@@ -412,6 +529,8 @@ export const useGameStore = create<GameState>((set, get) => ({
                 moveHistory: newMoveHistory,
                 historyCursor: HISTORY_CURSOR.LATEST_POSITION, // 新しい手を指したので最新状態にリセット
                 gameStatus: newStatus,
+                branchInfo: newBranchInfo,
+                originalMoveHistory: newOriginalMoveHistory,
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
@@ -465,6 +584,11 @@ export const useGameStore = create<GameState>((set, get) => ({
             gameStatus: "playing",
             promotionPending: null,
             resignedPlayer: null,
+            branchInfo: null,
+            originalMoveHistory: [],
+            initialBoard: modernInitialBoard,
+            initialHandsData: structuredClone(initialHands()),
+            isTsumeShogi: false,
             timer: createInitialTimerState(),
         });
     },
@@ -497,6 +621,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         // KIFコンテンツがある場合は初期局面を解析
         let initialBoard = modernInitialBoard;
         let initialHandsData = structuredClone(initialHands());
+        let isTsumeShogi = false;
 
         if (kifContent) {
             const parseResult = parseKifMoves(kifContent);
@@ -506,9 +631,22 @@ export const useGameStore = create<GameState>((set, get) => ({
             if (parseResult.initialHands) {
                 initialHandsData = parseResult.initialHands;
             }
+
+            // 詰将棋かどうかを判定
+            isTsumeShogi = kifContent.includes("棋戦：詰将棋") || kifContent.includes("詰将棋");
         }
 
-        // ゲームをリセットしてから棋譜を読み込む
+        // 初期局面のゲーム状態を判定
+        let initialGameStatus: GameStatus = "playing";
+        if (isInCheck(initialBoard, "black")) {
+            if (isCheckmate(initialBoard, initialHandsData, "black")) {
+                initialGameStatus = "checkmate";
+            } else {
+                initialGameStatus = "check";
+            }
+        }
+
+        // ゲームをリセットしてから棋譜を読み込む（初期局面から開始）
         set({
             board: initialBoard,
             hands: initialHandsData,
@@ -518,48 +656,16 @@ export const useGameStore = create<GameState>((set, get) => ({
             validMoves: [],
             validDropSquares: [],
             moveHistory: moves,
-            historyCursor: moves.length - 1, // 最終手の状態に設定
-            gameStatus: "playing",
+            historyCursor: HISTORY_CURSOR.INITIAL_POSITION, // 初期局面から開始
+            gameStatus: initialGameStatus,
             promotionPending: null,
             resignedPlayer: null,
+            initialBoard: initialBoard, // 初期局面を保存
+            initialHandsData: initialHandsData, // 初期持ち駒を保存
+            branchInfo: null,
+            originalMoveHistory: [],
+            isTsumeShogi: isTsumeShogi,
         });
-
-        // 最終局面まで再構築
-        if (moves.length > 0) {
-            // 初期局面から手を適用していく
-            let board = initialBoard;
-            let hands = initialHandsData;
-            let currentPlayer: Player = "black";
-
-            for (const move of moves) {
-                try {
-                    const result = applyMove(board, hands, currentPlayer, move);
-                    board = result.board;
-                    hands = result.hands;
-                    currentPlayer = result.nextTurn;
-                } catch (error) {
-                    console.error("Failed to apply move:", error);
-                    break;
-                }
-            }
-
-            // ゲーム状態の判定
-            let gameStatus: GameStatus = "playing";
-            if (isInCheck(board, currentPlayer)) {
-                if (isCheckmate(board, hands, currentPlayer)) {
-                    gameStatus = "checkmate";
-                } else {
-                    gameStatus = "check";
-                }
-            }
-
-            set({
-                board,
-                hands,
-                currentPlayer,
-                gameStatus,
-            });
-        }
     },
 
     importSfen: (sfen: string) => {
@@ -594,6 +700,9 @@ export const useGameStore = create<GameState>((set, get) => ({
                 gameStatus,
                 promotionPending: null,
                 resignedPlayer: null,
+                initialBoard: board,
+                initialHandsData: hands,
+                isTsumeShogi: false,
                 timer: createInitialTimerState(),
             });
         } catch (error) {
@@ -604,7 +713,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     // 履歴操作機能
     undo: () => {
-        const { moveHistory, historyCursor } = get();
+        const { moveHistory, historyCursor, initialBoard, initialHandsData } = get();
         if (moveHistory.length === 0) return;
 
         const newCursor =
@@ -618,9 +727,11 @@ export const useGameStore = create<GameState>((set, get) => ({
                 : newCursor;
         if (finalCursor < HISTORY_CURSOR.INITIAL_POSITION) return;
 
-        const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
+        const { board, hands, currentPlayer, gameStatus } = reconstructGameStateWithInitial(
             moveHistory,
             finalCursor,
+            initialBoard,
+            initialHandsData,
         );
 
         set({
@@ -638,7 +749,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     redo: () => {
-        const { moveHistory, historyCursor } = get();
+        const { moveHistory, historyCursor, initialBoard, initialHandsData } = get();
         // 最新位置からはredoできない
         if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) return;
         // 最後の手からはredoできない
@@ -646,9 +757,11 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // 初期位置からは最初の手（0）に進む
         const newCursor = historyCursor === HISTORY_CURSOR.INITIAL_POSITION ? 0 : historyCursor + 1;
-        const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
+        const { board, hands, currentPlayer, gameStatus } = reconstructGameStateWithInitial(
             moveHistory,
             newCursor,
+            initialBoard,
+            initialHandsData,
         );
 
         set({
@@ -666,12 +779,14 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     goToMove: (moveIndex: number) => {
-        const { moveHistory } = get();
+        const { moveHistory, initialBoard, initialHandsData } = get();
         if (moveIndex < HISTORY_CURSOR.INITIAL_POSITION || moveIndex >= moveHistory.length) return;
 
-        const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
+        const { board, hands, currentPlayer, gameStatus } = reconstructGameStateWithInitial(
             moveHistory,
             moveIndex,
+            initialBoard,
+            initialHandsData,
         );
 
         set({
@@ -890,5 +1005,84 @@ export const useGameStore = create<GameState>((set, get) => ({
                 },
             });
         }
+    },
+
+    // 再生制御機能
+    navigateToMove: (index: number) => {
+        const { moveHistory } = get();
+        if (index < HISTORY_CURSOR.INITIAL_POSITION || index >= moveHistory.length) return;
+
+        get().goToMove(index);
+    },
+
+    navigateNext: () => {
+        const { historyCursor, moveHistory } = get();
+        if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) return;
+
+        if (historyCursor === HISTORY_CURSOR.INITIAL_POSITION) {
+            get().goToMove(0);
+        } else if (historyCursor < moveHistory.length - 1) {
+            get().goToMove(historyCursor + 1);
+        }
+    },
+
+    navigatePrevious: () => {
+        const { historyCursor, moveHistory } = get();
+
+        if (historyCursor === HISTORY_CURSOR.INITIAL_POSITION) return;
+
+        if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {
+            get().goToMove(moveHistory.length - 2);
+        } else if (historyCursor === 0) {
+            get().goToMove(HISTORY_CURSOR.INITIAL_POSITION);
+        } else {
+            get().goToMove(historyCursor - 1);
+        }
+    },
+
+    navigateFirst: () => {
+        get().goToMove(HISTORY_CURSOR.INITIAL_POSITION);
+    },
+
+    navigateLast: () => {
+        const { moveHistory } = get();
+        if (moveHistory.length > 0) {
+            get().goToMove(moveHistory.length - 1);
+        }
+    },
+
+    returnToMainLine: () => {
+        const { branchInfo } = get();
+        if (!branchInfo || !branchInfo.isInBranch) return;
+
+        // 本譜に戻す
+        set({
+            moveHistory: branchInfo.originalMoves,
+            branchInfo: null,
+            originalMoveHistory: [],
+            historyCursor: branchInfo.branchPoint,
+        });
+
+        // 分岐点の局面を再構築
+        get().goToMove(branchInfo.branchPoint);
+    },
+
+    isInBranch: () => {
+        const { branchInfo } = get();
+        return branchInfo?.isInBranch ?? false;
+    },
+
+    canNavigateNext: () => {
+        const { historyCursor, moveHistory } = get();
+        if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) return false;
+        if (historyCursor === HISTORY_CURSOR.INITIAL_POSITION) return moveHistory.length > 0;
+        return historyCursor < moveHistory.length - 1;
+    },
+
+    canNavigatePrevious: () => {
+        const { historyCursor, moveHistory } = get();
+        if (historyCursor === HISTORY_CURSOR.INITIAL_POSITION) return false;
+        if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) return moveHistory.length > 0;
+        return true;
     },
 }));

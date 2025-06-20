@@ -1,54 +1,32 @@
 import { cn } from "@/lib/utils";
 import { HISTORY_CURSOR, formatMove } from "shogi-core";
 import type { Move } from "shogi-core";
-import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 
 interface MoveHistoryProps {
     moveHistory: Move[];
     historyCursor: number;
-    canUndo: boolean;
-    canRedo: boolean;
-    onUndo: () => void;
-    onRedo: () => void;
+    isInBranch: boolean;
+    branchPoint?: number;
     onGoToMove: (moveIndex: number) => void;
 }
 
 export function MoveHistory({
     moveHistory,
     historyCursor,
-    canUndo,
-    canRedo,
-    onUndo,
-    onRedo,
+    isInBranch,
+    branchPoint = -1,
     onGoToMove,
 }: MoveHistoryProps) {
     return (
         <Card className="w-80 sm:w-96">
             <CardHeader className="pb-2 sm:pb-3">
-                <CardTitle className="text-base sm:text-lg font-bold">棋譜</CardTitle>
-                <div className="flex gap-1 sm:gap-2">
-                    <Button
-                        onClick={onUndo}
-                        disabled={!canUndo}
-                        size="sm"
-                        variant="outline"
-                        className="flex-1 text-xs sm:text-sm touch-manipulation"
-                        title="戻る"
-                    >
-                        ← 戻る
-                    </Button>
-                    <Button
-                        onClick={onRedo}
-                        disabled={!canRedo}
-                        size="sm"
-                        variant="outline"
-                        className="flex-1 text-xs sm:text-sm touch-manipulation"
-                        title="進む"
-                    >
-                        進む →
-                    </Button>
-                </div>
+                <CardTitle className="text-base sm:text-lg font-bold">
+                    棋譜
+                    {isInBranch && (
+                        <span className="ml-2 text-sm text-orange-600 font-normal">(検討中)</span>
+                    )}
+                </CardTitle>
             </CardHeader>
             <CardContent className="pt-0">
                 <div className="max-h-48 sm:max-h-64 overflow-y-auto space-y-1">
@@ -74,6 +52,7 @@ export function MoveHistory({
                             (historyCursor === HISTORY_CURSOR.LATEST_POSITION &&
                                 index === moveHistory.length - 1);
                         const moveKey = `${index}-${move.type}-${move.to.row}${move.to.column}`;
+                        const isBranchMove = isInBranch && index > branchPoint;
 
                         return (
                             <button
@@ -85,9 +64,13 @@ export function MoveHistory({
                                     isCurrentMove
                                         ? "bg-blue-100 text-blue-900 font-medium"
                                         : "hover:bg-gray-100",
+                                    isBranchMove && "border-l-2 border-orange-400 ml-2",
                                 )}
                             >
                                 {formatMove(move, moveNumber)}
+                                {isBranchMove && index === branchPoint + 1 && (
+                                    <span className="ml-1 text-xs text-orange-600">(分岐)</span>
+                                )}
                             </button>
                         );
                     })}

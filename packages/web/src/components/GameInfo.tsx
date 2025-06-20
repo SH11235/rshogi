@@ -23,6 +23,7 @@ interface GameInfoProps {
     moveHistory: Move[];
     historyCursor: number;
     resignedPlayer: Player | null;
+    isTsumeShogi: boolean;
     onReset: () => void;
     onResign?: () => void;
 }
@@ -33,6 +34,7 @@ export function GameInfo({
     moveHistory,
     historyCursor,
     resignedPlayer,
+    isTsumeShogi,
     onReset,
     onResign,
 }: GameInfoProps) {
@@ -50,6 +52,23 @@ export function GameInfo({
     const resumeTimer = useGameStore((state) => state.resumeTimer);
 
     const getStatusMessage = () => {
+        // 詰将棋モードの場合の特別な表示
+        if (isTsumeShogi) {
+            switch (gameStatus) {
+                case "checkmate":
+                    // 最終手まで進んでいる場合は「詰み」、そうでない場合は通常表示
+                    if (historyCursor === moveHistory.length - 1 || historyCursor === -1) {
+                        return "詰み！正解です！";
+                    }
+                    return currentPlayer === "black" ? "先手番" : "後手番";
+                case "check":
+                    return `王手！ - ${currentPlayer === "black" ? "先手番" : "後手番"}`;
+                default:
+                    return currentPlayer === "black" ? "先手番" : "後手番";
+            }
+        }
+
+        // 通常の対局の場合
         switch (gameStatus) {
             case "black_win":
                 return "先手の勝ち！";
@@ -157,6 +176,15 @@ export function GameInfo({
 
     return (
         <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md max-w-xs sm:max-w-md mx-auto">
+            {/* 詰将棋モードの表示 */}
+            {isTsumeShogi && (
+                <div className="mb-3 text-center">
+                    <div className="text-sm text-purple-600 font-bold bg-purple-50 px-3 py-1 rounded-full inline-block">
+                        🎯 詰将棋
+                    </div>
+                </div>
+            )}
+
             {/* タイマー表示 */}
             {timer.config.mode && (
                 <div className="mb-4 grid grid-cols-2 gap-4">
@@ -255,8 +283,8 @@ export function GameInfo({
 
             {/* 操作ボタン */}
             <div className="flex gap-2 justify-center">
-                {/* 投了ボタン - ゲーム中のみ表示 */}
-                {onResign && !isGameOver && moveCount > 0 && (
+                {/* 投了ボタン - ゲーム中のみ表示（詰将棋モードでは非表示） */}
+                {onResign && !isGameOver && moveCount > 0 && !isTsumeShogi && (
                     <AlertDialog open={isResignDialogOpen} onOpenChange={setIsResignDialogOpen}>
                         <AlertDialogTrigger asChild>
                             <button

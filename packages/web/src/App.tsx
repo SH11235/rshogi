@@ -9,6 +9,7 @@ import { KifuExportDialog } from "./components/KifuExportDialog";
 import { KifuImportDialog } from "./components/KifuImportDialog";
 import type { ImportFormat } from "./components/KifuImportDialog";
 import { MoveHistory } from "./components/MoveHistory";
+import { PlaybackControls } from "./components/PlaybackControls";
 import { PromotionDialog } from "./components/PromotionDialog";
 import { Button } from "./components/ui/button";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -28,6 +29,8 @@ function App() {
         historyCursor,
         promotionPending,
         resignedPlayer,
+        branchInfo,
+        isTsumeShogi,
         selectSquare,
         selectDropPiece,
         confirmPromotion,
@@ -42,6 +45,14 @@ function App() {
         goToMove,
         canUndo,
         canRedo,
+        navigateNext,
+        navigatePrevious,
+        navigateFirst,
+        navigateLast,
+        returnToMainLine,
+        isInBranch,
+        canNavigateNext,
+        canNavigatePrevious,
     } = useGameStore();
 
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
@@ -62,6 +73,11 @@ function App() {
             }
         },
         onEnter: promotionPending ? () => confirmPromotion(true) : undefined,
+        onNavigateNext: canNavigateNext() ? navigateNext : undefined,
+        onNavigatePrevious: canNavigatePrevious() ? navigatePrevious : undefined,
+        onNavigateFirst: navigateFirst,
+        onNavigateLast: navigateLast,
+        onReturnToMainLine: isInBranch() ? returnToMainLine : undefined,
     });
 
     const handleImport = (moves: Move[], format: ImportFormat, content?: string) => {
@@ -128,16 +144,25 @@ function App() {
                                     moveHistory={moveHistory}
                                     historyCursor={historyCursor}
                                     resignedPlayer={resignedPlayer}
+                                    isTsumeShogi={isTsumeShogi}
                                     onReset={resetGame}
                                     onResign={resign}
+                                />
+                                <PlaybackControls
+                                    canNavigateNext={canNavigateNext()}
+                                    canNavigatePrevious={canNavigatePrevious()}
+                                    isInBranch={isInBranch()}
+                                    onNavigateFirst={navigateFirst}
+                                    onNavigatePrevious={navigatePrevious}
+                                    onNavigateNext={navigateNext}
+                                    onNavigateLast={navigateLast}
+                                    onReturnToMainLine={returnToMainLine}
                                 />
                                 <MoveHistory
                                     moveHistory={moveHistory}
                                     historyCursor={historyCursor}
-                                    canUndo={canUndo()}
-                                    canRedo={canRedo()}
-                                    onUndo={undo}
-                                    onRedo={redo}
+                                    isInBranch={isInBranch()}
+                                    branchPoint={branchInfo?.branchPoint}
                                     onGoToMove={goToMove}
                                 />
                             </div>
@@ -195,16 +220,25 @@ function App() {
                             moveHistory={moveHistory}
                             historyCursor={historyCursor}
                             resignedPlayer={resignedPlayer}
+                            isTsumeShogi={isTsumeShogi}
                             onReset={resetGame}
                             onResign={resign}
+                        />
+                        <PlaybackControls
+                            canNavigateNext={canNavigateNext()}
+                            canNavigatePrevious={canNavigatePrevious()}
+                            isInBranch={isInBranch()}
+                            onNavigateFirst={navigateFirst}
+                            onNavigatePrevious={navigatePrevious}
+                            onNavigateNext={navigateNext}
+                            onNavigateLast={navigateLast}
+                            onReturnToMainLine={returnToMainLine}
                         />
                         <MoveHistory
                             moveHistory={moveHistory}
                             historyCursor={historyCursor}
-                            canUndo={canUndo()}
-                            canRedo={canRedo()}
-                            onUndo={undo}
-                            onRedo={redo}
+                            isInBranch={isInBranch()}
+                            branchPoint={branchInfo?.branchPoint}
                             onGoToMove={goToMove}
                         />
                     </div>

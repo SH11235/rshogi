@@ -6,6 +6,11 @@ interface KeyboardShortcutsConfig {
     onReset?: () => void;
     onEscape?: () => void;
     onEnter?: () => void;
+    onNavigateNext?: () => void;
+    onNavigatePrevious?: () => void;
+    onNavigateFirst?: () => void;
+    onNavigateLast?: () => void;
+    onReturnToMainLine?: () => void;
 }
 
 /**
@@ -62,6 +67,51 @@ export function useKeyboardShortcuts(config: KeyboardShortcutsConfig) {
             if (event.key === "Enter" && config.onEnter) {
                 event.preventDefault();
                 config.onEnter();
+                return;
+            }
+
+            // ArrowRight or Right: 次の手へ
+            if (
+                (event.key === "ArrowRight" || event.key === "Right") &&
+                !event.ctrlKey &&
+                !event.altKey &&
+                config.onNavigateNext
+            ) {
+                event.preventDefault();
+                config.onNavigateNext();
+                return;
+            }
+
+            // ArrowLeft or Left: 前の手へ
+            if (
+                (event.key === "ArrowLeft" || event.key === "Left") &&
+                !event.ctrlKey &&
+                !event.altKey &&
+                config.onNavigatePrevious
+            ) {
+                event.preventDefault();
+                config.onNavigatePrevious();
+                return;
+            }
+
+            // Home: 最初へ
+            if (event.key === "Home" && !event.ctrlKey && !event.altKey && config.onNavigateFirst) {
+                event.preventDefault();
+                config.onNavigateFirst();
+                return;
+            }
+
+            // End: 最後へ
+            if (event.key === "End" && !event.ctrlKey && !event.altKey && config.onNavigateLast) {
+                event.preventDefault();
+                config.onNavigateLast();
+                return;
+            }
+
+            // M: 本譜に戻る
+            if (event.key === "m" && !event.ctrlKey && !event.altKey && config.onReturnToMainLine) {
+                event.preventDefault();
+                config.onReturnToMainLine();
                 return;
             }
         };
