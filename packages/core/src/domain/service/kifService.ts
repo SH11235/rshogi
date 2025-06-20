@@ -3,7 +3,8 @@ import type { Board } from "../model/board";
 import { getPiece } from "../model/board";
 import type { Move } from "../model/move";
 import type { PieceType, Player } from "../model/piece";
-import type { Square } from "../model/square";
+import { convertToJapaneseName } from "../model/piece";
+import type { Column, Row, Square } from "../model/square";
 import {
     fullWidthToHalfWidth,
     kanjiToNumber,
@@ -12,6 +13,7 @@ import {
     pieceTypeToKanji,
 } from "../utils/notation";
 import { applyMove, generateMoves, initialHands } from "./moveService";
+import type { Hands } from "./moveService";
 
 /**
  * KIF形式の棋譜エクスポート/インポート機能
@@ -34,14 +36,23 @@ function formatMoveForKif(move: Move, moveIndex: number): string {
 
     if (move.type === "drop") {
         const pieceName = pieceTypeToKanji(move.piece.type);
-        return `${moveNumber.toString().padStart(3)} ${move.to.column}${numberToKanji(move.to.row)}${pieceName}打`;
+        const toCol = fullWidthNumber(move.to.column);
+        const toRow = numberToKanji(move.to.row);
+        return `${moveNumber.toString().padStart(4)} ${toCol}${toRow}${pieceName}打`;
     }
 
     const pieceName = pieceTypeToKanji(move.piece.type);
-    const capture = move.captured ? "取" : "";
+    const toCol = fullWidthNumber(move.to.column);
+    const toRow = numberToKanji(move.to.row);
+    const fromStr = `(${move.from.column}${move.from.row})`;
     const promotion = move.promote ? "成" : "";
 
-    return `${moveNumber.toString().padStart(3)} ${move.to.column}${numberToKanji(move.to.row)}${pieceName}${capture}${promotion}`;
+    return `${moveNumber.toString().padStart(4)} ${toCol}${toRow}${pieceName}${promotion}${fromStr}`;
+}
+
+function fullWidthNumber(num: number): string {
+    const fullWidthNumbers = ["０", "１", "２", "３", "４", "５", "６", "７", "８", "９"];
+    return fullWidthNumbers[num];
 }
 
 /**
@@ -181,16 +192,189 @@ function inferSourceFromKifMove(
 }
 
 /**
+ * KIF形式から初期局面情報を解析
+ */
+function parseInitialPosition(lines: string[]): {
+    board: Board;
+    hands: Hands;
+    foundPosition: boolean;
+} {
+    let board = modernInitialBoard;
+    const hands = initialHands();
+    let foundPosition = false;
+    let inBoardSection = false;
+    const boardLines: string[] = [];
+
+    for (const line of lines) {
+        // コメント行の場合は、# を除去
+        const cleanLine = line.startsWith("#") ? line.substring(1).trim() : line;
+        const trimmedLine = cleanLine.trim();
+
+        // 持駒情報の解析
+        if (trimmedLine.startsWith("先手の持駒：") || trimmedLine.startsWith("下手の持駒：")) {
+            foundPosition = true;
+            const piecesStr = trimmedLine.split("：")[1];
+            if (piecesStr && piecesStr !== "なし") {
+                const pieces = piecesStr.trim().split(/\s+/);
+                for (const piece of pieces) {
+                    const match = piece.match(/^(\d*)(.+)$/);
+                    if (match) {
+                        const [, countStr, pieceKanji] = match;
+                        const count = countStr ? Number.parseInt(countStr, 10) : 1;
+                        const pieceType = kanjiToPieceType(pieceKanji);
+                        if (pieceType) {
+                            const japaneseName = convertToJapaneseName(pieceType);
+                            hands.black[japaneseName] += count;
+                        }
+                    }
+                }
+            }
+        } else if (
+            trimmedLine.startsWith("後手の持駒：") ||
+            trimmedLine.startsWith("上手の持駒：")
+        ) {
+            foundPosition = true;
+            const piecesStr = trimmedLine.split("：")[1];
+            if (piecesStr && piecesStr !== "なし") {
+                const pieces = piecesStr.trim().split(/\s+/);
+                for (const piece of pieces) {
+                    const match = piece.match(/^(\d*)(.+)$/);
+                    if (match) {
+                        const [, countStr, pieceKanji] = match;
+                        const count = countStr ? Number.parseInt(countStr, 10) : 1;
+                        const pieceType = kanjiToPieceType(pieceKanji);
+                        if (pieceType) {
+                            const japaneseName = convertToJapaneseName(pieceType);
+                            hands.white[japaneseName] += count;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 盤面情報の解析（BOD形式）- コメント行も含む
+        if (
+            trimmedLine.includes("９ ８ ７ ６ ５ ４ ３ ２ １") ||
+            line.includes("９ ８ ７ ６ ５ ４ ３ ２ １")
+        ) {
+            inBoardSection = true;
+            foundPosition = true;
+            board = {} as Board; // 盤面をクリア
+            continue;
+        }
+
+        if (inBoardSection && line.includes("|")) {
+            // コメント行から盤面情報を抽出
+            const boardLine = line.includes("#") ? line.substring(line.indexOf("|")) : line;
+            if (boardLine.includes("|") && boardLine.lastIndexOf("|") > boardLine.indexOf("|")) {
+                boardLines.push(boardLine);
+            }
+
+            if (boardLines.length === 9) {
+                // 9行分の盤面情報を解析
+                for (let row = 0; row < 9; row++) {
+                    const line = boardLines[row];
+                    // | ・ ・ ・ ・ ・ ・ ・ ・v玉|二 のような形式
+                    const content = line.substring(line.indexOf("|") + 1, line.lastIndexOf("|"));
+
+                    // 各マスの内容を解析（2文字または3文字単位）
+                    const cells: string[] = [];
+                    let i = 0;
+                    while (i < content.length) {
+                        // スペースをスキップ
+                        if (content[i] === " " || content[i] === "　") {
+                            i++;
+                            continue;
+                        }
+
+                        // ・（空マス）の場合
+                        if (content[i] === "・") {
+                            cells.push("・");
+                            i++;
+                        }
+                        // v（後手の駒）の場合
+                        else if (content[i] === "v") {
+                            // v + 駒の漢字を取得
+                            if (i + 1 < content.length) {
+                                cells.push(content.substring(i, i + 2));
+                                i += 2;
+                            } else {
+                                i++;
+                            }
+                        }
+                        // 先手の駒の場合
+                        else if (content[i] !== "|") {
+                            // 駒の漢字を取得
+                            cells.push(content[i]);
+                            i++;
+                        } else {
+                            i++;
+                        }
+                    }
+
+                    for (let col = 0; col < cells.length && col < 9; col++) {
+                        const cell = cells[col];
+                        if (cell && cell !== "・") {
+                            const isWhite = cell.startsWith("v");
+                            const pieceStr = isWhite ? cell.substring(1) : cell;
+                            const promoted = pieceStr.startsWith("+");
+                            const pieceKanji = promoted ? pieceStr.substring(1) : pieceStr;
+                            const pieceType = kanjiToPieceType(pieceKanji);
+
+                            if (pieceType) {
+                                const square: Square = {
+                                    row: (row + 1) as Row,
+                                    column: (9 - col) as Column,
+                                };
+                                board[`${square.row}${square.column}`] = {
+                                    type: pieceType,
+                                    owner: isWhite ? "white" : "black",
+                                    promoted,
+                                };
+                            }
+                        }
+                    }
+                }
+                inBoardSection = false;
+            }
+        }
+
+        // 手数行に到達したら終了
+        if (trimmedLine.includes("手数----指手")) {
+            break;
+        }
+    }
+
+    return { board, hands, foundPosition };
+}
+
+/**
+ * KIF形式の棋譜解析結果
+ */
+export interface KifParseResult {
+    moves: Move[];
+    initialBoard?: Board;
+    initialHands?: Hands;
+}
+
+/**
  * KIF形式の棋譜からMove配列を解析
  * 移動元推定機能付き
  */
-export function parseKifMoves(kifContent: string): Move[] {
+export function parseKifMoves(kifContent: string): KifParseResult {
     const lines = kifContent.split("\n");
     const moves: Move[] = [];
 
+    // 初期局面を解析
+    const {
+        board: initialBoard,
+        hands: initialHandsData,
+        foundPosition,
+    } = parseInitialPosition(lines);
+
     // 現在の盤面状態を管理（移動元推定のため）
-    let currentBoard = modernInitialBoard;
-    let currentHands = initialHands();
+    let currentBoard = foundPosition ? initialBoard : modernInitialBoard;
+    let currentHands = foundPosition ? initialHandsData : initialHands();
     let currentPlayer: Player = "black";
 
     // 手数行を探す
@@ -260,14 +444,21 @@ export function parseKifMoves(kifContent: string): Move[] {
                     };
                     moves.push(move);
 
-                    // 盤面状態を更新
-                    try {
-                        const result = applyMove(currentBoard, currentHands, currentPlayer, move);
-                        currentBoard = result.board;
-                        currentHands = result.hands;
-                        currentPlayer = result.nextTurn;
-                    } catch (error) {
-                        console.error("駒打ちの適用に失敗:", error);
+                    // 盤面状態を更新（初期局面がある場合のみ検証）
+                    if (!foundPosition) {
+                        try {
+                            const result = applyMove(
+                                currentBoard,
+                                currentHands,
+                                currentPlayer,
+                                move,
+                            );
+                            currentBoard = result.board;
+                            currentHands = result.hands;
+                            currentPlayer = result.nextTurn;
+                        } catch (error) {
+                            console.error("駒打ちの適用に失敗:", error);
+                        }
                     }
                 } else {
                     // 通常の移動 - 移動元を推定
@@ -298,19 +489,21 @@ export function parseKifMoves(kifContent: string): Move[] {
                             };
                             moves.push(move);
 
-                            // 盤面状態を更新
-                            try {
-                                const result = applyMove(
-                                    currentBoard,
-                                    currentHands,
-                                    currentPlayer,
-                                    move,
-                                );
-                                currentBoard = result.board;
-                                currentHands = result.hands;
-                                currentPlayer = result.nextTurn;
-                            } catch (error) {
-                                console.error("通常移動の適用に失敗:", error);
+                            // 盤面状態を更新（初期局面がある場合のみ検証）
+                            if (!foundPosition) {
+                                try {
+                                    const result = applyMove(
+                                        currentBoard,
+                                        currentHands,
+                                        currentPlayer,
+                                        move,
+                                    );
+                                    currentBoard = result.board;
+                                    currentHands = result.hands;
+                                    currentPlayer = result.nextTurn;
+                                } catch (error) {
+                                    console.error("通常移動の適用に失敗:", error);
+                                }
                             }
                         } else {
                             console.warn("移動元に駒が見つかりません:", from);
@@ -323,7 +516,11 @@ export function parseKifMoves(kifContent: string): Move[] {
         }
     }
 
-    return moves;
+    return {
+        moves,
+        initialBoard: foundPosition ? initialBoard : undefined,
+        initialHands: foundPosition ? initialHandsData : undefined,
+    };
 }
 
 /**

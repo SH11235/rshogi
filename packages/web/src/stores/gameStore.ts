@@ -25,6 +25,8 @@ import {
     isInCheck,
     modernInitialBoard,
     mustPromote,
+    parseKifMoves,
+    parseSfen,
     reconstructGameState,
 } from "shogi-core";
 import { create } from "zustand";
@@ -79,7 +81,8 @@ interface GameState {
     clearSelections: () => void;
     resetGame: () => void;
     resign: () => void;
-    importGame: (moves: Move[]) => void;
+    importGame: (moves: Move[], kifContent?: string) => void;
+    importSfen: (sfen: string) => void;
     // 履歴操作機能
     undo: () => void;
     redo: () => void;
@@ -490,11 +493,25 @@ export const useGameStore = create<GameState>((set, get) => ({
         playGameSound("gameEnd");
     },
 
-    importGame: (moves: Move[]) => {
+    importGame: (moves: Move[], kifContent?: string) => {
+        // KIFコンテンツがある場合は初期局面を解析
+        let initialBoard = modernInitialBoard;
+        let initialHandsData = structuredClone(initialHands());
+
+        if (kifContent) {
+            const parseResult = parseKifMoves(kifContent);
+            if (parseResult.initialBoard) {
+                initialBoard = parseResult.initialBoard;
+            }
+            if (parseResult.initialHands) {
+                initialHandsData = parseResult.initialHands;
+            }
+        }
+
         // ゲームをリセットしてから棋譜を読み込む
         set({
-            board: modernInitialBoard,
-            hands: structuredClone(initialHands()),
+            board: initialBoard,
+            hands: initialHandsData,
             currentPlayer: "black",
             selectedSquare: null,
             selectedDropPiece: null,
@@ -509,16 +526,79 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // 最終局面まで再構築
         if (moves.length > 0) {
-            const { board, hands, currentPlayer, gameStatus } = reconstructGameState(
-                moves,
-                moves.length - 1,
-            );
+            // 初期局面から手を適用していく
+            let board = initialBoard;
+            let hands = initialHandsData;
+            let currentPlayer: Player = "black";
+
+            for (const move of moves) {
+                try {
+                    const result = applyMove(board, hands, currentPlayer, move);
+                    board = result.board;
+                    hands = result.hands;
+                    currentPlayer = result.nextTurn;
+                } catch (error) {
+                    console.error("Failed to apply move:", error);
+                    break;
+                }
+            }
+
+            // ゲーム状態の判定
+            let gameStatus: GameStatus = "playing";
+            if (isInCheck(board, currentPlayer)) {
+                if (isCheckmate(board, hands, currentPlayer)) {
+                    gameStatus = "checkmate";
+                } else {
+                    gameStatus = "check";
+                }
+            }
+
             set({
                 board,
                 hands,
                 currentPlayer,
                 gameStatus,
             });
+        }
+    },
+
+    importSfen: (sfen: string) => {
+        try {
+            // SFEN形式から局面を解析
+            const { board, hands, currentPlayer } = parseSfen(sfen);
+
+            // ゲーム状態の判定
+            let gameStatus: GameStatus = "playing";
+
+            // 王手判定
+            if (isInCheck(board, currentPlayer)) {
+                // 詰み判定
+                if (isCheckmate(board, hands, currentPlayer)) {
+                    gameStatus = "checkmate";
+                } else {
+                    gameStatus = "check";
+                }
+            }
+
+            // 局面を設定（履歴はクリア）
+            set({
+                board,
+                hands,
+                currentPlayer,
+                selectedSquare: null,
+                selectedDropPiece: null,
+                validMoves: [],
+                validDropSquares: [],
+                moveHistory: [],
+                historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+                gameStatus,
+                promotionPending: null,
+                resignedPlayer: null,
+                timer: createInitialTimerState(),
+            });
+        } catch (error) {
+            console.error("Failed to import SFEN:", error);
+            throw error;
         }
     },
 

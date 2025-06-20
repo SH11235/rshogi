@@ -1,10 +1,16 @@
 import "./App.css";
+import { useState } from "react";
+import type { Move } from "shogi-core";
 import { AudioTestPanel } from "./components/AudioTestPanel";
 import { Board } from "./components/Board";
 import { CapturedPieces } from "./components/CapturedPieces";
 import { GameInfo } from "./components/GameInfo";
+import { KifuExportDialog } from "./components/KifuExportDialog";
+import { KifuImportDialog } from "./components/KifuImportDialog";
+import type { ImportFormat } from "./components/KifuImportDialog";
 import { MoveHistory } from "./components/MoveHistory";
 import { PromotionDialog } from "./components/PromotionDialog";
+import { Button } from "./components/ui/button";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
 
@@ -30,12 +36,16 @@ function App() {
         resetGame,
         resign,
         importGame,
+        importSfen,
         undo,
         redo,
         goToMove,
         canUndo,
         canRedo,
     } = useGameStore();
+
+    const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
+    const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
 
     // キーボードショートカットの設定
     useKeyboardShortcuts({
@@ -54,12 +64,37 @@ function App() {
         onEnter: promotionPending ? () => confirmPromotion(true) : undefined,
     });
 
+    const handleImport = (moves: Move[], format: ImportFormat, content?: string) => {
+        if (format === "kif") {
+            importGame(moves, content);
+        } else if (format === "sfen" && content) {
+            importSfen(content);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-100 py-4 sm:py-8">
             <div className="container mx-auto px-2 sm:px-4">
-                <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-center mb-4 sm:mb-8">
-                    将棋
-                </h1>
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-4 sm:mb-8">
+                    <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold">将棋</h1>
+                    <div className="flex gap-2">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setIsImportDialogOpen(true)}
+                        >
+                            📤 棋譜読込
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setIsExportDialogOpen(true)}
+                            disabled={moveHistory.length === 0}
+                        >
+                            📥 棋譜保存
+                        </Button>
+                    </div>
+                </div>
 
                 {/* モバイル向け: 縦配置メインレイアウト */}
                 <div className="flex flex-col lg:hidden space-y-4">
@@ -95,7 +130,6 @@ function App() {
                                     resignedPlayer={resignedPlayer}
                                     onReset={resetGame}
                                     onResign={resign}
-                                    onImportGame={importGame}
                                 />
                                 <MoveHistory
                                     moveHistory={moveHistory}
@@ -163,7 +197,6 @@ function App() {
                             resignedPlayer={resignedPlayer}
                             onReset={resetGame}
                             onResign={resign}
-                            onImportGame={importGame}
                         />
                         <MoveHistory
                             moveHistory={moveHistory}
@@ -191,6 +224,22 @@ function App() {
                 <div className="mt-8">
                     <AudioTestPanel />
                 </div>
+
+                {/* 棋譜インポート・エクスポートダイアログ */}
+                <KifuImportDialog
+                    open={isImportDialogOpen}
+                    onOpenChange={setIsImportDialogOpen}
+                    onImport={handleImport}
+                />
+                <KifuExportDialog
+                    open={isExportDialogOpen}
+                    onOpenChange={setIsExportDialogOpen}
+                    moveHistory={moveHistory}
+                    currentBoard={board}
+                    currentHands={hands}
+                    currentPlayer={currentPlayer}
+                    historyCursor={historyCursor}
+                />
             </div>
         </div>
     );

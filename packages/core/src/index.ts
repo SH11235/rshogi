@@ -13,6 +13,7 @@ export * from "./domain/service/generateDropMoves";
 export * from "./domain/service/legalMoves";
 export * from "./domain/service/promotionService";
 export * from "./domain/service/kifService";
+export * from "./domain/service/sfenService";
 export {
     type GameState,
     type GameStatus,

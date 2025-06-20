@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Move } from "shogi-core";
+import { parseKifMoves } from "shogi-core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useGameStore } from "./gameStore";
 
@@ -123,5 +127,99 @@ describe("gameStore checkmate to win status functionality", () => {
         useGameStore.setState({ gameStatus: "white_win" });
         store = useGameStore.getState();
         expect(store.gameStatus).toBe("white_win");
+    });
+});
+
+describe("gameStore tsume-shogi import functionality", () => {
+    beforeEach(() => {
+        useGameStore.getState().resetGame();
+    });
+
+    it("should parse tsume-shogi KIF with initial position", () => {
+        // Read the tsume-shogi test file
+        const kifContent = readFileSync(
+            join(__dirname, "../../test-data/tsume-shogi.kif"),
+            "utf-8",
+        );
+
+        // Parse directly using parseKifMoves to test the parser
+        const parseResult = parseKifMoves(kifContent);
+
+        // Verify initial position was parsed
+        expect(parseResult.initialBoard).toBeDefined();
+        expect(parseResult.initialHands).toBeDefined();
+
+        // Debug: log what we got
+        console.log("Parsed board keys:", Object.keys(parseResult.initialBoard || {}));
+        console.log("Board at 12:", parseResult.initialBoard?.["12"]);
+        console.log("Board at 21:", parseResult.initialBoard?.["21"]);
+
+        // Should have white king at position 21 (row 2, column 1)
+        expect(parseResult.initialBoard?.["21"]).toEqual({
+            type: "gyoku",
+            owner: "white",
+            promoted: false,
+        });
+
+        // Black should have 1 silver and 1 gold in initial hands
+        expect(parseResult.initialHands.black.銀).toBe(1);
+        expect(parseResult.initialHands.black.金).toBe(1);
+
+        // Should parse 3 moves
+        expect(parseResult.moves).toHaveLength(3);
+    });
+
+    it("should import tsume-shogi game with initial position and moves", () => {
+        // Create a simple tsume-shogi position manually
+        const initialMoves: Move[] = [];
+        const kifContent = `# KIF形式棋譜ファイル
+# 先手の持駒：銀 金
+# 後手の持駒：なし
+#   ９ ８ ７ ６ ５ ４ ３ ２ １
+# +---------------------------+
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|一
+# | ・ ・ ・ ・ ・ ・ ・ ・v玉|二
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|三
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|四
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|五
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|六
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|七
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|八
+# | ・ ・ ・ ・ ・ ・ ・ ・ ・|九
+# +---------------------------+
+
+手数----指手---------消費時間--`;
+
+        const store = useGameStore.getState();
+
+        // Import with empty moves but with KIF content
+        store.importGame(initialMoves, kifContent);
+
+        // Get updated state
+        const updatedStore = useGameStore.getState();
+
+        // Verify initial position was set correctly
+        // White king should be at position 21 (row 2, column 1)
+        expect(updatedStore.board["21"]).toEqual({
+            type: "gyoku",
+            owner: "white",
+            promoted: false,
+        });
+
+        // Verify hands
+        expect(updatedStore.hands.black.銀).toBe(1);
+        expect(updatedStore.hands.black.金).toBe(1);
+
+        // Now test that we can drop a piece
+        store.selectDropPiece("silver", "black");
+        store.makeDrop("silver", { row: 2, column: 3 });
+
+        const afterDropState = useGameStore.getState();
+        expect(afterDropState.board["23"]).toEqual({
+            type: "silver",
+            owner: "black",
+            promoted: false,
+        });
+        expect(afterDropState.hands.black.銀).toBe(0);
     });
 });
