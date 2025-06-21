@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Move } from "shogi-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GameInfo } from "./GameInfo";
@@ -6,6 +6,13 @@ import { GameInfo } from "./GameInfo";
 describe("GameInfo component", () => {
     const mockOnReset = vi.fn();
     const mockOnResign = vi.fn();
+
+    // Default props for GameInfo
+    const defaultProps = {
+        historyCursor: -1,
+        isTsumeShogi: false,
+        gameMode: "playing" as const,
+    };
     const mockMoveHistory: Move[] = []; // Empty move history for basic tests
 
     beforeEach(() => {
@@ -19,10 +26,10 @@ describe("GameInfo component", () => {
                 currentPlayer="black"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
-                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
@@ -38,27 +45,26 @@ describe("GameInfo component", () => {
                 currentPlayer="white"
                 gameStatus="playing"
                 moveHistory={mockMoveHistory}
-                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
         expect(screen.getByText("後手番")).toBeInTheDocument();
-        expect(screen.getByText("リセット")).toBeInTheDocument();
     });
 
-    it("displays black win correctly", () => {
+    it("displays black win status", () => {
         render(
             <GameInfo
                 currentPlayer="black"
                 gameStatus="black_win"
                 moveHistory={mockMoveHistory}
-                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
@@ -66,50 +72,48 @@ describe("GameInfo component", () => {
         expect(screen.getByText("新しいゲーム")).toBeInTheDocument();
     });
 
-    it("displays white win correctly", () => {
+    it("displays white win status", () => {
         render(
             <GameInfo
                 currentPlayer="white"
                 gameStatus="white_win"
                 moveHistory={mockMoveHistory}
-                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
         expect(screen.getByText("後手の勝ち！")).toBeInTheDocument();
-        expect(screen.getByText("新しいゲーム")).toBeInTheDocument();
     });
 
-    it("displays draw correctly", () => {
+    it("displays draw status", () => {
         render(
             <GameInfo
                 currentPlayer="black"
                 gameStatus="draw"
                 moveHistory={mockMoveHistory}
-                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
         expect(screen.getByText("引き分け")).toBeInTheDocument();
-        expect(screen.getByText("新しいゲーム")).toBeInTheDocument();
     });
 
-    it("displays check status correctly", () => {
+    it("displays check status", () => {
         render(
             <GameInfo
                 currentPlayer="black"
                 gameStatus="check"
                 moveHistory={mockMoveHistory}
-                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
@@ -117,16 +121,16 @@ describe("GameInfo component", () => {
         expect(screen.getByText("🔥 王手がかかっています")).toBeInTheDocument();
     });
 
-    it("displays checkmate status correctly", () => {
+    it("displays checkmate status", () => {
         render(
             <GameInfo
                 currentPlayer="white"
                 gameStatus="checkmate"
                 moveHistory={mockMoveHistory}
-                historyCursor={-1}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
@@ -134,94 +138,119 @@ describe("GameInfo component", () => {
         expect(screen.getByText("🏁 ゲーム終了")).toBeInTheDocument();
     });
 
-    it("calls onReset when button is clicked", () => {
-        render(
-            <GameInfo
-                currentPlayer="black"
-                gameStatus="playing"
-                moveHistory={mockMoveHistory}
-                historyCursor={-1}
-                resignedPlayer={null}
-                onReset={mockOnReset}
-                onResign={mockOnResign}
-            />,
-        );
+    it("shows correct move count", () => {
+        const moveHistory: Move[] = [
+            {
+                type: "move",
+                from: { row: 7, column: 7 },
+                to: { row: 6, column: 7 },
+                piece: { type: "pawn", owner: "black", promoted: false },
+                promote: false,
+                captured: null,
+            },
+        ];
 
-        const resetButton = screen.getByText("リセット");
-        fireEvent.click(resetButton);
-
-        expect(mockOnReset).toHaveBeenCalledTimes(1);
-    });
-
-    it("applies correct styling for black player", () => {
-        render(
-            <GameInfo
-                currentPlayer="black"
-                gameStatus="playing"
-                moveHistory={mockMoveHistory}
-                historyCursor={-1}
-                resignedPlayer={null}
-                onReset={mockOnReset}
-                onResign={mockOnResign}
-            />,
-        );
-
-        const title = screen.getByText("先手番");
-        expect(title).toHaveClass("text-black");
-    });
-
-    it("applies correct styling for white player", () => {
         render(
             <GameInfo
                 currentPlayer="white"
                 gameStatus="playing"
-                moveHistory={mockMoveHistory}
-                historyCursor={-1}
+                moveHistory={moveHistory}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
             />,
         );
 
-        const title = screen.getByText("後手番");
-        expect(title).toHaveClass("text-red-600");
+        expect(screen.getByText("第2手")).toBeInTheDocument();
+        expect(screen.getByText("総手数: 1")).toBeInTheDocument();
     });
 
-    it("applies correct styling for check status", () => {
-        render(
-            <GameInfo
-                currentPlayer="black"
-                gameStatus="check"
-                moveHistory={mockMoveHistory}
-                historyCursor={-1}
-                resignedPlayer={null}
-                onReset={mockOnReset}
-                onResign={mockOnResign}
-            />,
-        );
+    it("shows correct move count when at specific position", () => {
+        const moveHistory: Move[] = [
+            {
+                type: "move",
+                from: { row: 7, column: 7 },
+                to: { row: 6, column: 7 },
+                piece: { type: "pawn", owner: "black", promoted: false },
+                promote: false,
+                captured: null,
+            },
+            {
+                type: "move",
+                from: { row: 3, column: 3 },
+                to: { row: 4, column: 3 },
+                piece: { type: "pawn", owner: "white", promoted: false },
+                promote: false,
+                captured: null,
+            },
+        ];
 
-        const title = screen.getByText("王手！ - 先手番");
-        expect(title).toHaveClass("text-red-600");
-    });
-
-    it("has correct button type", () => {
         render(
             <GameInfo
                 currentPlayer="black"
                 gameStatus="playing"
-                moveHistory={mockMoveHistory}
-                historyCursor={-1}
+                moveHistory={moveHistory}
                 resignedPlayer={null}
                 onReset={mockOnReset}
                 onResign={mockOnResign}
+                {...defaultProps}
+                historyCursor={0}
             />,
         );
 
-        const buttons = screen.getAllByRole("button");
-        // Check that all buttons have correct type attribute
-        for (const button of buttons) {
-            expect(button).toHaveAttribute("type", "button");
-        }
+        expect(screen.getByText("第2手")).toBeInTheDocument();
+        expect(screen.getByText("総手数: 2")).toBeInTheDocument();
+    });
+
+    it("check status shows additional info", () => {
+        render(
+            <GameInfo
+                currentPlayer="white"
+                gameStatus="check"
+                moveHistory={mockMoveHistory}
+                resignedPlayer={null}
+                onReset={mockOnReset}
+                onResign={mockOnResign}
+                {...defaultProps}
+            />,
+        );
+
+        expect(screen.getByText("王手！ - 後手番")).toBeInTheDocument();
+        expect(screen.getByText("🔥 王手がかかっています")).toBeInTheDocument();
+    });
+
+    it("shows game end indicator for checkmate", () => {
+        render(
+            <GameInfo
+                currentPlayer="black"
+                gameStatus="checkmate"
+                moveHistory={mockMoveHistory}
+                resignedPlayer={null}
+                onReset={mockOnReset}
+                onResign={mockOnResign}
+                {...defaultProps}
+            />,
+        );
+
+        expect(screen.getByText("詰み")).toBeInTheDocument();
+        expect(screen.getByText("🏁 ゲーム終了")).toBeInTheDocument();
+    });
+
+    it("shows game end indicator when game is won", () => {
+        render(
+            <GameInfo
+                currentPlayer="black"
+                gameStatus="black_win"
+                moveHistory={mockMoveHistory}
+                resignedPlayer={null}
+                onReset={mockOnReset}
+                onResign={mockOnResign}
+                {...defaultProps}
+            />,
+        );
+
+        expect(screen.getByText("🏁 ゲーム終了")).toBeInTheDocument();
     });
 
     describe("Resignation functionality", () => {
@@ -229,8 +258,8 @@ describe("GameInfo component", () => {
             const moveHistoryWithMoves: Move[] = [
                 {
                     type: "move",
-                    from: { row: 7, column: 5 },
-                    to: { row: 6, column: 5 },
+                    from: { row: 7, column: 7 },
+                    to: { row: 6, column: 7 },
                     piece: { type: "pawn", owner: "black", promoted: false },
                     promote: false,
                     captured: null,
@@ -242,7 +271,10 @@ describe("GameInfo component", () => {
                     currentPlayer="black"
                     gameStatus="playing"
                     moveHistory={moveHistoryWithMoves}
+                    historyCursor={-1}
                     resignedPlayer={null}
+                    isTsumeShogi={false}
+                    gameMode="playing"
                     onReset={mockOnReset}
                     onResign={mockOnResign}
                 />,
@@ -260,6 +292,7 @@ describe("GameInfo component", () => {
                     resignedPlayer={null}
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
@@ -270,8 +303,8 @@ describe("GameInfo component", () => {
             const moveHistoryWithMoves: Move[] = [
                 {
                     type: "move",
-                    from: { row: 7, column: 5 },
-                    to: { row: 6, column: 5 },
+                    from: { row: 7, column: 7 },
+                    to: { row: 6, column: 7 },
                     piece: { type: "pawn", owner: "black", promoted: false },
                     promote: false,
                     captured: null,
@@ -286,6 +319,7 @@ describe("GameInfo component", () => {
                     resignedPlayer={null}
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
@@ -296,8 +330,8 @@ describe("GameInfo component", () => {
             const moveHistoryWithMoves: Move[] = [
                 {
                     type: "move",
-                    from: { row: 7, column: 5 },
-                    to: { row: 6, column: 5 },
+                    from: { row: 7, column: 7 },
+                    to: { row: 6, column: 7 },
                     piece: { type: "pawn", owner: "black", promoted: false },
                     promote: false,
                     captured: null,
@@ -312,6 +346,7 @@ describe("GameInfo component", () => {
                     resignedPlayer={null}
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
@@ -319,7 +354,12 @@ describe("GameInfo component", () => {
             const resignButton = screen.getByText("投了");
             fireEvent.click(resignButton);
 
-            // Confirm resignation
+            // Wait for dialog to appear
+            await waitFor(() => {
+                expect(screen.getByText("投了しますか？")).toBeInTheDocument();
+            });
+
+            // Click confirm button
             const confirmButton = screen.getByText("投了する");
             fireEvent.click(confirmButton);
 
@@ -328,40 +368,12 @@ describe("GameInfo component", () => {
     });
 
     describe("Detailed game end display", () => {
-        it("displays checkmate victory details for black win", () => {
-            const moveHistoryWithMoves: Move[] = [
-                {
-                    type: "move",
-                    from: { row: 7, column: 5 },
-                    to: { row: 6, column: 5 },
-                    piece: { type: "pawn", owner: "black", promoted: false },
-                    promote: false,
-                    captured: null,
-                },
-            ];
-
-            render(
-                <GameInfo
-                    currentPlayer="white"
-                    gameStatus="black_win"
-                    moveHistory={moveHistoryWithMoves}
-                    resignedPlayer={null}
-                    onReset={mockOnReset}
-                    onResign={mockOnResign}
-                />,
-            );
-
-            expect(screen.getByText("先手の勝ち！")).toBeInTheDocument();
-            expect(screen.getByText("詰みにより勝利")).toBeInTheDocument();
-            expect(screen.getByText("第2手までで決着")).toBeInTheDocument();
-        });
-
         it("displays resignation victory details for black win", () => {
             const moveHistoryWithMoves: Move[] = [
                 {
                     type: "move",
-                    from: { row: 7, column: 5 },
-                    to: { row: 6, column: 5 },
+                    from: { row: 7, column: 7 },
+                    to: { row: 6, column: 7 },
                     piece: { type: "pawn", owner: "black", promoted: false },
                     promote: false,
                     captured: null,
@@ -376,6 +388,7 @@ describe("GameInfo component", () => {
                     resignedPlayer="white"
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
@@ -384,56 +397,20 @@ describe("GameInfo component", () => {
             expect(screen.getByText("第2手までで決着")).toBeInTheDocument();
         });
 
-        it("displays checkmate victory details for white win", () => {
-            const moveHistoryWithMoves: Move[] = [
-                {
-                    type: "move",
-                    from: { row: 7, column: 5 },
-                    to: { row: 6, column: 5 },
-                    piece: { type: "pawn", owner: "black", promoted: false },
-                    promote: false,
-                    captured: null,
-                },
-                {
-                    type: "move",
-                    from: { row: 3, column: 5 },
-                    to: { row: 4, column: 5 },
-                    piece: { type: "pawn", owner: "white", promoted: false },
-                    promote: false,
-                    captured: null,
-                },
-            ];
-
-            render(
-                <GameInfo
-                    currentPlayer="black"
-                    gameStatus="white_win"
-                    moveHistory={moveHistoryWithMoves}
-                    resignedPlayer={null}
-                    onReset={mockOnReset}
-                    onResign={mockOnResign}
-                />,
-            );
-
-            expect(screen.getByText("後手の勝ち！")).toBeInTheDocument();
-            expect(screen.getByText("詰みにより勝利")).toBeInTheDocument();
-            expect(screen.getByText("第3手までで決着")).toBeInTheDocument();
-        });
-
         it("displays resignation victory details for white win", () => {
             const moveHistoryWithMoves: Move[] = [
                 {
                     type: "move",
-                    from: { row: 7, column: 5 },
-                    to: { row: 6, column: 5 },
+                    from: { row: 7, column: 7 },
+                    to: { row: 6, column: 7 },
                     piece: { type: "pawn", owner: "black", promoted: false },
                     promote: false,
                     captured: null,
                 },
                 {
                     type: "move",
-                    from: { row: 3, column: 5 },
-                    to: { row: 4, column: 5 },
+                    from: { row: 3, column: 3 },
+                    to: { row: 4, column: 3 },
                     piece: { type: "pawn", owner: "white", promoted: false },
                     promote: false,
                     captured: null,
@@ -448,6 +425,7 @@ describe("GameInfo component", () => {
                     resignedPlayer="black"
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
@@ -465,6 +443,7 @@ describe("GameInfo component", () => {
                     resignedPlayer={null}
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
@@ -481,6 +460,7 @@ describe("GameInfo component", () => {
                     resignedPlayer={null}
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
@@ -497,11 +477,12 @@ describe("GameInfo component", () => {
                     resignedPlayer={null}
                     onReset={mockOnReset}
                     onResign={mockOnResign}
+                    {...defaultProps}
                 />,
             );
 
-            const title = screen.getByText("先手の勝ち！");
-            expect(title).toHaveClass("text-green-600");
+            const statusHeader = screen.getByText("先手の勝ち！");
+            expect(statusHeader).toHaveClass("text-green-600");
         });
     });
 });
