@@ -117,8 +117,8 @@ function findPossibleSources(
             // この駒が指定した位置に移動できるかチェック
             const moves = generateMoves(board, from);
             const canMoveToTarget = moves.some((move) => {
-                const targetPiece = getPiece(board, to);
-                const hasCapture = !!targetPiece;
+                // generateMovesが返すmoveには既にcaptured情報が含まれている
+                const hasCapture = !!move.captured;
 
                 return (
                     move.to.row === to.row &&
@@ -444,25 +444,20 @@ export function parseKifMoves(kifContent: string): KifParseResult {
                     };
                     moves.push(move);
 
-                    // 盤面状態を更新（初期局面がある場合のみ検証）
-                    if (!foundPosition) {
-                        try {
-                            const result = applyMove(
-                                currentBoard,
-                                currentHands,
-                                currentPlayer,
-                                move,
-                            );
-                            currentBoard = result.board;
-                            currentHands = result.hands;
-                            currentPlayer = result.nextTurn;
-                        } catch (error) {
-                            console.error("駒打ちの適用に失敗:", error);
-                        }
+                    // 盤面状態を更新（移動元推定のために常に更新が必要）
+                    try {
+                        const result = applyMove(currentBoard, currentHands, currentPlayer, move);
+                        currentBoard = result.board;
+                        currentHands = result.hands;
+                        currentPlayer = result.nextTurn;
+                    } catch (error) {
+                        console.error("駒打ちの適用に失敗:", error);
                     }
                 } else {
                     // 通常の移動 - 移動元を推定
-                    const captured = action === "取";
+                    // まず移動先に駒があるかチェックして、capturedフラグを設定
+                    const targetPiece = getPiece(currentBoard, to);
+                    const captured = action === "取" || !!targetPiece;
                     const promote = action === "成";
 
                     const from = inferSourceFromKifMove(
@@ -489,21 +484,19 @@ export function parseKifMoves(kifContent: string): KifParseResult {
                             };
                             moves.push(move);
 
-                            // 盤面状態を更新（初期局面がある場合のみ検証）
-                            if (!foundPosition) {
-                                try {
-                                    const result = applyMove(
-                                        currentBoard,
-                                        currentHands,
-                                        currentPlayer,
-                                        move,
-                                    );
-                                    currentBoard = result.board;
-                                    currentHands = result.hands;
-                                    currentPlayer = result.nextTurn;
-                                } catch (error) {
-                                    console.error("通常移動の適用に失敗:", error);
-                                }
+                            // 盤面状態を更新（移動元推定のために常に更新が必要）
+                            try {
+                                const result = applyMove(
+                                    currentBoard,
+                                    currentHands,
+                                    currentPlayer,
+                                    move,
+                                );
+                                currentBoard = result.board;
+                                currentHands = result.hands;
+                                currentPlayer = result.nextTurn;
+                            } catch (error) {
+                                console.error("通常移動の適用に失敗:", error);
                             }
                         } else {
                             console.warn("移動元に駒が見つかりません:", from);

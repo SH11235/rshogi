@@ -92,12 +92,23 @@ interface PromotionPendingMove {
     piece: Piece;
 }
 
+// ゲームモードの型定義
+type GameMode = "playing" | "review" | "analysis";
+
 // 分岐情報の型定義
 interface BranchInfo {
     branchPoint: number; // 分岐開始点の手数
     originalMoves: Move[]; // 本譜の手順
     branchMoves: Move[]; // 分岐の手順
     isInBranch: boolean; // 現在分岐中かどうか
+}
+
+// 閲覧モードの基準局面
+interface ReviewBasePosition {
+    board: Board;
+    hands: Hands;
+    moveIndex: number;
+    currentPlayer: Player;
 }
 
 interface GameState {
@@ -118,6 +129,8 @@ interface GameState {
     initialBoard: Board; // 初期局面
     initialHandsData: Hands; // 初期持ち駒
     isTsumeShogi: boolean; // 詰将棋モードかどうか
+    gameMode: GameMode; // ゲームモード
+    reviewBasePosition: ReviewBasePosition | null; // 閲覧モードの基準局面
 
     // タイマー状態
     timer: TimerState;
@@ -149,6 +162,10 @@ interface GameState {
     isInBranch: () => boolean;
     canNavigateNext: () => boolean;
     canNavigatePrevious: () => boolean;
+    // モード管理機能
+    setGameMode: (mode: GameMode) => void;
+    startGameFromPosition: () => void;
+    returnToReviewMode: () => void;
 }
 
 // タイマーアクションをGameStateに統合
@@ -196,6 +213,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     initialBoard: modernInitialBoard,
     initialHandsData: structuredClone(initialHands()),
     isTsumeShogi: false,
+    gameMode: "playing",
+    reviewBasePosition: null,
     timer: createInitialTimerState(),
 
     selectSquare: (square: Square) => {
@@ -206,9 +225,15 @@ export const useGameStore = create<GameState>((set, get) => ({
             selectedDropPiece,
             validDropSquares,
             gameStatus,
+            gameMode,
         } = get();
 
-        // ゲーム終了時は操作不可
+        // 閲覧モードでは操作不可
+        if (gameMode === "review") {
+            return;
+        }
+
+        // ゲーム終了時は操作不可（対局・解析モードのみ）
         if (gameStatus !== "playing" && gameStatus !== "check") {
             return;
         }
@@ -312,7 +337,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     selectDropPiece: (pieceType: PieceType, player: Player) => {
-        const { board, hands, currentPlayer, gameStatus } = get();
+        const { board, hands, currentPlayer, gameStatus, gameMode } = get();
+
+        // 閲覧モードでは操作不可
+        if (gameMode === "review") {
+            return;
+        }
 
         // ゲーム終了時は操作不可
         if (gameStatus !== "playing" && gameStatus !== "check") {
@@ -344,7 +374,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     makeDrop: (pieceType: PieceType, to: Square) => {
-        const { board, hands, currentPlayer, moveHistory, historyCursor } = get();
+        const { board, hands, currentPlayer, moveHistory, historyCursor, gameMode } = get();
 
         try {
             const pieceNameMap: Record<PieceType, string> = {
@@ -395,6 +425,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             let newMoveHistory: Move[];
             let newBranchInfo = branchInfo;
             let newOriginalMoveHistory = originalMoveHistory;
+            let newGameMode = gameMode;
 
             if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {
                 // 最新位置から指す場合は通常通り追加
@@ -411,6 +442,11 @@ export const useGameStore = create<GameState>((set, get) => ({
                         isInBranch: true,
                     };
                     newMoveHistory = [...moveHistory.slice(0, historyCursor + 1), move];
+
+                    // 閲覧モードから分岐を作成した場合は解析モードに移行
+                    if (gameMode === "review") {
+                        newGameMode = "analysis";
+                    }
                 } else {
                     // 既に分岐中の場合は分岐を延長
                     newBranchInfo = {
@@ -432,6 +468,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 gameStatus: newStatus,
                 branchInfo: newBranchInfo,
                 originalMoveHistory: newOriginalMoveHistory,
+                gameMode: newGameMode,
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
@@ -454,7 +491,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     makeMove: (from: Square, to: Square, promote = false) => {
-        const { board, hands, currentPlayer, moveHistory, historyCursor } = get();
+        const { board, hands, currentPlayer, moveHistory, historyCursor, gameMode } = get();
 
         try {
             const fromKey = `${from.row}${from.column}` as keyof Board;
@@ -494,6 +531,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             let newMoveHistory: Move[];
             let newBranchInfo = branchInfo;
             let newOriginalMoveHistory = originalMoveHistory;
+            let newGameMode = gameMode;
 
             if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {
                 // 最新位置から指す場合は通常通り追加
@@ -510,6 +548,11 @@ export const useGameStore = create<GameState>((set, get) => ({
                         isInBranch: true,
                     };
                     newMoveHistory = [...moveHistory.slice(0, historyCursor + 1), move];
+
+                    // 閲覧モードから分岐を作成した場合は解析モードに移行
+                    if (gameMode === "review") {
+                        newGameMode = "analysis";
+                    }
                 } else {
                     // 既に分岐中の場合は分岐を延長
                     newBranchInfo = {
@@ -531,6 +574,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 gameStatus: newStatus,
                 branchInfo: newBranchInfo,
                 originalMoveHistory: newOriginalMoveHistory,
+                gameMode: newGameMode,
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
@@ -589,6 +633,8 @@ export const useGameStore = create<GameState>((set, get) => ({
             initialBoard: modernInitialBoard,
             initialHandsData: structuredClone(initialHands()),
             isTsumeShogi: false,
+            gameMode: "playing",
+            reviewBasePosition: null,
             timer: createInitialTimerState(),
         });
     },
@@ -665,6 +711,8 @@ export const useGameStore = create<GameState>((set, get) => ({
             branchInfo: null,
             originalMoveHistory: [],
             isTsumeShogi: isTsumeShogi,
+            gameMode: "review", // 棋譜インポート時は閲覧モード
+            reviewBasePosition: null,
         });
     },
 
@@ -703,6 +751,8 @@ export const useGameStore = create<GameState>((set, get) => ({
                 initialBoard: board,
                 initialHandsData: hands,
                 isTsumeShogi: false,
+                gameMode: "review", // SFENインポート時も閲覧モード
+                reviewBasePosition: null,
                 timer: createInitialTimerState(),
             });
         } catch (error) {
@@ -1052,7 +1102,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     returnToMainLine: () => {
-        const { branchInfo } = get();
+        const { branchInfo, gameMode } = get();
         if (!branchInfo || !branchInfo.isInBranch) return;
 
         // 本譜に戻す
@@ -1061,6 +1111,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             branchInfo: null,
             originalMoveHistory: [],
             historyCursor: branchInfo.branchPoint,
+            gameMode: gameMode === "analysis" ? "review" : gameMode, // 解析モードから戻る場合は閲覧モードに
         });
 
         // 分岐点の局面を再構築
@@ -1084,5 +1135,60 @@ export const useGameStore = create<GameState>((set, get) => ({
         if (historyCursor === HISTORY_CURSOR.INITIAL_POSITION) return false;
         if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) return moveHistory.length > 0;
         return true;
+    },
+
+    // モード管理機能
+    setGameMode: (mode: GameMode) => {
+        set({ gameMode: mode });
+    },
+
+    startGameFromPosition: () => {
+        const { board, hands, currentPlayer, historyCursor, moveHistory, gameMode } = get();
+
+        // 現在の局面から対局を開始
+        const basePosition: ReviewBasePosition = {
+            board: structuredClone(board),
+            hands: structuredClone(hands),
+            moveIndex: historyCursor,
+            currentPlayer,
+        };
+
+        // 履歴を現在の位置までに切り詰め
+        const newMoveHistory =
+            historyCursor === HISTORY_CURSOR.INITIAL_POSITION
+                ? []
+                : moveHistory.slice(0, historyCursor + 1);
+
+        set({
+            gameMode: "playing",
+            reviewBasePosition: gameMode === "review" ? basePosition : null,
+            moveHistory: newMoveHistory,
+            historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+            branchInfo: null,
+            originalMoveHistory: [],
+            gameStatus: "playing",
+            resignedPlayer: null,
+        });
+    },
+
+    returnToReviewMode: () => {
+        const { reviewBasePosition } = get();
+
+        if (!reviewBasePosition) return;
+
+        // 閲覧モードに戻る
+        set({
+            gameMode: "review",
+            board: reviewBasePosition.board,
+            hands: reviewBasePosition.hands,
+            currentPlayer: reviewBasePosition.currentPlayer,
+            historyCursor: reviewBasePosition.moveIndex,
+            gameStatus: "playing",
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            promotionPending: null,
+        });
     },
 }));

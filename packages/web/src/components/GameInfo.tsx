@@ -24,8 +24,12 @@ interface GameInfoProps {
     historyCursor: number;
     resignedPlayer: Player | null;
     isTsumeShogi: boolean;
+    gameMode: "playing" | "review" | "analysis";
+    hasReviewBase?: boolean;
     onReset: () => void;
     onResign?: () => void;
+    onStartFromPosition?: () => void;
+    onReturnToReview?: () => void;
 }
 
 export function GameInfo({
@@ -35,8 +39,12 @@ export function GameInfo({
     historyCursor,
     resignedPlayer,
     isTsumeShogi,
+    gameMode,
+    hasReviewBase,
     onReset,
     onResign,
+    onStartFromPosition,
+    onReturnToReview,
 }: GameInfoProps) {
     const moveCount = moveHistory.length;
     // Calculate turn based on current position in history
@@ -176,17 +184,29 @@ export function GameInfo({
 
     return (
         <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md max-w-xs sm:max-w-md mx-auto">
-            {/* 詰将棋モードの表示 */}
-            {isTsumeShogi && (
-                <div className="mb-3 text-center">
+            {/* モード表示 */}
+            <div className="mb-3 text-center flex justify-center gap-2">
+                {/* 詰将棋モード */}
+                {isTsumeShogi && (
                     <div className="text-sm text-purple-600 font-bold bg-purple-50 px-3 py-1 rounded-full inline-block">
                         🎯 詰将棋
                     </div>
-                </div>
-            )}
+                )}
+                {/* ゲームモード */}
+                {gameMode === "review" && (
+                    <div className="text-sm text-blue-600 font-bold bg-blue-50 px-3 py-1 rounded-full inline-block">
+                        👀 閲覧モード
+                    </div>
+                )}
+                {gameMode === "analysis" && (
+                    <div className="text-sm text-green-600 font-bold bg-green-50 px-3 py-1 rounded-full inline-block">
+                        🔍 解析モード
+                    </div>
+                )}
+            </div>
 
-            {/* タイマー表示 */}
-            {timer.config.mode && (
+            {/* タイマー表示 - 対局モードと解析モードのみ */}
+            {timer.config.mode && gameMode !== "review" && (
                 <div className="mb-4 grid grid-cols-2 gap-4">
                     <div className="text-center">
                         <div className="text-sm text-gray-600 mb-1">先手</div>
@@ -246,7 +266,7 @@ export function GameInfo({
             {/* ヘルプ・タイマーボタン */}
             <div className="mb-3 flex gap-2 justify-center">
                 <KeyboardHelp />
-                {!timer.config.mode && (
+                {!timer.config.mode && gameMode !== "review" && (
                     <button
                         type="button"
                         onClick={() => setIsTimerSettingsOpen(true)}
@@ -281,43 +301,79 @@ export function GameInfo({
                 )}
             </div>
 
+            {/* モード別操作ボタン */}
+            {(gameMode === "review" || gameMode === "analysis") && onStartFromPosition && (
+                <div className="mb-3 flex gap-2 justify-center">
+                    <button
+                        type="button"
+                        onClick={onStartFromPosition}
+                        className={cn(
+                            "px-4 py-2 rounded-lg font-medium transition-colors text-sm",
+                            "touch-manipulation active:scale-95",
+                            "bg-purple-500 text-white hover:bg-purple-600",
+                            "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500",
+                        )}
+                    >
+                        🎯 この局面から対局開始
+                    </button>
+                    {gameMode === "analysis" && hasReviewBase && onReturnToReview && (
+                        <button
+                            type="button"
+                            onClick={onReturnToReview}
+                            className={cn(
+                                "px-4 py-2 rounded-lg font-medium transition-colors text-sm",
+                                "touch-manipulation active:scale-95",
+                                "bg-gray-500 text-white hover:bg-gray-600",
+                                "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500",
+                            )}
+                        >
+                            👀 閲覧モードに戻る
+                        </button>
+                    )}
+                </div>
+            )}
+
             {/* 操作ボタン */}
             <div className="flex gap-2 justify-center">
-                {/* 投了ボタン - ゲーム中のみ表示（詰将棋モードでは非表示） */}
-                {onResign && !isGameOver && moveCount > 0 && !isTsumeShogi && (
-                    <AlertDialog open={isResignDialogOpen} onOpenChange={setIsResignDialogOpen}>
-                        <AlertDialogTrigger asChild>
-                            <button
-                                type="button"
-                                className={cn(
-                                    "px-4 sm:px-6 py-2 rounded-lg font-medium transition-colors text-sm sm:text-base",
-                                    "touch-manipulation active:scale-95",
-                                    "bg-red-500 text-white hover:bg-red-600 focus:ring-red-500",
-                                    "focus:outline-none focus:ring-2 focus:ring-offset-2",
-                                )}
-                            >
-                                投了
-                            </button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                            <AlertDialogHeader>
-                                <AlertDialogTitle>投了しますか？</AlertDialogTitle>
-                                <AlertDialogDescription>
-                                    投了すると相手の勝ちとなり、対局が終了します。この操作は取り消せません。
-                                </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                                <AlertDialogCancel>キャンセル</AlertDialogCancel>
-                                <AlertDialogAction
-                                    onClick={handleConfirmResign}
-                                    className="bg-red-500 hover:bg-red-600"
+                {/* 投了ボタン - 対局モードのゲーム中のみ表示（詰将棋モードと閲覧モードでは非表示） */}
+                {onResign &&
+                    !isGameOver &&
+                    moveCount > 0 &&
+                    !isTsumeShogi &&
+                    gameMode === "playing" && (
+                        <AlertDialog open={isResignDialogOpen} onOpenChange={setIsResignDialogOpen}>
+                            <AlertDialogTrigger asChild>
+                                <button
+                                    type="button"
+                                    className={cn(
+                                        "px-4 sm:px-6 py-2 rounded-lg font-medium transition-colors text-sm sm:text-base",
+                                        "touch-manipulation active:scale-95",
+                                        "bg-red-500 text-white hover:bg-red-600 focus:ring-red-500",
+                                        "focus:outline-none focus:ring-2 focus:ring-offset-2",
+                                    )}
                                 >
-                                    投了する
-                                </AlertDialogAction>
-                            </AlertDialogFooter>
-                        </AlertDialogContent>
-                    </AlertDialog>
-                )}
+                                    投了
+                                </button>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                                <AlertDialogHeader>
+                                    <AlertDialogTitle>投了しますか？</AlertDialogTitle>
+                                    <AlertDialogDescription>
+                                        投了すると相手の勝ちとなり、対局が終了します。この操作は取り消せません。
+                                    </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                    <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                                    <AlertDialogAction
+                                        onClick={handleConfirmResign}
+                                        className="bg-red-500 hover:bg-red-600"
+                                    >
+                                        投了する
+                                    </AlertDialogAction>
+                                </AlertDialogFooter>
+                            </AlertDialogContent>
+                        </AlertDialog>
+                    )}
 
                 {/* リセット/新しいゲームボタン */}
                 <AlertDialog open={isResetDialogOpen} onOpenChange={setIsResetDialogOpen}>

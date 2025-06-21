@@ -31,6 +31,7 @@ function App() {
         resignedPlayer,
         branchInfo,
         isTsumeShogi,
+        gameMode,
         selectSquare,
         selectDropPiece,
         confirmPromotion,
@@ -53,6 +54,9 @@ function App() {
         isInBranch,
         canNavigateNext,
         canNavigatePrevious,
+        startGameFromPosition,
+        returnToReviewMode,
+        reviewBasePosition,
     } = useGameStore();
 
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
@@ -145,8 +149,12 @@ function App() {
                                     historyCursor={historyCursor}
                                     resignedPlayer={resignedPlayer}
                                     isTsumeShogi={isTsumeShogi}
+                                    gameMode={gameMode}
+                                    hasReviewBase={!!reviewBasePosition}
                                     onReset={resetGame}
                                     onResign={resign}
+                                    onStartFromPosition={startGameFromPosition}
+                                    onReturnToReview={returnToReviewMode}
                                 />
                                 <PlaybackControls
                                     canNavigateNext={canNavigateNext()}
@@ -221,8 +229,12 @@ function App() {
                             historyCursor={historyCursor}
                             resignedPlayer={resignedPlayer}
                             isTsumeShogi={isTsumeShogi}
+                            gameMode={gameMode}
+                            hasReviewBase={!!reviewBasePosition}
                             onReset={resetGame}
                             onResign={resign}
+                            onStartFromPosition={startGameFromPosition}
+                            onReturnToReview={returnToReviewMode}
                         />
                         <PlaybackControls
                             canNavigateNext={canNavigateNext()}
