@@ -72,6 +72,10 @@ const mockState = {
     returnToReviewMode: vi.fn(),
     pauseTimer: vi.fn(),
     resumeTimer: vi.fn(),
+    gameUndo: vi.fn(),
+    gameRedo: vi.fn(),
+    canGameUndo: vi.fn(() => false),
+    canGameRedo: vi.fn(() => false),
 };
 
 // GameStateの部分型を定義

@@ -131,6 +131,7 @@ interface GameState {
     isTsumeShogi: boolean; // 詰将棋モードかどうか
     gameMode: GameMode; // ゲームモード
     reviewBasePosition: ReviewBasePosition | null; // 閲覧モードの基準局面
+    undoStack: Move[]; // 対局中のundo用スタック
 
     // タイマー状態
     timer: TimerState;
@@ -166,6 +167,11 @@ interface GameState {
     setGameMode: (mode: GameMode) => void;
     startGameFromPosition: () => void;
     returnToReviewMode: () => void;
+    // 対局中のundo/redo機能
+    gameUndo: () => void;
+    gameRedo: () => void;
+    canGameUndo: () => boolean;
+    canGameRedo: () => boolean;
 }
 
 // タイマーアクションをGameStateに統合
@@ -215,6 +221,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     isTsumeShogi: false,
     gameMode: "playing",
     reviewBasePosition: null,
+    undoStack: [],
     timer: createInitialTimerState(),
 
     selectSquare: (square: Square) => {
@@ -469,6 +476,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 branchInfo: newBranchInfo,
                 originalMoveHistory: newOriginalMoveHistory,
                 gameMode: newGameMode,
+                undoStack: [], // 新しい手を指したのでundoStackをクリア
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
@@ -575,6 +583,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 branchInfo: newBranchInfo,
                 originalMoveHistory: newOriginalMoveHistory,
                 gameMode: newGameMode,
+                undoStack: [], // 新しい手を指したのでundoStackをクリア
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
@@ -1190,5 +1199,111 @@ export const useGameStore = create<GameState>((set, get) => ({
             validDropSquares: [],
             promotionPending: null,
         });
+    },
+
+    // 対局中のundo/redo機能
+    gameUndo: () => {
+        const { gameMode, moveHistory, undoStack } = get();
+
+        // 対局モード以外では使用不可
+        if (gameMode !== "playing") return;
+
+        // undo可能な手がない
+        if (moveHistory.length === 0) return;
+
+        // 最後の手を取り出してundoStackに追加
+        const lastMove = moveHistory[moveHistory.length - 1];
+        const newMoveHistory = moveHistory.slice(0, -1);
+        const newUndoStack = [...undoStack, lastMove];
+
+        // 手を戻す前の状態を再構築
+        const { initialBoard, initialHandsData } = get();
+        const { board, hands, currentPlayer, gameStatus } = reconstructGameStateWithInitial(
+            newMoveHistory,
+            newMoveHistory.length - 1,
+            initialBoard,
+            initialHandsData,
+        );
+
+        set({
+            board,
+            hands,
+            currentPlayer,
+            gameStatus,
+            moveHistory: newMoveHistory,
+            undoStack: newUndoStack,
+            historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            promotionPending: null,
+        });
+    },
+
+    gameRedo: () => {
+        const { gameMode, undoStack } = get();
+
+        // 対局モード以外では使用不可
+        if (gameMode !== "playing") return;
+
+        // redo可能な手がない
+        if (undoStack.length === 0) return;
+
+        // undoStackから最後の手を取り出す
+        const nextMove = undoStack[undoStack.length - 1];
+        const newUndoStack = undoStack.slice(0, -1);
+
+        // 手を進める
+        const { board, hands, currentPlayer, moveHistory } = get();
+        const result = applyMove(board, hands, currentPlayer, nextMove);
+
+        // ゲーム状態判定
+        let gameStatus: GameStatus = "playing";
+        if (isInCheck(result.board, result.nextTurn)) {
+            if (isCheckmate(result.board, result.hands, result.nextTurn)) {
+                gameStatus = "checkmate";
+            } else {
+                gameStatus = "check";
+            }
+        }
+
+        set({
+            board: result.board,
+            hands: result.hands,
+            currentPlayer: result.nextTurn,
+            gameStatus,
+            moveHistory: [...moveHistory, nextMove],
+            undoStack: newUndoStack,
+            historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            promotionPending: null,
+        });
+
+        // 駒音再生
+        playGameSound("piece");
+
+        // 王手音再生
+        if (gameStatus === "check") {
+            playGameSound("check");
+        }
+
+        // ゲーム終了音再生
+        if (gameStatus === "checkmate") {
+            playGameSound("gameEnd");
+        }
+    },
+
+    canGameUndo: () => {
+        const { gameMode, moveHistory } = get();
+        return gameMode === "playing" && moveHistory.length > 0;
+    },
+
+    canGameRedo: () => {
+        const { gameMode, undoStack } = get();
+        return gameMode === "playing" && undoStack.length > 0;
     },
 }));

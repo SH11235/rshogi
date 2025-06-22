@@ -4,6 +4,7 @@ import type { Move } from "shogi-core";
 import { AudioTestPanel } from "./components/AudioTestPanel";
 import { Board } from "./components/Board";
 import { CapturedPieces } from "./components/CapturedPieces";
+import { GameControls } from "./components/GameControls";
 import { GameInfo } from "./components/GameInfo";
 import { KifuExportDialog } from "./components/KifuExportDialog";
 import { KifuImportDialog } from "./components/KifuImportDialog";
@@ -57,6 +58,10 @@ function App() {
         startGameFromPosition,
         returnToReviewMode,
         reviewBasePosition,
+        gameUndo,
+        gameRedo,
+        canGameUndo,
+        canGameRedo,
     } = useGameStore();
 
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
@@ -64,8 +69,22 @@ function App() {
 
     // キーボードショートカットの設定
     useKeyboardShortcuts({
-        onUndo: canUndo() ? undo : undefined,
-        onRedo: canRedo() ? redo : undefined,
+        onUndo:
+            gameMode === "playing"
+                ? canGameUndo()
+                    ? gameUndo
+                    : undefined
+                : canUndo()
+                  ? undo
+                  : undefined,
+        onRedo:
+            gameMode === "playing"
+                ? canGameRedo()
+                    ? gameRedo
+                    : undefined
+                : canRedo()
+                  ? redo
+                  : undefined,
         onReset: resetGame,
         onEscape: () => {
             // プロモーションダイアログをキャンセル
@@ -77,11 +96,12 @@ function App() {
             }
         },
         onEnter: promotionPending ? () => confirmPromotion(true) : undefined,
-        onNavigateNext: canNavigateNext() ? navigateNext : undefined,
-        onNavigatePrevious: canNavigatePrevious() ? navigatePrevious : undefined,
-        onNavigateFirst: navigateFirst,
-        onNavigateLast: navigateLast,
-        onReturnToMainLine: isInBranch() ? returnToMainLine : undefined,
+        onNavigateNext: gameMode !== "playing" && canNavigateNext() ? navigateNext : undefined,
+        onNavigatePrevious:
+            gameMode !== "playing" && canNavigatePrevious() ? navigatePrevious : undefined,
+        onNavigateFirst: gameMode !== "playing" ? navigateFirst : undefined,
+        onNavigateLast: gameMode !== "playing" ? navigateLast : undefined,
+        onReturnToMainLine: gameMode !== "playing" && isInBranch() ? returnToMainLine : undefined,
     });
 
     const handleImport = (moves: Move[], format: ImportFormat, content?: string) => {
@@ -156,16 +176,25 @@ function App() {
                                     onStartFromPosition={startGameFromPosition}
                                     onReturnToReview={returnToReviewMode}
                                 />
-                                <PlaybackControls
-                                    canNavigateNext={canNavigateNext()}
-                                    canNavigatePrevious={canNavigatePrevious()}
-                                    isInBranch={isInBranch()}
-                                    onNavigateFirst={navigateFirst}
-                                    onNavigatePrevious={navigatePrevious}
-                                    onNavigateNext={navigateNext}
-                                    onNavigateLast={navigateLast}
-                                    onReturnToMainLine={returnToMainLine}
-                                />
+                                {gameMode === "playing" ? (
+                                    <GameControls
+                                        canUndo={canGameUndo()}
+                                        canRedo={canGameRedo()}
+                                        onUndo={gameUndo}
+                                        onRedo={gameRedo}
+                                    />
+                                ) : (
+                                    <PlaybackControls
+                                        canNavigateNext={canNavigateNext()}
+                                        canNavigatePrevious={canNavigatePrevious()}
+                                        isInBranch={isInBranch()}
+                                        onNavigateFirst={navigateFirst}
+                                        onNavigatePrevious={navigatePrevious}
+                                        onNavigateNext={navigateNext}
+                                        onNavigateLast={navigateLast}
+                                        onReturnToMainLine={returnToMainLine}
+                                    />
+                                )}
                                 <MoveHistory
                                     moveHistory={moveHistory}
                                     historyCursor={historyCursor}
@@ -250,16 +279,25 @@ function App() {
                                 />
                             </div>
                         </div>
-                        <PlaybackControls
-                            canNavigateNext={canNavigateNext()}
-                            canNavigatePrevious={canNavigatePrevious()}
-                            isInBranch={isInBranch()}
-                            onNavigateFirst={navigateFirst}
-                            onNavigatePrevious={navigatePrevious}
-                            onNavigateNext={navigateNext}
-                            onNavigateLast={navigateLast}
-                            onReturnToMainLine={returnToMainLine}
-                        />
+                        {gameMode === "playing" ? (
+                            <GameControls
+                                canUndo={canGameUndo()}
+                                canRedo={canGameRedo()}
+                                onUndo={gameUndo}
+                                onRedo={gameRedo}
+                            />
+                        ) : (
+                            <PlaybackControls
+                                canNavigateNext={canNavigateNext()}
+                                canNavigatePrevious={canNavigatePrevious()}
+                                isInBranch={isInBranch()}
+                                onNavigateFirst={navigateFirst}
+                                onNavigatePrevious={navigatePrevious}
+                                onNavigateNext={navigateNext}
+                                onNavigateLast={navigateLast}
+                                onReturnToMainLine={returnToMainLine}
+                            />
+                        )}
                     </div>
                 </div>
 
