@@ -35,7 +35,7 @@ export function CapturedPieces({
     return (
         <div
             className={cn(
-                "p-2 sm:p-4 bg-gray-50 rounded-lg max-w-sm sm:max-w-md lg:max-w-lg mx-auto",
+                "p-2 sm:p-4 bg-gray-50 rounded-lg w-full",
                 player === "white" && "rotate-180",
             )}
         >

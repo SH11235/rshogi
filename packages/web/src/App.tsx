@@ -219,66 +219,23 @@ function App() {
                 </div>
 
                 {/* デスクトップ向け: 横配置レイアウト */}
-                <div className="hidden lg:flex gap-6 xl:gap-8 justify-center items-start">
-                    {/* 後手の持ち駒 */}
-                    <div className="flex-shrink-0">
-                        <CapturedPieces
-                            hands={hands}
-                            player="white"
+                <div className="hidden lg:flex gap-6 xl:gap-8 justify-center items-start max-w-7xl mx-auto">
+                    {/* 左側パネル（ゲーム情報・コントロール） */}
+                    <div className="flex-shrink-0 w-64 xl:w-80 space-y-4">
+                        <GameInfo
                             currentPlayer={currentPlayer}
-                            selectedDropPiece={selectedDropPiece}
-                            onPieceClick={selectDropPiece}
+                            gameStatus={gameStatus}
+                            moveHistory={moveHistory}
+                            historyCursor={historyCursor}
+                            resignedPlayer={resignedPlayer}
+                            isTsumeShogi={isTsumeShogi}
+                            gameMode={gameMode}
+                            hasReviewBase={!!reviewBasePosition}
+                            onReset={resetGame}
+                            onResign={resign}
+                            onStartFromPosition={startGameFromPosition}
+                            onReturnToReview={returnToReviewMode}
                         />
-                    </div>
-
-                    {/* 将棋盤 */}
-                    <div className="flex-shrink-0 pr-6 xl:pr-8">
-                        <Board
-                            board={board}
-                            selectedSquare={selectedSquare}
-                            validMoves={validMoves}
-                            validDropSquares={validDropSquares}
-                            onSquareClick={selectSquare}
-                        />
-                    </div>
-
-                    {/* 右側パネル（先手の持ち駒 + ゲーム情報・棋譜） */}
-                    <div className="flex-shrink-0 space-y-6">
-                        <CapturedPieces
-                            hands={hands}
-                            player="black"
-                            currentPlayer={currentPlayer}
-                            selectedDropPiece={selectedDropPiece}
-                            onPieceClick={selectDropPiece}
-                        />
-                        {/* ゲーム情報と棋譜を横並びに配置 */}
-                        <div className="flex gap-4 xl:gap-6">
-                            <div className="flex-1">
-                                <GameInfo
-                                    currentPlayer={currentPlayer}
-                                    gameStatus={gameStatus}
-                                    moveHistory={moveHistory}
-                                    historyCursor={historyCursor}
-                                    resignedPlayer={resignedPlayer}
-                                    isTsumeShogi={isTsumeShogi}
-                                    gameMode={gameMode}
-                                    hasReviewBase={!!reviewBasePosition}
-                                    onReset={resetGame}
-                                    onResign={resign}
-                                    onStartFromPosition={startGameFromPosition}
-                                    onReturnToReview={returnToReviewMode}
-                                />
-                            </div>
-                            <div className="flex-shrink-0">
-                                <MoveHistory
-                                    moveHistory={moveHistory}
-                                    historyCursor={historyCursor}
-                                    isInBranch={isInBranch()}
-                                    branchPoint={branchInfo?.branchPoint}
-                                    onGoToMove={goToMove}
-                                />
-                            </div>
-                        </div>
                         {gameMode === "playing" ? (
                             <GameControls
                                 canUndo={canGameUndo()}
@@ -298,6 +255,53 @@ function App() {
                                 onReturnToMainLine={returnToMainLine}
                             />
                         )}
+                    </div>
+
+                    {/* 中央：将棋盤と持ち駒 */}
+                    <div className="flex-shrink-0 space-y-4">
+                        {/* 後手の持ち駒 */}
+                        <div className="w-full max-w-md mx-auto">
+                            <CapturedPieces
+                                hands={hands}
+                                player="white"
+                                currentPlayer={currentPlayer}
+                                selectedDropPiece={selectedDropPiece}
+                                onPieceClick={selectDropPiece}
+                            />
+                        </div>
+
+                        {/* 将棋盤 */}
+                        <div className="pr-6 xl:pr-8">
+                            <Board
+                                board={board}
+                                selectedSquare={selectedSquare}
+                                validMoves={validMoves}
+                                validDropSquares={validDropSquares}
+                                onSquareClick={selectSquare}
+                            />
+                        </div>
+
+                        {/* 先手の持ち駒 */}
+                        <div className="w-full max-w-md mx-auto">
+                            <CapturedPieces
+                                hands={hands}
+                                player="black"
+                                currentPlayer={currentPlayer}
+                                selectedDropPiece={selectedDropPiece}
+                                onPieceClick={selectDropPiece}
+                            />
+                        </div>
+                    </div>
+
+                    {/* 右側パネル（棋譜） */}
+                    <div className="flex-shrink-0 w-64 xl:w-80">
+                        <MoveHistory
+                            moveHistory={moveHistory}
+                            historyCursor={historyCursor}
+                            isInBranch={isInBranch()}
+                            branchPoint={branchInfo?.branchPoint}
+                            onGoToMove={goToMove}
+                        />
                     </div>
                 </div>
 
