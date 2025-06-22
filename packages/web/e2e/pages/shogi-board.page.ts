@@ -38,15 +38,13 @@ export class ShogiBoardPage {
     }
 
     async undo() {
-        // Look for the undo button in the desktop layout
-        const gameSection = this.page.locator(".hidden.lg\\:flex").first();
-        await gameSection.getByText("← 戻る").click();
+        // Look for the undo button (now "戻す" in playing mode)
+        await this.page.getByRole("button", { name: "戻す" }).click();
     }
 
     async redo() {
-        // Look for the redo button in the desktop layout
-        const gameSection = this.page.locator(".hidden.lg\\:flex").first();
-        const redoButton = gameSection.getByText("進む →");
+        // Look for the redo button (now "進む" in playing mode)
+        const redoButton = this.page.getByRole("button", { name: "進む" });
 
         // Wait for the button to be enabled
         await expect(redoButton).toBeEnabled();
