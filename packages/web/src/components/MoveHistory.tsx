@@ -19,7 +19,7 @@ export function MoveHistory({
     onGoToMove,
 }: MoveHistoryProps) {
     return (
-        <Card className="w-80 sm:w-96">
+        <Card className="w-80 sm:w-96 lg:w-80 xl:w-96">
             <CardHeader className="pb-2 sm:pb-3">
                 <CardTitle className="text-base sm:text-lg font-bold">
                     棋譜
@@ -29,7 +29,15 @@ export function MoveHistory({
                 </CardTitle>
             </CardHeader>
             <CardContent className="pt-0">
-                <div className="max-h-48 sm:max-h-64 overflow-y-auto space-y-1">
+                {/* overflow-y-scroll で常にスクロールバー領域を確保 */}
+                <div
+                    className="max-h-48 sm:max-h-64 overflow-y-scroll space-y-1 pr-1"
+                    style={{
+                        scrollbarGutter: "stable",
+                        scrollbarWidth: "thin",
+                        scrollbarColor: "#d1d5db #f3f4f6",
+                    }}
+                >
                     {/* 初期状態 */}
                     <button
                         type="button"
@@ -60,7 +68,7 @@ export function MoveHistory({
                                 type="button"
                                 onClick={() => onGoToMove(index)}
                                 className={cn(
-                                    "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation",
+                                    "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation will-change-transform",
                                     isCurrentMove
                                         ? "bg-blue-100 text-blue-900 font-medium"
                                         : "hover:bg-gray-100",

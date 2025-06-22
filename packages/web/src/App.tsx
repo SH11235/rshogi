@@ -213,7 +213,7 @@ function App() {
                         />
                     </div>
 
-                    {/* 右側パネル（先手の持ち駒 + ゲーム情報 + 棋譜） */}
+                    {/* 右側パネル（先手の持ち駒 + ゲーム情報・棋譜） */}
                     <div className="flex-shrink-0 space-y-6">
                         <CapturedPieces
                             hands={hands}
@@ -222,20 +222,34 @@ function App() {
                             selectedDropPiece={selectedDropPiece}
                             onPieceClick={selectDropPiece}
                         />
-                        <GameInfo
-                            currentPlayer={currentPlayer}
-                            gameStatus={gameStatus}
-                            moveHistory={moveHistory}
-                            historyCursor={historyCursor}
-                            resignedPlayer={resignedPlayer}
-                            isTsumeShogi={isTsumeShogi}
-                            gameMode={gameMode}
-                            hasReviewBase={!!reviewBasePosition}
-                            onReset={resetGame}
-                            onResign={resign}
-                            onStartFromPosition={startGameFromPosition}
-                            onReturnToReview={returnToReviewMode}
-                        />
+                        {/* ゲーム情報と棋譜を横並びに配置 */}
+                        <div className="flex gap-4 xl:gap-6">
+                            <div className="flex-1">
+                                <GameInfo
+                                    currentPlayer={currentPlayer}
+                                    gameStatus={gameStatus}
+                                    moveHistory={moveHistory}
+                                    historyCursor={historyCursor}
+                                    resignedPlayer={resignedPlayer}
+                                    isTsumeShogi={isTsumeShogi}
+                                    gameMode={gameMode}
+                                    hasReviewBase={!!reviewBasePosition}
+                                    onReset={resetGame}
+                                    onResign={resign}
+                                    onStartFromPosition={startGameFromPosition}
+                                    onReturnToReview={returnToReviewMode}
+                                />
+                            </div>
+                            <div className="flex-shrink-0">
+                                <MoveHistory
+                                    moveHistory={moveHistory}
+                                    historyCursor={historyCursor}
+                                    isInBranch={isInBranch()}
+                                    branchPoint={branchInfo?.branchPoint}
+                                    onGoToMove={goToMove}
+                                />
+                            </div>
+                        </div>
                         <PlaybackControls
                             canNavigateNext={canNavigateNext()}
                             canNavigatePrevious={canNavigatePrevious()}
@@ -245,13 +259,6 @@ function App() {
                             onNavigateNext={navigateNext}
                             onNavigateLast={navigateLast}
                             onReturnToMainLine={returnToMainLine}
-                        />
-                        <MoveHistory
-                            moveHistory={moveHistory}
-                            historyCursor={historyCursor}
-                            isInBranch={isInBranch()}
-                            branchPoint={branchInfo?.branchPoint}
-                            onGoToMove={goToMove}
                         />
                     </div>
                 </div>

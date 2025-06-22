@@ -183,7 +183,7 @@ export function GameInfo({
     };
 
     return (
-        <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md max-w-xs sm:max-w-md mx-auto">
+        <div className="p-3 sm:p-6 bg-white rounded-lg shadow-md">
             {/* モード表示 */}
             <div className="mb-3 text-center flex justify-center gap-2">
                 {/* 詰将棋モード */}
@@ -219,21 +219,28 @@ export function GameInfo({
                 </div>
             )}
 
-            {/* ゲーム状態表示 */}
-            <div className="mb-3 sm:mb-4 text-center">
+            {/* ゲーム状態表示 - 固定高さで安定化 */}
+            <div className="mb-3 sm:mb-4 text-center min-h-[180px] sm:min-h-[200px] flex flex-col justify-center">
                 <h2
                     className={cn(
-                        "text-lg sm:text-xl lg:text-2xl font-bold mb-2",
+                        "text-lg sm:text-xl lg:text-2xl font-bold mb-2 transition-all duration-200",
                         getStatusColor(),
                     )}
                 >
                     {getStatusMessage()}
                 </h2>
 
-                {/* 詳細メッセージ */}
-                {getDetailedMessage() && (
-                    <p className="text-xs sm:text-sm text-gray-600 mb-2">{getDetailedMessage()}</p>
-                )}
+                {/* 詳細メッセージ - 常にスペースを確保 */}
+                <div className="h-6 sm:h-7 mb-2">
+                    <p
+                        className={cn(
+                            "text-xs sm:text-sm text-gray-600 transition-opacity duration-200",
+                            getDetailedMessage() ? "opacity-100" : "opacity-0",
+                        )}
+                    >
+                        {getDetailedMessage() || "　"}
+                    </p>
+                </div>
 
                 {/* 手数表示 */}
                 <div className="flex justify-center gap-2 sm:gap-4 text-xs sm:text-sm text-gray-600 mb-2 sm:mb-3">
@@ -242,16 +249,27 @@ export function GameInfo({
                     <span>総手数: {moveCount}</span>
                 </div>
 
-                {/* 追加の状態情報 */}
-                {gameStatus === "check" && (
-                    <div className="text-red-500 text-xs sm:text-sm font-medium bg-red-50 px-2 sm:px-3 py-1 rounded-full">
+                {/* 追加の状態情報 - 常にスペースを確保 */}
+                <div className="h-8 sm:h-9">
+                    <div
+                        className={cn(
+                            "text-red-500 text-xs sm:text-sm font-medium bg-red-50 px-2 sm:px-3 py-1 rounded-full inline-block transition-all duration-200",
+                            gameStatus === "check" ? "opacity-100" : "opacity-0 invisible",
+                        )}
+                    >
                         🔥 王手がかかっています
                     </div>
-                )}
+                </div>
 
-                {isGameOver && (
-                    <div className="mt-2 space-y-1">
-                        <div className="text-gray-500 text-xs sm:text-sm bg-gray-50 px-2 sm:px-3 py-1 rounded-full">
+                {/* ゲーム終了情報 - 常にスペースを確保 */}
+                <div className="mt-2 min-h-[24px] sm:min-h-[32px]">
+                    <div
+                        className={cn(
+                            "space-y-1 transition-all duration-200",
+                            isGameOver ? "opacity-100" : "opacity-0 invisible",
+                        )}
+                    >
+                        <div className="text-gray-500 text-xs sm:text-sm bg-gray-50 px-2 sm:px-3 py-1 rounded-full inline-block">
                             🏁 ゲーム終了
                         </div>
                         {(gameStatus === "black_win" || gameStatus === "white_win") && (
@@ -260,7 +278,7 @@ export function GameInfo({
                             </div>
                         )}
                     </div>
-                )}
+                </div>
             </div>
 
             {/* ヘルプ・タイマーボタン */}

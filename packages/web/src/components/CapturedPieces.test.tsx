@@ -47,12 +47,12 @@ describe("CapturedPieces component", () => {
         expect(screen.getByText("×3")).toBeInTheDocument(); // 歩×3
         expect(screen.getByText("香")).toBeInTheDocument();
 
-        // Should not show pieces with count 0
+        // Pieces with count 0 should not be rendered
         expect(screen.queryByText("桂")).not.toBeInTheDocument();
         expect(screen.queryByText("金")).not.toBeInTheDocument();
         expect(screen.queryByText("角")).not.toBeInTheDocument();
 
-        // Should not show 'なし'
+        // 'なし' should not be shown when there are captured pieces
         expect(screen.queryByText("なし")).not.toBeInTheDocument();
     });
 
