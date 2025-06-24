@@ -118,3 +118,161 @@ type PartialBoard = Partial<Board>
 type ButtonVariant = "default" | "destructive" | "outline" | "secondary" | "ghost" | "link"
 type ButtonSize = "default" | "sm" | "lg" | "icon"
 ```
+
+## Timer Types
+
+```typescript
+// Timer configuration
+type TimerMode = "basic" | "fischer" | "perMove" | null
+type WarningLevel = "normal" | "low" | "critical" | "byoyomi"
+
+type TimerConfig = {
+    mode: TimerMode
+    basicTime: number  // seconds
+    byoyomiTime: number  // seconds
+    fischerIncrement: number  // seconds
+    perMoveLimit: number  // seconds
+}
+
+type TimerState = {
+    config: TimerConfig
+    blackTime: number  // milliseconds
+    whiteTime: number  // milliseconds
+    blackInByoyomi: boolean
+    whiteInByoyomi: boolean
+    activePlayer: Player | null
+    isPaused: boolean
+    lastTickTime: number
+    blackWarningLevel: WarningLevel
+    whiteWarningLevel: WarningLevel
+    hasTimedOut: boolean
+    timedOutPlayer: Player | null
+}
+
+type TimerActions = {
+    initializeTimer: (config: TimerConfig) => void
+    startPlayerTimer: (player: Player) => void
+    switchTimer: () => void
+    pauseTimer: () => void
+    resumeTimer: () => void
+    resetTimer: () => void
+    tick: () => void
+    updateWarningLevels: () => void
+}
+```
+
+## Audio Types
+
+```typescript
+// Sound types
+type SoundType = "piece" | "check" | "gameEnd"
+type VolumeLevel = 0 | 25 | 50 | 75 | 100
+
+type SoundConfig = {
+    path: string
+    defaultVolume?: VolumeLevel
+    preload?: boolean
+}
+
+type AudioPlayerState = {
+    isInitialized: boolean
+    volume: VolumeLevel
+    isMuted: boolean
+    loadedSounds: Set<SoundType>
+}
+
+type PlayOptions = {
+    volume?: number  // 0-1 range
+    playbackRate?: number
+    interrupt?: boolean
+}
+
+type AudioManager = {
+    initialize: () => Promise<void>
+    play: (type: SoundType, options?: PlayOptions) => Promise<void>
+    setVolume: (volume: VolumeLevel) => void
+    setMuted: (muted: boolean) => void
+    preload: (type: SoundType) => Promise<void>
+    stopAll: () => void
+    getState: () => AudioPlayerState
+}
+```
+
+## Settings Types
+
+```typescript
+// Time and volume settings
+type TimeControlMinutes = 1 | 3 | 5 | 10 | 15 | 30 | 60 | 90
+type ByoyomiSeconds = 0 | 10 | 30 | 60
+type Theme = "light" | "dark" | "auto"
+
+type TimeControlSettings = {
+    mainTimeMinutes: TimeControlMinutes
+    byoyomiSeconds: ByoyomiSeconds
+    enabled: boolean
+}
+
+type AudioSettings = {
+    masterVolume: VolumeLevel
+    pieceSound: boolean
+    checkSound: boolean
+    gameEndSound: boolean
+}
+
+type DisplaySettings = {
+    theme: Theme
+    animations: boolean
+    showValidMoves: boolean
+    showLastMove: boolean
+}
+
+type GameSettings = {
+    timeControl: TimeControlSettings
+    audio: AudioSettings
+    display: DisplaySettings
+}
+```
+
+## UI State Types
+
+```typescript
+// UI-specific states
+type PromotionPendingState = {
+    from: Square
+    to: Square
+    piece: Piece
+}
+
+type SelectedDropPiece = {
+    type: PieceType
+    player: Player
+}
+
+type UIGameState = {
+    selectedSquare: Square | null
+    selectedDropPiece: SelectedDropPiece | null
+    validMoves: Square[]
+    validDropSquares: Square[]
+    promotionPending: PromotionPendingState | null
+}
+
+// UI action callbacks
+type UIActions = {
+    onSquareSelect: (square: Square) => void
+    onDropPieceSelect: (pieceType: PieceType, player: Player) => void
+    onPromotionConfirm: (promote: boolean) => void
+    onPromotionCancel: () => void
+}
+
+type GameActions = {
+    onReset: () => void
+    onResign: () => void
+    onImportGame: (kifContent: string) => void
+}
+
+type HistoryActions = {
+    onUndo: () => void
+    onRedo: () => void
+    onGoToMove: (moveIndex: number) => void
+}
+```

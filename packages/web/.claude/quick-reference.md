@@ -6,16 +6,16 @@ Essential information for common development tasks to minimize context reading.
 
 ```bash
 # Run these 4 commands in order after any code changes:
-npm run build      # Must pass - build check
-npm run typecheck  # Must pass - type validation  
-npm run lint       # Must pass - code quality
+npm run build        # Must pass - build check
+npm run typecheck    # Must pass - type validation
 npm run format:check # Auto-formats code
+npm run lint         # Must pass - code quality
 ```
 
 ## Test Status
-- **Total Tests**: 83 tests across 8 files
+- **Total Tests**: 191 tests across 21 files
 - **All Passing**: Yes ✅
-- **Coverage**: Components, stores, utilities, UI components
+- **Coverage**: Components, stores, utilities, UI components, hooks, types, services
 
 ## Current Dependencies
 
@@ -30,6 +30,14 @@ npm run format:check # Auto-formats code
 - Vitest + @testing-library/react
 - Storybook for component development
 - Biome for linting/formatting
+
+### New Features Added
+- Timer system (basic, fischer, per-move modes)
+- Audio system (dynamic sound generation)
+- Kifu import/export functionality
+- Keyboard shortcuts support
+- Game settings persistence
+- Move history with undo/redo
 
 ## File Creation Guidelines
 
@@ -93,10 +101,22 @@ import { useGameStore } from "@/stores/gameStore";
 // UI components
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Dialog } from "@/components/ui/dialog";
 
 // Game components
 import { Board } from "@/components/Board";
 import { Piece } from "@/components/Piece";
+import { Timer } from "@/components/Timer";
+
+// Hooks
+import { useAudio } from "@/hooks/useAudio";
+import { useGameSettings } from "@/hooks/useGameSettings";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+
+// Types
+import type { TimerConfig } from "@/types/timer";
+import type { GameSettings } from "@/types/settings";
+import type { SoundType } from "@/types/audio";
 
 // Utilities
 import { cn } from "@/lib/utils";
@@ -117,6 +137,13 @@ const { selectSquare, makeMove, resetGame } = useGameStore();
 // Subscribe to specific state
 const currentPlayer = useGameStore((state) => state.currentPlayer);
 const board = useGameStore((state) => state.board);
+const timer = useGameStore((state) => state.timer);
+
+// Timer actions
+const { initializeTimer, startPlayerTimer, switchTimer } = useGameStore();
+
+// History actions
+const { undo, redo, canUndo, canRedo } = useGameStore();
 ```
 
 ## Development Workflow
