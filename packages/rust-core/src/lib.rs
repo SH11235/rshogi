@@ -15,7 +15,7 @@ extern "C" {
 
 fn dispatch_p2p_message(message: &str) {
     let window = web_sys::window().expect("no global `window` exists");
-    let mut event_init = web_sys::CustomEventInit::new();
+    let event_init = web_sys::CustomEventInit::new();
     event_init.set_detail(&JsValue::from_str(message));
     let event = web_sys::CustomEvent::new_with_event_init_dict("p2p-message", &event_init)
         .expect("Failed to create custom event");
