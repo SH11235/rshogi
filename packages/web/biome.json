@@ -6,7 +6,8 @@
             "node_modules/**",
             "storybook-static/**",
             "*.json",
-            ".vscode/**"
+            ".vscode/**",
+            "src/wasm/**"
         ]
     },
     "formatter": {

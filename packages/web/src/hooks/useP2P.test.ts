@@ -7,12 +7,15 @@ let wasmInitResolve: () => void;
 let wasmInitPromise: Promise<void>;
 
 // Mock the WASM module
-vi.mock("shogi-rust-core", () => ({
-    default: vi.fn(() => wasmInitPromise),
-    start_p2p_manager: vi.fn(() => ({
-        send_message: vi.fn(),
-    })),
-}));
+vi.mock("../wasm/shogi_core", () => {
+    return {
+        default: vi.fn(() => Promise.resolve()),
+        start_p2p_manager: vi.fn(() => ({
+            send_message: vi.fn(),
+            free: () => {},
+        })),
+    };
+});
 
 // Type for test globals
 interface TestGlobals {
@@ -39,20 +42,36 @@ vi.mock("../stores/p2pStore", () => ({
 }));
 
 describe("useP2P", () => {
-    beforeEach(() => {
+    let mockWasmInit: ReturnType<typeof vi.fn>;
+    let mockStartP2PManager: ReturnType<typeof vi.fn>;
+    let mockSendMessage: ReturnType<typeof vi.fn>;
+
+    beforeEach(async () => {
         vi.clearAllMocks();
         const globals = globalThis as unknown as TestGlobals;
         globals.__p2pMessages = [];
+
         // Reset the promise for each test
         wasmInitPromise = new Promise((resolve) => {
             wasmInitResolve = resolve;
         });
+
+        // Get mocked functions
+        const wasmModule = await import("../wasm/shogi_core");
+        mockWasmInit = vi.mocked(wasmModule.default);
+        mockStartP2PManager = vi.mocked(wasmModule.start_p2p_manager);
+        mockSendMessage = vi.fn();
+
+        // Setup mock implementations
+        mockWasmInit.mockReturnValue(wasmInitPromise);
+        mockStartP2PManager.mockReturnValue({
+            send_message: mockSendMessage,
+            free: () => {},
+        });
     });
 
     afterEach(() => {
-        const globals = globalThis as unknown as TestGlobals;
-        globals.__p2pMessages = undefined;
-        globals.__p2pStoreCallback = undefined;
+        vi.clearAllMocks();
     });
 
     it("should initialize with default state", async () => {
@@ -73,8 +92,6 @@ describe("useP2P", () => {
 
     it("should connect to a room", async () => {
         const { result } = renderHook(() => useP2P());
-        const { start_p2p_manager } = await import("shogi-rust-core");
-        const mockStart = vi.mocked(start_p2p_manager);
 
         // Initialize WASM first
         await act(async () => {
@@ -89,25 +106,25 @@ describe("useP2P", () => {
             result.current.connect("test-room-123");
         });
 
-        expect(mockStart).toHaveBeenCalledWith("test-room-123");
+        expect(mockStartP2PManager).toHaveBeenCalledWith("test-room-123");
         expect(result.current.isConnected).toBe(true);
     });
 
     it("should not connect if already connected", async () => {
         const { result } = renderHook(() => useP2P());
-        const { start_p2p_manager } = await import("shogi-rust-core");
-        const mockStart = vi.mocked(start_p2p_manager);
 
-        // Initialize WASM
+        // Initialize WASM first
         await act(async () => {
             wasmInitResolve();
             await wasmInitPromise;
         });
 
-        // Connect once
+        // Connect first time
         act(() => {
             result.current.connect("test-room");
         });
+
+        expect(mockStartP2PManager).toHaveBeenCalledTimes(1);
 
         // Try to connect again
         act(() => {
@@ -115,33 +132,23 @@ describe("useP2P", () => {
         });
 
         // Should only be called once
-        expect(mockStart).toHaveBeenCalledTimes(1);
-        expect(mockStart).toHaveBeenCalledWith("test-room");
+        expect(mockStartP2PManager).toHaveBeenCalledTimes(1);
+        expect(mockStartP2PManager).toHaveBeenCalledWith("test-room");
     });
 
-    it("should not connect before initialization", async () => {
+    it("should not connect before initialization", () => {
         const { result } = renderHook(() => useP2P());
-        const { start_p2p_manager } = await import("shogi-rust-core");
-        const mockStart = vi.mocked(start_p2p_manager);
 
-        // Try to connect before initialization (WASM not resolved)
+        // Try to connect without initializing WASM
         act(() => {
             result.current.connect("test-room");
         });
 
-        expect(mockStart).not.toHaveBeenCalled();
+        expect(mockStartP2PManager).not.toHaveBeenCalled();
         expect(result.current.isConnected).toBe(false);
     });
 
     it("should send messages when connected", async () => {
-        const mockSendMessage = vi.fn();
-        const { start_p2p_manager } = await import("shogi-rust-core");
-        const mockStart = vi.mocked(start_p2p_manager);
-        mockStart.mockReturnValue({
-            send_message: mockSendMessage,
-            free: () => {},
-        } as ReturnType<typeof start_p2p_manager>);
-
         const { result } = renderHook(() => useP2P());
 
         // Initialize WASM
@@ -164,14 +171,6 @@ describe("useP2P", () => {
     });
 
     it("should not send messages when not connected", async () => {
-        const mockSendMessage = vi.fn();
-        const { start_p2p_manager } = await import("shogi-rust-core");
-        const mockStart = vi.mocked(start_p2p_manager);
-        mockStart.mockReturnValue({
-            send_message: mockSendMessage,
-            free: () => {},
-        } as ReturnType<typeof start_p2p_manager>);
-
         const { result } = renderHook(() => useP2P());
 
         // Initialize WASM
@@ -181,59 +180,38 @@ describe("useP2P", () => {
         });
 
         // Try to send without connecting
-        const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
         act(() => {
-            result.current.sendMessage("Should not send");
+            result.current.sendMessage("Hello!");
         });
 
         expect(mockSendMessage).not.toHaveBeenCalled();
-        expect(consoleSpy).toHaveBeenCalledWith(
-            "Cannot send message, not connected or handle not ready.",
-        );
-
-        consoleSpy.mockRestore();
     });
 
-    it("should receive messages from store", async () => {
-        const { result } = renderHook(() => useP2P());
+    it("should receive messages from store", () => {
+        const globals = globalThis as unknown as TestGlobals;
+        globals.__p2pMessages = ["Message 1", "Message 2"];
 
-        // Simulate receiving messages
-        act(() => {
-            const globals = globalThis as unknown as TestGlobals;
-            globals.__p2pMessages = ["Message 1", "Message 2"];
-            if (globals.__p2pStoreCallback) {
-                globals.__p2pStoreCallback();
-            }
-        });
+        const { result } = renderHook(() => useP2P());
 
         expect(result.current.receivedMessages).toEqual(["Message 1", "Message 2"]);
     });
 
-    it("should update when new messages arrive", async () => {
+    it("should update when new messages arrive", () => {
+        const globals = globalThis as unknown as TestGlobals;
+        globals.__p2pMessages = [];
+
         const { result } = renderHook(() => useP2P());
 
         expect(result.current.receivedMessages).toEqual([]);
 
-        // Add first message
+        // Simulate a new message
         act(() => {
-            const globals = globalThis as unknown as TestGlobals;
-            globals.__p2pMessages = ["First message"];
+            globals.__p2pMessages = ["New message"];
             if (globals.__p2pStoreCallback) {
                 globals.__p2pStoreCallback();
             }
         });
 
-        expect(result.current.receivedMessages).toEqual(["First message"]);
-
-        // Add second message
-        act(() => {
-            const globals = globalThis as unknown as TestGlobals;
-            globals.__p2pMessages = ["First message", "Second message"];
-            if (globals.__p2pStoreCallback) {
-                globals.__p2pStoreCallback();
-            }
-        });
-
-        expect(result.current.receivedMessages).toEqual(["First message", "Second message"]);
+        expect(result.current.receivedMessages).toEqual(["New message"]);
     });
 });

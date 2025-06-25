@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import initWasm, { type P2PHandle, start_p2p_manager } from "shogi-rust-core";
 import { p2pStore } from "../stores/p2pStore";
+import initWasm, { type P2PHandle, start_p2p_manager } from "../wasm/shogi_core";
 
 export function useP2P() {
     const [handle, setHandle] = useState<P2PHandle | null>(null);

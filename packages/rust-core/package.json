@@ -6,6 +6,8 @@
     "build:wasm": "wasm-pack build --target web --out-dir pkg && cp pkg/* ../web/src/wasm/",
     "build:wasm:dev": "wasm-pack build --dev --target web --out-dir pkg && cp pkg/* ../web/src/wasm/",
     "test:wasm": "wasm-pack test --chrome --headless",
+    "test:wasm:firefox": "wasm-pack test --firefox --headless",
+    "test:rust": "cargo test",
     "fmt": "cargo fmt",
     "lint": "cargo clippy",
     "clean": "cargo clean && rm -rf pkg"
