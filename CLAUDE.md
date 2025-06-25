@@ -131,6 +131,16 @@ When working with rust-core:
 - Output: ES modules with TypeScript definitions
 - Optimization: Enable in release builds
 
+## Web Search
+
+**IMPORTANT**: When performing web searches, use the gemini CLI command via Task tool instead of the built-in WebSearch tool:
+
+```bash
+gemini -p "WebSearch: [your search query]"
+```
+
+This approach is preferred as it provides project-specific context and better integration with the development workflow.
+
 ## Additional Documentation
 
 For detailed references to reduce token usage, see:
