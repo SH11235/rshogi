@@ -16,9 +16,11 @@ extern "C" {
 
 fn dispatch_p2p_message(message: &str) {
     let window = web_sys::window().expect("no global `window` exists");
+    let mut event_init = web_sys::CustomEventInit::new();
+    event_init.detail(&JsValue::from_str(message));
     let event = web_sys::CustomEvent::new_with_event_init_dict(
         "p2p-message",
-        &web_sys::CustomEventInit::new().detail(&JsValue::from_str(message)),
+        &event_init,
     ).expect("Failed to create custom event");
     window.dispatch_event(&event).expect("Failed to dispatch event");
 }
@@ -66,10 +68,21 @@ async fn p2p_loop(room_id: String, mut rx: mpsc::Receiver<String>) {
 
     let mut message_loop = message_loop.fuse();
     let mut peers = HashSet::new();
+    let mut peer_update_counter = 0u32;
 
     loop {
-        let mut main_loop = Box::pin(async {
-            TimeoutFuture::new(10).await;
+        // Check for incoming messages first (immediate processing)
+        let channel = socket.channel_mut(0);
+        for (peer, packet) in channel.receive() {
+            let message_str = String::from_utf8_lossy(&packet);
+            console_log!("Received message from {}: {}", peer, message_str);
+            dispatch_p2p_message(&message_str);
+        }
+
+        // Update peers every ~20 iterations (approximately 100ms)
+        peer_update_counter += 1;
+        if peer_update_counter >= 20 {
+            peer_update_counter = 0;
             socket.update_peers();
             let new_peers = socket.players().into_iter().collect::<HashSet<_>>();
 
@@ -80,31 +93,33 @@ async fn p2p_loop(room_id: String, mut rx: mpsc::Receiver<String>) {
                 console_log!("Peer left: {:?}", peer);
             }
             peers = new_peers;
-
-            let channel = socket.channel_mut(0);
-            for (peer, packet) in channel.receive() {
-                let message_str = String::from_utf8_lossy(&packet);
-                console_log!("Received message from {}: {}", peer, message_str);
-                dispatch_p2p_message(&message_str);
-            }
-
-            if let Some(message) = rx.next().await {
-                console_log!("Sending broadcast message: {}", message);
-                let packet = message.as_bytes().to_vec().into_boxed_slice();
-                for &peer in &peers {
-                    if let PlayerType::Remote(peer_id) = peer {
-                        channel.send(packet.clone(), peer_id);
-                    }
-                }
-            }
-        });
+        }
 
         select! {
+            // Handle signalling loop completion
             result = message_loop => {
                 console_log!("Signalling loop finished with result: {:?}", result);
                 break;
             },
-            _ = main_loop.fuse() => {},
+            
+            // Handle outgoing messages from the channel
+            message = rx.next() => {
+                if let Some(message) = message {
+                    console_log!("Sending broadcast message: {}", message);
+                    let packet = message.as_bytes().to_vec().into_boxed_slice();
+                    let channel = socket.channel_mut(0);
+                    for &peer in &peers {
+                        if let PlayerType::Remote(peer_id) = peer {
+                            channel.send(packet.clone(), peer_id);
+                        }
+                    }
+                }
+            },
+            
+            // Small timeout to yield control and check messages again
+            _ = TimeoutFuture::new(5).fuse() => {
+                // This ensures the loop continues and checks for messages
+            }
         }
     }
     console_log!("P2P loop finished.");

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import init, { type P2PHandle, start_p2p_manager } from "shogi-rust-core";
+import initWasm, { type P2PHandle, start_p2p_manager } from "shogi-rust-core";
 import { p2pStore } from "../stores/p2pStore";
 
 export function useP2P() {
@@ -9,7 +9,7 @@ export function useP2P() {
     const [isInitialized, setIsInitialized] = useState(false);
 
     useEffect(() => {
-        init().then(() => setIsInitialized(true));
+        initWasm().then(() => setIsInitialized(true));
     }, []);
 
     const connect = useCallback(

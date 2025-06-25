@@ -1,0 +1,1 @@
+After making any changes to the code, run `npm run build` to ensure that the changes do not break the build.
