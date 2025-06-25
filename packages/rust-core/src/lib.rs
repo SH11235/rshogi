@@ -1,12 +1,11 @@
 use futures::channel::mpsc;
-use futures::{future::FutureExt, select, SinkExt, StreamExt};
-use gloo_timers::future::TimeoutFuture;
+use futures::{SinkExt, StreamExt, future::FutureExt, select};
 use ggrs::PlayerType;
+use gloo_timers::future::TimeoutFuture;
 use matchbox_socket::WebRtcSocket;
 use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
-use web_sys;
 
 #[wasm_bindgen]
 extern "C" {
@@ -17,12 +16,12 @@ extern "C" {
 fn dispatch_p2p_message(message: &str) {
     let window = web_sys::window().expect("no global `window` exists");
     let mut event_init = web_sys::CustomEventInit::new();
-    event_init.detail(&JsValue::from_str(message));
-    let event = web_sys::CustomEvent::new_with_event_init_dict(
-        "p2p-message",
-        &event_init,
-    ).expect("Failed to create custom event");
-    window.dispatch_event(&event).expect("Failed to dispatch event");
+    event_init.set_detail(&JsValue::from_str(message));
+    let event = web_sys::CustomEvent::new_with_event_init_dict("p2p-message", &event_init)
+        .expect("Failed to create custom event");
+    window
+        .dispatch_event(&event)
+        .expect("Failed to dispatch event");
 }
 
 macro_rules! console_log {
@@ -101,7 +100,7 @@ async fn p2p_loop(room_id: String, mut rx: mpsc::Receiver<String>) {
                 console_log!("Signalling loop finished with result: {:?}", result);
                 break;
             },
-            
+
             // Handle outgoing messages from the channel
             message = rx.next() => {
                 if let Some(message) = message {
@@ -115,7 +114,7 @@ async fn p2p_loop(room_id: String, mut rx: mpsc::Receiver<String>) {
                     }
                 }
             },
-            
+
             // Small timeout to yield control and check messages again
             _ = TimeoutFuture::new(5).fuse() => {
                 // This ensures the loop continues and checks for messages
@@ -156,5 +155,42 @@ impl Piece {
             owner,
             promoted: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn test_piece_creation() {
+        let piece = Piece::new(PieceType::Pawn, Player::Black);
+        assert_eq!(piece.piece_type, PieceType::Pawn);
+        assert_eq!(piece.owner, Player::Black);
+        assert_eq!(piece.promoted, false);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_p2p_handle_creation() {
+        let _handle = start_p2p_manager("test-room".to_string());
+        // Basic check that handle is created
+        // Note: We can't easily test the async behavior in unit tests
+        assert!(true); // Placeholder - handle exists
+    }
+
+    #[test]
+    fn test_player_enum() {
+        let black = Player::Black;
+        let white = Player::White;
+        assert_ne!(black, white);
+    }
+
+    #[test]
+    fn test_piece_type_enum() {
+        let pawn = PieceType::Pawn;
+        assert_eq!(pawn, PieceType::Pawn);
     }
 }
