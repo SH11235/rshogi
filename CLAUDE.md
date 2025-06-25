@@ -91,6 +91,46 @@ These checks must all pass before considering a task complete. This ensures code
 - **Explicit button types** - Always specify `type="button"`
 - **Prefer for-of over forEach** - Especially in test files
 
+## Rust/WebAssembly Development (packages/rust-core/)
+
+### Commands
+
+**IMPORTANT**: When modifying any Rust code in packages/rust-core/, ALWAYS run these commands in order:
+
+1. **Build WASM**: `npm run build:wasm` - Builds the WebAssembly module
+2. **Test**: `npm run test:wasm` - Runs Rust tests in browser environment
+3. **Format**: `cargo fmt` - Formats Rust code according to standard style
+4. **Lint**: `cargo clippy` - Runs Rust linter for code quality
+
+### Development Workflow
+
+When working with rust-core:
+1. Make changes to Rust code
+2. Run `npm run build:wasm` from packages/rust-core directory
+3. The built WASM files are automatically copied to packages/web/src/wasm/
+4. Test changes in the web application
+
+### Testing Strategy
+
+- **Browser Tests**: Use `#[wasm_bindgen_test]` for WASM-specific tests
+- **Unit Tests**: Use standard `#[test]` for pure Rust logic
+- **Test Runner**: `wasm-pack test --chrome --headless`
+- Keep tests minimal focusing on core functionality
+
+### Code Quality Standards
+
+- Use proper error handling with Result types where applicable
+- Minimize JavaScript interop surface area
+- Document public APIs with doc comments
+- Keep WASM module size small by avoiding unnecessary dependencies
+
+### Build Configuration
+
+- Target: wasm32-unknown-unknown
+- Build tool: wasm-pack
+- Output: ES modules with TypeScript definitions
+- Optimization: Enable in release builds
+
 ## Additional Documentation
 
 For detailed references to reduce token usage, see:

@@ -1,0 +1,16 @@
+{
+  "name": "@shogi/rust-core",
+  "version": "0.1.0",
+  "description": "Rust WebAssembly core for Shogi game",
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --out-dir pkg && cp pkg/* ../web/src/wasm/",
+    "build:wasm:dev": "wasm-pack build --dev --target web --out-dir pkg && cp pkg/* ../web/src/wasm/",
+    "test:wasm": "wasm-pack test --chrome --headless",
+    "fmt": "cargo fmt",
+    "lint": "cargo clippy",
+    "clean": "cargo clean && rm -rf pkg"
+  },
+  "devDependencies": {
+    "wasm-pack": "^0.13.2"
+  }
+}
