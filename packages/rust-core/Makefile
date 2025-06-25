@@ -3,10 +3,12 @@
 # Default target
 build:
 	wasm-pack build --target web --out-dir pkg
+	mkdir -p ../web/src/wasm
 	cp pkg/* ../web/src/wasm/
 
 build-dev:
 	wasm-pack build --dev --target web --out-dir pkg
+	mkdir -p ../web/src/wasm
 	cp pkg/* ../web/src/wasm/
 
 test:
