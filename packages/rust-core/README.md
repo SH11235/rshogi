@@ -9,14 +9,16 @@ This package contains the WebAssembly (WASM) implementation for P2P communicatio
 
 ## Building
 
-### Development Build
+### From project root
 ```bash
-npm run build:wasm:dev
+npm run build:wasm      # Production build
+npm run build:wasm:dev  # Development build
 ```
 
-### Production Build
+### From this directory
 ```bash
-npm run build:wasm
+make build      # Production build
+make build-dev  # Development build
 ```
 
 ## Important Notes
@@ -43,18 +45,26 @@ The generated files in `packages/web/src/wasm/` are:
 
 ```bash
 # Run standard Rust tests
-npm run test:rust
+cargo test
 
 # Run WASM tests in browser (requires Chrome)
-npm run test:wasm
+wasm-pack test --chrome --headless
+
+# Or use Make
+make test       # Standard tests
+make test-wasm  # Browser tests
 ```
 
 ## Code Quality
 
 ```bash
 # Format code
-npm run fmt
+cargo fmt
 
 # Run linter
-npm run lint
+cargo clippy
+
+# Or use Make
+make format
+make lint
 ```

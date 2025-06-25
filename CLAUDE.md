@@ -97,10 +97,10 @@ These checks must all pass before considering a task complete. This ensures code
 
 **IMPORTANT**: When modifying any Rust code in packages/rust-core/, ALWAYS run these commands in order:
 
-1. **Build WASM**: `npm run build:wasm` - Builds the WebAssembly module
-2. **Test**: `npm run test:rust` - Runs standard Rust tests
-3. **Format**: `npm run fmt` - Formats Rust code according to standard style
-4. **Lint**: `npm run lint` - Runs Rust linter for code quality
+1. **Build WASM**: `npm run build:wasm` (from root) or `make build` (from rust-core) - Builds the WebAssembly module
+2. **Test**: `cargo test` - Runs standard Rust tests
+3. **Format**: `cargo fmt` - Formats Rust code according to standard style
+4. **Lint**: `cargo clippy` - Runs Rust linter for code quality
 
 ### Development Workflow
 

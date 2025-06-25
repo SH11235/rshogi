@@ -83,9 +83,7 @@ jobs:
         run: npm ci --prefer-offline --no-audit --ignore-scripts
 
       - name: Build WASM files
-        run: |
-          cd packages/rust-core
-          npm run build:wasm
+        run: npm run build:wasm
 
       # デプロイ用の本番ビルドのみ実行（品質チェックはCIで完了済み）
       - name: Build packages

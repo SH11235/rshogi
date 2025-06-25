@@ -70,9 +70,7 @@ jobs:
         run: npm ci --prefer-offline --no-audit --ignore-scripts
 
       - name: Build WASM files
-        run: |
-          cd packages/rust-core
-          npm run build:wasm
+        run: npm run build:wasm
 
       # 条件分岐でAffected vs All を切り替え
       - name: Build (Affected)
