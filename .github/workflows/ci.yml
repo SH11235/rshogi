@@ -24,6 +24,27 @@ jobs:
           node-version: "24"
           cache: "npm"
 
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          target: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/rust-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
       # Enhanced npm cache with package-lock hash
       - name: Cache node modules
         uses: actions/cache@v4
@@ -47,6 +68,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit --ignore-scripts
+
+      - name: Build WASM files
+        run: |
+          cd packages/rust-core
+          npm run build:wasm
 
       # 条件分岐でAffected vs All を切り替え
       - name: Build (Affected)

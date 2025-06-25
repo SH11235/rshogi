@@ -21,7 +21,7 @@
     "format:check": "biome check .",
     "clean": "turbo clean && rm -rf node_modules packages/*/node_modules packages/*/dist",
     "pre-commit": "lint-staged",
-    "postinstall": "npm run build:wasm --workspace=@shogi/rust-core --if-present || echo 'Skipping WASM build (may not be available in CI)'"
+    "postinstall": "echo 'Note: WASM files need to be built. Run: cd packages/rust-core && npm run build:wasm'"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
