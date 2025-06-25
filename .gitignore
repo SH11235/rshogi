@@ -42,6 +42,10 @@ packages/web/coverage/
 
 # Rust build artifacts
 packages/rust-core/target/
+packages/rust-core/pkg/
+
+# WASM build artifacts
+packages/web/src/wasm/
 
 
 # private memo
