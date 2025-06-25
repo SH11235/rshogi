@@ -39,3 +39,10 @@ test-results/
 
 # Coverage
 packages/web/coverage/
+
+# Rust build artifacts
+packages/rust-core/target/
+
+
+# private memo
+memo/
