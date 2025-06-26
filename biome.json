@@ -32,7 +32,9 @@
             ".vscode/**",
             "**/test-results/**",
             "**/playwright-report/**",
-            "**/coverage/**"
+            "**/coverage/**",
+            "packages/rust-core/**",
+            "packages/web/src/wasm/**"
         ]
     }
 }
