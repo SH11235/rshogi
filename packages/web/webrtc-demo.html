@@ -150,6 +150,7 @@
                     <h3>役割を選択</h3>
                     <button id="hostBtn" onclick="startAsHost()">ホストとして開始</button>
                     <button id="guestBtn" onclick="startAsGuest()">ゲストとして開始</button>
+                    <button id="resetBtn" onclick="resetConnection()" style="display: none; background: #ff5722;">接続をリセット</button>
                 </div>
 
                 <div id="hostSection" style="display: none; margin-top: 20px;">
@@ -206,6 +207,7 @@
         let peer = null;
         let isHost = false;
         let channelOpen = false;
+        let connectionState = 'new'; // new, connecting, connected, disconnected
 
         // WASM モジュールの読み込み
         async function loadWasm() {
@@ -230,6 +232,7 @@
                 window.acceptAnswer = acceptAnswer;
                 window.sendMessage = sendMessage;
                 window.clearLog = clearLog;
+                window.resetConnection = resetConnection;
                 
                 // イベントリスナー設定
                 setupEventListeners();
@@ -249,11 +252,13 @@
             window.addEventListener('webrtc-channel-open', (event) => {
                 addLog('データチャネルが開きました！', 'system');
                 channelOpen = true;
+                connectionState = 'connected';
                 document.getElementById('messageInput').disabled = false;
                 document.getElementById('sendBtn').disabled = false;
                 document.getElementById('status').textContent = '接続済み';
                 document.getElementById('status').classList.add('connected');
                 document.getElementById('connState').textContent = '接続済み';
+                document.getElementById('resetBtn').style.display = 'inline-block';
             });
 
             window.addEventListener('webrtc-message', (event) => {
@@ -265,6 +270,18 @@
                 const state = event.detail;
                 addLog(`接続状態: ${state}`, 'system');
                 document.getElementById('connState').textContent = state;
+                
+                // 接続が切断された場合
+                if (state === 'Disconnected' || state === 'Failed' || state === 'Closed') {
+                    connectionState = 'disconnected';
+                    channelOpen = false;
+                    document.getElementById('messageInput').disabled = true;
+                    document.getElementById('sendBtn').disabled = true;
+                    document.getElementById('status').textContent = '切断されました';
+                    document.getElementById('status').classList.remove('connected');
+                    addLog('接続が切断されました。再接続するには「接続をリセット」をクリックしてください。', 'system');
+                    document.getElementById('resetBtn').style.display = 'inline-block';
+                }
             });
         }
 
@@ -416,6 +433,44 @@
 
         function clearLog() {
             document.getElementById('log').innerHTML = '';
+        }
+
+        function resetConnection() {
+            // 既存の接続をクリーンアップ
+            if (peer) {
+                peer = null;
+            }
+            
+            // UIをリセット
+            channelOpen = false;
+            connectionState = 'new';
+            document.getElementById('status').textContent = '未接続';
+            document.getElementById('status').classList.remove('connected');
+            document.getElementById('connState').textContent = '未接続';
+            document.getElementById('messageInput').disabled = true;
+            document.getElementById('sendBtn').disabled = true;
+            
+            // ボタンを有効化
+            document.getElementById('hostBtn').disabled = false;
+            document.getElementById('guestBtn').disabled = false;
+            document.getElementById('resetBtn').style.display = 'none';
+            
+            // セクションを非表示
+            document.getElementById('hostSection').style.display = 'none';
+            document.getElementById('guestSection').style.display = 'none';
+            
+            // ステップをリセット
+            document.querySelectorAll('.step').forEach(step => {
+                step.classList.remove('active', 'completed');
+            });
+            
+            // 入力フィールドをクリア
+            document.getElementById('offerData').value = '';
+            document.getElementById('offerInput').value = '';
+            document.getElementById('answerData').value = '';
+            document.getElementById('answerInput').value = '';
+            
+            addLog('接続をリセットしました。新しい接続を開始できます。', 'system');
         }
 
         // 初期化
