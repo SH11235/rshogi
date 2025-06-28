@@ -32,6 +32,7 @@
     "@radix-ui/react-radio-group": "^1.3.7",
     "@radix-ui/react-select": "^2.2.5",
     "@radix-ui/react-slot": "^1.2.3",
+    "@radix-ui/react-tabs": "^1.1.12",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.518.0",
@@ -39,7 +40,6 @@
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.6.2",
     "shogi-core": "file:../core",
-    "shogi-rust-core": "file:../rust-core/pkg",
     "simple-peer": "^9.11.1",
     "tailwind-merge": "^3.3.1",
     "zustand": "^5.0.4"

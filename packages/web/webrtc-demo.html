@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC P2P Demo - 真のサーバーレスP2P</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        h2 {
+            color: #666;
+            margin-top: 0;
+        }
+        .status {
+            padding: 10px;
+            background: #e3f2fd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .connected {
+            background: #c8e6c9;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #2196f3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px 0;
+        }
+        button:hover {
+            background: #1976d2;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .log {
+            height: 300px;
+            overflow-y: auto;
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 4px;
+        }
+        .log-sent {
+            background: #e3f2fd;
+        }
+        .log-received {
+            background: #fff3e0;
+        }
+        .log-system {
+            background: #f5f5f5;
+            color: #666;
+        }
+        .error {
+            color: #f44336;
+            background: #ffebee;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .info {
+            background: #fffde7;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        #loading {
+            text-align: center;
+            padding: 40px;
+        }
+        .step {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+        }
+        .step.active {
+            background: #e3f2fd;
+            font-weight: bold;
+        }
+        .step.completed {
+            background: #c8e6c9;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebRTC P2P Demo - 真のサーバーレスP2P</h1>
+    
+    <div id="loading">
+        <p>Loading WASM module...</p>
+    </div>
+
+    <div id="app" style="display: none;">
+        <div class="info" style="margin-bottom: 20px;">
+            <strong>完全にサーバーレスなP2P通信デモ</strong><br>
+            このデモは、シグナリングサーバーを使用せずに2つのブラウザ間で直接P2P接続を確立します。<br>
+            接続情報（SDP）を手動で交換することで、WebRTC接続を確立します。
+        </div>
+
+        <div class="container">
+            <div class="panel">
+                <h2>接続設定</h2>
+                
+                <div class="status" id="status">未接続</div>
+                
+                <div>
+                    <strong>Peer ID:</strong>
+                    <div id="peerId" style="word-break: break-all; font-family: monospace; font-size: 12px;">-</div>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <h3>役割を選択</h3>
+                    <button id="hostBtn" onclick="startAsHost()">ホストとして開始</button>
+                    <button id="guestBtn" onclick="startAsGuest()">ゲストとして開始</button>
+                </div>
+
+                <div id="hostSection" style="display: none; margin-top: 20px;">
+                    <h3>ホスト側の手順</h3>
+                    <div class="step" id="hostStep1">1. オファーを作成中...</div>
+                    <div class="step" id="hostStep2">2. 以下のオファーをゲストに送信してください：</div>
+                    <textarea id="offerData" rows="6" readonly placeholder="オファーを生成中..."></textarea>
+                    <button onclick="copyOffer()">オファーをコピー</button>
+                    
+                    <div class="step" id="hostStep3" style="margin-top: 20px;">3. ゲストからのアンサーを貼り付けてください：</div>
+                    <textarea id="answerInput" rows="6" placeholder="ゲストからのアンサーを貼り付け"></textarea>
+                    <button onclick="acceptAnswer()">アンサーを受け入れる</button>
+                </div>
+
+                <div id="guestSection" style="display: none; margin-top: 20px;">
+                    <h3>ゲスト側の手順</h3>
+                    <div class="step" id="guestStep1">1. ホストからのオファーを貼り付けてください：</div>
+                    <textarea id="offerInput" rows="6" placeholder="ホストからのオファーを貼り付け"></textarea>
+                    <button onclick="acceptOffer()">オファーを受け入れる</button>
+                    
+                    <div class="step" id="guestStep2" style="margin-top: 20px;">2. 以下のアンサーをホストに送信してください：</div>
+                    <textarea id="answerData" rows="6" readonly placeholder="アンサーを生成中..."></textarea>
+                    <button onclick="copyAnswer()">アンサーをコピー</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>チャット</h2>
+                
+                <div id="connectionStatus" style="margin-bottom: 10px;">
+                    <strong>接続状態:</strong> <span id="connState">未接続</span>
+                </div>
+                
+                <div>
+                    <h3>メッセージ送信</h3>
+                    <input type="text" id="messageInput" placeholder="メッセージを入力" onkeypress="if(event.key==='Enter')sendMessage()" disabled>
+                    <button id="sendBtn" onclick="sendMessage()" disabled>送信</button>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <h3>ログ</h3>
+                    <div id="log" class="log"></div>
+                </div>
+
+                <div style="margin-top: 10px;">
+                    <button onclick="clearLog()">ログをクリア</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        let wasmModule;
+        let peer = null;
+        let isHost = false;
+        let channelOpen = false;
+
+        // WASM モジュールの読み込み
+        async function loadWasm() {
+            try {
+                const module = await import('./src/wasm/shogi_core.js');
+                await module.default();
+                wasmModule = module;
+                
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('app').style.display = 'block';
+                
+                addLog('WASM module loaded successfully', 'system');
+                
+                // グローバルに関数を公開
+                window.startAsHost = startAsHost;
+                window.startAsGuest = startAsGuest;
+                window.copyOffer = copyOffer;
+                window.copyAnswer = copyAnswer;
+                window.acceptOffer = acceptOffer;
+                window.acceptAnswer = acceptAnswer;
+                window.sendMessage = sendMessage;
+                window.clearLog = clearLog;
+                
+                // イベントリスナー設定
+                setupEventListeners();
+            } catch (error) {
+                console.error('Failed to load WASM:', error);
+                document.getElementById('loading').innerHTML = `
+                    <div class="error">
+                        WASM module の読み込みに失敗しました: ${error.message}<br>
+                        コンソールを確認してください。
+                    </div>
+                `;
+            }
+        }
+
+        function setupEventListeners() {
+            // WebRTC events
+            window.addEventListener('webrtc-channel-open', (event) => {
+                addLog('データチャネルが開きました！', 'system');
+                channelOpen = true;
+                document.getElementById('messageInput').disabled = false;
+                document.getElementById('sendBtn').disabled = false;
+                document.getElementById('status').textContent = '接続済み';
+                document.getElementById('status').classList.add('connected');
+                document.getElementById('connState').textContent = '接続済み';
+            });
+
+            window.addEventListener('webrtc-message', (event) => {
+                const message = event.detail;
+                addLog(`受信: ${message}`, 'received');
+            });
+
+            window.addEventListener('webrtc-connection-state', (event) => {
+                const state = event.detail;
+                addLog(`接続状態: ${state}`, 'system');
+                document.getElementById('connState').textContent = state;
+            });
+        }
+
+        async function startAsHost() {
+            try {
+                isHost = true;
+                document.getElementById('hostBtn').disabled = true;
+                document.getElementById('guestBtn').disabled = true;
+                document.getElementById('hostSection').style.display = 'block';
+                document.getElementById('guestSection').style.display = 'none';
+                
+                addLog('ホストとして開始...', 'system');
+                document.getElementById('hostStep1').classList.add('active');
+                
+                peer = await wasmModule.create_webrtc_peer(true);
+                const peerId = peer.get_peer_id();
+                document.getElementById('peerId').textContent = peerId;
+                
+                // オファーを作成
+                const offer = await peer.create_offer();
+                document.getElementById('offerData').value = offer;
+                
+                document.getElementById('hostStep1').classList.remove('active');
+                document.getElementById('hostStep1').classList.add('completed');
+                document.getElementById('hostStep2').classList.add('active');
+                
+                addLog('オファーを作成しました。ゲストに送信してください。', 'system');
+                
+            } catch (error) {
+                console.error('Failed to start as host:', error);
+                addLog(`エラー: ${error}`, 'system');
+            }
+        }
+
+        async function startAsGuest() {
+            try {
+                isHost = false;
+                document.getElementById('hostBtn').disabled = true;
+                document.getElementById('guestBtn').disabled = true;
+                document.getElementById('hostSection').style.display = 'none';
+                document.getElementById('guestSection').style.display = 'block';
+                
+                addLog('ゲストとして開始...', 'system');
+                document.getElementById('guestStep1').classList.add('active');
+                
+                peer = await wasmModule.create_webrtc_peer(false);
+                const peerId = peer.get_peer_id();
+                document.getElementById('peerId').textContent = peerId;
+                
+                addLog('ホストからのオファーを待っています...', 'system');
+                
+            } catch (error) {
+                console.error('Failed to start as guest:', error);
+                addLog(`エラー: ${error}`, 'system');
+            }
+        }
+
+        async function acceptOffer() {
+            const offer = document.getElementById('offerInput').value.trim();
+            if (!offer) {
+                alert('オファーを入力してください');
+                return;
+            }
+
+            try {
+                addLog('オファーを処理中...', 'system');
+                document.getElementById('guestStep1').classList.remove('active');
+                document.getElementById('guestStep1').classList.add('completed');
+                document.getElementById('guestStep2').classList.add('active');
+                
+                const answer = await peer.handle_offer(offer);
+                document.getElementById('answerData').value = answer;
+                
+                addLog('アンサーを作成しました。ホストに送信してください。', 'system');
+                
+            } catch (error) {
+                console.error('Failed to accept offer:', error);
+                addLog(`エラー: ${error}`, 'system');
+            }
+        }
+
+        async function acceptAnswer() {
+            const answer = document.getElementById('answerInput').value.trim();
+            if (!answer) {
+                alert('アンサーを入力してください');
+                return;
+            }
+
+            try {
+                addLog('アンサーを処理中...', 'system');
+                document.getElementById('hostStep2').classList.remove('active');
+                document.getElementById('hostStep2').classList.add('completed');
+                document.getElementById('hostStep3').classList.remove('active');
+                document.getElementById('hostStep3').classList.add('completed');
+                
+                await peer.handle_answer(answer);
+                
+                addLog('アンサーを受け入れました。接続を確立中...', 'system');
+                
+            } catch (error) {
+                console.error('Failed to accept answer:', error);
+                addLog(`エラー: ${error}`, 'system');
+            }
+        }
+
+        function copyOffer() {
+            const textarea = document.getElementById('offerData');
+            textarea.select();
+            document.execCommand('copy');
+            addLog('オファーをコピーしました', 'system');
+        }
+
+        function copyAnswer() {
+            const textarea = document.getElementById('answerData');
+            textarea.select();
+            document.execCommand('copy');
+            addLog('アンサーをコピーしました', 'system');
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (!message || !peer || !channelOpen) {
+                return;
+            }
+
+            try {
+                peer.send_message(message);
+                addLog(`送信: ${message}`, 'sent');
+                input.value = '';
+            } catch (error) {
+                console.error('Failed to send message:', error);
+                addLog(`送信エラー: ${error}`, 'system');
+            }
+        }
+
+        function addLog(message, type = 'system') {
+            const log = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        // 初期化
+        loadWasm();
+    </script>
+</body>
+</html>
