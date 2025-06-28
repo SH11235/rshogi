@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BASE_URL Test</title>
+</head>
+<body>
+    <h1>Vite BASE_URL Test</h1>
+    <p>This page tests if import.meta.env.BASE_URL is correctly set.</p>
+    
+    <div id="result"></div>
+    
+    <script type="module">
+        // Viteビルド後のアプリケーションでは、import.meta.env.BASE_URLが使用可能
+        // ただし、このHTMLファイルは直接開いているため、import.meta.envは使用できません
+        
+        // 代わりに、現在のパスから推測
+        const pathname = window.location.pathname;
+        const isGitHubPages = pathname.includes('/shogi/');
+        const expectedBaseUrl = isGitHubPages ? '/shogi/' : '/';
+        
+        document.getElementById('result').innerHTML = `
+            <p>Current pathname: ${pathname}</p>
+            <p>Is GitHub Pages: ${isGitHubPages}</p>
+            <p>Expected BASE_URL: ${expectedBaseUrl}</p>
+            <p>Note: In the actual Vite-built app, import.meta.env.BASE_URL = "${expectedBaseUrl}"</p>
+        `;
+    </script>
+</body>
+</html>

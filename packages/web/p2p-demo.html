@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>libp2p P2P Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        h2 {
+            color: #666;
+            margin-top: 0;
+        }
+        .status {
+            padding: 10px;
+            background: #e3f2fd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .connected {
+            background: #c8e6c9;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #2196f3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px 0;
+        }
+        button:hover {
+            background: #1976d2;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .log {
+            height: 300px;
+            overflow-y: auto;
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 4px;
+        }
+        .log-sent {
+            background: #e3f2fd;
+        }
+        .log-received {
+            background: #fff3e0;
+        }
+        .log-system {
+            background: #f5f5f5;
+            color: #666;
+        }
+        .error {
+            color: #f44336;
+            background: #ffebee;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .info {
+            background: #fffde7;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        #loading {
+            text-align: center;
+            padding: 40px;
+        }
+    </style>
+</head>
+<body>
+    <h1>libp2p P2P Demo</h1>
+    
+    <div id="loading">
+        <p>Loading WASM module...</p>
+    </div>
+
+    <div id="app" style="display: none;">
+        <div class="container">
+            <div class="panel">
+                <h2>ノード情報</h2>
+                <div class="status" id="status">未接続</div>
+                
+                <div>
+                    <strong>Peer ID:</strong>
+                    <div id="peerId" style="word-break: break-all; font-family: monospace; font-size: 12px;">-</div>
+                </div>
+                
+                <div style="margin-top: 10px;">
+                    <strong>リスニングアドレス:</strong>
+                    <div id="addresses" style="font-family: monospace; font-size: 12px;">-</div>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <button id="startNode" onclick="startP2PNode()">P2Pノードを開始</button>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <h3>接続情報の共有</h3>
+                    <div class="info">
+                        他のブラウザと接続するには、この接続情報を共有してください：
+                    </div>
+                    <textarea id="connectionInfo" rows="4" readonly placeholder="ノード開始後に表示されます"></textarea>
+                    <button onclick="copyConnectionInfo()">コピー</button>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <h3>他のノードに接続</h3>
+                    <input type="text" id="remoteAddress" placeholder="相手の接続情報を貼り付け">
+                    <button onclick="connectToPeer()">接続</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>メッセージング</h2>
+                
+                <div>
+                    <h3>メッセージ送信</h3>
+                    <input type="text" id="messageInput" placeholder="メッセージを入力" onkeypress="if(event.key==='Enter')sendMessage()">
+                    <button onclick="sendMessage()">送信</button>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <h3>ログ</h3>
+                    <div id="log" class="log"></div>
+                </div>
+
+                <div style="margin-top: 10px;">
+                    <button onclick="clearLog()">ログをクリア</button>
+                </div>
+            </div>
+        </div>
+
+        <div style="margin-top: 20px;" class="panel">
+            <h2>接続中のピア</h2>
+            <div id="peers">なし</div>
+        </div>
+    </div>
+
+    <script type="module">
+        let wasmModule;
+        let p2pHandle = null;
+        let peerId = null;
+        let connectedPeers = new Set();
+
+        // WASM モジュールの読み込み
+        async function loadWasm() {
+            try {
+                // GitHub Pagesとローカル開発の両方に対応
+                const basePath = location.hostname === 'localhost' ? '' : '/shogi';
+                const module = await import(`${basePath}/src/wasm/shogi_core.js`);
+                await module.default();
+                wasmModule = module;
+                
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('app').style.display = 'block';
+                
+                addLog('WASM module loaded successfully', 'system');
+                
+                // グローバルに関数を公開
+                window.startP2PNode = startP2PNode;
+                window.sendMessage = sendMessage;
+                window.clearLog = clearLog;
+                window.connectToPeer = connectToPeer;
+                window.copyConnectionInfo = copyConnectionInfo;
+                
+                // イベントリスナー設定
+                setupEventListeners();
+            } catch (error) {
+                console.error('Failed to load WASM:', error);
+                document.getElementById('loading').innerHTML = `
+                    <div class="error">
+                        WASM module の読み込みに失敗しました: ${error.message}<br>
+                        コンソールを確認してください。
+                    </div>
+                `;
+            }
+        }
+
+        function setupEventListeners() {
+            // libp2p events
+            window.addEventListener('libp2p-message', (event) => {
+                const data = event.detail;
+                addLog(`受信: ${data}`, 'received');
+                
+                try {
+                    const message = JSON.parse(data);
+                    if (message.msg_type === 'ping') {
+                        // Ping に対して Pong を返す
+                        if (p2pHandle) {
+                            p2pHandle.send_message('pong', JSON.stringify({
+                                from: peerId,
+                                timestamp: Date.now()
+                            }));
+                        }
+                    }
+                } catch (e) {
+                    // JSON以外のメッセージ
+                }
+            });
+
+            window.addEventListener('libp2p-peer-discovered', (event) => {
+                const peerId = event.detail;
+                addLog(`新しいピアを発見: ${peerId}`, 'system');
+                connectedPeers.add(peerId);
+                updatePeersList();
+            });
+
+            window.addEventListener('libp2p-peer-identified', (event) => {
+                const peerId = event.detail;
+                addLog(`ピアを識別: ${peerId}`, 'system');
+            });
+
+            window.addEventListener('libp2p-listening', (event) => {
+                const address = event.detail;
+                addLog(`リスニング開始: ${address}`, 'system');
+                document.getElementById('addresses').textContent = address;
+                updateConnectionInfo();
+            });
+        }
+
+        async function startP2PNode() {
+            try {
+                document.getElementById('startNode').disabled = true;
+                addLog('P2Pノードを開始中...', 'system');
+                
+                p2pHandle = await wasmModule.create_libp2p_node();
+                peerId = p2pHandle.get_peer_id();
+                
+                document.getElementById('peerId').textContent = peerId;
+                document.getElementById('status').textContent = 'オンライン';
+                document.getElementById('status').classList.add('connected');
+                
+                addLog(`ノード開始成功! Peer ID: ${peerId}`, 'system');
+                
+                // 定期的にPingを送信
+                setInterval(() => {
+                    if (p2pHandle && connectedPeers.size > 0) {
+                        p2pHandle.send_message('ping', JSON.stringify({
+                            from: peerId,
+                            timestamp: Date.now()
+                        }));
+                    }
+                }, 30000); // 30秒ごと
+                
+            } catch (error) {
+                console.error('Failed to start P2P node:', error);
+                addLog(`エラー: ${error}`, 'system');
+                document.getElementById('startNode').disabled = false;
+            }
+        }
+
+        function updateConnectionInfo() {
+            if (peerId) {
+                const info = {
+                    peerId: peerId,
+                    addresses: [document.getElementById('addresses').textContent],
+                    timestamp: Date.now()
+                };
+                
+                const ticket = wasmModule.create_bootstrap_ticket(
+                    info.peerId,
+                    info.addresses
+                );
+                
+                document.getElementById('connectionInfo').value = ticket;
+            }
+        }
+
+        function copyConnectionInfo() {
+            const textarea = document.getElementById('connectionInfo');
+            textarea.select();
+            document.execCommand('copy');
+            addLog('接続情報をコピーしました', 'system');
+        }
+
+        async function connectToPeer() {
+            const ticket = document.getElementById('remoteAddress').value.trim();
+            if (!ticket) {
+                alert('接続情報を入力してください');
+                return;
+            }
+
+            try {
+                const info = wasmModule.parse_bootstrap_ticket(ticket);
+                const parsedInfo = JSON.parse(info);
+                
+                addLog(`接続試行中: ${parsedInfo.peer_id}`, 'system');
+                
+                // 注: 現在の実装では直接接続はサポートされていません
+                // WebSocketアドレスへの接続が必要です
+                
+                addLog('注意: 現在の実装では、同じWebSocketサーバーに接続している必要があります', 'system');
+                
+            } catch (error) {
+                console.error('Failed to connect:', error);
+                addLog(`接続エラー: ${error}`, 'system');
+            }
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (!message || !p2pHandle) {
+                return;
+            }
+
+            const messageData = {
+                from: peerId,
+                text: message,
+                timestamp: Date.now()
+            };
+
+            p2pHandle.send_message('chat', JSON.stringify(messageData));
+            addLog(`送信: ${message}`, 'sent');
+            
+            input.value = '';
+        }
+
+        function updatePeersList() {
+            const peersDiv = document.getElementById('peers');
+            if (connectedPeers.size === 0) {
+                peersDiv.textContent = 'なし';
+            } else {
+                peersDiv.innerHTML = Array.from(connectedPeers)
+                    .map(peer => `<div style="font-family: monospace; font-size: 12px; margin: 2px 0;">${peer}</div>`)
+                    .join('');
+            }
+        }
+
+        function addLog(message, type = 'system') {
+            const log = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        // 初期化
+        loadWasm();
+    </script>
+</body>
+</html>
