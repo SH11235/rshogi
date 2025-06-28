@@ -1,5 +1,14 @@
 import { audioManager } from "@/services/audioManager";
+import { WebRTCConnection } from "@/services/webrtc";
 import type { SoundType } from "@/types/audio";
+import type {
+    ConnectionStatus,
+    GameMessage,
+    GameStartMessage,
+    MoveMessage,
+    ResignMessage,
+} from "@/types/online";
+import { isGameStartMessage, isMoveMessage, isResignMessage } from "@/types/online";
 import {
     type TimerActions,
     type TimerConfig,
@@ -16,6 +25,7 @@ import {
     type PieceType,
     type Player,
     type Square,
+    type SquareKey,
     applyMove,
     canPromoteByPosition,
     generateLegalDropMovesForPiece,
@@ -136,6 +146,12 @@ interface GameState {
     // タイマー状態
     timer: TimerState;
 
+    // 通信対戦関連
+    isOnlineGame: boolean;
+    connectionStatus: ConnectionStatus;
+    webrtcConnection: WebRTCConnection | null;
+    localPlayer: Player | null; // ローカルプレイヤーの色
+
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
     makeMove: (from: Square, to: Square, promote?: boolean) => void;
@@ -172,6 +188,13 @@ interface GameState {
     gameRedo: () => void;
     canGameUndo: () => boolean;
     canGameRedo: () => boolean;
+
+    // 通信対戦機能
+    startOnlineGame: (isHost: boolean) => Promise<string>;
+    joinOnlineGame: (offer: string) => Promise<string>;
+    acceptOnlineAnswer: (answer: string) => Promise<void>;
+    handleOnlineMessage: (message: GameMessage) => void;
+    disconnectOnline: () => void;
 }
 
 // タイマーアクションをGameStateに統合
@@ -224,6 +247,17 @@ export const useGameStore = create<GameState>((set, get) => ({
     undoStack: [],
     timer: createInitialTimerState(),
 
+    // 通信対戦関連の初期状態
+    isOnlineGame: false,
+    connectionStatus: {
+        isConnected: false,
+        isHost: false,
+        peerId: "",
+        connectionState: "new",
+    },
+    webrtcConnection: null,
+    localPlayer: null,
+
     selectSquare: (square: Square) => {
         const {
             board,
@@ -242,6 +276,12 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // ゲーム終了時は操作不可（対局・解析モードのみ）
         if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        // 通信対戦時は自分の手番でのみ操作可能
+        const { isOnlineGame, localPlayer } = get();
+        if (isOnlineGame && localPlayer !== currentPlayer) {
             return;
         }
 
@@ -358,6 +398,12 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // 手番プレイヤーでない場合は無視
         if (player !== currentPlayer) {
+            return;
+        }
+
+        // 通信対戦時は自分の手番でのみ操作可能
+        const { isOnlineGame, localPlayer } = get();
+        if (isOnlineGame && localPlayer !== currentPlayer) {
             return;
         }
 
@@ -490,6 +536,22 @@ export const useGameStore = create<GameState>((set, get) => ({
                 get().switchTimer();
             }
 
+            // 通信対戦時は相手にメッセージを送信
+            const { isOnlineGame, webrtcConnection, localPlayer } = get();
+            if (isOnlineGame && webrtcConnection && localPlayer === currentPlayer) {
+                const moveMessage: MoveMessage = {
+                    type: "move",
+                    data: {
+                        from: "" as SquareKey, // dropの場合は空文字列
+                        to: `${to.row}${to.column}` as SquareKey,
+                        drop: pieceType,
+                    },
+                    timestamp: Date.now(),
+                    playerId: webrtcConnection.getConnectionInfo().peerId,
+                };
+                webrtcConnection.sendMessage(moveMessage);
+            }
+
             console.log(`Dropped ${pieceType} at ${to.row}${to.column}`);
         } catch (error) {
             console.error("Invalid drop:", error);
@@ -499,7 +561,17 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     makeMove: (from: Square, to: Square, promote = false) => {
-        const { board, hands, currentPlayer, moveHistory, historyCursor, gameMode } = get();
+        const {
+            board,
+            hands,
+            currentPlayer,
+            moveHistory,
+            historyCursor,
+            gameMode,
+            isOnlineGame,
+            webrtcConnection,
+            localPlayer,
+        } = get();
 
         try {
             const fromKey = `${from.row}${from.column}` as keyof Board;
@@ -596,6 +668,21 @@ export const useGameStore = create<GameState>((set, get) => ({
             if (timer.config.mode && timer.activePlayer) {
                 get().switchTimer();
             }
+
+            // 通信対戦時は相手にメッセージを送信
+            if (isOnlineGame && webrtcConnection && localPlayer === currentPlayer) {
+                const moveMessage: MoveMessage = {
+                    type: "move",
+                    data: {
+                        from: `${from.row}${from.column}` as SquareKey,
+                        to: `${to.row}${to.column}` as SquareKey,
+                        promote,
+                    },
+                    timestamp: Date.now(),
+                    playerId: webrtcConnection.getConnectionInfo().peerId,
+                };
+                webrtcConnection.sendMessage(moveMessage);
+            }
         } catch (error) {
             console.error("Invalid move:", error);
         }
@@ -649,10 +736,15 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     resign: () => {
-        const { currentPlayer, gameStatus } = get();
+        const { currentPlayer, gameStatus, isOnlineGame, webrtcConnection, localPlayer } = get();
 
         // ゲーム中でない場合は投了できない
         if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        // 通信対戦時は自分の手番でのみ投了可能
+        if (isOnlineGame && localPlayer !== currentPlayer) {
             return;
         }
 
@@ -670,6 +762,17 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // ゲーム終了音を再生
         playGameSound("gameEnd");
+
+        // 通信対戦時は相手に投了メッセージを送信
+        if (isOnlineGame && webrtcConnection) {
+            const resignMessage: ResignMessage = {
+                type: "resign",
+                data: null,
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(resignMessage);
+        }
     },
 
     importGame: (moves: Move[], kifContent?: string) => {
@@ -1305,5 +1408,166 @@ export const useGameStore = create<GameState>((set, get) => ({
     canGameRedo: () => {
         const { gameMode, undoStack } = get();
         return gameMode === "playing" && undoStack.length > 0;
+    },
+
+    // 通信対戦機能の実装
+    startOnlineGame: async (isHost: boolean) => {
+        const connection = new WebRTCConnection();
+
+        // メッセージハンドラーを設定
+        connection.onMessage((message) => {
+            get().handleOnlineMessage(message);
+        });
+
+        // 接続状態変更ハンドラーを設定
+        connection.onConnectionStateChange((state) => {
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: state as ConnectionStatus["connectionState"],
+                    isConnected: state === "connected",
+                },
+            });
+        });
+
+        let offer = "";
+        if (isHost) {
+            offer = await connection.createHost();
+            set({
+                isOnlineGame: true,
+                webrtcConnection: connection,
+                localPlayer: "black", // ホストは先手
+                connectionStatus: {
+                    isConnected: false,
+                    isHost: true,
+                    peerId: connection.getConnectionInfo().peerId,
+                    connectionState: "connecting",
+                },
+            });
+        }
+
+        get().resetGame();
+        set({ gameMode: "playing" });
+
+        return offer;
+    },
+
+    joinOnlineGame: async (offer: string) => {
+        const connection = new WebRTCConnection();
+
+        // メッセージハンドラーを設定
+        connection.onMessage((message) => {
+            get().handleOnlineMessage(message);
+        });
+
+        // 接続状態変更ハンドラーを設定
+        connection.onConnectionStateChange((state) => {
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: state as ConnectionStatus["connectionState"],
+                    isConnected: state === "connected",
+                },
+            });
+        });
+
+        const answer = await connection.joinAsGuest(offer);
+
+        set({
+            isOnlineGame: true,
+            webrtcConnection: connection,
+            localPlayer: "white", // ゲストは後手
+            connectionStatus: {
+                isConnected: false,
+                isHost: false,
+                peerId: connection.getConnectionInfo().peerId,
+                connectionState: "connecting",
+            },
+        });
+
+        get().resetGame();
+        set({ gameMode: "playing" });
+
+        return answer;
+    },
+
+    acceptOnlineAnswer: async (answer: string) => {
+        const { webrtcConnection } = get();
+        if (!webrtcConnection) throw new Error("No connection");
+
+        await webrtcConnection.acceptAnswer(answer);
+
+        // 接続完了後、ゲーム開始メッセージを送信
+        const gameStartMessage: GameStartMessage = {
+            type: "game_start",
+            data: {
+                hostPlayer: "black",
+                guestPlayer: "white",
+            },
+            timestamp: Date.now(),
+            playerId: webrtcConnection.getConnectionInfo().peerId,
+        };
+
+        webrtcConnection.sendMessage(gameStartMessage);
+    },
+
+    handleOnlineMessage: (message: GameMessage) => {
+        console.log("Received online message:", message);
+
+        if (isMoveMessage(message)) {
+            const { data } = message;
+
+            if (data.drop) {
+                // 駒打ちの場合
+                const to: Square = {
+                    row: Number.parseInt(data.to[0]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    column: Number.parseInt(data.to[1]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                };
+                get().makeDrop(data.drop, to);
+            } else if (data.from && data.from !== "") {
+                // 通常の移動の場合
+                const from: Square = {
+                    row: Number.parseInt(data.from[0]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    column: Number.parseInt(data.from[1]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                };
+                const to: Square = {
+                    row: Number.parseInt(data.to[0]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    column: Number.parseInt(data.to[1]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                };
+
+                // 相手の手を反映
+                get().makeMove(from, to, data.promote);
+            }
+        } else if (isGameStartMessage(message)) {
+            console.log("Game started:", message.data);
+        } else if (isResignMessage(message)) {
+            // 相手が投了した
+            const { currentPlayer } = get();
+            const winStatus = currentPlayer === "black" ? "black_win" : "white_win";
+            set({
+                gameStatus: winStatus,
+                resignedPlayer: currentPlayer === "black" ? "white" : "black",
+            });
+            playGameSound("gameEnd");
+        }
+    },
+
+    disconnectOnline: () => {
+        const { webrtcConnection } = get();
+        if (webrtcConnection) {
+            webrtcConnection.disconnect();
+        }
+
+        set({
+            isOnlineGame: false,
+            webrtcConnection: null,
+            localPlayer: null,
+            connectionStatus: {
+                isConnected: false,
+                isHost: false,
+                peerId: "",
+                connectionState: "new",
+            },
+        });
     },
 }));

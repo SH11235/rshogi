@@ -8,6 +8,21 @@
   </head>
   <body>
     <div id="root"></div>
+    <script type="module">
+      // WASMモジュールを事前に読み込んでグローバルに保存
+      async function loadWasm() {
+          try {
+              const basePath = location.hostname === 'localhost' ? '' : '/shogi';
+              const module = await import(`${basePath}/src/wasm/shogi_core.js`);
+              await module.default();
+              window.wasmModule = module;
+              console.log('WASM module loaded and stored globally');
+          } catch (error) {
+              console.error('Failed to load WASM module:', error);
+          }
+      }
+      loadWasm();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
