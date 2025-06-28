@@ -16,7 +16,28 @@ log = "0.4"
 wasm-logger = "0.2"
 js-sys = "0.3.77"
 gloo-timers = { version = "0.3.0", features = ["futures"] }
-web-sys = { version = "0.3", features = ["CustomEvent", "CustomEventInit", "Window"] }
+web-sys = { version = "0.3", features = [
+    "CustomEvent", "CustomEventInit", "Window", "Location",
+    "RtcPeerConnection", "RtcConfiguration", "RtcDataChannel", "RtcDataChannelEvent",
+    "RtcPeerConnectionIceEvent", "RtcIceCandidate", "RtcSessionDescription",
+    "RtcSessionDescriptionInit", "RtcSdpType", "RtcDataChannelState",
+    "RtcIceConnectionState", "RtcSignalingState", "MessageEvent"
+] }
+serde_json = "1.0"
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+# Dependencies for serverless P2P
+# libp2p implementation (currently not used in favor of WebRTC)
+# libp2p = { version = "0.54", features = ["wasm-bindgen", "websocket-websys", "noise", "yamux", "gossipsub", "identify", "kad", "macros"] }
+# libp2p-webrtc-websys = "0.4"
+# libp2p-websocket-websys = "0.4"
+# instant = { version = "0.1", features = ["wasm-bindgen"] }
+# async-trait = "0.1"
+# web-time = "1.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
