@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Principles
+- Test-driven development is mandatory based on code excellence principles
+- Code must be type-safe, with no usage of "any" type
+- When practicing TDD and Test Driven Development, please follow all the steps recommended by t-wada.
+- Applied for the Kent C. Dodds Testing Trophy for front-end testing
+- For refactoring, follow the steps recommended by Martin Fowler.
+
 ## Commands
 
 ### Development
