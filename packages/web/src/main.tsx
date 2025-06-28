@@ -5,16 +5,21 @@ import App from "./App";
 import { P2PTestPage } from "./pages/P2PTestPage";
 import "./App.css";
 
-const router = createBrowserRouter([
+const router = createBrowserRouter(
+    [
+        {
+            path: "/",
+            element: <App />,
+        },
+        {
+            path: "/p2p-test",
+            element: <P2PTestPage />,
+        },
+    ],
     {
-        path: "/",
-        element: <App />,
+        basename: import.meta.env.BASE_URL,
     },
-    {
-        path: "/p2p-test",
-        element: <P2PTestPage />,
-    },
-]);
+);
 
 const rootElement = document.getElementById("root");
 if (rootElement) {

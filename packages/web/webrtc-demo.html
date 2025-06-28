@@ -210,7 +210,9 @@
         // WASM モジュールの読み込み
         async function loadWasm() {
             try {
-                const module = await import('./src/wasm/shogi_core.js');
+                // GitHub Pagesとローカル開発の両方に対応
+                const basePath = location.hostname === 'localhost' ? '' : '/shogi';
+                const module = await import(`${basePath}/src/wasm/shogi_core.js`);
                 await module.default();
                 wasmModule = module;
                 
