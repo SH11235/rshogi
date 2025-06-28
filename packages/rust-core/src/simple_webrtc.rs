@@ -4,6 +4,8 @@ use js_sys::{Array, Object, Reflect};
 use futures::channel::mpsc;
 use serde::{Serialize, Deserialize};
 use base64::{Engine as _, engine::general_purpose};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[wasm_bindgen]
 extern "C" {
@@ -38,7 +40,7 @@ pub struct IceCandidateData {
 pub struct SimpleWebRTCPeer {
     peer_id: String,
     connection: RtcPeerConnection,
-    data_channel: Option<web_sys::RtcDataChannel>,
+    data_channel: Rc<RefCell<Option<web_sys::RtcDataChannel>>>,
     // For future use: signal channel
     _signal_sender: mpsc::UnboundedSender<SignalData>,
 }
@@ -50,7 +52,8 @@ impl SimpleWebRTCPeer {
     }
     
     pub fn send_message(&self, message: &str) -> Result<(), JsValue> {
-        if let Some(channel) = &self.data_channel {
+        let channel_ref = self.data_channel.borrow();
+        if let Some(channel) = channel_ref.as_ref() {
             if channel.ready_state() == web_sys::RtcDataChannelState::Open {
                 channel.send_with_str(message)?;
                 console_log!("Sent message: {}", message);
@@ -176,12 +179,12 @@ pub async fn create_webrtc_peer(is_host: bool) -> Result<SimpleWebRTCPeer, JsVal
     let (tx, _rx) = mpsc::unbounded();
     
     // Set up data channel
-    let data_channel = if is_host {
+    let data_channel = Rc::new(RefCell::new(if is_host {
         let channel = connection.create_data_channel("game");
         Some(channel)
     } else {
         None
-    };
+    }));
     
     let peer = SimpleWebRTCPeer {
         peer_id: peer_id.clone(),
@@ -192,9 +195,14 @@ pub async fn create_webrtc_peer(is_host: bool) -> Result<SimpleWebRTCPeer, JsVal
     
     // Set up connection event handlers
     {
+        let data_channel_clone = data_channel.clone();
         let ondatachannel = Closure::wrap(Box::new(move |event: web_sys::RtcDataChannelEvent| {
             console_log!("Data channel received");
             let channel = event.channel();
+            
+            // Store the received channel for the guest
+            *data_channel_clone.borrow_mut() = Some(channel.clone());
+            console_log!("Data channel stored for guest");
             
             // Set up channel event handlers
             let onopen = Closure::wrap(Box::new(move || {
@@ -242,7 +250,7 @@ pub async fn create_webrtc_peer(is_host: bool) -> Result<SimpleWebRTCPeer, JsVal
     }
     
     // Set up data channel handlers if host
-    if let Some(channel) = &data_channel {
+    if let Some(channel) = data_channel.borrow().as_ref() {
         let onopen = Closure::wrap(Box::new(move || {
             console_log!("Data channel opened (host)");
             dispatch_webrtc_event("channel-open", "");
