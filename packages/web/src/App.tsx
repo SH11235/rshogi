@@ -17,6 +17,7 @@ import { MoveHistory } from "./components/MoveHistory";
 import { OnlineGameDialog } from "./components/OnlineGameDialog";
 import { PlaybackControls } from "./components/PlaybackControls";
 import { PromotionDialog } from "./components/PromotionDialog";
+import { SavedGamesDialog } from "./components/SavedGamesDialog";
 import { Button } from "./components/ui/button";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
@@ -82,6 +83,7 @@ function App() {
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
     const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
     const [isOnlineDialogOpen, setIsOnlineDialogOpen] = useState(false);
+    const [isSavedGamesDialogOpen, setIsSavedGamesDialogOpen] = useState(false);
 
     // キーボードショートカットの設定
     useKeyboardShortcuts({
@@ -158,6 +160,13 @@ function App() {
                             disabled={moveHistory.length === 0}
                         >
                             📥 棋譜保存
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setIsSavedGamesDialogOpen(true)}
+                        >
+                            📚 保存済み棋譜
                         </Button>
                         <GameRecordManager autoSave={true} />
                     </div>
@@ -388,6 +397,25 @@ function App() {
                     onCreateHost={(playerName) => startOnlineGame(true, playerName)}
                     onJoinAsGuest={joinOnlineGame}
                     onAcceptAnswer={acceptOnlineAnswer}
+                />
+
+                {/* 保存済み棋譜ダイアログ */}
+                <SavedGamesDialog
+                    open={isSavedGamesDialogOpen}
+                    onOpenChange={setIsSavedGamesDialogOpen}
+                    onImport={(moves, kifContent) => handleImport(moves, "kif", kifContent)}
+                    hasActiveGame={
+                        moveHistory.length > 0 &&
+                        ![
+                            "black_win",
+                            "white_win",
+                            "draw",
+                            "sennichite",
+                            "perpetual_check",
+                            "timeout",
+                            "resigned",
+                        ].includes(gameStatus)
+                    }
                 />
             </div>
         </div>

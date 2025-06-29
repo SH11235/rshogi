@@ -72,6 +72,8 @@ export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordMana
     const localPlayer = useGameStore((state) => state.localPlayer);
     const isOnlineGame = useGameStore((state) => state.isOnlineGame);
     const gameMode = useGameStore((state) => state.gameMode);
+    const localPlayerName = useGameStore((state) => state.localPlayerName);
+    const remotePlayerName = useGameStore((state) => state.remotePlayerName);
 
     // ゲーム結果のテキストを取得
     const getGameResultText = useCallback((status: GameStatus): string => {
@@ -97,9 +99,21 @@ export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordMana
     // ゲーム終了時の自動保存
     useEffect(() => {
         if (autoSave && gameMode === "playing" && !["playing", "check"].includes(gameStatus)) {
+            // 通信対戦の場合は実際のプレイヤー名を使用
+            const blackPlayerName = isOnlineGame
+                ? localPlayer === "black"
+                    ? localPlayerName || "あなた"
+                    : remotePlayerName || "相手"
+                : "先手";
+            const whitePlayerName = isOnlineGame
+                ? localPlayer === "white"
+                    ? localPlayerName || "あなた"
+                    : remotePlayerName || "相手"
+                : "後手";
+
             const metadata = {
-                blackPlayer: localPlayer === "black" ? "あなた" : "相手",
-                whitePlayer: localPlayer === "white" ? "あなた" : "相手",
+                blackPlayer: blackPlayerName,
+                whitePlayer: whitePlayerName,
                 date: new Date().toISOString().split("T")[0],
                 result: getGameResultText(gameStatus as GameStatus),
                 timeControl: timer.config.mode
@@ -130,6 +144,9 @@ export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordMana
         autoSave,
         moveHistory,
         localPlayer,
+        localPlayerName,
+        remotePlayerName,
+        isOnlineGame,
         timer.config,
         onGameEnd,
         getGameResultText,
@@ -145,6 +162,7 @@ export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordMana
                 kif,
                 metadata,
                 isOnline: isOnlineGame,
+                moveCount: moveHistory.length,
             };
 
             savedGames.unshift(newGame);
