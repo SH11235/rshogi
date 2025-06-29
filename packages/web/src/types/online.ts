@@ -2,7 +2,14 @@ import type { PieceType, SquareKey } from "shogi-core";
 
 // 基本的なゲームメッセージの型
 export interface GameMessage {
-    type: "move" | "resign" | "draw_offer" | "game_start" | "sync_state";
+    type:
+        | "move"
+        | "resign"
+        | "draw_offer"
+        | "game_start"
+        | "sync_state"
+        | "timer_config"
+        | "timer_update";
     data: unknown;
     timestamp: number;
     playerId: string;
@@ -55,6 +62,30 @@ export interface SyncStateMessage extends GameMessage {
     };
 }
 
+// タイマー設定メッセージ
+export interface TimerConfigMessage extends GameMessage {
+    type: "timer_config";
+    data: {
+        mode: "basic" | "fischer" | "perMove" | null;
+        basicTime: number;
+        byoyomiTime: number;
+        fischerIncrement: number;
+        perMoveLimit: number;
+    };
+}
+
+// タイマー更新メッセージ
+export interface TimerUpdateMessage extends GameMessage {
+    type: "timer_update";
+    data: {
+        blackTime: number;
+        whiteTime: number;
+        blackInByoyomi: boolean;
+        whiteInByoyomi: boolean;
+        activePlayer: "black" | "white" | null;
+    };
+}
+
 // 接続状態
 export interface ConnectionStatus {
     isConnected: boolean;
@@ -82,4 +113,12 @@ export function isDrawOfferMessage(msg: GameMessage): msg is DrawOfferMessage {
 
 export function isSyncStateMessage(msg: GameMessage): msg is SyncStateMessage {
     return msg.type === "sync_state";
+}
+
+export function isTimerConfigMessage(msg: GameMessage): msg is TimerConfigMessage {
+    return msg.type === "timer_config";
+}
+
+export function isTimerUpdateMessage(msg: GameMessage): msg is TimerUpdateMessage {
+    return msg.type === "timer_update";
 }

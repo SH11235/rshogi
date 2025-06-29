@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import { useGameStore } from "@/stores/gameStore";
 import { useState } from "react";
 import type { GameStatus, Move, Player } from "shogi-core";
+import { DrawOfferDialog } from "./DrawOfferDialog";
 import { KeyboardHelp } from "./KeyboardHelp";
 import { TimerDisplay } from "./TimerDisplay";
 import { TimerSettingsDialog } from "./TimerSettingsDialog";
@@ -392,6 +393,9 @@ export function GameInfo({
                             </AlertDialogContent>
                         </AlertDialog>
                     )}
+
+                {/* 引き分け提案ボタン - 対局モードのゲーム中のみ表示 */}
+                {!isGameOver && gameMode === "playing" && <DrawOfferDialog />}
 
                 {/* リセット/新しいゲームボタン */}
                 <AlertDialog open={isResetDialogOpen} onOpenChange={setIsResetDialogOpen}>

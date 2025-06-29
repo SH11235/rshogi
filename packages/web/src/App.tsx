@@ -6,6 +6,7 @@ import { AudioTestPanel } from "./components/AudioTestPanel";
 import { Board } from "./components/Board";
 import { CapturedPieces } from "./components/CapturedPieces";
 import { ConnectionStatusComponent } from "./components/ConnectionStatus";
+import { DrawOfferDialog } from "./components/DrawOfferDialog";
 import { GameControls } from "./components/GameControls";
 import { GameInfo } from "./components/GameInfo";
 import { KifuExportDialog } from "./components/KifuExportDialog";
@@ -345,6 +346,9 @@ function App() {
                         onCancel={cancelPromotion}
                     />
                 )}
+
+                {/* 引き分け提案ダイアログ */}
+                <DrawOfferDialog />
 
                 {/* 開発用音声テストパネル */}
                 <div className="mt-8">

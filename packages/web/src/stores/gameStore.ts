@@ -3,12 +3,22 @@ import { WebRTCConnection } from "@/services/webrtc";
 import type { SoundType } from "@/types/audio";
 import type {
     ConnectionStatus,
+    DrawOfferMessage,
     GameMessage,
     GameStartMessage,
     MoveMessage,
     ResignMessage,
+    TimerConfigMessage,
+    TimerUpdateMessage,
 } from "@/types/online";
-import { isGameStartMessage, isMoveMessage, isResignMessage } from "@/types/online";
+import {
+    isDrawOfferMessage,
+    isGameStartMessage,
+    isMoveMessage,
+    isResignMessage,
+    isTimerConfigMessage,
+    isTimerUpdateMessage,
+} from "@/types/online";
 import {
     type TimerActions,
     type TimerConfig,
@@ -37,6 +47,8 @@ import {
     mustPromote,
     parseKifMoves,
     parseSfen,
+    reconstructGameStateWithInitial,
+    validateReceivedMove,
 } from "shogi-core";
 import { create } from "zustand";
 
@@ -45,44 +57,6 @@ function playGameSound(soundType: SoundType): void {
     audioManager.play(soundType).catch((error) => {
         console.debug(`Failed to play ${soundType} sound:`, error);
     });
-}
-
-// 初期局面を考慮したゲーム状態再構築
-function reconstructGameStateWithInitial(
-    moveHistory: Move[],
-    targetMoveIndex: number,
-    initialBoard: Board,
-    initialHandsData: Hands,
-) {
-    let board = structuredClone(initialBoard);
-    let hands = structuredClone(initialHandsData);
-    let currentPlayer: Player = "black";
-
-    // 初期位置の場合は何も手を適用しない
-    if (targetMoveIndex === HISTORY_CURSOR.INITIAL_POSITION) {
-        // 初期状態をそのまま返す
-    } else {
-        for (let i = 0; i <= targetMoveIndex; i++) {
-            if (i >= moveHistory.length) break;
-
-            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
-            board = result.board;
-            hands = result.hands;
-            currentPlayer = result.nextTurn;
-        }
-    }
-
-    // ゲーム状態判定
-    let gameStatus: GameStatus = "playing";
-    if (isInCheck(board, currentPlayer)) {
-        if (isCheckmate(board, hands, currentPlayer)) {
-            gameStatus = "checkmate";
-        } else {
-            gameStatus = "check";
-        }
-    }
-
-    return { board, hands, currentPlayer, gameStatus };
 }
 
 // ドロップ可能位置を計算（王手放置チェック含む）
@@ -152,6 +126,10 @@ interface GameState {
     webrtcConnection: WebRTCConnection | null;
     localPlayer: Player | null; // ローカルプレイヤーの色
 
+    // 引き分け提案関連
+    drawOfferPending: boolean;
+    pendingDrawOfferer: Player | null;
+
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
     makeMove: (from: Square, to: Square, promote?: boolean) => void;
@@ -161,6 +139,9 @@ interface GameState {
     clearSelections: () => void;
     resetGame: () => void;
     resign: () => void;
+    offerDraw: () => void;
+    acceptDrawOffer: () => void;
+    rejectDrawOffer: () => void;
     importGame: (moves: Move[], kifContent?: string) => void;
     importSfen: (sfen: string) => void;
     // 履歴操作機能
@@ -257,6 +238,10 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
     webrtcConnection: null,
     localPlayer: null,
+
+    // 引き分け提案関連
+    drawOfferPending: false,
+    pendingDrawOfferer: null,
 
     selectSquare: (square: Square) => {
         const {
@@ -775,6 +760,79 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
     },
 
+    offerDraw: () => {
+        const { currentPlayer, gameStatus, isOnlineGame, webrtcConnection, localPlayer } = get();
+
+        // ゲーム中でない場合は引き分け提案できない
+        if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        // 通信対戦時は自分の手番でのみ提案可能
+        if (isOnlineGame && localPlayer !== currentPlayer) {
+            return;
+        }
+
+        // 通信対戦時
+        if (isOnlineGame && webrtcConnection) {
+            const drawOfferMessage: DrawOfferMessage = {
+                type: "draw_offer",
+                data: { accepted: undefined }, // 提案メッセージ
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(drawOfferMessage);
+            set({ drawOfferPending: true, pendingDrawOfferer: localPlayer });
+        } else {
+            // ローカル対戦時は相手に提案を表示
+            set({ drawOfferPending: true, pendingDrawOfferer: currentPlayer });
+        }
+    },
+
+    acceptDrawOffer: () => {
+        const { isOnlineGame, webrtcConnection } = get();
+
+        // 引き分けにする
+        set({
+            gameStatus: "draw",
+            drawOfferPending: false,
+            pendingDrawOfferer: null,
+        });
+        playGameSound("gameEnd");
+
+        // 通信対戦時は承認メッセージを送信
+        if (isOnlineGame && webrtcConnection) {
+            const acceptMessage: DrawOfferMessage = {
+                type: "draw_offer",
+                data: { accepted: true },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(acceptMessage);
+        }
+    },
+
+    rejectDrawOffer: () => {
+        const { isOnlineGame, webrtcConnection } = get();
+
+        // 提案を拒否
+        set({
+            drawOfferPending: false,
+            pendingDrawOfferer: null,
+        });
+
+        // 通信対戦時は拒否メッセージを送信
+        if (isOnlineGame && webrtcConnection) {
+            const rejectMessage: DrawOfferMessage = {
+                type: "draw_offer",
+                data: { accepted: false },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(rejectMessage);
+        }
+    },
+
     importGame: (moves: Move[], kifContent?: string) => {
         // KIFコンテンツがある場合は初期局面を解析
         let initialBoard = modernInitialBoard;
@@ -1012,6 +1070,24 @@ export const useGameStore = create<GameState>((set, get) => ({
                 timedOutPlayer: null,
             },
         });
+
+        // オンラインゲームの場合、タイマー設定を相手に送信
+        const { isOnlineGame, webrtcConnection, connectionStatus } = get();
+        if (isOnlineGame && webrtcConnection && connectionStatus.isHost) {
+            const timerConfigMessage: TimerConfigMessage = {
+                type: "timer_config",
+                data: {
+                    mode: config.mode,
+                    basicTime: config.basicTime,
+                    byoyomiTime: config.byoyomiTime,
+                    fischerIncrement: config.fischerIncrement,
+                    perMoveLimit: config.perMoveLimit,
+                },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(timerConfigMessage);
+        }
     },
 
     startPlayerTimer: (player: Player) => {
@@ -1102,7 +1178,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     tick: () => {
-        const { timer, gameStatus } = get();
+        const { timer, gameStatus, isOnlineGame, webrtcConnection, localPlayer } = get();
         if (!timer.config.mode || timer.isPaused || !timer.activePlayer || timer.hasTimedOut)
             return;
         if (gameStatus !== "playing" && gameStatus !== "check") return;
@@ -1147,6 +1223,24 @@ export const useGameStore = create<GameState>((set, get) => ({
                 },
             });
             get().updateWarningLevels();
+        }
+
+        // オンラインゲームで自分のタイマーが更新された場合、相手に送信
+        if (isOnlineGame && webrtcConnection && player === localPlayer) {
+            const updatedTimer = get().timer;
+            const timerUpdateMessage: TimerUpdateMessage = {
+                type: "timer_update",
+                data: {
+                    blackTime: updatedTimer.blackTime,
+                    whiteTime: updatedTimer.whiteTime,
+                    blackInByoyomi: updatedTimer.blackInByoyomi,
+                    whiteInByoyomi: updatedTimer.whiteInByoyomi,
+                    activePlayer: updatedTimer.activePlayer,
+                },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(timerUpdateMessage);
         }
     },
 
@@ -1430,6 +1524,19 @@ export const useGameStore = create<GameState>((set, get) => ({
             });
         });
 
+        // エラーハンドラーを設定
+        connection.onError((error) => {
+            console.error("WebRTC error in game:", error);
+            // ユーザーに通知するためのエラー状態を設定
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: "failed",
+                    isConnected: false,
+                },
+            });
+        });
+
         let offer = "";
         if (isHost) {
             offer = await connection.createHost();
@@ -1467,6 +1574,19 @@ export const useGameStore = create<GameState>((set, get) => ({
                     ...get().connectionStatus,
                     connectionState: state as ConnectionStatus["connectionState"],
                     isConnected: state === "connected",
+                },
+            });
+        });
+
+        // エラーハンドラーを設定
+        connection.onError((error) => {
+            console.error("WebRTC error in game:", error);
+            // ユーザーに通知するためのエラー状態を設定
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: "failed",
+                    isConnected: false,
                 },
             });
         });
@@ -1516,6 +1636,22 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         if (isMoveMessage(message)) {
             const { data } = message;
+            const { board, hands, currentPlayer, localPlayer } = get();
+
+            // 自分の手番でないことを確認（相手の手のみ受け入れる）
+            if (currentPlayer === localPlayer) {
+                console.warn("Received move during own turn, ignoring");
+                return;
+            }
+
+            // 受信した手の検証
+            const validation = validateReceivedMove(board, hands, currentPlayer, data);
+            if (!validation.valid) {
+                console.error("Invalid move received:", validation.error);
+                // 不正な手を受信した場合の処理
+                // TODO: エラーメッセージをUIに表示するか、同期エラーとして処理
+                return;
+            }
 
             if (data.drop) {
                 // 駒打ちの場合
@@ -1524,7 +1660,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                     column: Number.parseInt(data.to[1]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
                 };
                 get().makeDrop(data.drop, to);
-            } else if (data.from && data.from !== "") {
+            } else if (data.from) {
                 // 通常の移動の場合
                 const from: Square = {
                     row: Number.parseInt(data.from[0]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
@@ -1549,6 +1685,52 @@ export const useGameStore = create<GameState>((set, get) => ({
                 resignedPlayer: currentPlayer === "black" ? "white" : "black",
             });
             playGameSound("gameEnd");
+        } else if (isDrawOfferMessage(message)) {
+            // 引き分け提案メッセージの処理
+            const { data } = message;
+            if (data.accepted === undefined) {
+                // 新規提案を受信
+                const { currentPlayer, localPlayer } = get();
+                const offerer = currentPlayer === localPlayer ? "white" : "black";
+                set({ drawOfferPending: true, pendingDrawOfferer: offerer });
+            } else if (data.accepted === true) {
+                // 承認を受信
+                set({
+                    gameStatus: "draw",
+                    drawOfferPending: false,
+                    pendingDrawOfferer: null,
+                });
+                playGameSound("gameEnd");
+            } else {
+                // 拒否を受信
+                set({
+                    drawOfferPending: false,
+                    pendingDrawOfferer: null,
+                });
+            }
+        } else if (isTimerConfigMessage(message)) {
+            // ホストからタイマー設定を受信（ゲストのみ）
+            const { connectionStatus } = get();
+            if (!connectionStatus.isHost) {
+                get().initializeTimer(message.data);
+            }
+        } else if (isTimerUpdateMessage(message)) {
+            // 相手のタイマー更新を受信
+            const { localPlayer } = get();
+            const { data } = message;
+
+            // 相手のタイマー情報のみ更新（自分のタイマーは自分で管理）
+            set({
+                timer: {
+                    ...get().timer,
+                    blackTime: localPlayer === "white" ? data.blackTime : get().timer.blackTime,
+                    whiteTime: localPlayer === "black" ? data.whiteTime : get().timer.whiteTime,
+                    blackInByoyomi:
+                        localPlayer === "white" ? data.blackInByoyomi : get().timer.blackInByoyomi,
+                    whiteInByoyomi:
+                        localPlayer === "black" ? data.whiteInByoyomi : get().timer.whiteInByoyomi,
+                },
+            });
         }
     },
 
