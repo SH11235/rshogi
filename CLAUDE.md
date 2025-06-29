@@ -148,10 +148,128 @@ gemini -p "WebSearch: [your search query]"
 
 This approach is preferred as it provides project-specific context and better integration with the development workflow.
 
+## WebRTC Communication Patterns
+
+### Error Handling and Reconnection
+- Implement exponential backoff for reconnection attempts
+- Store connection state in Zustand with proper error states
+- Use try-catch blocks for all WebRTC operations
+- Provide user feedback for connection states
+
+Example reconnection pattern:
+```typescript
+private async attemptReconnect(attempt: number = 0): Promise<void> {
+    if (attempt >= this.MAX_RECONNECT_ATTEMPTS) {
+        this.handleError(new WebRTCError("Max reconnection attempts reached", "MAX_ATTEMPTS"));
+        return;
+    }
+    
+    const delay = Math.min(1000 * Math.pow(2, attempt), 30000); // Exponential backoff
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    
+    try {
+        // Reconnection logic
+    } catch (error) {
+        await this.attemptReconnect(attempt + 1);
+    }
+}
+```
+
+### Message Type Extension
+- Define all message types in `types/online.ts`
+- Create type guards for each message type
+- Use discriminated unions for type safety
+- Add new message types to the GameMessage union
+
+Example pattern:
+```typescript
+export interface NewFeatureMessage extends GameMessage {
+    type: "new_feature";
+    data: { /* specific data */ };
+}
+
+export function isNewFeatureMessage(msg: GameMessage): msg is NewFeatureMessage {
+    return msg.type === "new_feature";
+}
+```
+
+### Multiple Connections (Spectator Mode)
+- Separate spectator state from player state
+- Use different message channels for spectators
+- Implement sync messages for late-joining spectators
+- Manage spectator lists in the game state
+
+## State Management Best Practices
+
+### Complex State with Zustand
+- Separate concerns into logical slices (game, connection, timer, etc.)
+- Use immer for immutable updates when needed
+- Implement proper error boundaries
+- Clear state appropriately on disconnection
+
+### Async Operations
+- Handle all async operations in try-catch blocks
+- Update loading states appropriately
+- Provide user feedback for long operations
+- Use proper cleanup in useEffect hooks
+
+### State Synchronization
+- Send state updates immediately after local changes
+- Validate received state before applying
+- Handle race conditions with timestamps
+- Implement optimistic updates where appropriate
+
+## Type Safety Patterns
+
+### Avoiding "any" Type
+- Use `unknown` for untyped data from external sources
+- Create proper type guards for runtime validation
+- Use generics for reusable components
+- Leverage TypeScript's discriminated unions
+
+Example of unknown usage:
+```typescript
+// Instead of: board: any
+board: Record<string, unknown>; // Then validate with type guards
+
+// For complex types
+function isValidBoard(board: unknown): board is Board {
+    // Validation logic
+}
+```
+
+### Message Handling
+- Define strict types for all messages
+- Use exhaustive checks in switch statements
+- Implement proper error types
+- Validate all external data
+
+## Testing Strategies
+
+### WebRTC Testing
+- Mock WebRTC connections for unit tests
+- Use vi.mock() for module mocking
+- Test error scenarios thoroughly
+- Implement connection state assertions
+
+### Async Testing
+- Use proper async/await in tests
+- Mock timers for reconnection logic
+- Test race conditions
+- Verify cleanup on unmount
+
 ## Additional Documentation
 
 For detailed references to reduce token usage, see:
-- **packages/web/.claude/file-structure.md** - File locations and import patterns
+
+### Implementation Guides
+- **docs/webrtc-patterns.md** - WebRTC implementation patterns
+- **docs/testing-strategies.md** - Comprehensive testing guide
+- **docs/state-management-patterns.md** - Zustand patterns and examples
+
+### Development References
 - **packages/web/.claude/type-definitions.md** - Key TypeScript types reference
 - **packages/web/.claude/common-patterns.md** - Code patterns and best practices
 - **packages/web/.claude/quick-reference.md** - Essential commands and workflows
+- **packages/web/.claude/webrtc-message-types.md** - Message type extension guide
+- **packages/web/.claude/refactoring-patterns.md** - Core package migration patterns
