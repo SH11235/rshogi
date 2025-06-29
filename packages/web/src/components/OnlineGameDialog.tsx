@@ -15,8 +15,8 @@ import { useState } from "react";
 interface OnlineGameDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    onCreateHost: () => Promise<string>;
-    onJoinAsGuest: (offer: string) => Promise<string>;
+    onCreateHost: (playerName: string) => Promise<string>;
+    onJoinAsGuest: (offer: string, playerName: string) => Promise<string>;
     onAcceptAnswer: (answer: string) => Promise<void>;
 }
 
@@ -32,16 +32,23 @@ export function OnlineGameDialog({
     const [answer, setAnswer] = useState("");
     const [guestOffer, setGuestOffer] = useState("");
     const [hostAnswer, setHostAnswer] = useState("");
+    const [hostName, setHostName] = useState("");
+    const [guestName, setGuestName] = useState("");
     const [copied, setCopied] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
     const [step, setStep] = useState<"create" | "wait" | "complete">("create");
 
     const handleCreateHost = async () => {
+        if (!hostName.trim()) {
+            setError("プレイヤー名を入力してください");
+            return;
+        }
+
         setLoading(true);
         setError("");
         try {
-            const offerData = await onCreateHost();
+            const offerData = await onCreateHost(hostName.trim());
             setOffer(offerData);
             setStep("wait");
         } catch (err) {
@@ -58,10 +65,15 @@ export function OnlineGameDialog({
             return;
         }
 
+        if (!guestName.trim()) {
+            setError("プレイヤー名を入力してください");
+            return;
+        }
+
         setLoading(true);
         setError("");
         try {
-            const answerData = await onJoinAsGuest(guestOffer);
+            const answerData = await onJoinAsGuest(guestOffer, guestName.trim());
             setAnswer(answerData);
             setStep("wait");
         } catch (err) {
@@ -106,6 +118,8 @@ export function OnlineGameDialog({
         setAnswer("");
         setGuestOffer("");
         setHostAnswer("");
+        setHostName("");
+        setGuestName("");
         setError("");
         setStep("create");
     };
@@ -146,6 +160,21 @@ export function OnlineGameDialog({
                                 <p className="text-sm text-muted-foreground">
                                     部屋を作成して、接続情報を相手に送信してください
                                 </p>
+                                <div>
+                                    <label
+                                        htmlFor="host-player-name"
+                                        className="text-sm font-medium"
+                                    >
+                                        プレイヤー名
+                                    </label>
+                                    <Input
+                                        id="host-player-name"
+                                        value={hostName}
+                                        onChange={(e) => setHostName(e.target.value)}
+                                        placeholder="あなたの名前を入力"
+                                        className="mt-1"
+                                    />
+                                </div>
                                 <Button
                                     onClick={handleCreateHost}
                                     disabled={loading}
@@ -230,15 +259,30 @@ export function OnlineGameDialog({
                                             placeholder="接続情報を貼り付け"
                                             className="font-mono text-xs"
                                         />
-                                        <Button
-                                            onClick={handleJoinAsGuest}
-                                            disabled={loading || !guestOffer.trim()}
-                                            className="w-full"
-                                        >
-                                            {loading ? "接続中..." : "部屋に参加"}
-                                        </Button>
                                     </div>
                                 </div>
+                                <div>
+                                    <label
+                                        htmlFor="guest-player-name"
+                                        className="text-sm font-medium"
+                                    >
+                                        プレイヤー名
+                                    </label>
+                                    <Input
+                                        id="guest-player-name"
+                                        value={guestName}
+                                        onChange={(e) => setGuestName(e.target.value)}
+                                        placeholder="あなたの名前を入力"
+                                        className="mt-1"
+                                    />
+                                </div>
+                                <Button
+                                    onClick={handleJoinAsGuest}
+                                    disabled={loading || !guestOffer.trim()}
+                                    className="w-full"
+                                >
+                                    {loading ? "接続中..." : "部屋に参加"}
+                                </Button>
                             </div>
                         )}
 

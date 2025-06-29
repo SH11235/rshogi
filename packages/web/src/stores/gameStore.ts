@@ -197,6 +197,8 @@ interface GameState {
     connectionStatus: ConnectionStatus;
     webrtcConnection: WebRTCConnection | null;
     localPlayer: Player | null; // ローカルプレイヤーの色
+    localPlayerName: string; // ローカルプレイヤー名
+    remotePlayerName: string; // リモートプレイヤー名
 
     // 引き分け提案関連
     drawOfferPending: boolean;
@@ -243,8 +245,8 @@ interface GameState {
     canGameRedo: () => boolean;
 
     // 通信対戦機能
-    startOnlineGame: (isHost: boolean) => Promise<string>;
-    joinOnlineGame: (offer: string) => Promise<string>;
+    startOnlineGame: (isHost: boolean, playerName?: string) => Promise<string>;
+    joinOnlineGame: (offer: string, playerName?: string) => Promise<string>;
     acceptOnlineAnswer: (answer: string) => Promise<void>;
     handleOnlineMessage: (message: GameMessage) => void;
     disconnectOnline: () => void;
@@ -310,6 +312,8 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
     webrtcConnection: null,
     localPlayer: null,
+    localPlayerName: "",
+    remotePlayerName: "",
 
     // 引き分け提案関連
     drawOfferPending: false,
@@ -1684,7 +1688,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     // 通信対戦機能の実装
-    startOnlineGame: async (isHost: boolean) => {
+    startOnlineGame: async (isHost: boolean, playerName?: string) => {
         const connection = new WebRTCConnection();
 
         // メッセージハンドラーを設定
@@ -1723,6 +1727,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 isOnlineGame: true,
                 webrtcConnection: connection,
                 localPlayer: "black", // ホストは先手
+                localPlayerName: playerName || "",
                 connectionStatus: {
                     isConnected: false,
                     isHost: true,
@@ -1738,7 +1743,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         return offer;
     },
 
-    joinOnlineGame: async (offer: string) => {
+    joinOnlineGame: async (offer: string, playerName?: string) => {
         const connection = new WebRTCConnection();
 
         // メッセージハンドラーを設定
@@ -1776,6 +1781,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             isOnlineGame: true,
             webrtcConnection: connection,
             localPlayer: "white", // ゲストは後手
+            localPlayerName: playerName || "",
             connectionStatus: {
                 isConnected: false,
                 isHost: false,
@@ -1797,11 +1803,13 @@ export const useGameStore = create<GameState>((set, get) => ({
         await webrtcConnection.acceptAnswer(answer);
 
         // 接続完了後、ゲーム開始メッセージを送信
+        const { localPlayerName } = get();
         const gameStartMessage: GameStartMessage = {
             type: "game_start",
             data: {
                 hostPlayer: "black",
                 guestPlayer: "white",
+                playerName: localPlayerName,
             },
             timestamp: Date.now(),
             playerId: webrtcConnection.getConnectionInfo().peerId,
@@ -1855,6 +1863,25 @@ export const useGameStore = create<GameState>((set, get) => ({
             }
         } else if (isGameStartMessage(message)) {
             console.log("Game started:", message.data);
+            // 相手のプレイヤー名を保存
+            if (message.data.playerName) {
+                set({ remotePlayerName: message.data.playerName });
+            }
+            // ゲストも自分の名前を送り返す（初回接続時）
+            const { connectionStatus, localPlayerName, webrtcConnection } = get();
+            if (!connectionStatus.isHost && webrtcConnection) {
+                const responseMessage: GameStartMessage = {
+                    type: "game_start",
+                    data: {
+                        hostPlayer: "black",
+                        guestPlayer: "white",
+                        playerName: localPlayerName,
+                    },
+                    timestamp: Date.now(),
+                    playerId: webrtcConnection.getConnectionInfo().peerId,
+                };
+                webrtcConnection.sendMessage(responseMessage);
+            }
         } else if (isResignMessage(message)) {
             // 相手が投了した
             const { currentPlayer } = get();
@@ -1948,6 +1975,8 @@ export const useGameStore = create<GameState>((set, get) => ({
             isOnlineGame: false,
             webrtcConnection: null,
             localPlayer: null,
+            localPlayerName: "",
+            remotePlayerName: "",
             connectionStatus: {
                 isConnected: false,
                 isHost: false,

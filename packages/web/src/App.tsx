@@ -70,6 +70,9 @@ function App() {
         // 通信対戦関連
         isOnlineGame,
         connectionStatus,
+        localPlayer,
+        localPlayerName,
+        remotePlayerName,
         startOnlineGame,
         joinOnlineGame,
         acceptOnlineAnswer,
@@ -372,13 +375,17 @@ function App() {
                     currentHands={hands}
                     currentPlayer={currentPlayer}
                     historyCursor={historyCursor}
+                    isOnlineGame={isOnlineGame}
+                    localPlayer={localPlayer}
+                    localPlayerName={localPlayerName}
+                    remotePlayerName={remotePlayerName}
                 />
 
                 {/* 通信対戦ダイアログ */}
                 <OnlineGameDialog
                     open={isOnlineDialogOpen}
                     onOpenChange={setIsOnlineDialogOpen}
-                    onCreateHost={() => startOnlineGame(true)}
+                    onCreateHost={(playerName) => startOnlineGame(true, playerName)}
                     onJoinAsGuest={joinOnlineGame}
                     onAcceptAnswer={acceptOnlineAnswer}
                 />

@@ -36,6 +36,7 @@ export interface GameStartMessage extends GameMessage {
     data: {
         hostPlayer: "black" | "white";
         guestPlayer: "black" | "white";
+        playerName?: string; // プレイヤー名を追加
     };
 }
 

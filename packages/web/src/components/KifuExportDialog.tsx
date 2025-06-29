@@ -26,6 +26,10 @@ interface KifuExportDialogProps {
     currentHands: Hands;
     currentPlayer: Player;
     historyCursor: number;
+    isOnlineGame?: boolean;
+    localPlayer?: Player | null;
+    localPlayerName?: string;
+    remotePlayerName?: string;
 }
 
 export function KifuExportDialog({
@@ -36,6 +40,10 @@ export function KifuExportDialog({
     currentHands,
     currentPlayer,
     historyCursor,
+    isOnlineGame,
+    localPlayer,
+    localPlayerName,
+    remotePlayerName,
 }: KifuExportDialogProps) {
     const [format, setFormat] = useState<ExportFormat>("kif");
     const [fileName, setFileName] = useState("");
@@ -53,11 +61,25 @@ export function KifuExportDialog({
     const exportContent = useMemo(() => {
         try {
             if (format === "kif") {
+                // プレイヤー名を決定
+                let blackPlayerName = "先手";
+                let whitePlayerName = "後手";
+
+                if (isOnlineGame && localPlayer && localPlayerName && remotePlayerName) {
+                    if (localPlayer === "black") {
+                        blackPlayerName = localPlayerName;
+                        whitePlayerName = remotePlayerName;
+                    } else {
+                        blackPlayerName = remotePlayerName;
+                        whitePlayerName = localPlayerName;
+                    }
+                }
+
                 const gameInfo = {
                     開始日時: new Date().toLocaleString("ja-JP"),
-                    先手: "先手",
-                    後手: "後手",
-                    棋戦: "自由対局",
+                    先手: blackPlayerName,
+                    後手: whitePlayerName,
+                    棋戦: isOnlineGame ? "通信対戦" : "自由対局",
                     手合割: "平手",
                 };
                 return exportToKif(exportMoves, gameInfo);
@@ -77,6 +99,10 @@ export function KifuExportDialog({
         currentPlayer,
         moveHistory.length,
         historyCursor,
+        isOnlineGame,
+        localPlayer,
+        localPlayerName,
+        remotePlayerName,
     ]);
 
     // デフォルトのファイル名を生成
