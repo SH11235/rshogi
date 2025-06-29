@@ -221,6 +221,7 @@ function App() {
                                     isTsumeShogi={isTsumeShogi}
                                     gameMode={gameMode}
                                     hasReviewBase={!!reviewBasePosition}
+                                    isOnlineGame={isOnlineGame}
                                     onReset={resetGame}
                                     onResign={resign}
                                     onStartFromPosition={startGameFromPosition}

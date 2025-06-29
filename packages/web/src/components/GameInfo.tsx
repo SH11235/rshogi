@@ -27,6 +27,7 @@ interface GameInfoProps {
     isTsumeShogi: boolean;
     gameMode: "playing" | "review" | "analysis";
     hasReviewBase?: boolean;
+    isOnlineGame?: boolean;
     onReset: () => void;
     onResign?: () => void;
     onStartFromPosition?: () => void;
@@ -42,6 +43,7 @@ export function GameInfo({
     isTsumeShogi,
     gameMode,
     hasReviewBase,
+    isOnlineGame = false,
     onReset,
     onResign,
     onStartFromPosition,
@@ -394,8 +396,8 @@ export function GameInfo({
                         </AlertDialog>
                     )}
 
-                {/* 引き分け提案ボタン - 対局モードのゲーム中のみ表示 */}
-                {!isGameOver && gameMode === "playing" && <DrawOfferDialog />}
+                {/* 引き分け提案ボタン - オンライン対戦中のみ表示 */}
+                {!isGameOver && gameMode === "playing" && isOnlineGame && <DrawOfferDialog />}
 
                 {/* リセット/新しいゲームボタン */}
                 <AlertDialog open={isResetDialogOpen} onOpenChange={setIsResetDialogOpen}>
