@@ -1,5 +1,5 @@
 // Re-export timer types from core
-import type { Player, TimerConfig, TimerState } from "shogi-core";
+import type { Player, TimerConfig } from "shogi-core";
 
 export type { Player } from "shogi-core";
 export {
@@ -35,5 +35,3 @@ export interface TimerActions {
     // 警告レベル更新
     updateWarningLevels: () => void;
 }
-
-export interface GameTimer extends TimerState, TimerActions {}

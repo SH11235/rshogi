@@ -7,7 +7,6 @@ export interface GameMessage {
         | "resign"
         | "draw_offer"
         | "game_start"
-        | "sync_state"
         | "timer_config"
         | "timer_update"
         | "repetition_check"
@@ -51,19 +50,6 @@ export interface DrawOfferMessage extends GameMessage {
     type: "draw_offer";
     data: {
         accepted?: boolean;
-    };
-}
-
-// 状態同期メッセージ
-export interface SyncStateMessage extends GameMessage {
-    type: "sync_state";
-    data: {
-        moveHistory: Array<{
-            from: SquareKey;
-            to: SquareKey;
-            promote?: boolean;
-            drop?: PieceType;
-        }>;
     };
 }
 
@@ -173,10 +159,6 @@ export function isResignMessage(msg: GameMessage): msg is ResignMessage {
 
 export function isDrawOfferMessage(msg: GameMessage): msg is DrawOfferMessage {
     return msg.type === "draw_offer";
-}
-
-export function isSyncStateMessage(msg: GameMessage): msg is SyncStateMessage {
-    return msg.type === "sync_state";
 }
 
 export function isTimerConfigMessage(msg: GameMessage): msg is TimerConfigMessage {

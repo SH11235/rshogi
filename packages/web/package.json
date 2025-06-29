@@ -27,7 +27,6 @@
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.14",
-    "@radix-ui/react-checkbox": "^1.3.2",
     "@radix-ui/react-dialog": "^1.1.14",
     "@radix-ui/react-label": "^2.1.7",
     "@radix-ui/react-radio-group": "^1.3.7",
@@ -41,7 +40,6 @@
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.6.2",
     "shogi-core": "file:../core",
-    "simple-peer": "^9.11.1",
     "tailwind-merge": "^3.3.1",
     "zustand": "^5.0.4"
   },

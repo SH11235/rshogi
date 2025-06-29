@@ -858,7 +858,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                         webrtcConnection.sendMessage(repetitionMessage);
                     }
 
-                    if (repetitionCheck.isJishogi) {
+                    if (repetitionCheck.isJishogi && repetitionCheck.jishogiStatus) {
                         const jishogiMessage: JishogiCheckMessage = {
                             type: "jishogi_check",
                             data: {
@@ -2004,8 +2004,8 @@ export const useGameStore = create<GameState>((set, get) => ({
                 // 観戦者は簡易形式のままで問題ないため、そのまま使用
                 // TODO: 完全なMove形式への変換が必要な場合は後で実装
                 set({
-                    board: data.board,
-                    hands: data.hands,
+                    board: data.board as Board,
+                    hands: data.hands as Hands,
                     currentPlayer: data.currentPlayer,
                     moveHistory: [], // 観戦者は履歴を表示しないため空配列で初期化
                     gameStatus: data.gameStatus as GameStatus,
