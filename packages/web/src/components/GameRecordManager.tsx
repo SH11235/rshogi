@@ -2,16 +2,6 @@ import { useGameStore } from "@/stores/gameStore";
 import { useCallback, useEffect, useState } from "react";
 import type { GameStatus, Move } from "shogi-core";
 import { numberToKanji, pieceTypeToKanji } from "shogi-core";
-import { Button } from "./ui/button";
-import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
-} from "./ui/dialog";
-import { Textarea } from "./ui/textarea";
 
 interface GameRecordManagerProps {
     autoSave?: boolean;
@@ -74,9 +64,6 @@ function fullWidthNumber(num: number): string {
 }
 
 export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordManagerProps) {
-    const [isShareDialogOpen, setIsShareDialogOpen] = useState(false);
-    const [kifContent, setKifContent] = useState("");
-    const [shareUrl, setShareUrl] = useState("");
     const [message, setMessage] = useState("");
 
     const moveHistory = useGameStore((state) => state.moveHistory);
@@ -125,7 +112,6 @@ export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordMana
             };
 
             const kif = generateKifFormat(moveHistory as Move[], metadata);
-            setKifContent(kif);
 
             // ローカルストレージに保存
             saveToLocalStorage(kif, metadata);
@@ -174,69 +160,6 @@ export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordMana
         }
     }
 
-    // 現在の棋譜を生成
-    const generateCurrentKif = useCallback(() => {
-        const metadata = {
-            blackPlayer: localPlayer === "black" ? "あなた" : isOnlineGame ? "相手" : "先手",
-            whitePlayer: localPlayer === "white" ? "あなた" : isOnlineGame ? "相手" : "後手",
-            date: new Date().toISOString().split("T")[0],
-            result: getGameResultText(gameStatus as GameStatus),
-        };
-
-        return generateKifFormat(moveHistory as Move[], metadata);
-    }, [moveHistory, gameStatus, localPlayer, isOnlineGame, getGameResultText]);
-
-    // 棋譜をクリップボードにコピー
-    const copyToClipboard = async () => {
-        try {
-            await navigator.clipboard.writeText(kifContent);
-            setMessage("棋譜をクリップボードにコピーしました");
-            setTimeout(() => setMessage(""), 3000);
-        } catch (error) {
-            setMessage("クリップボードへのアクセスが拒否されました");
-            setTimeout(() => setMessage(""), 3000);
-        }
-    };
-
-    // 棋譜をダウンロード
-    const downloadKif = () => {
-        const blob = new Blob([kifContent], { type: "text/plain;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `shogi_${new Date().toISOString().split("T")[0]}.kif`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        setMessage("棋譜のダウンロードを開始しました");
-        setTimeout(() => setMessage(""), 3000);
-    };
-
-    // 棋譜を共有URL生成（実際の実装では外部サービスを使用）
-    const generateShareUrl = async () => {
-        try {
-            // 実際の実装では棋譜共有サービスのAPIを使用
-            // ここでは仮のURLを生成
-            const mockUrl = `https://shogi-share.example.com/game/${Date.now()}`;
-            setShareUrl(mockUrl);
-
-            setMessage("棋譜の共有URLを生成しました");
-            setTimeout(() => setMessage(""), 3000);
-        } catch (error) {
-            setMessage("共有URLの生成に失敗しました");
-            setTimeout(() => setMessage(""), 3000);
-        }
-    };
-
-    // 共有ダイアログを開く
-    const openShareDialog = () => {
-        const kif = generateCurrentKif();
-        setKifContent(kif);
-        setIsShareDialogOpen(true);
-    };
-
     return (
         <>
             {/* メッセージ表示 */}
@@ -245,94 +168,6 @@ export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordMana
                     {message}
                 </div>
             )}
-
-            {/* 共有ボタン */}
-            <Button
-                onClick={openShareDialog}
-                variant="outline"
-                size="sm"
-                className="text-blue-600 border-blue-300 hover:bg-blue-50"
-            >
-                📤 棋譜を共有
-            </Button>
-
-            {/* 共有ダイアログ */}
-            <Dialog open={isShareDialogOpen} onOpenChange={setIsShareDialogOpen}>
-                <DialogContent className="max-w-2xl">
-                    <DialogHeader>
-                        <DialogTitle>棋譜の共有</DialogTitle>
-                        <DialogDescription>
-                            棋譜をコピー、ダウンロード、または共有URLを生成できます
-                        </DialogDescription>
-                    </DialogHeader>
-
-                    <div className="space-y-4">
-                        {/* 棋譜表示 */}
-                        <div>
-                            <label
-                                htmlFor="kif-textarea"
-                                className="text-sm font-medium mb-2 block"
-                            >
-                                KIF形式の棋譜
-                            </label>
-                            <Textarea
-                                id="kif-textarea"
-                                value={kifContent}
-                                readOnly
-                                className="font-mono text-sm h-64"
-                                onClick={(e) => e.currentTarget.select()}
-                            />
-                        </div>
-
-                        {/* 共有URL */}
-                        {shareUrl && (
-                            <div>
-                                <label
-                                    htmlFor="share-url-input"
-                                    className="text-sm font-medium mb-2 block"
-                                >
-                                    共有URL
-                                </label>
-                                <div className="flex gap-2">
-                                    <input
-                                        id="share-url-input"
-                                        type="text"
-                                        value={shareUrl}
-                                        readOnly
-                                        className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm"
-                                        onClick={(e) => e.currentTarget.select()}
-                                    />
-                                    <Button
-                                        onClick={() => navigator.clipboard.writeText(shareUrl)}
-                                        size="sm"
-                                    >
-                                        コピー
-                                    </Button>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* アクションボタン */}
-                        <div className="flex gap-2 justify-center">
-                            <Button onClick={copyToClipboard} variant="outline">
-                                📋 クリップボードにコピー
-                            </Button>
-                            <Button onClick={downloadKif} variant="outline">
-                                💾 ダウンロード
-                            </Button>
-                            {!shareUrl && (
-                                <Button onClick={generateShareUrl} variant="outline">
-                                    🔗 共有URL生成
-                                </Button>
-                            )}
-                        </div>
-                    </div>
-
-                    <DialogFooter>
-                        <Button onClick={() => setIsShareDialogOpen(false)}>閉じる</Button>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
         </>
     );
 }
