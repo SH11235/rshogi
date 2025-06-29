@@ -24,25 +24,10 @@ const config: KnipConfig = {
      * 無視するファイル（意図的に未使用だが残したいもの）
      */
     ignore: [
-        // 将来使用予定のファイル
-        "src/types/audioConfig.ts",
-        "src/types/audioErrors.ts",
-        "src/types/result.ts",
-        "src/types/timer.ts",
-
-        // UI component library (shadcn/ui)
-        "src/types/ui.ts",
-        "src/components/ui/alert-dialog.tsx",
-        "src/components/ui/card.tsx",
-
-        // Audio development utilities
+        // Audio development utilities (内部で使用される関数)
         "src/services/audioGenerator.ts",
         "src/services/audioLogger.ts",
         "src/services/audioManager.ts",
-
-        // Timer system (将来使用予定)
-        "src/hooks/useGameTimer.ts",
-        "src/stores/timerStore.ts",
 
         // Storybook設定ファイル
         ".storybook/preview.ts",

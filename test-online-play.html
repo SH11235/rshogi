@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>通信対戦テスト補助ツール</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        h2 {
+            color: #666;
+            margin-top: 0;
+        }
+        .info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        iframe {
+            width: 100%;
+            height: 800px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .controls {
+            margin-bottom: 10px;
+        }
+        button {
+            background: #2196f3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #1976d2;
+        }
+        .status {
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>将棋通信対戦テスト補助ツール</h1>
+    
+    <div class="info">
+        <strong>使い方：</strong>
+        同じページで2つのゲームインスタンスを開いて、通信対戦のテストができます。<br>
+        左側がホスト、右側がゲストとして使用してください。
+    </div>
+
+    <div class="container">
+        <div class="panel">
+            <h2>ホスト側（先手）</h2>
+            <div class="controls">
+                <button onclick="reloadHost()">リロード</button>
+                <button onclick="openDevToolsHost()">開発者ツール</button>
+            </div>
+            <iframe id="hostFrame" src="http://localhost:5173"></iframe>
+            <div class="status" id="hostStatus">
+                ホスト側のステータス情報がここに表示されます
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>ゲスト側（後手）</h2>
+            <div class="controls">
+                <button onclick="reloadGuest()">リロード</button>
+                <button onclick="openDevToolsGuest()">開発者ツール</button>
+            </div>
+            <iframe id="guestFrame" src="http://localhost:5173"></iframe>
+            <div class="status" id="guestStatus">
+                ゲスト側のステータス情報がここに表示されます
+            </div>
+        </div>
+    </div>
+
+    <div style="margin-top: 20px;" class="panel">
+        <h2>テスト手順</h2>
+        <ol>
+            <li><strong>ホスト側</strong>で「通信対戦」→「部屋を作る」→「部屋を作成」</li>
+            <li>生成されたオファーをコピー</li>
+            <li><strong>ゲスト側</strong>で「通信対戦」→「部屋に参加」→ オファーを貼り付け → 「部屋に参加」</li>
+            <li>生成されたアンサーをコピー</li>
+            <li><strong>ホスト側</strong>でアンサーを貼り付け → 「接続を完了」</li>
+            <li>接続が確立されたら対局開始！</li>
+        </ol>
+        
+        <h3>テストポイント</h3>
+        <ul>
+            <li>✅ 指し手が相手側に反映されるか</li>
+            <li>✅ 手番が正しく切り替わるか</li>
+            <li>✅ 駒の成りが正しく同期されるか</li>
+            <li>✅ 持ち駒からの駒打ちが同期されるか</li>
+            <li>✅ 投了が相手に伝わるか</li>
+            <li>✅ 切断・再接続が機能するか</li>
+        </ul>
+    </div>
+
+    <script>
+        function reloadHost() {
+            document.getElementById('hostFrame').src = 'http://localhost:5173';
+            document.getElementById('hostStatus').textContent = 'ホスト側をリロードしました';
+        }
+
+        function reloadGuest() {
+            document.getElementById('guestFrame').src = 'http://localhost:5173';
+            document.getElementById('guestStatus').textContent = 'ゲスト側をリロードしました';
+        }
+
+        function openDevToolsHost() {
+            alert('ホスト側のiframe内で右クリック → 「検証」を選択してください');
+        }
+
+        function openDevToolsGuest() {
+            alert('ゲスト側のiframe内で右クリック → 「検証」を選択してください');
+        }
+
+        // 定期的にステータスを更新（実装は簡略化）
+        setInterval(() => {
+            const now = new Date().toLocaleTimeString();
+            document.getElementById('hostStatus').textContent = `最終更新: ${now}`;
+            document.getElementById('guestStatus').textContent = `最終更新: ${now}`;
+        }, 5000);
+    </script>
+</body>
+</html>

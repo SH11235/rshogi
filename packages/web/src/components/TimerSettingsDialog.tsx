@@ -59,6 +59,8 @@ export function TimerSettingsDialog({
 }: TimerSettingsDialogProps) {
     const initializeTimer = useGameStore((state) => state.initializeTimer);
     const startPlayerTimer = useGameStore((state) => state.startPlayerTimer);
+    const isOnlineGame = useGameStore((state) => state.isOnlineGame);
+    const connectionStatus = useGameStore((state) => state.connectionStatus);
 
     const [mode, setMode] = useState<TimerMode>("basic");
     const [basicTime, setBasicTime] = useState(1800); // 30分
@@ -104,7 +106,14 @@ export function TimerSettingsDialog({
             <DialogContent className="sm:max-w-[500px]">
                 <DialogHeader>
                     <DialogTitle>対局時計の設定</DialogTitle>
-                    <DialogDescription>持ち時間の方式と時間を設定してください</DialogDescription>
+                    <DialogDescription>
+                        持ち時間の方式と時間を設定してください
+                        {isOnlineGame && !connectionStatus.isHost && (
+                            <span className="block text-yellow-600 mt-2">
+                                ※ 通信対戦ではホストのみがタイマー設定を変更できます
+                            </span>
+                        )}
+                    </DialogDescription>
                 </DialogHeader>
 
                 <div className="space-y-4">

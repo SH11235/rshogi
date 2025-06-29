@@ -1,5 +1,33 @@
 import { audioManager } from "@/services/audioManager";
+import { WebRTCConnection } from "@/services/webrtc";
 import type { SoundType } from "@/types/audio";
+import type {
+    ConnectionStatus,
+    DrawOfferMessage,
+    GameMessage,
+    GameStartMessage,
+    JishogiCheckMessage,
+    MoveMessage,
+    RepetitionCheckMessage,
+    ResignMessage,
+    TimerConfigMessage,
+    TimerUpdateMessage,
+} from "@/types/online";
+import {
+    type SpectatorJoinMessage,
+    type SpectatorSyncMessage,
+    isDrawOfferMessage,
+    isGameStartMessage,
+    isJishogiCheckMessage,
+    isMoveMessage,
+    isRepetitionCheckMessage,
+    isResignMessage,
+    isSpectatorJoinMessage,
+    isSpectatorLeaveMessage,
+    isSpectatorSyncMessage,
+    isTimerConfigMessage,
+    isTimerUpdateMessage,
+} from "@/types/online";
 import {
     type TimerActions,
     type TimerConfig,
@@ -15,9 +43,14 @@ import {
     type Piece,
     type PieceType,
     type Player,
+    type PositionState,
     type Square,
+    type SquareKey,
     applyMove,
     canPromoteByPosition,
+    checkJishogi,
+    checkPerpetualCheck,
+    checkSennichite,
     generateLegalDropMovesForPiece,
     generateLegalMoves,
     initialHands,
@@ -27,6 +60,8 @@ import {
     mustPromote,
     parseKifMoves,
     parseSfen,
+    reconstructGameStateWithInitial,
+    validateReceivedMove,
 } from "shogi-core";
 import { create } from "zustand";
 
@@ -35,44 +70,6 @@ function playGameSound(soundType: SoundType): void {
     audioManager.play(soundType).catch((error) => {
         console.debug(`Failed to play ${soundType} sound:`, error);
     });
-}
-
-// 初期局面を考慮したゲーム状態再構築
-function reconstructGameStateWithInitial(
-    moveHistory: Move[],
-    targetMoveIndex: number,
-    initialBoard: Board,
-    initialHandsData: Hands,
-) {
-    let board = structuredClone(initialBoard);
-    let hands = structuredClone(initialHandsData);
-    let currentPlayer: Player = "black";
-
-    // 初期位置の場合は何も手を適用しない
-    if (targetMoveIndex === HISTORY_CURSOR.INITIAL_POSITION) {
-        // 初期状態をそのまま返す
-    } else {
-        for (let i = 0; i <= targetMoveIndex; i++) {
-            if (i >= moveHistory.length) break;
-
-            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
-            board = result.board;
-            hands = result.hands;
-            currentPlayer = result.nextTurn;
-        }
-    }
-
-    // ゲーム状態判定
-    let gameStatus: GameStatus = "playing";
-    if (isInCheck(board, currentPlayer)) {
-        if (isCheckmate(board, hands, currentPlayer)) {
-            gameStatus = "checkmate";
-        } else {
-            gameStatus = "check";
-        }
-    }
-
-    return { board, hands, currentPlayer, gameStatus };
 }
 
 // ドロップ可能位置を計算（王手放置チェック含む）
@@ -84,6 +81,70 @@ function getValidDropSquares(
 ): Square[] {
     // 合法手生成機能を使用
     return generateLegalDropMovesForPiece(board, hands, pieceType, player);
+}
+
+// 千日手・持将棋の判定用ヘルパー
+function checkRepetitionAndJishogi(
+    moveHistory: Move[],
+    currentBoard: Board,
+    currentHands: Hands,
+    currentPlayer: Player,
+    initialBoard: Board,
+    initialHands: Hands,
+): {
+    isSennichite: boolean;
+    isPerpetualCheck: boolean;
+    isJishogi: boolean;
+    jishogiStatus?: { isJishogi: boolean; blackPoints?: number; whitePoints?: number };
+} {
+    // 局面履歴を再構築
+    const positionHistory: PositionState[] = [];
+    const checkHistory: boolean[] = [];
+
+    let board = structuredClone(initialBoard);
+    let hands = structuredClone(initialHands);
+    let player: Player = "black";
+
+    // 初期局面を追加
+    positionHistory.push({
+        board: structuredClone(board),
+        hands: structuredClone(hands),
+        currentPlayer: player,
+    });
+    checkHistory.push(isInCheck(board, player));
+
+    // 各手を適用して局面履歴を作成
+    for (const move of moveHistory) {
+        const result = applyMove(board, hands, player, move);
+        board = result.board;
+        hands = result.hands;
+        player = result.nextTurn;
+
+        positionHistory.push({
+            board: structuredClone(board),
+            hands: structuredClone(hands),
+            currentPlayer: player,
+        });
+        checkHistory.push(isInCheck(board, player));
+    }
+
+    // 現在の局面も追加
+    positionHistory.push({ board: currentBoard, hands: currentHands, currentPlayer });
+    checkHistory.push(isInCheck(currentBoard, currentPlayer));
+
+    // 千日手判定
+    const isSennichite = checkSennichite(positionHistory);
+    const isPerpetualCheck = checkPerpetualCheck(positionHistory, checkHistory);
+
+    // 持将棋判定
+    const jishogiStatus = checkJishogi(currentBoard, currentHands);
+
+    return {
+        isSennichite,
+        isPerpetualCheck,
+        isJishogi: jishogiStatus.isJishogi,
+        jishogiStatus,
+    };
 }
 
 interface PromotionPendingMove {
@@ -136,6 +197,21 @@ interface GameState {
     // タイマー状態
     timer: TimerState;
 
+    // 通信対戦関連
+    isOnlineGame: boolean;
+    connectionStatus: ConnectionStatus;
+    webrtcConnection: WebRTCConnection | null;
+    localPlayer: Player | null; // ローカルプレイヤーの色
+
+    // 引き分け提案関連
+    drawOfferPending: boolean;
+    pendingDrawOfferer: Player | null;
+
+    // 観戦モード関連
+    isSpectatorMode: boolean;
+    spectatorCount: number;
+    spectatorIds: string[];
+
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
     makeMove: (from: Square, to: Square, promote?: boolean) => void;
@@ -145,6 +221,9 @@ interface GameState {
     clearSelections: () => void;
     resetGame: () => void;
     resign: () => void;
+    offerDraw: () => void;
+    acceptDrawOffer: () => void;
+    rejectDrawOffer: () => void;
     importGame: (moves: Move[], kifContent?: string) => void;
     importSfen: (sfen: string) => void;
     // 履歴操作機能
@@ -172,6 +251,18 @@ interface GameState {
     gameRedo: () => void;
     canGameUndo: () => boolean;
     canGameRedo: () => boolean;
+
+    // 通信対戦機能
+    startOnlineGame: (isHost: boolean) => Promise<string>;
+    joinOnlineGame: (offer: string) => Promise<string>;
+    acceptOnlineAnswer: (answer: string) => Promise<void>;
+    handleOnlineMessage: (message: GameMessage) => void;
+    disconnectOnline: () => void;
+
+    // 観戦機能
+    startSpectatorMode: (gameId: string) => Promise<void>;
+    hostSpectatorGame: () => string;
+    sendSpectatorSync: () => void;
 }
 
 // タイマーアクションをGameStateに統合
@@ -224,6 +315,26 @@ export const useGameStore = create<GameState>((set, get) => ({
     undoStack: [],
     timer: createInitialTimerState(),
 
+    // 通信対戦関連の初期状態
+    isOnlineGame: false,
+    connectionStatus: {
+        isConnected: false,
+        isHost: false,
+        peerId: "",
+        connectionState: "new",
+    },
+    webrtcConnection: null,
+    localPlayer: null,
+
+    // 引き分け提案関連
+    drawOfferPending: false,
+    pendingDrawOfferer: null,
+
+    // 観戦モード関連
+    isSpectatorMode: false,
+    spectatorCount: 0,
+    spectatorIds: [],
+
     selectSquare: (square: Square) => {
         const {
             board,
@@ -242,6 +353,12 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // ゲーム終了時は操作不可（対局・解析モードのみ）
         if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        // 通信対戦時は自分の手番でのみ操作可能
+        const { isOnlineGame, localPlayer } = get();
+        if (isOnlineGame && localPlayer !== currentPlayer) {
             return;
         }
 
@@ -361,6 +478,12 @@ export const useGameStore = create<GameState>((set, get) => ({
             return;
         }
 
+        // 通信対戦時は自分の手番でのみ操作可能
+        const { isOnlineGame, localPlayer } = get();
+        if (isOnlineGame && localPlayer !== currentPlayer) {
+            return;
+        }
+
         // 同じ駒を再度選択した場合は選択解除
         const { selectedDropPiece } = get();
         if (selectedDropPiece?.type === pieceType && selectedDropPiece?.player === player) {
@@ -464,6 +587,37 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
+            // 千日手・持将棋の判定（対局中のみ）
+            if (gameMode === "playing" && newStatus === "playing") {
+                const { initialBoard, initialHandsData } = get();
+                const repetitionCheck = checkRepetitionAndJishogi(
+                    newMoveHistory,
+                    result.board,
+                    result.hands,
+                    nextPlayer,
+                    initialBoard,
+                    initialHandsData,
+                );
+
+                if (repetitionCheck.isSennichite) {
+                    if (repetitionCheck.isPerpetualCheck) {
+                        // 連続王手の千日手は王手をかけている側の負け
+                        newStatus = currentPlayer === "black" ? "black_win" : "white_win";
+                        console.log("Perpetual check - winner:", newStatus);
+                    } else {
+                        // 通常の千日手は引き分け
+                        newStatus = "sennichite";
+                        console.log("Sennichite (repetition) detected");
+                    }
+                    playGameSound("gameEnd");
+                } else if (repetitionCheck.isJishogi) {
+                    // 持将棋
+                    newStatus = "draw";
+                    console.log("Jishogi (impasse) detected:", repetitionCheck.jishogiStatus);
+                    playGameSound("gameEnd");
+                }
+            }
+
             set({
                 board: result.board,
                 hands: result.hands,
@@ -490,7 +644,29 @@ export const useGameStore = create<GameState>((set, get) => ({
                 get().switchTimer();
             }
 
+            // 通信対戦時は相手にメッセージを送信
+            const { isOnlineGame, webrtcConnection, localPlayer } = get();
+            if (isOnlineGame && webrtcConnection && localPlayer === currentPlayer) {
+                const moveMessage: MoveMessage = {
+                    type: "move",
+                    data: {
+                        from: "" as SquareKey, // dropの場合は空文字列
+                        to: `${to.row}${to.column}` as SquareKey,
+                        drop: pieceType,
+                    },
+                    timestamp: Date.now(),
+                    playerId: webrtcConnection.getConnectionInfo().peerId,
+                };
+                webrtcConnection.sendMessage(moveMessage);
+            }
+
             console.log(`Dropped ${pieceType} at ${to.row}${to.column}`);
+
+            // 観戦者に状態を同期
+            const { spectatorCount } = get();
+            if (spectatorCount > 0) {
+                get().sendSpectatorSync();
+            }
         } catch (error) {
             console.error("Invalid drop:", error);
             // エラー時は選択状態をクリア
@@ -499,7 +675,17 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     makeMove: (from: Square, to: Square, promote = false) => {
-        const { board, hands, currentPlayer, moveHistory, historyCursor, gameMode } = get();
+        const {
+            board,
+            hands,
+            currentPlayer,
+            moveHistory,
+            historyCursor,
+            gameMode,
+            isOnlineGame,
+            webrtcConnection,
+            localPlayer,
+        } = get();
 
         try {
             const fromKey = `${from.row}${from.column}` as keyof Board;
@@ -571,6 +757,37 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
+            // 千日手・持将棋の判定（対局中のみ）
+            if (gameMode === "playing" && newStatus === "playing") {
+                const { initialBoard, initialHandsData } = get();
+                const repetitionCheck = checkRepetitionAndJishogi(
+                    newMoveHistory,
+                    result.board,
+                    result.hands,
+                    nextPlayer,
+                    initialBoard,
+                    initialHandsData,
+                );
+
+                if (repetitionCheck.isSennichite) {
+                    if (repetitionCheck.isPerpetualCheck) {
+                        // 連続王手の千日手は王手をかけている側の負け
+                        newStatus = currentPlayer === "black" ? "black_win" : "white_win";
+                        console.log("Perpetual check - winner:", newStatus);
+                    } else {
+                        // 通常の千日手は引き分け
+                        newStatus = "sennichite";
+                        console.log("Sennichite (repetition) detected");
+                    }
+                    playGameSound("gameEnd");
+                } else if (repetitionCheck.isJishogi) {
+                    // 持将棋
+                    newStatus = "draw";
+                    console.log("Jishogi (impasse) detected:", repetitionCheck.jishogiStatus);
+                    playGameSound("gameEnd");
+                }
+            }
+
             set({
                 board: result.board,
                 hands: result.hands,
@@ -595,6 +812,72 @@ export const useGameStore = create<GameState>((set, get) => ({
             const { timer } = get();
             if (timer.config.mode && timer.activePlayer) {
                 get().switchTimer();
+            }
+
+            // 通信対戦時は相手にメッセージを送信
+            if (isOnlineGame && webrtcConnection && localPlayer === currentPlayer) {
+                const moveMessage: MoveMessage = {
+                    type: "move",
+                    data: {
+                        from: `${from.row}${from.column}` as SquareKey,
+                        to: `${to.row}${to.column}` as SquareKey,
+                        promote,
+                    },
+                    timestamp: Date.now(),
+                    playerId: webrtcConnection.getConnectionInfo().peerId,
+                };
+                webrtcConnection.sendMessage(moveMessage);
+
+                // 千日手・持将棋の判定結果も送信
+                if (
+                    gameMode === "playing" &&
+                    (newStatus === "sennichite" ||
+                        newStatus === "draw" ||
+                        (newStatus !== "playing" && newStatus !== "check"))
+                ) {
+                    const { initialBoard, initialHandsData } = get();
+                    const repetitionCheck = checkRepetitionAndJishogi(
+                        newMoveHistory,
+                        result.board,
+                        result.hands,
+                        nextPlayer,
+                        initialBoard,
+                        initialHandsData,
+                    );
+
+                    if (repetitionCheck.isSennichite) {
+                        const repetitionMessage: RepetitionCheckMessage = {
+                            type: "repetition_check",
+                            data: {
+                                isSennichite: true,
+                                isPerpetualCheck: repetitionCheck.isPerpetualCheck,
+                            },
+                            timestamp: Date.now(),
+                            playerId: webrtcConnection.getConnectionInfo().peerId,
+                        };
+                        webrtcConnection.sendMessage(repetitionMessage);
+                    }
+
+                    if (repetitionCheck.isJishogi && repetitionCheck.jishogiStatus) {
+                        const jishogiMessage: JishogiCheckMessage = {
+                            type: "jishogi_check",
+                            data: {
+                                isJishogi: true,
+                                blackPoints: repetitionCheck.jishogiStatus.blackPoints || 0,
+                                whitePoints: repetitionCheck.jishogiStatus.whitePoints || 0,
+                            },
+                            timestamp: Date.now(),
+                            playerId: webrtcConnection.getConnectionInfo().peerId,
+                        };
+                        webrtcConnection.sendMessage(jishogiMessage);
+                    }
+                }
+            }
+
+            // 観戦者に状態を同期
+            const { spectatorCount } = get();
+            if (spectatorCount > 0) {
+                get().sendSpectatorSync();
             }
         } catch (error) {
             console.error("Invalid move:", error);
@@ -649,10 +932,15 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     resign: () => {
-        const { currentPlayer, gameStatus } = get();
+        const { currentPlayer, gameStatus, isOnlineGame, webrtcConnection, localPlayer } = get();
 
         // ゲーム中でない場合は投了できない
         if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        // 通信対戦時は自分の手番でのみ投了可能
+        if (isOnlineGame && localPlayer !== currentPlayer) {
             return;
         }
 
@@ -670,6 +958,90 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // ゲーム終了音を再生
         playGameSound("gameEnd");
+
+        // 通信対戦時は相手に投了メッセージを送信
+        if (isOnlineGame && webrtcConnection) {
+            const resignMessage: ResignMessage = {
+                type: "resign",
+                data: null,
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(resignMessage);
+        }
+    },
+
+    offerDraw: () => {
+        const { currentPlayer, gameStatus, isOnlineGame, webrtcConnection, localPlayer } = get();
+
+        // ゲーム中でない場合は引き分け提案できない
+        if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        // 通信対戦時は自分の手番でのみ提案可能
+        if (isOnlineGame && localPlayer !== currentPlayer) {
+            return;
+        }
+
+        // 通信対戦時
+        if (isOnlineGame && webrtcConnection) {
+            const drawOfferMessage: DrawOfferMessage = {
+                type: "draw_offer",
+                data: { accepted: undefined }, // 提案メッセージ
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(drawOfferMessage);
+            set({ drawOfferPending: true, pendingDrawOfferer: localPlayer });
+        } else {
+            // ローカル対戦時は相手に提案を表示
+            set({ drawOfferPending: true, pendingDrawOfferer: currentPlayer });
+        }
+    },
+
+    acceptDrawOffer: () => {
+        const { isOnlineGame, webrtcConnection } = get();
+
+        // 引き分けにする
+        set({
+            gameStatus: "draw",
+            drawOfferPending: false,
+            pendingDrawOfferer: null,
+        });
+        playGameSound("gameEnd");
+
+        // 通信対戦時は承認メッセージを送信
+        if (isOnlineGame && webrtcConnection) {
+            const acceptMessage: DrawOfferMessage = {
+                type: "draw_offer",
+                data: { accepted: true },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(acceptMessage);
+        }
+    },
+
+    rejectDrawOffer: () => {
+        const { isOnlineGame, webrtcConnection } = get();
+
+        // 提案を拒否
+        set({
+            drawOfferPending: false,
+            pendingDrawOfferer: null,
+        });
+
+        // 通信対戦時は拒否メッセージを送信
+        if (isOnlineGame && webrtcConnection) {
+            const rejectMessage: DrawOfferMessage = {
+                type: "draw_offer",
+                data: { accepted: false },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(rejectMessage);
+        }
     },
 
     importGame: (moves: Move[], kifContent?: string) => {
@@ -909,6 +1281,24 @@ export const useGameStore = create<GameState>((set, get) => ({
                 timedOutPlayer: null,
             },
         });
+
+        // オンラインゲームの場合、タイマー設定を相手に送信
+        const { isOnlineGame, webrtcConnection, connectionStatus } = get();
+        if (isOnlineGame && webrtcConnection && connectionStatus.isHost) {
+            const timerConfigMessage: TimerConfigMessage = {
+                type: "timer_config",
+                data: {
+                    mode: config.mode,
+                    basicTime: config.basicTime,
+                    byoyomiTime: config.byoyomiTime,
+                    fischerIncrement: config.fischerIncrement,
+                    perMoveLimit: config.perMoveLimit,
+                },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(timerConfigMessage);
+        }
     },
 
     startPlayerTimer: (player: Player) => {
@@ -999,7 +1389,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     tick: () => {
-        const { timer, gameStatus } = get();
+        const { timer, gameStatus, isOnlineGame, webrtcConnection, localPlayer } = get();
         if (!timer.config.mode || timer.isPaused || !timer.activePlayer || timer.hasTimedOut)
             return;
         if (gameStatus !== "playing" && gameStatus !== "check") return;
@@ -1044,6 +1434,24 @@ export const useGameStore = create<GameState>((set, get) => ({
                 },
             });
             get().updateWarningLevels();
+        }
+
+        // オンラインゲームで自分のタイマーが更新された場合、相手に送信
+        if (isOnlineGame && webrtcConnection && player === localPlayer) {
+            const updatedTimer = get().timer;
+            const timerUpdateMessage: TimerUpdateMessage = {
+                type: "timer_update",
+                data: {
+                    blackTime: updatedTimer.blackTime,
+                    whiteTime: updatedTimer.whiteTime,
+                    blackInByoyomi: updatedTimer.blackInByoyomi,
+                    whiteInByoyomi: updatedTimer.whiteInByoyomi,
+                    activePlayer: updatedTimer.activePlayer,
+                },
+                timestamp: Date.now(),
+                playerId: webrtcConnection.getConnectionInfo().peerId,
+            };
+            webrtcConnection.sendMessage(timerUpdateMessage);
         }
     },
 
@@ -1305,5 +1713,479 @@ export const useGameStore = create<GameState>((set, get) => ({
     canGameRedo: () => {
         const { gameMode, undoStack } = get();
         return gameMode === "playing" && undoStack.length > 0;
+    },
+
+    // 通信対戦機能の実装
+    startOnlineGame: async (isHost: boolean) => {
+        const connection = new WebRTCConnection();
+
+        // メッセージハンドラーを設定
+        connection.onMessage((message) => {
+            get().handleOnlineMessage(message);
+        });
+
+        // 接続状態変更ハンドラーを設定
+        connection.onConnectionStateChange((state) => {
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: state as ConnectionStatus["connectionState"],
+                    isConnected: state === "connected",
+                },
+            });
+        });
+
+        // エラーハンドラーを設定
+        connection.onError((error) => {
+            console.error("WebRTC error in game:", error);
+            // ユーザーに通知するためのエラー状態を設定
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: "failed",
+                    isConnected: false,
+                },
+            });
+        });
+
+        let offer = "";
+        if (isHost) {
+            offer = await connection.createHost();
+            set({
+                isOnlineGame: true,
+                webrtcConnection: connection,
+                localPlayer: "black", // ホストは先手
+                connectionStatus: {
+                    isConnected: false,
+                    isHost: true,
+                    peerId: connection.getConnectionInfo().peerId,
+                    connectionState: "connecting",
+                },
+            });
+        }
+
+        get().resetGame();
+        set({ gameMode: "playing" });
+
+        return offer;
+    },
+
+    joinOnlineGame: async (offer: string) => {
+        const connection = new WebRTCConnection();
+
+        // メッセージハンドラーを設定
+        connection.onMessage((message) => {
+            get().handleOnlineMessage(message);
+        });
+
+        // 接続状態変更ハンドラーを設定
+        connection.onConnectionStateChange((state) => {
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: state as ConnectionStatus["connectionState"],
+                    isConnected: state === "connected",
+                },
+            });
+        });
+
+        // エラーハンドラーを設定
+        connection.onError((error) => {
+            console.error("WebRTC error in game:", error);
+            // ユーザーに通知するためのエラー状態を設定
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: "failed",
+                    isConnected: false,
+                },
+            });
+        });
+
+        const answer = await connection.joinAsGuest(offer);
+
+        set({
+            isOnlineGame: true,
+            webrtcConnection: connection,
+            localPlayer: "white", // ゲストは後手
+            connectionStatus: {
+                isConnected: false,
+                isHost: false,
+                peerId: connection.getConnectionInfo().peerId,
+                connectionState: "connecting",
+            },
+        });
+
+        get().resetGame();
+        set({ gameMode: "playing" });
+
+        return answer;
+    },
+
+    acceptOnlineAnswer: async (answer: string) => {
+        const { webrtcConnection } = get();
+        if (!webrtcConnection) throw new Error("No connection");
+
+        await webrtcConnection.acceptAnswer(answer);
+
+        // 接続完了後、ゲーム開始メッセージを送信
+        const gameStartMessage: GameStartMessage = {
+            type: "game_start",
+            data: {
+                hostPlayer: "black",
+                guestPlayer: "white",
+            },
+            timestamp: Date.now(),
+            playerId: webrtcConnection.getConnectionInfo().peerId,
+        };
+
+        webrtcConnection.sendMessage(gameStartMessage);
+    },
+
+    handleOnlineMessage: (message: GameMessage) => {
+        console.log("Received online message:", message);
+
+        if (isMoveMessage(message)) {
+            const { data } = message;
+            const { board, hands, currentPlayer, localPlayer } = get();
+
+            // 自分の手番でないことを確認（相手の手のみ受け入れる）
+            if (currentPlayer === localPlayer) {
+                console.warn("Received move during own turn, ignoring");
+                return;
+            }
+
+            // 受信した手の検証
+            const validation = validateReceivedMove(board, hands, currentPlayer, data);
+            if (!validation.valid) {
+                console.error("Invalid move received:", validation.error);
+                // 不正な手を受信した場合の処理
+                // TODO: エラーメッセージをUIに表示するか、同期エラーとして処理
+                return;
+            }
+
+            if (data.drop) {
+                // 駒打ちの場合
+                const to: Square = {
+                    row: Number.parseInt(data.to[0]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    column: Number.parseInt(data.to[1]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                };
+                get().makeDrop(data.drop, to);
+            } else if (data.from) {
+                // 通常の移動の場合
+                const from: Square = {
+                    row: Number.parseInt(data.from[0]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    column: Number.parseInt(data.from[1]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                };
+                const to: Square = {
+                    row: Number.parseInt(data.to[0]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    column: Number.parseInt(data.to[1]) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                };
+
+                // 相手の手を反映
+                get().makeMove(from, to, data.promote);
+            }
+        } else if (isGameStartMessage(message)) {
+            console.log("Game started:", message.data);
+        } else if (isResignMessage(message)) {
+            // 相手が投了した
+            const { currentPlayer } = get();
+            const winStatus = currentPlayer === "black" ? "black_win" : "white_win";
+            set({
+                gameStatus: winStatus,
+                resignedPlayer: currentPlayer === "black" ? "white" : "black",
+            });
+            playGameSound("gameEnd");
+        } else if (isDrawOfferMessage(message)) {
+            // 引き分け提案メッセージの処理
+            const { data } = message;
+            if (data.accepted === undefined) {
+                // 新規提案を受信
+                const { currentPlayer, localPlayer } = get();
+                const offerer = currentPlayer === localPlayer ? "white" : "black";
+                set({ drawOfferPending: true, pendingDrawOfferer: offerer });
+            } else if (data.accepted === true) {
+                // 承認を受信
+                set({
+                    gameStatus: "draw",
+                    drawOfferPending: false,
+                    pendingDrawOfferer: null,
+                });
+                playGameSound("gameEnd");
+            } else {
+                // 拒否を受信
+                set({
+                    drawOfferPending: false,
+                    pendingDrawOfferer: null,
+                });
+            }
+        } else if (isTimerConfigMessage(message)) {
+            // ホストからタイマー設定を受信（ゲストのみ）
+            const { connectionStatus } = get();
+            if (!connectionStatus.isHost) {
+                get().initializeTimer(message.data);
+            }
+        } else if (isTimerUpdateMessage(message)) {
+            // 相手のタイマー更新を受信
+            const { localPlayer } = get();
+            const { data } = message;
+
+            // 相手のタイマー情報のみ更新（自分のタイマーは自分で管理）
+            set({
+                timer: {
+                    ...get().timer,
+                    blackTime: localPlayer === "white" ? data.blackTime : get().timer.blackTime,
+                    whiteTime: localPlayer === "black" ? data.whiteTime : get().timer.whiteTime,
+                    blackInByoyomi:
+                        localPlayer === "white" ? data.blackInByoyomi : get().timer.blackInByoyomi,
+                    whiteInByoyomi:
+                        localPlayer === "black" ? data.whiteInByoyomi : get().timer.whiteInByoyomi,
+                },
+            });
+        } else if (isRepetitionCheckMessage(message)) {
+            // 千日手チェックメッセージの処理
+            const { data } = message;
+            if (data.isSennichite) {
+                if (data.isPerpetualCheck) {
+                    // 連続王手の千日手
+                    const { currentPlayer } = get();
+                    const winStatus = currentPlayer === "black" ? "white_win" : "black_win";
+                    set({ gameStatus: winStatus });
+                    console.log("Perpetual check received - winner:", winStatus);
+                } else {
+                    // 通常の千日手
+                    set({ gameStatus: "sennichite" });
+                    console.log("Sennichite (repetition) received");
+                }
+                playGameSound("gameEnd");
+            }
+        } else if (isJishogiCheckMessage(message)) {
+            // 持将棋チェックメッセージの処理
+            const { data } = message;
+            if (data.isJishogi) {
+                set({ gameStatus: "draw" });
+                console.log("Jishogi (impasse) received:", data);
+                playGameSound("gameEnd");
+            }
+        } else if (isSpectatorJoinMessage(message)) {
+            // 観戦者参加メッセージの処理
+            const { data } = message;
+            const { spectatorIds } = get();
+            if (!spectatorIds.includes(data.spectatorId)) {
+                set({
+                    spectatorIds: [...spectatorIds, data.spectatorId],
+                    spectatorCount: spectatorIds.length + 1,
+                });
+                console.log("Spectator joined:", data.spectatorId);
+
+                // ホストの場合は現在の状態を新規観戦者に送信
+                const { connectionStatus, webrtcConnection } = get();
+                if (connectionStatus.isHost && webrtcConnection) {
+                    get().sendSpectatorSync();
+                }
+            }
+        } else if (isSpectatorLeaveMessage(message)) {
+            // 観戦者退出メッセージの処理
+            const { data } = message;
+            const { spectatorIds } = get();
+            const newSpectatorIds = spectatorIds.filter((id) => id !== data.spectatorId);
+            set({
+                spectatorIds: newSpectatorIds,
+                spectatorCount: newSpectatorIds.length,
+            });
+            console.log("Spectator left:", data.spectatorId);
+        } else if (isSpectatorSyncMessage(message)) {
+            // 観戦者同期メッセージの処理（観戦者のみ）
+            const { isSpectatorMode } = get();
+            if (isSpectatorMode) {
+                const { data } = message;
+
+                // 簡易形式の移動履歴から完全なMove[]を再構築
+                // 観戦者は簡易形式のままで問題ないため、そのまま使用
+                // TODO: 完全なMove形式への変換が必要な場合は後で実装
+                set({
+                    board: data.board as Board,
+                    hands: data.hands as Hands,
+                    currentPlayer: data.currentPlayer,
+                    moveHistory: [], // 観戦者は履歴を表示しないため空配列で初期化
+                    gameStatus: data.gameStatus as GameStatus,
+                    historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+                });
+
+                // タイマー情報も同期
+                if (data.timer) {
+                    set({
+                        timer: {
+                            ...get().timer,
+                            blackTime: data.timer.blackTime,
+                            whiteTime: data.timer.whiteTime,
+                            blackInByoyomi: data.timer.blackInByoyomi,
+                            whiteInByoyomi: data.timer.whiteInByoyomi,
+                        },
+                    });
+                }
+
+                console.log("Spectator sync received");
+            }
+        }
+    },
+
+    disconnectOnline: () => {
+        const { webrtcConnection, isSpectatorMode } = get();
+        if (webrtcConnection) {
+            // 観戦者の場合は退出メッセージを送信
+            if (isSpectatorMode) {
+                const leaveMessage = {
+                    type: "spectator_leave" as const,
+                    data: {
+                        spectatorId: webrtcConnection.getConnectionInfo().peerId,
+                    },
+                    timestamp: Date.now(),
+                    playerId: webrtcConnection.getConnectionInfo().peerId,
+                };
+                webrtcConnection.sendMessage(leaveMessage);
+            }
+
+            webrtcConnection.disconnect();
+        }
+
+        set({
+            isOnlineGame: false,
+            webrtcConnection: null,
+            localPlayer: null,
+            connectionStatus: {
+                isConnected: false,
+                isHost: false,
+                peerId: "",
+                connectionState: "new",
+            },
+            isSpectatorMode: false,
+            spectatorCount: 0,
+            spectatorIds: [],
+        });
+    },
+
+    // 観戦モード開始
+    startSpectatorMode: async (gameId: string) => {
+        const connection = new WebRTCConnection();
+
+        // メッセージハンドラーを設定
+        connection.onMessage((message) => {
+            get().handleOnlineMessage(message);
+        });
+
+        // 接続状態変更ハンドラーを設定
+        connection.onConnectionStateChange((state) => {
+            set({
+                connectionStatus: {
+                    ...get().connectionStatus,
+                    connectionState: state as ConnectionStatus["connectionState"],
+                    isConnected: state === "connected",
+                },
+            });
+        });
+
+        // エラーハンドラーを設定
+        connection.onError((error) => {
+            console.error("WebRTC error in spectator mode:", error);
+        });
+
+        try {
+            // ゲストとして接続（観戦者として）
+            await connection.joinAsGuest(gameId);
+
+            set({
+                isOnlineGame: true,
+                isSpectatorMode: true,
+                webrtcConnection: connection,
+                connectionStatus: {
+                    isConnected: false,
+                    isHost: false,
+                    peerId: connection.getConnectionInfo().peerId,
+                    connectionState: "connecting",
+                },
+                gameMode: "review", // 観戦者は閲覧モード
+            });
+
+            // 接続後に観戦者参加メッセージを送信
+            const joinMessage: SpectatorJoinMessage = {
+                type: "spectator_join",
+                data: {
+                    spectatorId: connection.getConnectionInfo().peerId,
+                },
+                timestamp: Date.now(),
+                playerId: connection.getConnectionInfo().peerId,
+            };
+
+            // 接続が確立するまで待つ
+            await new Promise<void>((resolve) => {
+                const checkConnection = () => {
+                    if (get().connectionStatus.isConnected) {
+                        resolve();
+                    } else {
+                        setTimeout(checkConnection, 100);
+                    }
+                };
+                checkConnection();
+            });
+
+            connection.sendMessage(joinMessage);
+        } catch (error) {
+            console.error("Failed to start spectator mode:", error);
+            throw error;
+        }
+    },
+
+    // 観戦可能な対局をホスト
+    hostSpectatorGame: () => {
+        const { webrtcConnection } = get();
+        if (!webrtcConnection) {
+            throw new Error("No active connection");
+        }
+
+        // ゲームIDはピアIDを使用
+        const gameId = webrtcConnection.getConnectionInfo().peerId;
+        console.log("Hosting spectator game with ID:", gameId);
+
+        return gameId;
+    },
+
+    // 観戦者に現在の状態を送信
+    sendSpectatorSync: () => {
+        const { board, hands, currentPlayer, moveHistory, gameStatus, timer, webrtcConnection } =
+            get();
+
+        if (!webrtcConnection) return;
+
+        const syncMessage: SpectatorSyncMessage = {
+            type: "spectator_sync",
+            data: {
+                board,
+                hands,
+                currentPlayer,
+                moveHistory: moveHistory.map((move) => ({
+                    from:
+                        move.type === "move"
+                            ? (`${move.from.row}${move.from.column}` as SquareKey)
+                            : ("" as SquareKey),
+                    to: `${move.to.row}${move.to.column}` as SquareKey,
+                    promote: move.type === "move" ? move.promote : undefined,
+                    drop: move.type === "drop" ? move.piece.type : undefined,
+                })),
+                gameStatus,
+                timer: timer.config.mode
+                    ? {
+                          blackTime: timer.blackTime,
+                          whiteTime: timer.whiteTime,
+                          blackInByoyomi: timer.blackInByoyomi,
+                          whiteInByoyomi: timer.whiteInByoyomi,
+                      }
+                    : undefined,
+            },
+            timestamp: Date.now(),
+            playerId: webrtcConnection.getConnectionInfo().peerId,
+        };
+
+        webrtcConnection.sendMessage(syncMessage);
     },
 }));

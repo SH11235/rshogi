@@ -14,6 +14,9 @@ export * from "./domain/service/legalMoves";
 export * from "./domain/service/promotionService";
 export * from "./domain/service/kifService";
 export * from "./domain/service/sfenService";
+export * from "./domain/service/moveValidationService";
+export * from "./domain/service/timerService";
+export * from "./domain/service/repetitionService";
 export {
     type GameState,
     type GameStatus,
@@ -24,6 +27,7 @@ export {
     createInitialGameState,
     updateGameState,
     reconstructGameState,
+    reconstructGameStateWithInitial,
 } from "./domain/service/gameState";
 
 // Initial board

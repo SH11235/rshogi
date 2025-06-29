@@ -1,17 +1,23 @@
 import "./App.css";
+import { Wifi } from "lucide-react";
 import { useState } from "react";
 import type { Move } from "shogi-core";
 import { AudioTestPanel } from "./components/AudioTestPanel";
 import { Board } from "./components/Board";
 import { CapturedPieces } from "./components/CapturedPieces";
+import { ConnectionStatusComponent } from "./components/ConnectionStatus";
+import { DrawOfferDialog } from "./components/DrawOfferDialog";
 import { GameControls } from "./components/GameControls";
 import { GameInfo } from "./components/GameInfo";
+import { GameRecordManager } from "./components/GameRecordManager";
 import { KifuExportDialog } from "./components/KifuExportDialog";
 import { KifuImportDialog } from "./components/KifuImportDialog";
 import type { ImportFormat } from "./components/KifuImportDialog";
 import { MoveHistory } from "./components/MoveHistory";
+import { OnlineGameDialog } from "./components/OnlineGameDialog";
 import { PlaybackControls } from "./components/PlaybackControls";
 import { PromotionDialog } from "./components/PromotionDialog";
+import { SpectatorMode } from "./components/SpectatorMode";
 import { Button } from "./components/ui/button";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
@@ -62,10 +68,23 @@ function App() {
         gameRedo,
         canGameUndo,
         canGameRedo,
+        // 通信対戦関連
+        isOnlineGame,
+        connectionStatus,
+        startOnlineGame,
+        joinOnlineGame,
+        acceptOnlineAnswer,
+        // disconnectOnline, // 将来使用予定
+        // 観戦機能
+        isSpectatorMode,
+        spectatorCount,
+        startSpectatorMode,
+        hostSpectatorGame,
     } = useGameStore();
 
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
     const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
+    const [isOnlineDialogOpen, setIsOnlineDialogOpen] = useState(false);
 
     // キーボードショートカットの設定
     useKeyboardShortcuts({
@@ -121,7 +140,17 @@ function App() {
                         <Button
                             variant="outline"
                             size="sm"
+                            onClick={() => setIsOnlineDialogOpen(true)}
+                            disabled={isOnlineGame}
+                        >
+                            <Wifi className="mr-2 h-4 w-4" />
+                            通信対戦
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
                             onClick={() => setIsImportDialogOpen(true)}
+                            disabled={isOnlineGame}
                         >
                             📤 棋譜読込
                         </Button>
@@ -133,8 +162,29 @@ function App() {
                         >
                             📥 棋譜保存
                         </Button>
+                        <GameRecordManager autoSave={true} />
                     </div>
                 </div>
+
+                {/* 通信対戦の接続状態表示 */}
+                {isOnlineGame && (
+                    <div className="flex justify-center mb-4">
+                        <ConnectionStatusComponent
+                            status={connectionStatus}
+                            onReconnect={() => setIsOnlineDialogOpen(true)}
+                        />
+                    </div>
+                )}
+
+                {/* 観戦機能 */}
+                {isOnlineGame && (
+                    <SpectatorMode
+                        onJoinAsSpectator={startSpectatorMode}
+                        onHostSpectatorGame={hostSpectatorGame}
+                        spectatorCount={spectatorCount}
+                        isSpectator={isSpectatorMode}
+                    />
+                )}
 
                 {/* モバイル向け: 縦配置メインレイアウト */}
                 <div className="flex flex-col lg:hidden space-y-4">
@@ -315,6 +365,9 @@ function App() {
                     />
                 )}
 
+                {/* 引き分け提案ダイアログ */}
+                <DrawOfferDialog />
+
                 {/* 開発用音声テストパネル */}
                 <div className="mt-8">
                     <AudioTestPanel />
@@ -334,6 +387,15 @@ function App() {
                     currentHands={hands}
                     currentPlayer={currentPlayer}
                     historyCursor={historyCursor}
+                />
+
+                {/* 通信対戦ダイアログ */}
+                <OnlineGameDialog
+                    open={isOnlineDialogOpen}
+                    onOpenChange={setIsOnlineDialogOpen}
+                    onCreateHost={() => startOnlineGame(true)}
+                    onJoinAsGuest={joinOnlineGame}
+                    onAcceptAnswer={acceptOnlineAnswer}
                 />
             </div>
         </div>

@@ -282,3 +282,49 @@ export function reconstructGameState(moveHistory: Move[], targetMoveIndex: numbe
 
     return { board, hands, currentPlayer, gameStatus };
 }
+
+/**
+ * 初期局面を考慮したゲーム状態再構築
+ *
+ * @param moveHistory 手の履歴
+ * @param targetMoveIndex 再構築対象の手数インデックス
+ * @param initialBoard 初期盤面
+ * @param initialHandsData 初期持ち駒
+ * @returns 再構築されたゲーム状態
+ */
+export function reconstructGameStateWithInitial(
+    moveHistory: Move[],
+    targetMoveIndex: number,
+    initialBoard: Board,
+    initialHandsData: Hands,
+) {
+    let board = structuredClone(initialBoard);
+    let hands = structuredClone(initialHandsData);
+    let currentPlayer: Player = "black";
+
+    // 初期位置の場合は何も手を適用しない
+    if (targetMoveIndex === HISTORY_CURSOR.INITIAL_POSITION) {
+        // 初期状態をそのまま返す
+    } else {
+        for (let i = 0; i <= targetMoveIndex; i++) {
+            if (i >= moveHistory.length) break;
+
+            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
+            board = result.board;
+            hands = result.hands;
+            currentPlayer = result.nextTurn;
+        }
+    }
+
+    // ゲーム状態判定
+    let gameStatus: GameStatus = "playing";
+    if (isInCheck(board, currentPlayer)) {
+        if (isCheckmate(board, hands, currentPlayer)) {
+            gameStatus = "checkmate";
+        } else {
+            gameStatus = "check";
+        }
+    }
+
+    return { board, hands, currentPlayer, gameStatus };
+}
