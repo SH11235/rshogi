@@ -241,31 +241,35 @@ describe('gameStore', () => {
 
 ### Complex State Updates
 ```typescript
-it('should handle spectator mode state', () => {
+it('should handle draw offer state', () => {
     const store = useGameStore.getState();
     
-    // Start spectator mode
+    // Set up online game
     act(() => {
-        store.startSpectatorMode('game-123');
+        store.startOnlineGame(true);
     });
     
-    expect(store.isSpectatorMode).toBe(true);
-    expect(store.gameMode).toBe('review');
-    
-    // Handle spectator sync
+    // Receive draw offer
     act(() => {
         store.handleOnlineMessage({
-            type: 'spectator_sync',
+            type: 'draw_offer',
             data: {
-                board: mockBoard,
-                hands: mockHands,
-                currentPlayer: 'white'
-            }
+                offerer: 'white'
+            },
+            timestamp: Date.now(),
+            playerId: 'peer-123'
         });
     });
     
-    expect(store.board).toEqual(mockBoard);
-    expect(store.currentPlayer).toBe('white');
+    expect(store.drawOfferPending).toBe(true);
+    expect(store.pendingDrawOfferer).toBe('white');
+    
+    // Accept draw offer
+    act(() => {
+        store.respondToDrawOffer(true);
+    });
+    
+    expect(store.gameStatus).toBe('draw');
 });
 ```
 

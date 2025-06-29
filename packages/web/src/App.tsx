@@ -17,7 +17,6 @@ import { MoveHistory } from "./components/MoveHistory";
 import { OnlineGameDialog } from "./components/OnlineGameDialog";
 import { PlaybackControls } from "./components/PlaybackControls";
 import { PromotionDialog } from "./components/PromotionDialog";
-import { SpectatorMode } from "./components/SpectatorMode";
 import { Button } from "./components/ui/button";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
@@ -75,11 +74,6 @@ function App() {
         joinOnlineGame,
         acceptOnlineAnswer,
         // disconnectOnline, // 将来使用予定
-        // 観戦機能
-        isSpectatorMode,
-        spectatorCount,
-        startSpectatorMode,
-        hostSpectatorGame,
     } = useGameStore();
 
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
@@ -174,16 +168,6 @@ function App() {
                             onReconnect={() => setIsOnlineDialogOpen(true)}
                         />
                     </div>
-                )}
-
-                {/* 観戦機能 */}
-                {isOnlineGame && (
-                    <SpectatorMode
-                        onJoinAsSpectator={startSpectatorMode}
-                        onHostSpectatorGame={hostSpectatorGame}
-                        spectatorCount={spectatorCount}
-                        isSpectator={isSpectatorMode}
-                    />
                 )}
 
                 {/* モバイル向け: 縦配置メインレイアウト */}

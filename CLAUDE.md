@@ -193,12 +193,6 @@ export function isNewFeatureMessage(msg: GameMessage): msg is NewFeatureMessage 
 }
 ```
 
-### Multiple Connections (Spectator Mode)
-- Separate spectator state from player state
-- Use different message channels for spectators
-- Implement sync messages for late-joining spectators
-- Manage spectator lists in the game state
-
 ## State Management Best Practices
 
 ### Complex State with Zustand

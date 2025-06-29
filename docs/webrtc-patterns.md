@@ -6,8 +6,7 @@ This document describes best practices and patterns for implementing WebRTC comm
 1. [Connection Lifecycle](#connection-lifecycle)
 2. [Error Handling](#error-handling)
 3. [Message Protocol](#message-protocol)
-4. [Spectator Mode Implementation](#spectator-mode-implementation)
-5. [Testing Strategies](#testing-strategies)
+4. [Testing Strategies](#testing-strategies)
 
 ## Connection Lifecycle
 
@@ -144,59 +143,6 @@ private validateMessage(message: unknown): GameMessage {
     }
     
     return message as GameMessage;
-}
-```
-
-## Spectator Mode Implementation
-
-### Architecture
-```
-┌─────────────┐     ┌─────────────┐
-│   Player 1  │────>│   Player 2  │
-│   (Host)    │<────│   (Guest)   │
-└─────────────┘     └─────────────┘
-       │                    │
-       v                    v
-┌─────────────┐     ┌─────────────┐
-│ Spectator 1 │     │ Spectator 2 │
-└─────────────┘     └─────────────┘
-```
-
-### Spectator State Management
-```typescript
-interface SpectatorState {
-    isSpectatorMode: boolean;
-    spectatorCount: number;
-    spectatorIds: string[];
-}
-```
-
-### Synchronization Strategy
-1. **Initial Sync**: Send full game state on join
-2. **Incremental Updates**: Send only changes during play
-3. **Periodic Sync**: Full sync every N moves
-4. **Late Join Support**: Handle spectators joining mid-game
-
-### Message Flow
-```typescript
-// Host broadcasts to all connected peers
-private broadcastToSpectators(message: GameMessage): void {
-    this.spectatorConnections.forEach(conn => {
-        conn.sendMessage(message);
-    });
-}
-
-// Spectator receives and applies state
-private handleSpectatorSync(message: SpectatorSyncMessage): void {
-    if (!this.isSpectatorMode) return;
-    
-    // Apply state without triggering local moves
-    this.gameStore.setState({
-        board: message.data.board,
-        hands: message.data.hands,
-        currentPlayer: message.data.currentPlayer,
-        gameStatus: message.data.gameStatus
-    });
 }
 ```
 

@@ -52,17 +52,8 @@ interface TimerSlice {
     timer: TimerState & TimerActions;
 }
 
-// Spectator slice
-interface SpectatorSlice {
-    isSpectatorMode: boolean;
-    spectatorCount: number;
-    spectatorIds: string[];
-    startSpectatorMode: (gameId: string) => Promise<void>;
-    sendSpectatorSync: () => void;
-}
-
 // Combine slices
-type GameStore = GameState & TimerSlice & SpectatorSlice;
+type GameStore = GameState & TimerSlice;
 ```
 
 ## State Organization
@@ -165,8 +156,8 @@ handleOnlineMessage: (message: GameMessage) => {
         handleMoveMessage(message);
     } else if (isTimerUpdateMessage(message)) {
         handleTimerMessage(message);
-    } else if (isSpectatorSyncMessage(message)) {
-        handleSpectatorSync(message);
+    } else if (isDrawOfferMessage(message)) {
+        handleDrawOfferMessage(message);
     }
     // ... handle all message types
 }
@@ -186,21 +177,6 @@ const makeOnlineMove = (move: Move) => {
     // If rejected, rollback the move
 };
 
-// Full state sync for spectators
-const syncSpectatorState = () => {
-    const { board, hands, currentPlayer, moveHistory, gameStatus } = get();
-    
-    sendMessage({
-        type: 'spectator_sync',
-        data: {
-            board,
-            hands,
-            currentPlayer,
-            moveHistory: moveHistory.map(simplifyMove),
-            gameStatus
-        }
-    });
-};
 ```
 
 ## History Management

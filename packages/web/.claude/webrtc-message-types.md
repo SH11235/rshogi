@@ -19,14 +19,10 @@ export interface GameMessage {
 2. `resign` - Resignation
 3. `draw_offer` - Draw proposals
 4. `game_start` - Game initialization
-5. `sync_state` - State synchronization
-6. `timer_config` - Timer settings
-7. `timer_update` - Timer updates
-8. `repetition_check` - Sennichite detection
-9. `jishogi_check` - Impasse detection
-10. `spectator_join` - Spectator joining
-11. `spectator_leave` - Spectator leaving
-12. `spectator_sync` - Spectator state sync
+5. `timer_config` - Timer settings
+6. `timer_update` - Timer updates
+7. `repetition_check` - Sennichite detection
+8. `jishogi_check` - Impasse detection
 
 ## Adding New Message Types
 

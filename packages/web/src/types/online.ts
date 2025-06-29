@@ -96,46 +96,6 @@ export interface JishogiCheckMessage extends GameMessage {
     };
 }
 
-// 観戦者参加メッセージ
-export interface SpectatorJoinMessage extends GameMessage {
-    type: "spectator_join";
-    data: {
-        spectatorId: string;
-        spectatorName?: string;
-    };
-}
-
-// 観戦者退出メッセージ
-export interface SpectatorLeaveMessage extends GameMessage {
-    type: "spectator_leave";
-    data: {
-        spectatorId: string;
-    };
-}
-
-// 観戦者同期メッセージ
-export interface SpectatorSyncMessage extends GameMessage {
-    type: "spectator_sync";
-    data: {
-        board: Record<string, unknown>; // Board型のシリアライズデータ
-        hands: Record<string, unknown>; // Hands型のシリアライズデータ
-        currentPlayer: "black" | "white";
-        moveHistory: Array<{
-            from: SquareKey;
-            to: SquareKey;
-            promote?: boolean;
-            drop?: PieceType;
-        }>;
-        gameStatus: string;
-        timer?: {
-            blackTime: number;
-            whiteTime: number;
-            blackInByoyomi: boolean;
-            whiteInByoyomi: boolean;
-        };
-    };
-}
-
 // 接続状態
 export interface ConnectionStatus {
     isConnected: boolean;
@@ -175,16 +135,4 @@ export function isRepetitionCheckMessage(msg: GameMessage): msg is RepetitionChe
 
 export function isJishogiCheckMessage(msg: GameMessage): msg is JishogiCheckMessage {
     return msg.type === "jishogi_check";
-}
-
-export function isSpectatorJoinMessage(msg: GameMessage): msg is SpectatorJoinMessage {
-    return msg.type === "spectator_join";
-}
-
-export function isSpectatorLeaveMessage(msg: GameMessage): msg is SpectatorLeaveMessage {
-    return msg.type === "spectator_leave";
-}
-
-export function isSpectatorSyncMessage(msg: GameMessage): msg is SpectatorSyncMessage {
-    return msg.type === "spectator_sync";
 }

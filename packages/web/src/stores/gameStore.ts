@@ -14,17 +14,12 @@ import type {
     TimerUpdateMessage,
 } from "@/types/online";
 import {
-    type SpectatorJoinMessage,
-    type SpectatorSyncMessage,
     isDrawOfferMessage,
     isGameStartMessage,
     isJishogiCheckMessage,
     isMoveMessage,
     isRepetitionCheckMessage,
     isResignMessage,
-    isSpectatorJoinMessage,
-    isSpectatorLeaveMessage,
-    isSpectatorSyncMessage,
     isTimerConfigMessage,
     isTimerUpdateMessage,
 } from "@/types/online";
@@ -207,11 +202,6 @@ interface GameState {
     drawOfferPending: boolean;
     pendingDrawOfferer: Player | null;
 
-    // 観戦モード関連
-    isSpectatorMode: boolean;
-    spectatorCount: number;
-    spectatorIds: string[];
-
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
     makeMove: (from: Square, to: Square, promote?: boolean) => void;
@@ -258,11 +248,6 @@ interface GameState {
     acceptOnlineAnswer: (answer: string) => Promise<void>;
     handleOnlineMessage: (message: GameMessage) => void;
     disconnectOnline: () => void;
-
-    // 観戦機能
-    startSpectatorMode: (gameId: string) => Promise<void>;
-    hostSpectatorGame: () => string;
-    sendSpectatorSync: () => void;
 }
 
 // タイマーアクションをGameStateに統合
@@ -329,11 +314,6 @@ export const useGameStore = create<GameState>((set, get) => ({
     // 引き分け提案関連
     drawOfferPending: false,
     pendingDrawOfferer: null,
-
-    // 観戦モード関連
-    isSpectatorMode: false,
-    spectatorCount: 0,
-    spectatorIds: [],
 
     selectSquare: (square: Square) => {
         const {
@@ -661,12 +641,6 @@ export const useGameStore = create<GameState>((set, get) => ({
             }
 
             console.log(`Dropped ${pieceType} at ${to.row}${to.column}`);
-
-            // 観戦者に状態を同期
-            const { spectatorCount } = get();
-            if (spectatorCount > 0) {
-                get().sendSpectatorSync();
-            }
         } catch (error) {
             console.error("Invalid drop:", error);
             // エラー時は選択状態をクリア
@@ -872,12 +846,6 @@ export const useGameStore = create<GameState>((set, get) => ({
                         webrtcConnection.sendMessage(jishogiMessage);
                     }
                 }
-            }
-
-            // 観戦者に状態を同期
-            const { spectatorCount } = get();
-            if (spectatorCount > 0) {
-                get().sendSpectatorSync();
             }
         } catch (error) {
             console.error("Invalid move:", error);
@@ -1967,85 +1935,12 @@ export const useGameStore = create<GameState>((set, get) => ({
                 console.log("Jishogi (impasse) received:", data);
                 playGameSound("gameEnd");
             }
-        } else if (isSpectatorJoinMessage(message)) {
-            // 観戦者参加メッセージの処理
-            const { data } = message;
-            const { spectatorIds } = get();
-            if (!spectatorIds.includes(data.spectatorId)) {
-                set({
-                    spectatorIds: [...spectatorIds, data.spectatorId],
-                    spectatorCount: spectatorIds.length + 1,
-                });
-                console.log("Spectator joined:", data.spectatorId);
-
-                // ホストの場合は現在の状態を新規観戦者に送信
-                const { connectionStatus, webrtcConnection } = get();
-                if (connectionStatus.isHost && webrtcConnection) {
-                    get().sendSpectatorSync();
-                }
-            }
-        } else if (isSpectatorLeaveMessage(message)) {
-            // 観戦者退出メッセージの処理
-            const { data } = message;
-            const { spectatorIds } = get();
-            const newSpectatorIds = spectatorIds.filter((id) => id !== data.spectatorId);
-            set({
-                spectatorIds: newSpectatorIds,
-                spectatorCount: newSpectatorIds.length,
-            });
-            console.log("Spectator left:", data.spectatorId);
-        } else if (isSpectatorSyncMessage(message)) {
-            // 観戦者同期メッセージの処理（観戦者のみ）
-            const { isSpectatorMode } = get();
-            if (isSpectatorMode) {
-                const { data } = message;
-
-                // 簡易形式の移動履歴から完全なMove[]を再構築
-                // 観戦者は簡易形式のままで問題ないため、そのまま使用
-                // TODO: 完全なMove形式への変換が必要な場合は後で実装
-                set({
-                    board: data.board as Board,
-                    hands: data.hands as Hands,
-                    currentPlayer: data.currentPlayer,
-                    moveHistory: [], // 観戦者は履歴を表示しないため空配列で初期化
-                    gameStatus: data.gameStatus as GameStatus,
-                    historyCursor: HISTORY_CURSOR.LATEST_POSITION,
-                });
-
-                // タイマー情報も同期
-                if (data.timer) {
-                    set({
-                        timer: {
-                            ...get().timer,
-                            blackTime: data.timer.blackTime,
-                            whiteTime: data.timer.whiteTime,
-                            blackInByoyomi: data.timer.blackInByoyomi,
-                            whiteInByoyomi: data.timer.whiteInByoyomi,
-                        },
-                    });
-                }
-
-                console.log("Spectator sync received");
-            }
         }
     },
 
     disconnectOnline: () => {
-        const { webrtcConnection, isSpectatorMode } = get();
+        const { webrtcConnection } = get();
         if (webrtcConnection) {
-            // 観戦者の場合は退出メッセージを送信
-            if (isSpectatorMode) {
-                const leaveMessage = {
-                    type: "spectator_leave" as const,
-                    data: {
-                        spectatorId: webrtcConnection.getConnectionInfo().peerId,
-                    },
-                    timestamp: Date.now(),
-                    playerId: webrtcConnection.getConnectionInfo().peerId,
-                };
-                webrtcConnection.sendMessage(leaveMessage);
-            }
-
             webrtcConnection.disconnect();
         }
 
@@ -2059,133 +1954,6 @@ export const useGameStore = create<GameState>((set, get) => ({
                 peerId: "",
                 connectionState: "new",
             },
-            isSpectatorMode: false,
-            spectatorCount: 0,
-            spectatorIds: [],
         });
-    },
-
-    // 観戦モード開始
-    startSpectatorMode: async (gameId: string) => {
-        const connection = new WebRTCConnection();
-
-        // メッセージハンドラーを設定
-        connection.onMessage((message) => {
-            get().handleOnlineMessage(message);
-        });
-
-        // 接続状態変更ハンドラーを設定
-        connection.onConnectionStateChange((state) => {
-            set({
-                connectionStatus: {
-                    ...get().connectionStatus,
-                    connectionState: state as ConnectionStatus["connectionState"],
-                    isConnected: state === "connected",
-                },
-            });
-        });
-
-        // エラーハンドラーを設定
-        connection.onError((error) => {
-            console.error("WebRTC error in spectator mode:", error);
-        });
-
-        try {
-            // ゲストとして接続（観戦者として）
-            await connection.joinAsGuest(gameId);
-
-            set({
-                isOnlineGame: true,
-                isSpectatorMode: true,
-                webrtcConnection: connection,
-                connectionStatus: {
-                    isConnected: false,
-                    isHost: false,
-                    peerId: connection.getConnectionInfo().peerId,
-                    connectionState: "connecting",
-                },
-                gameMode: "review", // 観戦者は閲覧モード
-            });
-
-            // 接続後に観戦者参加メッセージを送信
-            const joinMessage: SpectatorJoinMessage = {
-                type: "spectator_join",
-                data: {
-                    spectatorId: connection.getConnectionInfo().peerId,
-                },
-                timestamp: Date.now(),
-                playerId: connection.getConnectionInfo().peerId,
-            };
-
-            // 接続が確立するまで待つ
-            await new Promise<void>((resolve) => {
-                const checkConnection = () => {
-                    if (get().connectionStatus.isConnected) {
-                        resolve();
-                    } else {
-                        setTimeout(checkConnection, 100);
-                    }
-                };
-                checkConnection();
-            });
-
-            connection.sendMessage(joinMessage);
-        } catch (error) {
-            console.error("Failed to start spectator mode:", error);
-            throw error;
-        }
-    },
-
-    // 観戦可能な対局をホスト
-    hostSpectatorGame: () => {
-        const { webrtcConnection } = get();
-        if (!webrtcConnection) {
-            throw new Error("No active connection");
-        }
-
-        // ゲームIDはピアIDを使用
-        const gameId = webrtcConnection.getConnectionInfo().peerId;
-        console.log("Hosting spectator game with ID:", gameId);
-
-        return gameId;
-    },
-
-    // 観戦者に現在の状態を送信
-    sendSpectatorSync: () => {
-        const { board, hands, currentPlayer, moveHistory, gameStatus, timer, webrtcConnection } =
-            get();
-
-        if (!webrtcConnection) return;
-
-        const syncMessage: SpectatorSyncMessage = {
-            type: "spectator_sync",
-            data: {
-                board,
-                hands,
-                currentPlayer,
-                moveHistory: moveHistory.map((move) => ({
-                    from:
-                        move.type === "move"
-                            ? (`${move.from.row}${move.from.column}` as SquareKey)
-                            : ("" as SquareKey),
-                    to: `${move.to.row}${move.to.column}` as SquareKey,
-                    promote: move.type === "move" ? move.promote : undefined,
-                    drop: move.type === "drop" ? move.piece.type : undefined,
-                })),
-                gameStatus,
-                timer: timer.config.mode
-                    ? {
-                          blackTime: timer.blackTime,
-                          whiteTime: timer.whiteTime,
-                          blackInByoyomi: timer.blackInByoyomi,
-                          whiteInByoyomi: timer.whiteInByoyomi,
-                      }
-                    : undefined,
-            },
-            timestamp: Date.now(),
-            playerId: webrtcConnection.getConnectionInfo().peerId,
-        };
-
-        webrtcConnection.sendMessage(syncMessage);
     },
 }));
