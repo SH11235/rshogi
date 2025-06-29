@@ -1,6 +1,7 @@
 import { useGameStore } from "@/stores/gameStore";
 import { useCallback, useEffect, useState } from "react";
 import type { GameStatus, Move } from "shogi-core";
+import { numberToKanji, pieceTypeToKanji } from "shogi-core";
 import { Button } from "./ui/button";
 import {
     Dialog,
@@ -49,14 +50,27 @@ function generateKifFormat(moves: Move[], metadata: KifMetadata): string {
     // Moves
     moves.forEach((move, index) => {
         const turn = index % 2 === 0 ? "▲" : "△";
-        if ("drop" in move && move.drop) {
-            kif += `${index + 1} ${turn}${move.drop}打\n`;
-        } else if ("from" in move) {
-            kif += `${index + 1} ${turn}${move.to}${move.piece}${move.promote ? "成" : ""}\n`;
+        if (move.type === "drop") {
+            const pieceName = pieceTypeToKanji(move.piece.type);
+            const toCol = fullWidthNumber(move.to.column);
+            const toRow = numberToKanji(move.to.row);
+            kif += `${index + 1} ${turn}${toCol}${toRow}${pieceName}打\n`;
+        } else if (move.type === "move") {
+            const pieceName = pieceTypeToKanji(move.piece.type);
+            const toCol = fullWidthNumber(move.to.column);
+            const toRow = numberToKanji(move.to.row);
+            const fromStr = `(${move.from.column}${move.from.row})`;
+            const promotion = move.promote ? "成" : "";
+            kif += `${index + 1} ${turn}${toCol}${toRow}${pieceName}${promotion}${fromStr}\n`;
         }
     });
 
     return kif;
+}
+
+function fullWidthNumber(num: number): string {
+    const fullWidthNumbers = ["０", "１", "２", "３", "４", "５", "６", "７", "８", "９"];
+    return fullWidthNumbers[num];
 }
 
 export function GameRecordManager({ autoSave = true, onGameEnd }: GameRecordManagerProps) {
