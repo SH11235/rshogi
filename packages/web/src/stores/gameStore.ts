@@ -1678,12 +1678,16 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     canGameUndo: () => {
-        const { gameMode, moveHistory } = get();
+        const { gameMode, moveHistory, isOnlineGame } = get();
+        // 通信対局中は無効化
+        if (isOnlineGame) return false;
         return gameMode === "playing" && moveHistory.length > 0;
     },
 
     canGameRedo: () => {
-        const { gameMode, undoStack } = get();
+        const { gameMode, undoStack, isOnlineGame } = get();
+        // 通信対局中は無効化
+        if (isOnlineGame) return false;
         return gameMode === "playing" && undoStack.length > 0;
     },
 

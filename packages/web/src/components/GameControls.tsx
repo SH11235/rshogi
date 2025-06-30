@@ -7,9 +7,16 @@ interface GameControlsProps {
     canRedo: boolean;
     onUndo: () => void;
     onRedo: () => void;
+    isOnlineGame?: boolean;
 }
 
-export const GameControls: React.FC<GameControlsProps> = ({ canUndo, canRedo, onUndo, onRedo }) => {
+export const GameControls: React.FC<GameControlsProps> = ({
+    canUndo,
+    canRedo,
+    onUndo,
+    onRedo,
+    isOnlineGame = false,
+}) => {
     return (
         <div className="flex items-center justify-center gap-2">
             <Button
@@ -17,7 +24,7 @@ export const GameControls: React.FC<GameControlsProps> = ({ canUndo, canRedo, on
                 size="sm"
                 onClick={onUndo}
                 disabled={!canUndo}
-                title="1手戻す (Ctrl+Z)"
+                title={!canUndo && isOnlineGame ? "通信対局中は使用できません" : "1手戻す (Ctrl+Z)"}
             >
                 <Undo className="h-4 w-4 mr-1" />
                 戻す
@@ -27,7 +34,11 @@ export const GameControls: React.FC<GameControlsProps> = ({ canUndo, canRedo, on
                 size="sm"
                 onClick={onRedo}
                 disabled={!canRedo}
-                title="1手進む (Ctrl+Shift+Z)"
+                title={
+                    !canRedo && isOnlineGame
+                        ? "通信対局中は使用できません"
+                        : "1手進む (Ctrl+Shift+Z)"
+                }
             >
                 <Redo className="h-4 w-4 mr-1" />
                 進む

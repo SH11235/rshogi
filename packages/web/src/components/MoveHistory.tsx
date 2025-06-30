@@ -9,6 +9,8 @@ interface MoveHistoryProps {
     isInBranch: boolean;
     branchPoint?: number;
     onGoToMove: (moveIndex: number) => void;
+    isOnlineGame?: boolean;
+    gameMode?: "playing" | "review" | "analysis";
 }
 
 export function MoveHistory({
@@ -17,7 +19,11 @@ export function MoveHistory({
     isInBranch,
     branchPoint = -1,
     onGoToMove,
+    isOnlineGame = false,
+    gameMode = "playing",
 }: MoveHistoryProps) {
+    // 通信対局中かつ対局モードの場合は無効化
+    const isDisabled = isOnlineGame && gameMode === "playing";
     return (
         <Card className="w-80 sm:w-96 lg:w-80 xl:w-96">
             <CardHeader className="pb-2 sm:pb-3">
@@ -41,12 +47,15 @@ export function MoveHistory({
                     {/* 初期状態 */}
                     <button
                         type="button"
-                        onClick={() => onGoToMove(HISTORY_CURSOR.INITIAL_POSITION)}
+                        onClick={() => !isDisabled && onGoToMove(HISTORY_CURSOR.INITIAL_POSITION)}
+                        disabled={isDisabled}
+                        title={isDisabled ? "通信対局中は使用できません" : undefined}
                         className={cn(
                             "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation",
                             historyCursor === HISTORY_CURSOR.INITIAL_POSITION
                                 ? "bg-blue-100 text-blue-900 font-medium"
                                 : "hover:bg-gray-100",
+                            isDisabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
                         )}
                     >
                         開始局面
@@ -66,13 +75,17 @@ export function MoveHistory({
                             <button
                                 key={moveKey}
                                 type="button"
-                                onClick={() => onGoToMove(index)}
+                                onClick={() => !isDisabled && onGoToMove(index)}
+                                disabled={isDisabled}
+                                title={isDisabled ? "通信対局中は使用できません" : undefined}
                                 className={cn(
                                     "w-full text-left px-2 py-1 rounded text-xs sm:text-sm transition-colors touch-manipulation will-change-transform",
                                     isCurrentMove
                                         ? "bg-blue-100 text-blue-900 font-medium"
                                         : "hover:bg-gray-100",
                                     isBranchMove && "border-l-2 border-orange-400 ml-2",
+                                    isDisabled &&
+                                        "opacity-50 cursor-not-allowed hover:bg-transparent",
                                 )}
                             >
                                 {formatMove(move, moveNumber)}

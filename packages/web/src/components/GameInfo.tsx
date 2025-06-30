@@ -405,6 +405,12 @@ export function GameInfo({
                         <button
                             type="button"
                             onClick={handleResetClick}
+                            disabled={isOnlineGame && !isGameOver}
+                            title={
+                                isOnlineGame && !isGameOver
+                                    ? "通信対局中は使用できません"
+                                    : undefined
+                            }
                             className={cn(
                                 "px-4 sm:px-6 py-2 rounded-lg font-medium transition-colors text-sm sm:text-base",
                                 "touch-manipulation active:scale-95",
@@ -412,6 +418,7 @@ export function GameInfo({
                                     ? "bg-green-500 text-white hover:bg-green-600 focus:ring-green-500"
                                     : "bg-blue-500 text-white hover:bg-blue-600 focus:ring-blue-500",
                                 "focus:outline-none focus:ring-2 focus:ring-offset-2",
+                                isOnlineGame && !isGameOver && "opacity-50 cursor-not-allowed",
                             )}
                         >
                             {isGameOver ? "新しいゲーム" : "リセット"}

@@ -89,7 +89,7 @@ function App() {
     useKeyboardShortcuts({
         onUndo:
             gameMode === "playing"
-                ? canGameUndo()
+                ? canGameUndo() && !isOnlineGame
                     ? gameUndo
                     : undefined
                 : canUndo()
@@ -97,13 +97,13 @@ function App() {
                   : undefined,
         onRedo:
             gameMode === "playing"
-                ? canGameRedo()
+                ? canGameRedo() && !isOnlineGame
                     ? gameRedo
                     : undefined
                 : canRedo()
                   ? redo
                   : undefined,
-        onReset: resetGame,
+        onReset: isOnlineGame ? undefined : resetGame,
         onEscape: () => {
             // プロモーションダイアログをキャンセル
             if (promotionPending) {
@@ -229,6 +229,7 @@ function App() {
                                         canRedo={canGameRedo()}
                                         onUndo={gameUndo}
                                         onRedo={gameRedo}
+                                        isOnlineGame={isOnlineGame}
                                     />
                                 ) : (
                                     <PlaybackControls
@@ -248,6 +249,8 @@ function App() {
                                     isInBranch={isInBranch()}
                                     branchPoint={branchInfo?.branchPoint}
                                     onGoToMove={goToMove}
+                                    isOnlineGame={isOnlineGame}
+                                    gameMode={gameMode}
                                 />
                             </div>
                         </div>
@@ -289,6 +292,7 @@ function App() {
                                 canRedo={canGameRedo()}
                                 onUndo={gameUndo}
                                 onRedo={gameRedo}
+                                isOnlineGame={isOnlineGame}
                             />
                         ) : (
                             <PlaybackControls
@@ -348,6 +352,8 @@ function App() {
                             isInBranch={isInBranch()}
                             branchPoint={branchInfo?.branchPoint}
                             onGoToMove={goToMove}
+                            isOnlineGame={isOnlineGame}
+                            gameMode={gameMode}
                         />
                     </div>
                 </div>
