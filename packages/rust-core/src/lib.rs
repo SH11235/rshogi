@@ -4,6 +4,10 @@ use wasm_bindgen::prelude::*;
 mod simple_webrtc;
 pub use simple_webrtc::*;
 
+// Add mate search module
+mod mate_search;
+pub use mate_search::*;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
