@@ -71,6 +71,8 @@ function App() {
         // 通信対戦関連
         isOnlineGame,
         connectionStatus,
+        connectionQuality,
+        connectionProgress,
         localPlayer,
         localPlayerName,
         remotePlayerName,
@@ -177,6 +179,8 @@ function App() {
                     <div className="flex justify-center mb-4">
                         <ConnectionStatusComponent
                             status={connectionStatus}
+                            quality={connectionQuality || undefined}
+                            progress={connectionProgress}
                             onReconnect={() => setIsOnlineDialogOpen(true)}
                         />
                     </div>

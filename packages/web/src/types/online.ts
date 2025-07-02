@@ -13,7 +13,11 @@ export interface GameMessage {
         | "jishogi_check"
         | "spectator_join"
         | "spectator_leave"
-        | "spectator_sync";
+        | "spectator_sync"
+        | "state_sync_request"
+        | "state_sync_response"
+        | "ping"
+        | "pong";
     data: unknown;
     timestamp: number;
     playerId: string;
@@ -136,4 +140,39 @@ export function isRepetitionCheckMessage(msg: GameMessage): msg is RepetitionChe
 
 export function isJishogiCheckMessage(msg: GameMessage): msg is JishogiCheckMessage {
     return msg.type === "jishogi_check";
+}
+
+// 状態同期リクエストメッセージ
+export interface StateSyncRequestMessage extends GameMessage {
+    type: "state_sync_request";
+    data: null;
+}
+
+// 状態同期レスポンスメッセージ
+export interface StateSyncResponseMessage extends GameMessage {
+    type: "state_sync_response";
+    data: {
+        moveHistory: Array<{
+            from: SquareKey;
+            to: SquareKey;
+            promote?: boolean;
+            drop?: PieceType;
+        }>;
+        currentMoveIndex: number;
+        timerState?: {
+            blackTime: number;
+            whiteTime: number;
+            blackInByoyomi: boolean;
+            whiteInByoyomi: boolean;
+            activePlayer: "black" | "white" | null;
+        };
+    };
+}
+
+export function isStateSyncRequestMessage(msg: GameMessage): msg is StateSyncRequestMessage {
+    return msg.type === "state_sync_request";
+}
+
+export function isStateSyncResponseMessage(msg: GameMessage): msg is StateSyncResponseMessage {
+    return msg.type === "state_sync_response";
 }

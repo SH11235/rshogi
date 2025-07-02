@@ -1,5 +1,9 @@
 import { audioManager } from "@/services/audioManager";
-import { WebRTCConnection } from "@/services/webrtc";
+import {
+    type ConnectionProgress,
+    type ConnectionQuality,
+    WebRTCConnection,
+} from "@/services/webrtc";
 import type { SoundType } from "@/types/audio";
 import type {
     ConnectionStatus,
@@ -14,12 +18,15 @@ import type {
     TimerUpdateMessage,
 } from "@/types/online";
 import {
+    type StateSyncResponseMessage,
     isDrawOfferMessage,
     isGameStartMessage,
     isJishogiCheckMessage,
     isMoveMessage,
     isRepetitionCheckMessage,
     isResignMessage,
+    isStateSyncRequestMessage,
+    isStateSyncResponseMessage,
     isTimerConfigMessage,
     isTimerUpdateMessage,
 } from "@/types/online";
@@ -195,6 +202,8 @@ interface GameState {
     // 通信対戦関連
     isOnlineGame: boolean;
     connectionStatus: ConnectionStatus;
+    connectionQuality: ConnectionQuality | null;
+    connectionProgress: ConnectionProgress;
     webrtcConnection: WebRTCConnection | null;
     localPlayer: Player | null; // ローカルプレイヤーの色
     localPlayerName: string; // ローカルプレイヤー名
@@ -310,6 +319,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         peerId: "",
         connectionState: "new",
     },
+    connectionQuality: null,
+    connectionProgress: "idle" as ConnectionProgress,
     webrtcConnection: null,
     localPlayer: null,
     localPlayerName: "",
@@ -1722,6 +1733,20 @@ export const useGameStore = create<GameState>((set, get) => ({
                     isConnected: false,
                 },
             });
+            // ユーザーフレンドリーなエラーメッセージを表示
+            if (error.getUserMessage) {
+                console.error("User-friendly error:", error.getUserMessage());
+            }
+        });
+
+        // 接続品質ハンドラーを設定
+        connection.onQualityChange((quality) => {
+            set({ connectionQuality: quality });
+        });
+
+        // 接続進捗ハンドラーを設定
+        connection.onProgressChange((progress) => {
+            set({ connectionProgress: progress });
         });
 
         let offer = "";
@@ -1777,6 +1802,20 @@ export const useGameStore = create<GameState>((set, get) => ({
                     isConnected: false,
                 },
             });
+            // ユーザーフレンドリーなエラーメッセージを表示
+            if (error.getUserMessage) {
+                console.error("User-friendly error:", error.getUserMessage());
+            }
+        });
+
+        // 接続品質ハンドラーを設定
+        connection.onQualityChange((quality) => {
+            set({ connectionQuality: quality });
+        });
+
+        // 接続進捗ハンドラーを設定
+        connection.onProgressChange((progress) => {
+            set({ connectionProgress: progress });
         });
 
         const answer = await connection.joinAsGuest(offer);
@@ -1966,6 +2005,79 @@ export const useGameStore = create<GameState>((set, get) => ({
                 console.log("Jishogi (impasse) received:", data);
                 playGameSound("gameEnd");
             }
+        } else if (isStateSyncRequestMessage(message)) {
+            // 状態同期リクエストを受信
+            const { moveHistory, timer, webrtcConnection } = get();
+            if (webrtcConnection) {
+                // 現在のゲーム状態を送信
+                const syncResponse: StateSyncResponseMessage = {
+                    type: "state_sync_response",
+                    data: {
+                        moveHistory: moveHistory.map((move) => ({
+                            from:
+                                move.type === "move"
+                                    ? (`${move.from.row}${move.from.column}` as SquareKey)
+                                    : ("" as SquareKey),
+                            to: `${move.to.row}${move.to.column}` as SquareKey,
+                            promote: move.type === "move" ? move.promote : undefined,
+                            drop: move.type === "drop" ? move.piece.type : undefined,
+                        })),
+                        currentMoveIndex: moveHistory.length - 1,
+                        timerState: timer.config.mode
+                            ? {
+                                  blackTime: timer.blackTime,
+                                  whiteTime: timer.whiteTime,
+                                  blackInByoyomi: timer.blackInByoyomi,
+                                  whiteInByoyomi: timer.whiteInByoyomi,
+                                  activePlayer: timer.activePlayer,
+                              }
+                            : undefined,
+                    },
+                    timestamp: Date.now(),
+                    playerId: webrtcConnection.getConnectionInfo().peerId,
+                };
+                webrtcConnection.sendMessage(syncResponse);
+                console.log("Sent state sync response");
+            }
+        } else if (isStateSyncResponseMessage(message)) {
+            // 状態同期レスポンスを受信
+            console.log("Received state sync response", message.data);
+            const { data } = message;
+
+            // 手数が異なる場合のみ同期
+            const { moveHistory } = get();
+            if (data.currentMoveIndex >= moveHistory.length) {
+                console.log("Syncing game state from peer");
+                // TODO: 手の履歴からゲーム状態を再構築
+                // ここでは基本的な同期ロジックを実装
+                // 完全な実装は将来的に拡張
+            }
+
+            // タイマー状態の同期
+            if (data.timerState) {
+                const { localPlayer } = get();
+                set({
+                    timer: {
+                        ...get().timer,
+                        blackTime:
+                            localPlayer === "white"
+                                ? data.timerState.blackTime
+                                : get().timer.blackTime,
+                        whiteTime:
+                            localPlayer === "black"
+                                ? data.timerState.whiteTime
+                                : get().timer.whiteTime,
+                        blackInByoyomi:
+                            localPlayer === "white"
+                                ? data.timerState.blackInByoyomi
+                                : get().timer.blackInByoyomi,
+                        whiteInByoyomi:
+                            localPlayer === "black"
+                                ? data.timerState.whiteInByoyomi
+                                : get().timer.whiteInByoyomi,
+                    },
+                });
+            }
         }
     },
 
@@ -1978,6 +2090,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         set({
             isOnlineGame: false,
             webrtcConnection: null,
+            connectionQuality: null,
+            connectionProgress: "idle",
             localPlayer: null,
             localPlayerName: "",
             remotePlayerName: "",
