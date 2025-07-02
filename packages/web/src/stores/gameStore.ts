@@ -68,7 +68,9 @@ import {
     reconstructGameStateWithInitial,
     validateReceivedMove,
 } from "shogi-core";
+import { MateSearchService } from "shogi-core";
 import { create } from "zustand";
+import type { MateSearchOptions, MateSearchState } from "../types/mateSearch";
 
 // 音声再生ヘルパー関数
 function playGameSound(soundType: SoundType): void {
@@ -216,6 +218,9 @@ interface GameState {
     drawOfferPending: boolean;
     pendingDrawOfferer: Player | null;
 
+    // 詰み探索関連
+    mateSearch: MateSearchState;
+
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
     makeMove: (from: Square, to: Square, promote?: boolean) => void;
@@ -262,6 +267,10 @@ interface GameState {
     acceptOnlineAnswer: (answer: string) => Promise<void>;
     handleOnlineMessage: (message: GameMessage) => void;
     disconnectOnline: () => void;
+
+    // 詰み探索機能
+    startMateSearch: (options?: Partial<MateSearchOptions>) => Promise<void>;
+    cancelMateSearch: () => void;
 }
 
 // タイマーアクションをGameStateに統合
@@ -332,6 +341,15 @@ export const useGameStore = create<GameState>((set, get) => ({
     // 引き分け提案関連
     drawOfferPending: false,
     pendingDrawOfferer: null,
+
+    // 詰み探索の初期状態
+    mateSearch: {
+        status: "idle",
+        depth: 0,
+        maxDepth: 7,
+        result: null,
+        error: null,
+    },
 
     selectSquare: (square: Square) => {
         const {
@@ -2144,6 +2162,106 @@ export const useGameStore = create<GameState>((set, get) => ({
                 isHost: false,
                 peerId: "",
                 connectionState: "new",
+            },
+        });
+    },
+
+    // 詰み探索機能
+    startMateSearch: async (options?: Partial<MateSearchOptions>) => {
+        const { board, hands, currentPlayer, gameStatus } = get();
+
+        // ゲーム終了状態では探索不可
+        if (gameStatus !== "playing" && gameStatus !== "check") {
+            return;
+        }
+
+        const defaultOptions: MateSearchOptions = {
+            maxDepth: 7,
+            useWasm: false,
+            timeout: 30000,
+        };
+
+        const searchOptions = { ...defaultOptions, ...options };
+
+        set({
+            mateSearch: {
+                status: "searching",
+                depth: 1,
+                maxDepth: searchOptions.maxDepth,
+                result: null,
+                error: null,
+            },
+        });
+
+        try {
+            const mateSearchService = new MateSearchService();
+            const result = await mateSearchService.search(board, hands, currentPlayer, {
+                maxDepth: searchOptions.maxDepth,
+                timeout: searchOptions.timeout,
+            });
+
+            if (result.isMate) {
+                // 手順を棋譜形式に変換（簡易版）
+                const moveStrings = result.moves.map((move) => {
+                    if (move.type === "move") {
+                        return `${move.from.row}${move.from.column}→${move.to.row}${move.to.column}${move.promote ? "成" : ""}`;
+                    }
+                    return `${move.piece.type}打${move.to.row}${move.to.column}`;
+                });
+
+                set({
+                    mateSearch: {
+                        status: "found",
+                        depth: result.moves.length,
+                        maxDepth: searchOptions.maxDepth,
+                        result: {
+                            isMate: true,
+                            moves: moveStrings,
+                            nodeCount: result.nodeCount,
+                            elapsedMs: result.elapsedMs,
+                            depth: result.moves.length,
+                        },
+                        error: null,
+                    },
+                });
+            } else {
+                set({
+                    mateSearch: {
+                        status: "not_found",
+                        depth: searchOptions.maxDepth,
+                        maxDepth: searchOptions.maxDepth,
+                        result: {
+                            isMate: false,
+                            moves: [],
+                            nodeCount: result.nodeCount,
+                            elapsedMs: result.elapsedMs,
+                            depth: 0,
+                        },
+                        error: null,
+                    },
+                });
+            }
+        } catch (error) {
+            set({
+                mateSearch: {
+                    status: "error",
+                    depth: 0,
+                    maxDepth: searchOptions.maxDepth,
+                    result: null,
+                    error: error instanceof Error ? error.message : "Unknown error",
+                },
+            });
+        }
+    },
+
+    cancelMateSearch: () => {
+        set({
+            mateSearch: {
+                status: "idle",
+                depth: 0,
+                maxDepth: 7,
+                result: null,
+                error: null,
             },
         });
     },

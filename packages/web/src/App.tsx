@@ -13,6 +13,7 @@ import { GameRecordManager } from "./components/GameRecordManager";
 import { KifuExportDialog } from "./components/KifuExportDialog";
 import { KifuImportDialog } from "./components/KifuImportDialog";
 import type { ImportFormat } from "./components/KifuImportDialog";
+import { MateSearchPanel } from "./components/MateSearchPanel";
 import { MoveHistory } from "./components/MoveHistory";
 import { OnlineGameDialog } from "./components/OnlineGameDialog";
 import { PlaybackControls } from "./components/PlaybackControls";
@@ -256,6 +257,8 @@ function App() {
                                     isOnlineGame={isOnlineGame}
                                     gameMode={gameMode}
                                 />
+                                {/* 詰み探索パネル - 解析モードまたは詰将棋モードで表示 */}
+                                {(gameMode === "analysis" || isTsumeShogi) && <MateSearchPanel />}
                             </div>
                         </div>
                     </div>
@@ -310,6 +313,8 @@ function App() {
                                 onReturnToMainLine={returnToMainLine}
                             />
                         )}
+                        {/* 詰み探索パネル - 解析モードまたは詰将棋モードで表示 */}
+                        {(gameMode === "analysis" || isTsumeShogi) && <MateSearchPanel />}
                     </div>
 
                     {/* 中央：将棋盤と持ち駒 */}
