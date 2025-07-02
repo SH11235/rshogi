@@ -52,7 +52,8 @@ export function OnlineGameDialog({
             setOffer(offerData);
             setStep("wait");
         } catch (err) {
-            setError("ホストの作成に失敗しました");
+            const errorMessage = err instanceof Error ? err.message : "ホストの作成に失敗しました";
+            setError(errorMessage);
             console.error(err);
         } finally {
             setLoading(false);
@@ -77,7 +78,8 @@ export function OnlineGameDialog({
             setAnswer(answerData);
             setStep("wait");
         } catch (err) {
-            setError("接続に失敗しました");
+            const errorMessage = err instanceof Error ? err.message : "接続に失敗しました";
+            setError(errorMessage);
             console.error(err);
         } finally {
             setLoading(false);
@@ -99,17 +101,24 @@ export function OnlineGameDialog({
                 onOpenChange(false);
             }, 1500);
         } catch (err) {
-            setError("アンサーの受け入れに失敗しました");
+            const errorMessage =
+                err instanceof Error ? err.message : "アンサーの受け入れに失敗しました";
+            setError(errorMessage);
             console.error(err);
         } finally {
             setLoading(false);
         }
     };
 
-    const copyToClipboard = (text: string) => {
-        navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+    const copyToClipboard = async (text: string) => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch (err) {
+            setError("クリップボードへのコピーに失敗しました");
+            console.error("Clipboard copy failed:", err);
+        }
     };
 
     const resetDialog = () => {

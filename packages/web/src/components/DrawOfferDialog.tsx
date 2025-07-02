@@ -22,6 +22,7 @@ export function DrawOfferDialog() {
         offerDraw,
         gameStatus,
         isOnlineGame,
+        connectionStatus,
     } = useGameStore();
 
     // 自分が提案を受けた場合のダイアログを表示
@@ -35,7 +36,8 @@ export function DrawOfferDialog() {
     // 引き分け提案ボタンを表示する条件
     const canOfferDraw =
         (gameStatus === "playing" || gameStatus === "check") &&
-        (!isOnlineGame || (isOnlineGame && localPlayer === currentPlayer));
+        (!isOnlineGame || (isOnlineGame && localPlayer === currentPlayer)) &&
+        (!isOnlineGame || connectionStatus.isConnected);
 
     if (showReceiveDialog || showLocalReceiveDialog) {
         const offererName = pendingDrawOfferer === "black" ? "先手" : "後手";
@@ -60,7 +62,14 @@ export function DrawOfferDialog() {
 
     // 引き分け提案ボタン
     return canOfferDraw ? (
-        <Button onClick={offerDraw} variant="outline" disabled={drawOfferPending}>
+        <Button
+            onClick={offerDraw}
+            variant="outline"
+            disabled={drawOfferPending || (isOnlineGame && !connectionStatus.isConnected)}
+            title={
+                isOnlineGame && !connectionStatus.isConnected ? "接続が切断されています" : undefined
+            }
+        >
             {drawOfferPending ? "引き分け提案中..." : "引き分け提案"}
         </Button>
     ) : null;
