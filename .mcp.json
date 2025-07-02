@@ -3,8 +3,19 @@
         "playwright": {
             "type": "stdio",
             "command": "npx",
-            "args": ["@playwright/mcp@latest"],
+            "args": [
+                "@playwright/mcp@latest"
+            ],
             "env": {}
+        },
+        "human-in-the-loop": {
+            "command": "human-in-the-loop",
+            "args": [
+                "--discord-channel-id",
+                "1389835786203041882",
+                "--discord-user-id",
+                "793081458653659146"
+            ]
         }
     }
 }

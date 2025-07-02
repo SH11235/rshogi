@@ -117,6 +117,11 @@ npm run dev --workspace=@shogi/server
 npm run start --workspace=@shogi/server
 ```
 
+### MCP
+
+- human-in-the-loop
+https://github.com/KOBA789/human-in-the-loop
+
 ## 🏗️ アーキテクチャ
 
 ### 将棋エンジンコア (`packages/core/`)
