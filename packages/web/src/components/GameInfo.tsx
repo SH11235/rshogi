@@ -32,6 +32,7 @@ interface GameInfoProps {
     onResign?: () => void;
     onStartFromPosition?: () => void;
     onReturnToReview?: () => void;
+    onSwitchToAnalysis?: () => void;
 }
 
 export function GameInfo({
@@ -48,6 +49,7 @@ export function GameInfo({
     onResign,
     onStartFromPosition,
     onReturnToReview,
+    onSwitchToAnalysis,
 }: GameInfoProps) {
     const moveCount = moveHistory.length;
     // Calculate turn based on current position in history
@@ -336,20 +338,36 @@ export function GameInfo({
             </div>
 
             {/* モード別操作ボタン */}
-            {(gameMode === "review" || gameMode === "analysis") && onStartFromPosition && (
-                <div className="mb-3 flex gap-2 justify-center">
-                    <button
-                        type="button"
-                        onClick={onStartFromPosition}
-                        className={cn(
-                            "px-4 py-2 rounded-lg font-medium transition-colors text-sm",
-                            "touch-manipulation active:scale-95",
-                            "bg-purple-500 text-white hover:bg-purple-600",
-                            "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500",
-                        )}
-                    >
-                        🎯 この局面から対局開始
-                    </button>
+            {(gameMode === "review" || gameMode === "analysis") && (
+                <div className="mb-3 flex gap-2 justify-center flex-wrap">
+                    {onStartFromPosition && (
+                        <button
+                            type="button"
+                            onClick={onStartFromPosition}
+                            className={cn(
+                                "px-4 py-2 rounded-lg font-medium transition-colors text-sm",
+                                "touch-manipulation active:scale-95",
+                                "bg-purple-500 text-white hover:bg-purple-600",
+                                "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500",
+                            )}
+                        >
+                            🎯 この局面から対局開始
+                        </button>
+                    )}
+                    {gameMode === "review" && onSwitchToAnalysis && (
+                        <button
+                            type="button"
+                            onClick={onSwitchToAnalysis}
+                            className={cn(
+                                "px-4 py-2 rounded-lg font-medium transition-colors text-sm",
+                                "touch-manipulation active:scale-95",
+                                "bg-green-500 text-white hover:bg-green-600",
+                                "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500",
+                            )}
+                        >
+                            🔍 解析モードへ
+                        </button>
+                    )}
                     {gameMode === "analysis" && hasReviewBase && onReturnToReview && (
                         <button
                             type="button"

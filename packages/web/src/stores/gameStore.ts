@@ -255,6 +255,7 @@ interface GameState {
     setGameMode: (mode: GameMode) => void;
     startGameFromPosition: () => void;
     returnToReviewMode: () => void;
+    switchToAnalysisMode: () => void;
     // 対局中のundo/redo機能
     gameUndo: () => void;
     gameRedo: () => void;
@@ -1645,6 +1646,14 @@ export const useGameStore = create<GameState>((set, get) => ({
             validDropSquares: [],
             promotionPending: null,
         });
+    },
+
+    switchToAnalysisMode: () => {
+        const { gameMode } = get();
+        // 閲覧モードから解析モードに切り替え
+        if (gameMode === "review") {
+            set({ gameMode: "analysis" });
+        }
     },
 
     // 対局中のundo/redo機能

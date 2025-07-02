@@ -65,6 +65,7 @@ function App() {
         startGameFromPosition,
         returnToReviewMode,
         reviewBasePosition,
+        switchToAnalysisMode,
         gameUndo,
         gameRedo,
         canGameUndo,
@@ -227,6 +228,7 @@ function App() {
                                     onResign={resign}
                                     onStartFromPosition={startGameFromPosition}
                                     onReturnToReview={returnToReviewMode}
+                                    onSwitchToAnalysis={switchToAnalysisMode}
                                 />
                                 {gameMode === "playing" ? (
                                     <GameControls
@@ -292,6 +294,7 @@ function App() {
                             onResign={resign}
                             onStartFromPosition={startGameFromPosition}
                             onReturnToReview={returnToReviewMode}
+                            onSwitchToAnalysis={switchToAnalysisMode}
                         />
                         {gameMode === "playing" ? (
                             <GameControls
