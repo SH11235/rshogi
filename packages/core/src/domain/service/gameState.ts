@@ -48,7 +48,9 @@ export type GameStatus =
     | "timeout"
     | "resigned"
     | "black_win"
-    | "white_win";
+    | "white_win"
+    | "try_rule_black"
+    | "try_rule_white";
 
 export type GameMetadata = {
     readonly gameId: string;

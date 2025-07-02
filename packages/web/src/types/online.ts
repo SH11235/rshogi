@@ -11,6 +11,7 @@ export interface GameMessage {
         | "timer_update"
         | "repetition_check"
         | "jishogi_check"
+        | "try_rule"
         | "spectator_join"
         | "spectator_leave"
         | "spectator_sync"
@@ -101,6 +102,14 @@ export interface JishogiCheckMessage extends GameMessage {
     };
 }
 
+// トライルールメッセージ
+export interface TryRuleMessage extends GameMessage {
+    type: "try_rule";
+    data: {
+        winner: "black" | "white";
+    };
+}
+
 // 接続状態
 export interface ConnectionStatus {
     isConnected: boolean;
@@ -140,6 +149,10 @@ export function isRepetitionCheckMessage(msg: GameMessage): msg is RepetitionChe
 
 export function isJishogiCheckMessage(msg: GameMessage): msg is JishogiCheckMessage {
     return msg.type === "jishogi_check";
+}
+
+export function isTryRuleMessage(msg: GameMessage): msg is TryRuleMessage {
+    return msg.type === "try_rule";
 }
 
 // 状態同期リクエストメッセージ

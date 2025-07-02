@@ -16,6 +16,7 @@ import type {
     ResignMessage,
     TimerConfigMessage,
     TimerUpdateMessage,
+    TryRuleMessage,
 } from "@/types/online";
 import {
     type StateSyncResponseMessage,
@@ -29,6 +30,7 @@ import {
     isStateSyncResponseMessage,
     isTimerConfigMessage,
     isTimerUpdateMessage,
+    isTryRuleMessage,
 } from "@/types/online";
 import {
     type TimerActions,
@@ -53,6 +55,7 @@ import {
     checkJishogi,
     checkPerpetualCheck,
     checkSennichite,
+    checkTryRule,
     generateLegalDropMovesForPiece,
     generateLegalMoves,
     initialHands,
@@ -582,6 +585,15 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
+            // トライルール判定（対局中のみ）
+            if (gameMode === "playing" && newStatus === "playing") {
+                if (checkTryRule(result.board, currentPlayer)) {
+                    newStatus = currentPlayer === "black" ? "try_rule_black" : "try_rule_white";
+                    console.log("Try rule victory:", currentPlayer);
+                    playGameSound("gameEnd");
+                }
+            }
+
             // 千日手・持将棋の判定（対局中のみ）
             if (gameMode === "playing" && newStatus === "playing") {
                 const { initialBoard, initialHandsData } = get();
@@ -746,6 +758,15 @@ export const useGameStore = create<GameState>((set, get) => ({
                 }
             }
 
+            // トライルール判定（対局中のみ）
+            if (gameMode === "playing" && newStatus === "playing") {
+                if (checkTryRule(result.board, currentPlayer)) {
+                    newStatus = currentPlayer === "black" ? "try_rule_black" : "try_rule_white";
+                    console.log("Try rule victory:", currentPlayer);
+                    playGameSound("gameEnd");
+                }
+            }
+
             // 千日手・持将棋の判定（対局中のみ）
             if (gameMode === "playing" && newStatus === "playing") {
                 const { initialBoard, initialHandsData } = get();
@@ -816,6 +837,22 @@ export const useGameStore = create<GameState>((set, get) => ({
                     playerId: webrtcConnection.getConnectionInfo().peerId,
                 };
                 webrtcConnection.sendMessage(moveMessage);
+
+                // トライルール判定結果を送信
+                if (
+                    gameMode === "playing" &&
+                    (newStatus === "try_rule_black" || newStatus === "try_rule_white")
+                ) {
+                    const tryRuleMessage: TryRuleMessage = {
+                        type: "try_rule",
+                        data: {
+                            winner: currentPlayer,
+                        },
+                        timestamp: Date.now(),
+                        playerId: webrtcConnection.getConnectionInfo().peerId,
+                    };
+                    webrtcConnection.sendMessage(tryRuleMessage);
+                }
 
                 // 千日手・持将棋の判定結果も送信
                 if (
@@ -2005,6 +2042,13 @@ export const useGameStore = create<GameState>((set, get) => ({
                 console.log("Jishogi (impasse) received:", data);
                 playGameSound("gameEnd");
             }
+        } else if (isTryRuleMessage(message)) {
+            // トライルールメッセージの処理
+            const { data } = message;
+            const gameStatus = data.winner === "black" ? "try_rule_black" : "try_rule_white";
+            set({ gameStatus });
+            console.log("Try rule victory received:", data.winner);
+            playGameSound("gameEnd");
         } else if (isStateSyncRequestMessage(message)) {
             // 状態同期リクエストを受信
             const { moveHistory, timer, webrtcConnection } = get();

@@ -17,6 +17,7 @@ export * from "./domain/service/sfenService";
 export * from "./domain/service/moveValidationService";
 export * from "./domain/service/timerService";
 export * from "./domain/service/repetitionService";
+export { checkTryRule } from "./domain/service/repetitionService";
 export {
     type GameState,
     type GameStatus,

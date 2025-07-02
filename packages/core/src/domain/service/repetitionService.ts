@@ -195,3 +195,23 @@ export function checkJishogi(board: Board, hands: Hands): JishogiStatus {
 export function checkMaxMoves(moveCount: number, maxMoves = 512): boolean {
     return moveCount >= maxMoves;
 }
+
+/**
+ * トライルール判定
+ * 自分の玉が相手の玉の初期位置（後手なら59、先手なら51）に到達したら勝利
+ */
+export function checkTryRule(board: Board, currentPlayer: Player): boolean {
+    // 相手の玉の初期位置
+    const targetSquare = currentPlayer === "black" ? "51" : "59";
+
+    // 対象のマスにある駒を確認
+    const piece = board[targetSquare];
+
+    // 自分の玉が対象マスにいるか判定
+    return (
+        piece !== null &&
+        piece !== undefined &&
+        piece.owner === currentPlayer &&
+        (piece.type === "king" || piece.type === "gyoku")
+    );
+}

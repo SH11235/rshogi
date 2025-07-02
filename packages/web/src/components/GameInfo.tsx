@@ -85,6 +85,10 @@ export function GameInfo({
                 return "先手の勝ち！";
             case "white_win":
                 return "後手の勝ち！";
+            case "try_rule_black":
+                return "先手のトライ勝ち！";
+            case "try_rule_white":
+                return "後手のトライ勝ち！";
             case "checkmate":
                 return "詰み";
             case "check":
@@ -129,6 +133,10 @@ export function GameInfo({
                     return "詰みにより勝利";
                 }
                 return "";
+            case "try_rule_black":
+                return "先手玉が5一に到達";
+            case "try_rule_white":
+                return "後手玉が5九に到達";
             case "sennichite":
                 return "同一局面が4回現れました";
             case "perpetual_check":
@@ -146,6 +154,8 @@ export function GameInfo({
         switch (gameStatus) {
             case "black_win":
             case "white_win":
+            case "try_rule_black":
+            case "try_rule_white":
                 return "text-green-600";
             case "checkmate":
             case "check":
@@ -275,7 +285,10 @@ export function GameInfo({
                         <div className="text-gray-500 text-xs sm:text-sm bg-gray-50 px-2 sm:px-3 py-1 rounded-full inline-block">
                             🏁 ゲーム終了
                         </div>
-                        {(gameStatus === "black_win" || gameStatus === "white_win") && (
+                        {(gameStatus === "black_win" ||
+                            gameStatus === "white_win" ||
+                            gameStatus === "try_rule_black" ||
+                            gameStatus === "try_rule_white") && (
                             <div className="text-xs sm:text-sm text-gray-600">
                                 第{turn}手までで決着
                             </div>
