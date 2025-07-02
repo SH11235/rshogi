@@ -2,19 +2,19 @@
     "hooks": {
         "afterEdit": [
             {
-                "command": "npm run format:check",
+                "command": "npm run format",
                 "description": "Format code after editing"
             }
         ],
         "afterWrite": [
             {
-                "command": "npm run format:check",
+                "command": "npm run format",
                 "description": "Format code after writing new files"
             }
         ],
         "afterMultiEdit": [
             {
-                "command": "npm run format:check && npm run lint",
+                "command": "npm run format && npm run lint",
                 "description": "Format and lint after multiple edits"
             }
         ]
