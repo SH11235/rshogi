@@ -4,8 +4,8 @@ import { HISTORY_CURSOR } from "../model/history";
 import type { Move } from "../model/move";
 import type { Piece, Player } from "../model/piece";
 import type { Square } from "../model/square";
-import { isCheckmate, isInCheck } from "./checkmate";
 import { applyMove, initialHands } from "./moveService";
+import { determineGameStatus } from "./utils";
 
 // 持ち駒の型定義（moveService から独立）
 export type Hands = {
@@ -254,35 +254,12 @@ export const findRepetition = (gameState: GameState): number => {
  * @returns 再構築されたゲーム状態
  */
 export function reconstructGameState(moveHistory: Move[], targetMoveIndex: number) {
-    let board = structuredClone(modernInitialBoard);
-    let hands = structuredClone(initialHands());
-    let currentPlayer: Player = "black";
-
-    // 初期位置の場合は何も手を適用しない
-    if (targetMoveIndex === HISTORY_CURSOR.INITIAL_POSITION) {
-        // 初期状態をそのまま返す
-    } else {
-        for (let i = 0; i <= targetMoveIndex; i++) {
-            if (i >= moveHistory.length) break;
-
-            const result = applyMove(board, hands, currentPlayer, moveHistory[i]);
-            board = result.board;
-            hands = result.hands;
-            currentPlayer = result.nextTurn;
-        }
-    }
-
-    // ゲーム状態判定
-    let gameStatus: GameStatus = "playing";
-    if (isInCheck(board, currentPlayer)) {
-        if (isCheckmate(board, hands, currentPlayer)) {
-            gameStatus = "checkmate";
-        } else {
-            gameStatus = "check";
-        }
-    }
-
-    return { board, hands, currentPlayer, gameStatus };
+    return reconstructGameStateWithInitial(
+        moveHistory,
+        targetMoveIndex,
+        modernInitialBoard,
+        initialHands(),
+    );
 }
 
 /**
@@ -319,14 +296,7 @@ export function reconstructGameStateWithInitial(
     }
 
     // ゲーム状態判定
-    let gameStatus: GameStatus = "playing";
-    if (isInCheck(board, currentPlayer)) {
-        if (isCheckmate(board, hands, currentPlayer)) {
-            gameStatus = "checkmate";
-        } else {
-            gameStatus = "check";
-        }
-    }
+    const gameStatus = determineGameStatus(board, hands, currentPlayer);
 
     return { board, hands, currentPlayer, gameStatus };
 }

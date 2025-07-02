@@ -18,6 +18,7 @@ import {
 } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
 import { isCheckmate } from "./checkmate";
+import { cloneBoardAndHands } from "./utils";
 
 //--------------------------------------------------------
 // 持ち駒ヘルパー
@@ -125,13 +126,8 @@ export function applyMove(
     currentTurn: Player,
     move: Move,
 ): ApplyMoveResult {
-    // Board は浅い構造なのでスプレッドで OK
-    let newBoard: Board = { ...board };
-    // Hands はネストしているため plain object 化してから deep copy する
-    const newHands: Hands = structuredClone({
-        black: { ...hands.black },
-        white: { ...hands.white },
-    });
+    const { board: newBoard, hands: newHands } = cloneBoardAndHands(board, hands);
+    let updatedBoard = newBoard;
 
     const mover = currentTurn;
     const nextTurn = toggleSide(currentTurn);
@@ -152,7 +148,7 @@ export function applyMove(
         }
 
         // 移動
-        newBoard = setPiece(newBoard, move.from, null);
+        updatedBoard = setPiece(updatedBoard, move.from, null);
 
         // 成りの強制判定: 行き所のない位置に移動する場合は強制的に成る
         let mustPromote = false;
@@ -161,7 +157,7 @@ export function applyMove(
         }
 
         const placed: Piece = move.promote || mustPromote ? promote(srcPiece) : { ...srcPiece };
-        newBoard = setPiece(newBoard, move.to, placed);
+        updatedBoard = setPiece(updatedBoard, move.to, placed);
     } else if (move.type === "drop") {
         /* ---------- 打ち手（持ち駒を置く） ---------- */
         const japaneseName = convertToJapaneseName(move.piece.type);
@@ -184,13 +180,17 @@ export function applyMove(
         }
 
         newHands[mover][japaneseName] -= 1;
-        newBoard = setPiece(newBoard, move.to, { ...move.piece, owner: mover, promoted: false });
+        updatedBoard = setPiece(updatedBoard, move.to, {
+            ...move.piece,
+            owner: mover,
+            promoted: false,
+        });
     } else {
         /* ---------- それ以外（未定義の Move タイプ） ---------- */
         assertNever(move);
     }
 
-    return { board: newBoard, hands: newHands, nextTurn };
+    return { board: updatedBoard, hands: newHands, nextTurn };
 }
 
 /**
@@ -209,12 +209,8 @@ export function revertMove(
     move: Move,
 ): ApplyMoveResult {
     const mover = toggleSide(currentTurn); // 元の指し手側
-    let newBoard: Board = { ...board };
-    // Hands はネストしているため plain object 化してから deep copy する
-    const newHands: Hands = structuredClone({
-        black: { ...hands.black },
-        white: { ...hands.white },
-    });
+    const { board: newBoard, hands: newHands } = cloneBoardAndHands(board, hands);
+    let updatedBoard = newBoard;
 
     if (move.type === "move") {
         const dstPiece = getPiece(board, move.to);
@@ -223,8 +219,8 @@ export function revertMove(
         const original = move.promote ? { ...dstPiece, promoted: false } : dstPiece;
 
         // 取った駒を戻す / 駒を元位置へ
-        newBoard = setPiece(newBoard, move.to, move.captured);
-        newBoard = setPiece(newBoard, move.from, original);
+        updatedBoard = setPiece(updatedBoard, move.to, move.captured);
+        updatedBoard = setPiece(updatedBoard, move.from, original);
 
         if (move.captured) {
             const capturedJapaneseName = convertToJapaneseName(move.captured.type);
@@ -232,12 +228,12 @@ export function revertMove(
         }
     } else {
         // 打ち手を戻す
-        newBoard = setPiece(newBoard, move.to, null);
+        updatedBoard = setPiece(updatedBoard, move.to, null);
         const pieceJapaneseName = convertToJapaneseName(move.piece.type);
         newHands[mover][pieceJapaneseName] += 1;
     }
 
-    return { board: newBoard, hands: newHands, nextTurn: mover };
+    return { board: updatedBoard, hands: newHands, nextTurn: mover };
 }
 
 //--------------------------------------------------------
