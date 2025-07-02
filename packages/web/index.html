@@ -10,12 +10,12 @@
     <div id="root"></div>
     <script type="module">
       // WASMモジュールを事前に読み込んでグローバルに保存
+      import * as wasmModule from './src/wasm/shogi_core.js';
+      
       async function loadWasm() {
           try {
-              const basePath = location.hostname === 'localhost' ? '' : '/shogi';
-              const module = await import(`${basePath}/src/wasm/shogi_core.js`);
-              await module.default();
-              window.wasmModule = module;
+              await wasmModule.default();
+              window.wasmModule = wasmModule;
               console.log('WASM module loaded and stored globally');
           } catch (error) {
               console.error('Failed to load WASM module:', error);
