@@ -72,6 +72,35 @@ import { MateSearchService } from "shogi-core";
 import { create } from "zustand";
 import type { MateSearchOptions, MateSearchState } from "../types/mateSearch";
 
+// 駒の日本語名を取得するヘルパー関数
+function getPieceJapaneseName(piece: Piece): string {
+    const pieceNames: Record<PieceType, string> = {
+        pawn: "歩",
+        lance: "香",
+        knight: "桂",
+        silver: "銀",
+        gold: "金",
+        bishop: "角",
+        rook: "飛",
+        king: "王",
+        gyoku: "玉",
+    };
+
+    const promotedNames: Record<PieceType, string> = {
+        pawn: "と",
+        lance: "成香",
+        knight: "成桂",
+        silver: "成銀",
+        gold: "金",
+        bishop: "馬",
+        rook: "龍",
+        king: "王",
+        gyoku: "玉",
+    };
+
+    return piece.promoted ? promotedNames[piece.type] : pieceNames[piece.type];
+}
+
 // 音声再生ヘルパー関数
 function playGameSound(soundType: SoundType): void {
     audioManager.play(soundType).catch((error) => {
@@ -2210,12 +2239,42 @@ export const useGameStore = create<GameState>((set, get) => ({
             });
 
             if (result.isMate) {
-                // 手順を棋譜形式に変換（簡易版）
+                // 手順を棋譜形式に変換（詳細版）
+                let tempBoard = structuredClone(board);
+                let tempHands = structuredClone(hands);
+                let tempPlayer = currentPlayer;
+
                 const moveStrings = result.moves.map((move) => {
+                    const turnSymbol = tempPlayer === "black" ? "▲" : "△";
+                    let moveString = "";
+
                     if (move.type === "move") {
-                        return `${move.from.row}${move.from.column}→${move.to.row}${move.to.column}${move.promote ? "成" : ""}`;
+                        // 移動する駒の情報を取得
+                        const piece = tempBoard[`${move.from.row}${move.from.column}` as SquareKey];
+                        if (!piece) return "エラー";
+
+                        // 駒の日本語名を取得
+                        const pieceName = getPieceJapaneseName(piece);
+                        const fromPos = `${move.from.row}${move.from.column}`;
+                        const toPos = `${move.to.row}${move.to.column}`;
+                        const promoteText = move.promote ? "成" : "";
+
+                        moveString = `${turnSymbol}${fromPos}${pieceName}→${toPos}${promoteText}`;
+                    } else {
+                        // 駒の日本語名を取得
+                        const pieceName = getPieceJapaneseName(move.piece);
+                        const toPos = `${move.to.row}${move.to.column}`;
+
+                        moveString = `${turnSymbol}${pieceName}打${toPos}`;
                     }
-                    return `${move.piece.type}打${move.to.row}${move.to.column}`;
+
+                    // 実際に手を適用して盤面を更新
+                    const result = applyMove(tempBoard, tempHands, tempPlayer, move);
+                    tempBoard = result.board;
+                    tempHands = result.hands;
+                    tempPlayer = tempPlayer === "black" ? "white" : "black";
+
+                    return moveString;
                 });
 
                 set({
