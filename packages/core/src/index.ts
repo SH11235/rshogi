@@ -18,6 +18,7 @@ export * from "./domain/service/moveValidationService";
 export * from "./domain/service/timerService";
 export * from "./domain/service/repetitionService";
 export { checkTryRule } from "./domain/service/repetitionService";
+export * from "./domain/service/mateSearch";
 export {
     type GameState,
     type GameStatus,
