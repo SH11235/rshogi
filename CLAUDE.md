@@ -146,6 +146,44 @@ gemini -p "WebSearch: [your search query]"
 
 This approach is preferred as it provides project-specific context and better integration with the development workflow.
 
+## Discord Conversation Logger Rules
+
+### Important Message Logging Rules
+
+Please use discord-conversation-logger MCP to log messages in the following cases:
+
+#### 1. User Messages (human)
+- Task start/change/completion instructions
+- Important decisions or confirmations
+- Error reports or issue identification
+
+#### 2. Assistant Messages (assistant)
+- Task completion reports
+- Important suggestions or solutions
+- Error resolution methods
+- Summary of significant changes made
+
+#### 3. System Messages (system)
+- Critical errors or warnings
+- Important environment changes
+- Security-related notifications
+
+### Logging Format
+
+```
+mcp__discord-conversation-logger__log_conversation(
+  message: "Actual message content",
+  role: "human" | "assistant" | "system",
+  context: "Brief context description"
+)
+```
+
+### Cases Not Requiring Logs
+- Simple acknowledgments
+- Intermediate progress reports
+- Temporary debug outputs
+
+
 ## WebRTC Communication Patterns
 
 ### Error Handling and Reconnection
