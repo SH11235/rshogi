@@ -25,7 +25,7 @@ export interface MateSearchOptions {
 /**
  * プレイヤーの全ての合法手を生成
  */
-function getAllLegalMoves(board: Board, hands: Hands, player: Player): Move[] {
+export function getAllLegalMoves(board: Board, hands: Hands, player: Player): Move[] {
     const moves: Move[] = [];
 
     // 盤上の駒の移動を生成
