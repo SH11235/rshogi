@@ -83,14 +83,12 @@ This is a Shogi (Japanese Chess) web application built with React and TypeScript
 
 ## Code Quality Standards
 
-**IMPORTANT**: After completing each coding task, ALWAYS run the following checks in order:
+**IMPORTANT**: After completing each coding task, ALWAYS run the following checks:
 
 1. **Build check**: `npm run build` - Ensures code compiles without errors
 2. **Type check**: `npm run typecheck` - Verifies TypeScript types are correct
-3. **Format check**: `npm run format:check` - Applies automatic code formatting
-4. **Lint check**: `npm run lint` - Ensures code follows linting rules
 
-These checks must all pass before considering a task complete. This ensures code quality and prevents build failures in CI/CD pipelines.
+Note: Format and lint checks are automatically run via Hooks after file edits.
 
 ### Type Safety Requirements
 - **NO "any" type usage** - Use proper TypeScript types always

@@ -2,7 +2,7 @@ import type { Move } from "../model/move";
 import type { PieceType } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
 
-// '' は「1 始まりの行番号」と配列インデックス（0 始まり）を合わせるためのダミー要素
+// インデックス0は未使用（行番号は1から始まるため）
 const kanjiRow = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"] as const;
 type RowKanji = (typeof kanjiRow)[number];
 

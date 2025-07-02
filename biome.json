@@ -34,7 +34,8 @@
             "**/playwright-report/**",
             "**/coverage/**",
             "packages/rust-core/**",
-            "packages/web/src/wasm/**"
+            "packages/web/src/wasm/**",
+            "memo/**"
         ]
     }
 }
