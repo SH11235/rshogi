@@ -296,6 +296,7 @@ interface GameState {
     // モード管理機能
     setGameMode: (mode: GameMode) => void;
     startGameFromPosition: () => void;
+    startGameFromPositionVsAI: (difficulty: AIDifficulty) => Promise<void>;
     returnToReviewMode: () => void;
     switchToAnalysisMode: () => void;
     // 対局中のundo/redo機能
@@ -1620,8 +1621,8 @@ export const useGameStore = create<GameState>((set, get) => ({
             get().updateWarningLevels();
         }
 
-        // オンラインゲームで自分のタイマーが更新された場合、相手に送信
-        if (isOnlineGame && webrtcConnection && player === localPlayer) {
+        // オンラインゲームでタイマーが更新された場合、相手に送信
+        if (isOnlineGame && webrtcConnection) {
             const updatedTimer = get().timer;
             const timerUpdateMessage: TimerUpdateMessage = {
                 type: "timer_update",
@@ -1819,6 +1820,68 @@ export const useGameStore = create<GameState>((set, get) => ({
             resignedPlayer: null,
             gameType: "local", // 局面から対局開始時はローカル対局に設定
         });
+    },
+
+    startGameFromPositionVsAI: async (difficulty: AIDifficulty) => {
+        const { board, hands, currentPlayer, historyCursor, moveHistory, gameMode } = get();
+
+        // 現在の局面から対局を開始
+        const basePosition: ReviewBasePosition = {
+            board: structuredClone(board),
+            hands: structuredClone(hands),
+            moveIndex: historyCursor,
+            currentPlayer,
+        };
+
+        // 履歴を現在の位置までに切り詰め
+        const newMoveHistory =
+            historyCursor === HISTORY_CURSOR.INITIAL_POSITION
+                ? []
+                : moveHistory.slice(0, historyCursor + 1);
+
+        // 難易度名を日本語に変換
+        const difficultyNames = {
+            beginner: "初級",
+            intermediate: "中級",
+            advanced: "上級",
+            expert: "エキスパート",
+        };
+
+        // 既存のAIプレイヤーを破棄
+        const state = get();
+        if (state.aiPlayer) {
+            state.aiPlayer.dispose();
+        }
+
+        // 新しいAIプレイヤーを作成
+        const aiPlayer = new AIPlayerService(difficulty);
+        await aiPlayer.initialize();
+
+        set({
+            gameMode: "playing",
+            reviewBasePosition: gameMode === "review" ? basePosition : null,
+            moveHistory: newMoveHistory,
+            historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+            branchInfo: null,
+            originalMoveHistory: [],
+            gameStatus: "playing",
+            resignedPlayer: null,
+            gameType: "ai", // AI対戦として設定
+            localPlayerColor: currentPlayer, // 現在の手番を人間側に
+            aiPlayer: aiPlayer,
+            aiPlayerInfo: {
+                id: `ai-${difficulty}`,
+                name: `AI ${difficultyNames[difficulty]}`,
+                difficulty,
+                isThinking: false,
+            },
+            isAIThinking: false,
+        });
+
+        // AIの手番なら実行
+        if (currentPlayer !== get().localPlayerColor) {
+            get().executeAIMove();
+        }
     },
 
     returnToReviewMode: () => {
@@ -2222,20 +2285,33 @@ export const useGameStore = create<GameState>((set, get) => ({
                 get().initializeTimer(message.data);
             }
         } else if (isTimerUpdateMessage(message)) {
-            // 相手のタイマー更新を受信
-            const { localPlayer } = get();
+            // タイマー更新を受信
+            const { localPlayer, timer: currentTimer } = get();
             const { data } = message;
 
-            // 相手のタイマー情報のみ更新（自分のタイマーは自分で管理）
+            // 受信したタイマー情報で同期（ただし、現在の手番プレイヤーのタイマーは自分で管理）
+            const currentActivePlayer = currentTimer.activePlayer;
+
             set({
                 timer: {
-                    ...get().timer,
-                    blackTime: localPlayer === "white" ? data.blackTime : get().timer.blackTime,
-                    whiteTime: localPlayer === "black" ? data.whiteTime : get().timer.whiteTime,
+                    ...currentTimer,
+                    blackTime:
+                        currentActivePlayer === "black" && localPlayer === "black"
+                            ? currentTimer.blackTime // 自分の手番なら自分のタイマーを保持
+                            : data.blackTime,
+                    whiteTime:
+                        currentActivePlayer === "white" && localPlayer === "white"
+                            ? currentTimer.whiteTime // 自分の手番なら自分のタイマーを保持
+                            : data.whiteTime,
                     blackInByoyomi:
-                        localPlayer === "white" ? data.blackInByoyomi : get().timer.blackInByoyomi,
+                        currentActivePlayer === "black" && localPlayer === "black"
+                            ? currentTimer.blackInByoyomi
+                            : data.blackInByoyomi,
                     whiteInByoyomi:
-                        localPlayer === "black" ? data.whiteInByoyomi : get().timer.whiteInByoyomi,
+                        currentActivePlayer === "white" && localPlayer === "white"
+                            ? currentTimer.whiteInByoyomi
+                            : data.whiteInByoyomi,
+                    activePlayer: data.activePlayer, // 手番は必ず同期
                 },
             });
         } else if (isRepetitionCheckMessage(message)) {

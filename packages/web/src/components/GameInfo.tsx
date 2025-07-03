@@ -1,10 +1,12 @@
 import { cn } from "@/lib/utils";
 import { useGameStore } from "@/stores/gameStore";
+import type { AIDifficulty } from "@/types/ai";
 import { useState } from "react";
 import type { GameStatus, Move, Player } from "shogi-core";
 import { AIGuideDialog } from "./AIGuideDialog";
 import { DrawOfferDialog } from "./DrawOfferDialog";
 import { KeyboardHelp } from "./KeyboardHelp";
+import { StartGameDialog } from "./StartGameDialog";
 import { TimerDisplay } from "./TimerDisplay";
 import { TimerSettingsDialog } from "./TimerSettingsDialog";
 import {
@@ -62,9 +64,23 @@ export function GameInfo({
     const [isResignDialogOpen, setIsResignDialogOpen] = useState(false);
     const [isTimerSettingsOpen, setIsTimerSettingsOpen] = useState(false);
     const [isAIGuideOpen, setIsAIGuideOpen] = useState(false);
+    const [isStartGameDialogOpen, setIsStartGameDialogOpen] = useState(false);
     const timer = useGameStore((state) => state.timer);
     const pauseTimer = useGameStore((state) => state.pauseTimer);
     const resumeTimer = useGameStore((state) => state.resumeTimer);
+    const startGameFromPositionVsAI = useGameStore((state) => state.startGameFromPositionVsAI);
+
+    const handleStartFromPosition = () => {
+        setIsStartGameDialogOpen(true);
+    };
+
+    const handleStartLocal = () => {
+        onStartFromPosition?.();
+    };
+
+    const handleStartAI = async (difficulty: AIDifficulty) => {
+        await startGameFromPositionVsAI(difficulty);
+    };
 
     const getStatusMessage = () => {
         // 詰将棋モードの場合の特別な表示
@@ -359,7 +375,7 @@ export function GameInfo({
                     {onStartFromPosition && (
                         <button
                             type="button"
-                            onClick={onStartFromPosition}
+                            onClick={handleStartFromPosition}
                             className={cn(
                                 "px-4 py-2 rounded-lg font-medium transition-colors text-sm",
                                 "touch-manipulation active:scale-95",
@@ -497,6 +513,14 @@ export function GameInfo({
 
             {/* AIガイドダイアログ */}
             <AIGuideDialog open={isAIGuideOpen} onOpenChange={setIsAIGuideOpen} />
+
+            {/* 局面から対局開始ダイアログ */}
+            <StartGameDialog
+                isOpen={isStartGameDialogOpen}
+                onClose={() => setIsStartGameDialogOpen(false)}
+                onStartLocal={handleStartLocal}
+                onStartAI={handleStartAI}
+            />
         </div>
     );
 }
