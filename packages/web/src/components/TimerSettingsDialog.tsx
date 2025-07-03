@@ -72,7 +72,9 @@ export function TimerSettingsDialog({
     const handlePresetSelect = (presetKey: TimerPresetKey) => {
         const preset = TIMER_PRESETS[presetKey];
         setSelectedPreset(presetKey);
-        setMode(preset.mode);
+        if (preset.mode) {
+            setMode(preset.mode);
+        }
         setBasicTime(preset.basicTime);
         setByoyomiTime(preset.byoyomiTime);
         setFischerIncrement(preset.fischerIncrement);

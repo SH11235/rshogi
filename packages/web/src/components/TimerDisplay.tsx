@@ -1,6 +1,6 @@
+import { cn } from "@/lib/utils";
 import { useGameStore } from "@/stores/gameStore";
 import { type WarningLevel, formatByoyomiTime, formatTimeWithHours } from "@/types/timer";
-import { cn } from "@/utils/ui";
 import { memo, useEffect } from "react";
 import type { Player } from "shogi-core";
 
@@ -11,11 +11,9 @@ interface TimerDisplayProps {
 function getWarningClass(warningLevel: WarningLevel): string {
     switch (warningLevel) {
         case "critical":
-            return "text-red-600 font-bold";
-        case "low":
-            return "text-yellow-600";
-        case "byoyomi":
             return "text-red-600 font-bold animate-pulse";
+        case "warning":
+            return "text-yellow-600";
         default:
             return "";
     }
