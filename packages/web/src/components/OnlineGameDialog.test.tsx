@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OnlineGameDialog } from "./OnlineGameDialog";
 
 describe("OnlineGameDialog", () => {
@@ -394,6 +394,71 @@ describe("OnlineGameDialog", () => {
 
             // クリーンアップ
             unmount();
+        });
+    });
+
+    describe("接続状態の管理", () => {
+        it("ゲストが接続されると自動的に完了状態に移行する", async () => {
+            const user = userEvent.setup();
+            mockOnJoinAsGuest.mockResolvedValueOnce("mock-answer-data");
+
+            const { rerender } = render(<OnlineGameDialog {...defaultProps} isConnected={false} />);
+
+            // ゲストタブに切り替え
+            const guestTab = screen.getByRole("tab", { name: "部屋に参加" });
+            await user.click(guestTab);
+
+            // ゲスト情報を入力して接続
+            const offerInput = screen.getByPlaceholderText("接続情報を貼り付け");
+            await user.type(offerInput, "mock-offer-data");
+
+            const nameInput = screen.getByPlaceholderText("あなたの名前を入力");
+            await user.type(nameInput, "ゲストプレイヤー");
+
+            const joinButton = screen.getByRole("button", { name: "部屋に参加" });
+            await user.click(joinButton);
+
+            // 待機状態になることを確認
+            await waitFor(() => {
+                expect(screen.getByText("この返答をホストに送信してください")).toBeInTheDocument();
+            });
+
+            // 接続が確立された状態で再レンダリング
+            rerender(<OnlineGameDialog {...defaultProps} isConnected={true} />);
+
+            // 完了状態に移行することを確認
+            await waitFor(() => {
+                expect(screen.getByText("接続完了！")).toBeInTheDocument();
+                expect(screen.getByText("まもなく対戦が開始されます")).toBeInTheDocument();
+            });
+        });
+
+        it("ホストの場合は接続状態が変わっても自動移行しない（手動完了のため）", async () => {
+            const user = userEvent.setup();
+            mockOnCreateHost.mockResolvedValueOnce("mock-offer-data");
+
+            const { rerender } = render(<OnlineGameDialog {...defaultProps} isConnected={false} />);
+
+            // ホスト情報を入力して部屋作成
+            const nameInput = screen.getByPlaceholderText("あなたの名前を入力");
+            await user.type(nameInput, "ホストプレイヤー");
+
+            const createButton = screen.getByText("部屋を作成");
+            await user.click(createButton);
+
+            // 待機状態になることを確認
+            await waitFor(() => {
+                expect(
+                    screen.getByText("1. この接続情報を相手に送信してください"),
+                ).toBeInTheDocument();
+            });
+
+            // 接続が確立された状態で再レンダリング
+            rerender(<OnlineGameDialog {...defaultProps} isConnected={true} />);
+
+            // ホストの場合は自動移行せず、待機状態のままであることを確認
+            expect(screen.getByText("2. 相手からの返答を入力してください")).toBeInTheDocument();
+            expect(screen.queryByText("接続完了！")).not.toBeInTheDocument();
         });
     });
 });

@@ -10,7 +10,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Check, Copy } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface OnlineGameDialogProps {
     open: boolean;
@@ -18,6 +18,7 @@ interface OnlineGameDialogProps {
     onCreateHost: (playerName: string) => Promise<string>;
     onJoinAsGuest: (offer: string, playerName: string) => Promise<string>;
     onAcceptAnswer: (answer: string) => Promise<void>;
+    isConnected?: boolean;
 }
 
 export function OnlineGameDialog({
@@ -26,6 +27,7 @@ export function OnlineGameDialog({
     onCreateHost,
     onJoinAsGuest,
     onAcceptAnswer,
+    isConnected = false,
 }: OnlineGameDialogProps) {
     const [activeTab, setActiveTab] = useState<"host" | "guest">("host");
     const [offer, setOffer] = useState("");
@@ -38,6 +40,13 @@ export function OnlineGameDialog({
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
     const [step, setStep] = useState<"create" | "wait" | "complete">("create");
+
+    // 接続状態を監視してゲストの場合は自動的に完了状態に移行
+    useEffect(() => {
+        if (isConnected && step === "wait" && activeTab === "guest") {
+            setStep("complete");
+        }
+    }, [isConnected, step, activeTab]);
 
     const handleCreateHost = async () => {
         if (!hostName.trim()) {
@@ -322,6 +331,16 @@ export function OnlineGameDialog({
                                 </div>
                                 <p className="text-sm text-muted-foreground">
                                     ホストが返答を受け入れると接続が完了します
+                                </p>
+                            </div>
+                        )}
+
+                        {step === "complete" && (
+                            <div className="text-center py-4">
+                                <Check className="h-12 w-12 text-green-600 mx-auto mb-2" />
+                                <p className="text-green-600 font-medium">接続完了！</p>
+                                <p className="text-sm text-muted-foreground mt-1">
+                                    まもなく対戦が開始されます
                                 </p>
                             </div>
                         )}

@@ -76,6 +76,25 @@ const mockState = {
     gameRedo: vi.fn(),
     canGameUndo: vi.fn(() => false),
     canGameRedo: vi.fn(() => false),
+    // Online game properties
+    isOnlineGame: false,
+    connectionStatus: {
+        isConnected: false,
+        isHost: false,
+        peerId: "",
+        connectionState: "new" as const,
+    },
+    connectionQuality: null,
+    connectionProgress: "idle" as const,
+    localPlayer: null,
+    localPlayerName: "",
+    remotePlayerName: "",
+    startOnlineGame: vi.fn(),
+    joinOnlineGame: vi.fn(),
+    acceptOnlineAnswer: vi.fn(),
+    // AI properties
+    gameType: "human" as const,
+    switchToAnalysisMode: vi.fn(),
 };
 
 // GameStateの部分型を定義

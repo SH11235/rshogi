@@ -1546,7 +1546,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     tick: () => {
-        const { timer, gameStatus, isOnlineGame, webrtcConnection, localPlayer } = get();
+        const { timer, gameStatus, isOnlineGame, webrtcConnection } = get();
         if (!timer.config.mode || timer.isPaused || !timer.activePlayer || timer.hasTimedOut)
             return;
         if (gameStatus !== "playing" && gameStatus !== "check") return;

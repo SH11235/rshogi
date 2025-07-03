@@ -1,6 +1,6 @@
 import "./App.css";
 import { Wifi } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Move } from "shogi-core";
 import { AIGameSetup } from "./components/AIGameSetup";
 import { AIStatus } from "./components/AIStatus";
@@ -129,6 +129,17 @@ function App() {
         onNavigateLast: gameMode !== "playing" ? navigateLast : undefined,
         onReturnToMainLine: gameMode !== "playing" && isInBranch() ? returnToMainLine : undefined,
     });
+
+    // 通信対戦の接続が確立されたときに自動的にモーダルを閉じる
+    useEffect(() => {
+        if (isOnlineGame && connectionStatus.isConnected && isOnlineDialogOpen) {
+            // 接続確立後、少し待ってからモーダルを閉じる（ユーザーに接続成功を確認させる）
+            const timer = setTimeout(() => {
+                setIsOnlineDialogOpen(false);
+            }, 1500);
+            return () => clearTimeout(timer);
+        }
+    }, [isOnlineGame, connectionStatus.isConnected, isOnlineDialogOpen]);
 
     const handleImport = (moves: Move[], format: ImportFormat, content?: string) => {
         if (format === "kif") {
@@ -433,6 +444,7 @@ function App() {
                     onCreateHost={(playerName) => startOnlineGame(true, playerName)}
                     onJoinAsGuest={joinOnlineGame}
                     onAcceptAnswer={acceptOnlineAnswer}
+                    isConnected={connectionStatus.isConnected}
                 />
 
                 {/* 保存済み棋譜ダイアログ */}
