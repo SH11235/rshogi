@@ -1,4 +1,4 @@
-import { AIPlayerService } from "@/services/ai/aiPlayer";
+import { AIService } from "@/services/ai/aiService";
 import { audioManager } from "@/services/audioManager";
 import {
     type ConnectionProgress,
@@ -257,7 +257,7 @@ interface GameState {
 
     // AI対戦関連
     gameType: GameType;
-    aiPlayer: AIPlayerService | null;
+    aiPlayer: AIService | null;
     aiPlayerInfo: AIPlayer | null;
     isAIThinking: boolean;
     aiDifficulty: AIDifficulty;
@@ -1854,7 +1854,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
 
         // 新しいAIプレイヤーを作成
-        const aiPlayer = new AIPlayerService(difficulty);
+        const aiPlayer = new AIService(difficulty);
         await aiPlayer.initialize();
 
         set({
@@ -2588,7 +2588,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
 
         // 新しいAIプレイヤーを作成
-        const aiPlayer = new AIPlayerService(difficulty);
+        const aiPlayer = new AIService(difficulty);
         await aiPlayer.initialize();
 
         set({
@@ -2665,7 +2665,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         try {
             // AIに手を計算させる
-            const move = await aiPlayer.calculateMove(
+            const result = await aiPlayer.calculateMove(
                 board,
                 hands,
                 currentPlayer,
@@ -2676,6 +2676,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             await new Promise((resolve) => setTimeout(resolve, 300));
 
             // 手を実行
+            const move = result.move;
             if (move.type === "drop") {
                 get().makeDrop(move.piece.type, move.to);
             } else {

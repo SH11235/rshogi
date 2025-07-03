@@ -34,23 +34,27 @@ export function Board({
                 key={squareKey}
                 className={cn(
                     // レスポンシブサイズ: モバイルで小さく、デスクトップで大きく
-                    "w-10 h-10 sm:w-12 sm:h-12 lg:w-16 lg:h-16 border border-gray-800 flex items-center justify-center cursor-pointer transition-all duration-200",
+                    "w-10 h-10 sm:w-12 sm:h-12 lg:w-16 lg:h-16 border border-gray-700 flex items-center justify-center cursor-pointer transition-all duration-200",
                     // タッチ操作の改善
                     "touch-manipulation active:scale-95",
-                    "hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1",
+                    "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1",
+                    // 基本の盤面色（木目調）
+                    "bg-[#dcb35c]",
+                    // ホバー効果を盤面色に合わせて調整
+                    "hover:brightness-110",
                     // 選択中の駒のハイライト
-                    isSelected && "bg-blue-200 hover:bg-blue-300 ring-2 ring-blue-400",
+                    isSelected && "!bg-blue-300 hover:!bg-blue-400 ring-2 ring-blue-500",
                     // 有効な移動先のハイライト
                     isValidMove &&
                         !isSelected &&
-                        "bg-green-100 hover:bg-green-200 ring-1 ring-green-300",
+                        "!bg-green-200 hover:!bg-green-300 ring-1 ring-green-400",
                     // 有効なドロップ先のハイライト
                     isValidDrop &&
                         !isSelected &&
                         !isValidMove &&
-                        "bg-purple-100 hover:bg-purple-200 ring-1 ring-purple-300",
+                        "!bg-purple-200 hover:!bg-purple-300 ring-1 ring-purple-400",
                     // 駒がある場合のホバー効果
-                    piece && !isSelected && !isValidMove && !isValidDrop && "hover:bg-yellow-50",
+                    piece && !isSelected && !isValidMove && !isValidDrop && "hover:brightness-105",
                 )}
                 onClick={() => onSquareClick(square)}
                 onTouchStart={(e) => {
@@ -82,9 +86,9 @@ export function Board({
     const kanjiNumbers = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
 
     return (
-        <div className="inline-block border-2 border-gray-900 bg-white relative">
+        <div className="inline-block border-2 border-gray-900 bg-[#f8f4e6] p-4 relative rounded-lg shadow-lg">
             {/* 列の座標表示（上部） - 将棋の正しい列番号：左から右へ9-1 */}
-            <div className="flex justify-around mb-1 text-xs sm:text-sm font-medium">
+            <div className="flex justify-around mb-1 text-xs sm:text-sm font-medium text-gray-700">
                 {Array.from({ length: 9 }, (_, i) => (
                     <div key={`col-${9 - i}`} className="w-10 sm:w-12 lg:w-16 text-center">
                         {9 - i}
@@ -102,12 +106,12 @@ export function Board({
 
             {/* 行の座標表示（右側） - 将棋の正しい段表示：上から下へ一-九 */}
             <div
-                className="absolute -right-6 sm:-right-8 flex flex-col justify-around text-xs sm:text-sm font-medium"
-                style={{ top: "1.5rem", height: "calc(100% - 1.5rem)" }}
+                className="absolute -right-8 sm:-right-10 flex flex-col justify-around text-xs sm:text-sm font-medium text-gray-700"
+                style={{ top: "2rem", height: "calc(100% - 2.5rem)" }}
             >
                 {Array.from({ length: 9 }, (_, i) => (
                     <div key={`row-${i + 1}`} className="h-10 sm:h-12 lg:h-16 flex items-center">
-                        <div className="bg-white border border-gray-300 px-1 py-0.5 text-center min-w-[1.5rem] sm:min-w-[2rem]">
+                        <div className="px-1 py-0.5 text-center min-w-[1.5rem] sm:min-w-[2rem]">
                             {kanjiNumbers[i]}
                         </div>
                     </div>

@@ -57,8 +57,8 @@ export const PROMOTED_PIECE_NAMES = {
     ja: {
         pawn: "と",
         lance: "成香",
-        knight: "成桂",
-        silver: "成銀",
+        knight: "圭",
+        silver: "全",
         gold: "金", // 金は成駒なし
         bishop: "馬",
         rook: "龍",
