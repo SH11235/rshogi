@@ -2,6 +2,8 @@ import "./App.css";
 import { Wifi } from "lucide-react";
 import { useState } from "react";
 import type { Move } from "shogi-core";
+import { AIGameSetup } from "./components/AIGameSetup";
+import { AIStatus } from "./components/AIStatus";
 import { AudioTestPanel } from "./components/AudioTestPanel";
 import { Board } from "./components/Board";
 import { CapturedPieces } from "./components/CapturedPieces";
@@ -82,6 +84,8 @@ function App() {
         joinOnlineGame,
         acceptOnlineAnswer,
         // disconnectOnline, // 将来使用予定
+        // AI対戦関連
+        gameType,
     } = useGameStore();
 
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
@@ -144,7 +148,7 @@ function App() {
                             variant="outline"
                             size="sm"
                             onClick={() => setIsOnlineDialogOpen(true)}
-                            disabled={isOnlineGame}
+                            disabled={isOnlineGame || gameType === "ai"}
                         >
                             <Wifi className="mr-2 h-4 w-4" />
                             通信対戦
@@ -261,6 +265,13 @@ function App() {
                                 />
                                 {/* 詰み探索パネル - 解析モードまたは詰将棋モードで表示 */}
                                 {(gameMode === "analysis" || isTsumeShogi) && <MateSearchPanel />}
+                                {/* AI対戦セットアップまたはステータス表示 */}
+                                {gameType !== "online" && (
+                                    <>
+                                        <AIGameSetup />
+                                        <AIStatus />
+                                    </>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -318,6 +329,13 @@ function App() {
                         )}
                         {/* 詰み探索パネル - 解析モードまたは詰将棋モードで表示 */}
                         {(gameMode === "analysis" || isTsumeShogi) && <MateSearchPanel />}
+                        {/* AI対戦セットアップまたはステータス表示 */}
+                        {gameType !== "online" && (
+                            <>
+                                <AIGameSetup />
+                                <AIStatus />
+                            </>
+                        )}
                     </div>
 
                     {/* 中央：将棋盤と持ち駒 */}

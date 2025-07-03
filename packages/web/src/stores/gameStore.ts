@@ -1,9 +1,11 @@
+import { AIPlayerService } from "@/services/ai/aiPlayer";
 import { audioManager } from "@/services/audioManager";
 import {
     type ConnectionProgress,
     type ConnectionQuality,
     WebRTCConnection,
 } from "@/services/webrtc";
+import type { AIDifficulty, AIPlayer } from "@/types/ai";
 import type { SoundType } from "@/types/audio";
 import type {
     ConnectionStatus,
@@ -192,6 +194,9 @@ interface PromotionPendingMove {
 // ゲームモードの型定義
 type GameMode = "playing" | "review" | "analysis";
 
+// ゲームタイプの型定義
+export type GameType = "local" | "ai" | "online";
+
 // 分岐情報の型定義
 interface BranchInfo {
     branchPoint: number; // 分岐開始点の手数
@@ -250,6 +255,14 @@ interface GameState {
     // 詰み探索関連
     mateSearch: MateSearchState;
 
+    // AI対戦関連
+    gameType: GameType;
+    aiPlayer: AIPlayerService | null;
+    aiPlayerInfo: AIPlayer | null;
+    isAIThinking: boolean;
+    aiDifficulty: AIDifficulty;
+    localPlayerColor: Player; // AI対戦時のプレイヤー色
+
     selectSquare: (square: Square) => void;
     selectDropPiece: (pieceType: PieceType, player: Player) => void;
     makeMove: (from: Square, to: Square, promote?: boolean) => void;
@@ -301,6 +314,12 @@ interface GameState {
     // 詰み探索機能
     startMateSearch: (options?: Partial<MateSearchOptions>) => Promise<void>;
     cancelMateSearch: () => void;
+
+    // AI対戦機能
+    startAIGame: (difficulty?: AIDifficulty, playerColor?: Player) => Promise<void>;
+    setAIDifficulty: (difficulty: AIDifficulty) => Promise<void>;
+    stopAI: () => void;
+    executeAIMove: () => Promise<void>;
 }
 
 // タイマーアクションをGameStateに統合
@@ -387,6 +406,14 @@ export const useGameStore = create<GameState>((set, get) => ({
         error: null,
     },
 
+    // AI対戦関連の初期状態
+    gameType: "local",
+    aiPlayer: null,
+    aiPlayerInfo: null,
+    isAIThinking: false,
+    aiDifficulty: "intermediate",
+    localPlayerColor: "black",
+
     selectSquare: (square: Square) => {
         const {
             board,
@@ -409,8 +436,13 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
 
         // 通信対戦時は自分の手番でのみ操作可能
-        const { isOnlineGame, localPlayer } = get();
+        const { isOnlineGame, localPlayer, gameType, localPlayerColor, isAIThinking } = get();
         if (isOnlineGame && localPlayer !== currentPlayer) {
+            return;
+        }
+
+        // AI対戦時はAIの手番またはAI思考中は操作不可
+        if (gameType === "ai" && (currentPlayer !== localPlayerColor || isAIThinking)) {
             return;
         }
 
@@ -722,6 +754,15 @@ export const useGameStore = create<GameState>((set, get) => ({
             }
 
             console.log(`Dropped ${pieceType} at ${to.row}${to.column}`);
+
+            // AI対戦時、人間の手の後にAIに思考させる
+            const { gameType, localPlayerColor } = get();
+            if (gameType === "ai" && newStatus === "playing" && nextPlayer !== localPlayerColor) {
+                // 少し遅延を入れてからAIを実行
+                setTimeout(() => {
+                    get().executeAIMove();
+                }, 500);
+            }
         } catch (error) {
             console.error("Invalid drop:", error);
             // エラー時は選択状態をクリア
@@ -953,6 +994,15 @@ export const useGameStore = create<GameState>((set, get) => ({
                     }
                 }
             }
+
+            // AI対戦時、人間の手の後にAIに思考させる
+            const { gameType, localPlayerColor } = get();
+            if (gameType === "ai" && newStatus === "playing" && nextPlayer !== localPlayerColor) {
+                // 少し遅延を入れてからAIを実行
+                setTimeout(() => {
+                    get().executeAIMove();
+                }, 500);
+            }
         } catch (error) {
             console.error("Invalid move:", error);
         }
@@ -981,6 +1031,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     resetGame: () => {
+        // AIを停止
+        const { aiPlayer } = get();
+        if (aiPlayer) {
+            aiPlayer.dispose();
+        }
+
         set({
             board: modernInitialBoard,
             hands: structuredClone(initialHands()),
@@ -1002,6 +1058,11 @@ export const useGameStore = create<GameState>((set, get) => ({
             gameMode: "playing",
             reviewBasePosition: null,
             timer: createInitialTimerState(),
+            // AI関連をリセット
+            gameType: "local",
+            aiPlayer: null,
+            aiPlayerInfo: null,
+            isAIThinking: false,
         });
     },
 
@@ -2421,5 +2482,114 @@ export const useGameStore = create<GameState>((set, get) => ({
                 error: null,
             },
         });
+    },
+
+    // AI対戦機能
+    startAIGame: async (
+        difficulty: AIDifficulty = "intermediate",
+        playerColor: Player = "black",
+    ) => {
+        const state = get();
+
+        // 既存のAIを停止
+        if (state.aiPlayer) {
+            state.aiPlayer.dispose();
+        }
+
+        // 新しいAIプレイヤーを作成
+        const aiPlayer = new AIPlayerService(difficulty);
+        await aiPlayer.initialize();
+
+        set({
+            gameType: "ai",
+            aiPlayer,
+            aiPlayerInfo: aiPlayer.getPlayer(),
+            aiDifficulty: difficulty,
+            localPlayerColor: playerColor,
+            gameMode: "playing",
+            gameStatus: "playing",
+            board: modernInitialBoard,
+            hands: structuredClone(initialHands()),
+            currentPlayer: "black",
+            moveHistory: [],
+            historyCursor: HISTORY_CURSOR.LATEST_POSITION,
+            selectedSquare: null,
+            selectedDropPiece: null,
+            validMoves: [],
+            validDropSquares: [],
+            resignedPlayer: null,
+            branchInfo: null,
+            originalMoveHistory: [],
+            undoStack: [],
+        });
+
+        // タイマーを初期化して開始
+        if (get().timer.config.mode) {
+            get().startPlayerTimer("black");
+        }
+
+        // AIの手番の場合はAIに思考させる
+        if (playerColor === "white") {
+            await get().executeAIMove();
+        }
+    },
+
+    setAIDifficulty: async (difficulty: AIDifficulty) => {
+        const { aiPlayer } = get();
+        if (aiPlayer) {
+            await aiPlayer.setDifficulty(difficulty);
+            set({
+                aiDifficulty: difficulty,
+                aiPlayerInfo: aiPlayer.getPlayer(),
+            });
+        }
+    },
+
+    stopAI: () => {
+        const { aiPlayer } = get();
+        if (aiPlayer) {
+            aiPlayer.dispose();
+            set({
+                gameType: "local",
+                aiPlayer: null,
+                aiPlayerInfo: null,
+                isAIThinking: false,
+            });
+        }
+    },
+
+    // AI実行のヘルパー関数
+    executeAIMove: async () => {
+        const { aiPlayer, board, hands, currentPlayer, gameStatus, localPlayerColor } = get();
+
+        if (!aiPlayer || gameStatus !== "playing" || currentPlayer === localPlayerColor) {
+            return;
+        }
+
+        set({ isAIThinking: true });
+
+        try {
+            // AIに手を計算させる
+            const move = await aiPlayer.calculateMove(
+                board,
+                hands,
+                currentPlayer,
+                get().moveHistory,
+            );
+
+            // 少し遅延を入れて人間らしくする
+            await new Promise((resolve) => setTimeout(resolve, 300));
+
+            // 手を実行
+            if (move.type === "drop") {
+                get().makeDrop(move.piece.type, move.to);
+            } else {
+                get().makeMove(move.from, move.to, move.promote);
+            }
+        } catch (error) {
+            console.error("AI move error:", error);
+            // エラー時はAI思考フラグを解除
+            set({ isAIThinking: false });
+        }
     },
 }));
