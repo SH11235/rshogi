@@ -2588,6 +2588,13 @@ export const useGameStore = create<GameState>((set, get) => ({
             } else {
                 get().makeMove(move.from, move.to, move.promote);
             }
+
+            // 念のため、手を実行した後にAI思考フラグが解除されているか確認
+            const currentState = get();
+            if (currentState.isAIThinking) {
+                console.warn("isAIThinking was still true after AI move, resetting it");
+                set({ isAIThinking: false });
+            }
         } catch (error) {
             console.error("AI move error:", error);
             // エラー時はAI思考フラグを解除
