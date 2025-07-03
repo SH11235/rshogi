@@ -1239,6 +1239,10 @@ export const useGameStore = create<GameState>((set, get) => ({
             isTsumeShogi: isTsumeShogi,
             gameMode: "review", // 棋譜インポート時は閲覧モード
             reviewBasePosition: null,
+            gameType: "local", // 棋譜インポート時はローカル対局に戻す
+            aiPlayer: null,
+            aiPlayerInfo: null,
+            isAIThinking: false,
         });
     },
 
@@ -1813,6 +1817,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             originalMoveHistory: [],
             gameStatus: "playing",
             resignedPlayer: null,
+            gameType: "local", // 局面から対局開始時はローカル対局に設定
         });
     },
 
