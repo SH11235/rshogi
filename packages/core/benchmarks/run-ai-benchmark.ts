@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-import type { AIDifficulty } from "../../web/src/types/ai";
+import type { AIDifficulty } from "../src/types/ai";
 import { AIBenchmark, measureOpeningBookUsage } from "./ai-benchmark";
 
 async function runFullBenchmark() {

@@ -14,6 +14,7 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "format:check": "biome check .",
+    "typecheck": "tsc --noEmit && cd benchmarks && tsc --noEmit",
     "benchmark": "tsx src/domain/service/runBenchmark.ts",
     "benchmark:ai": "tsx benchmarks/run-ai-benchmark.ts"
   },

@@ -1,7 +1,10 @@
 import { AIEngine } from "../src/ai/engine";
 import { generateMainOpenings } from "../src/ai/openingGenerator";
-import { initialHands, modernInitialBoard } from "../src/domain/initialBoard";
-import type { AIDifficulty, Board, Move } from "../src/types";
+import { modernInitialBoard } from "../src/domain/initialBoard";
+import type { Board } from "../src/domain/model/board";
+import type { Move } from "../src/domain/model/move";
+import { initialHands } from "../src/domain/service/moveService";
+import type { AIDifficulty } from "../src/types/ai";
 
 export interface BenchmarkResult {
     difficulty: AIDifficulty;
