@@ -143,3 +143,27 @@ export function isPositionEvaluatedResponse(
 export function isErrorResponse(response: AIResponse): response is ErrorResponse {
     return response.type === "error";
 }
+
+// Search related types
+export interface SearchOptions {
+    maxDepth: number;
+    timeLimit: number;
+    evaluate: (board: Board, hands: Hands, player: Player) => number;
+    generateMoves: (board: Board, hands: Hands, player: Player) => Move[];
+}
+
+export interface SearchResult {
+    bestMove: Move;
+    score: number;
+    depth: number;
+    pv: Move[];
+    nodes: number;
+    time: number;
+}
+
+export interface TranspositionEntry {
+    score: number;
+    depth: number;
+    type: "exact" | "lowerbound" | "upperbound";
+    bestMove?: Move;
+}

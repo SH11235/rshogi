@@ -1,71 +1,24 @@
-import type {
-    Board,
-    Column,
-    Hands,
-    Move,
-    Piece,
-    PieceType,
-    Player,
-    Row,
-    SquareKey,
-} from "shogi-core";
-import {
-    applyMove,
-    generateLegalDropMovesForPiece,
-    generateLegalMoves,
-    isCheckmate,
-    isInCheck,
-} from "shogi-core";
+import type { Board, Column, Hands, Move, PieceType, Player, Row } from "shogi-core";
+import { generateLegalDropMovesForPiece, generateLegalMoves } from "shogi-core";
 import type { AIDifficulty, PositionEvaluation } from "../../types/ai";
 import { AI_DIFFICULTY_CONFIGS } from "../../types/ai";
-
-// Piece values (in centipawns)
-const PIECE_VALUES: Record<PieceType, number> = {
-    pawn: 100,
-    lance: 430,
-    knight: 450,
-    silver: 640,
-    gold: 690,
-    bishop: 890,
-    rook: 1040,
-    king: 0, // King has no material value
-    gyoku: 0,
-};
-
-// Promoted piece bonus
-const PROMOTION_BONUS: Record<PieceType, number> = {
-    pawn: 420, // Tokin is worth much more than pawn
-    lance: 260,
-    knight: 240,
-    silver: 50,
-    gold: 0,
-    bishop: 150,
-    rook: 150,
-    king: 0,
-    gyoku: 0,
-};
-
-// Position tables for piece-square evaluation
-const PAWN_TABLE = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 10, 10, 10, 10, 10, 10, 10, 10, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -5, -5, -5, -5, -5,
-    -5, -5, -5, -5, -10, -10, -10, -10, -10, -10, -10, -10, -10, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-];
+import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
+import { IterativeDeepeningSearch } from "./search";
 
 export class AIEngine {
     private difficulty: AIDifficulty;
     private searchDepth: number;
     private timeLimit: number;
     private startTime = 0;
-    private nodesSearched = 0;
-    private shouldStop = false;
     private lastEvaluation: PositionEvaluation | null = null;
+    private iterativeSearch: IterativeDeepeningSearch;
 
     constructor(difficulty: AIDifficulty) {
         this.difficulty = difficulty;
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
         this.timeLimit = config.timeLimit || 3000;
+        this.iterativeSearch = new IterativeDeepeningSearch();
     }
 
     setDifficulty(difficulty: AIDifficulty): void {
@@ -75,6 +28,10 @@ export class AIEngine {
         this.timeLimit = config.timeLimit || 3000;
     }
 
+    getSearchDepth(): number {
+        return this.searchDepth;
+    }
+
     async calculateBestMove(
         board: Board,
         hands: Hands,
@@ -82,8 +39,6 @@ export class AIEngine {
         _moveHistory: Move[],
     ): Promise<Move> {
         this.startTime = Date.now();
-        this.nodesSearched = 0;
-        this.shouldStop = false;
 
         // Generate all legal moves
         const legalMoves = this.generateAllLegalMoves(board, hands, currentPlayer);
@@ -106,146 +61,42 @@ export class AIEngine {
             return move;
         }
 
-        // Use minimax with alpha-beta pruning
-        let bestMove = legalMoves[0];
-        let bestScore = Number.NEGATIVE_INFINITY;
-        const pv: Move[] = [];
-
-        for (const move of legalMoves) {
-            if (this.shouldStop || Date.now() - this.startTime > this.timeLimit) break;
-
-            const newBoard = applyMove(board, hands, currentPlayer, move);
-            const score = -this.minimax(
-                newBoard.board,
-                newBoard.hands,
-                currentPlayer === "black" ? "white" : "black",
-                this.searchDepth - 1,
-                Number.NEGATIVE_INFINITY,
-                -bestScore,
-            );
-
-            if (score > bestScore) {
-                bestScore = score;
-                bestMove = move;
-                pv[0] = move;
-            }
-        }
-
-        this.lastEvaluation = {
-            score: bestScore,
-            depth: this.searchDepth,
-            pv,
-            nodes: this.nodesSearched,
-            time: Date.now() - this.startTime,
+        // Use iterative deepening search for better move ordering and time management
+        const searchOptions = {
+            maxDepth: this.searchDepth,
+            timeLimit: this.timeLimit,
+            evaluate: (b: Board, h: Hands, p: Player) => {
+                const evaluation = advancedEvaluatePosition(b, h, p);
+                return evaluation.total;
+            },
+            generateMoves: (b: Board, h: Hands, p: Player) => this.generateAllLegalMoves(b, h, p),
         };
 
-        return bestMove;
-    }
+        const searchResult = await this.iterativeSearch.search(
+            board,
+            hands,
+            currentPlayer,
+            legalMoves,
+            searchOptions,
+        );
 
-    private minimax(
-        board: Board,
-        hands: Hands,
-        player: Player,
-        depth: number,
-        alpha: number,
-        beta: number,
-    ): number {
-        this.nodesSearched++;
+        this.lastEvaluation = {
+            score: searchResult.score,
+            depth: searchResult.depth,
+            pv: searchResult.pv,
+            nodes: searchResult.nodes,
+            time: searchResult.time,
+        };
 
-        // Time limit check
-        if (this.shouldStop || Date.now() - this.startTime > this.timeLimit) {
-            return this.evaluatePosition(board, hands, player).score;
-        }
-
-        // Terminal node evaluation
-        if (depth === 0) {
-            return this.evaluatePosition(board, hands, player).score;
-        }
-
-        // Check for checkmate
-        if (isCheckmate(board, hands, player)) {
-            return -100000 + (this.searchDepth - depth); // Prefer faster checkmates
-        }
-
-        // Generate moves
-        const legalMoves = this.generateAllLegalMoves(board, hands, player);
-        if (legalMoves.length === 0) {
-            return 0; // Stalemate
-        }
-
-        // Search moves
-        let maxScore = Number.NEGATIVE_INFINITY;
-        let currentAlpha = alpha;
-        for (const move of legalMoves) {
-            if (currentAlpha >= beta) break; // Alpha-beta cutoff
-
-            const newBoard = applyMove(board, hands, player, move);
-            const score = -this.minimax(
-                newBoard.board,
-                newBoard.hands,
-                player === "black" ? "white" : "black",
-                depth - 1,
-                -beta,
-                -currentAlpha,
-            );
-
-            maxScore = Math.max(maxScore, score);
-            currentAlpha = Math.max(currentAlpha, score);
-        }
-
-        return maxScore;
+        return searchResult.bestMove;
     }
 
     evaluatePosition(board: Board, hands: Hands, player: Player): PositionEvaluation {
-        let score = 0;
-
-        // Material evaluation
-        for (const [square, piece] of Object.entries(board)) {
-            if (piece) {
-                const value = this.getPieceValue(piece);
-                const positionBonus = this.getPositionBonus(piece, square as SquareKey);
-                const totalValue = value + positionBonus;
-
-                if (piece.owner === player) {
-                    score += totalValue;
-                } else {
-                    score -= totalValue;
-                }
-            }
-        }
-
-        // Hand pieces evaluation
-        const handPieces: PieceType[] = [
-            "pawn",
-            "lance",
-            "knight",
-            "silver",
-            "gold",
-            "bishop",
-            "rook",
-        ];
-        for (const pieceType of handPieces) {
-            const blackCount = hands.black[pieceType] || 0;
-            const whiteCount = hands.white[pieceType] || 0;
-            const pieceValue = PIECE_VALUES[pieceType] * 0.9; // Hand pieces slightly less valuable
-
-            if (player === "black") {
-                score += blackCount * pieceValue;
-                score -= whiteCount * pieceValue;
-            } else {
-                score += whiteCount * pieceValue;
-                score -= blackCount * pieceValue;
-            }
-        }
-
-        // King safety bonus
-        const inCheck = isInCheck(board, player);
-        if (inCheck) {
-            score -= 50; // Penalty for being in check
-        }
+        // Use advanced evaluation function
+        const evaluation = advancedEvaluatePosition(board, hands, player);
 
         return {
-            score,
+            score: evaluation.total,
             depth: 0,
             pv: [],
             nodes: 0,
@@ -253,34 +104,7 @@ export class AIEngine {
         };
     }
 
-    private getPieceValue(piece: Piece): number {
-        const baseValue = PIECE_VALUES[piece.type];
-        const promotionBonus = piece.promoted ? PROMOTION_BONUS[piece.type] : 0;
-        return baseValue + promotionBonus;
-    }
-
-    private getPositionBonus(piece: Piece, square: SquareKey): number {
-        // Simple position evaluation for pawns
-        if (piece.type === "pawn" && !piece.promoted) {
-            const row = Number.parseInt(square[0]);
-            const col = Number.parseInt(square[1]);
-            const index = (row - 1) * 9 + (col - 1);
-
-            // Flip table for white pieces
-            const tableIndex = piece.owner === "black" ? index : 80 - index;
-            return PAWN_TABLE[tableIndex] || 0;
-        }
-
-        // Central control bonus for other pieces
-        const row = Number.parseInt(square[0]);
-        const col = Number.parseInt(square[1]);
-        const centerDistance = Math.abs(row - 5) + Math.abs(col - 5);
-        const centralBonus = Math.max(0, 4 - centerDistance) * 5;
-
-        return centralBonus;
-    }
-
-    private generateAllLegalMoves(board: Board, hands: Hands, player: Player): Move[] {
+    generateAllLegalMoves(board: Board, hands: Hands, player: Player): Move[] {
         const moves: Move[] = [];
 
         // Board moves
@@ -375,7 +199,7 @@ export class AIEngine {
     }
 
     stop(): void {
-        this.shouldStop = true;
+        this.iterativeSearch.stop();
     }
 
     getLastEvaluation(): PositionEvaluation {

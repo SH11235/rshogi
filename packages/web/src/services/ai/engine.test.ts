@@ -36,8 +36,8 @@ describe("AIEngine", () => {
         const beginnerEngine = new AIEngine("beginner");
         const expertEngine = new AIEngine("expert");
 
-        // Use private property access for testing
-        expect((beginnerEngine as any).searchDepth).toBe(2);
-        expect((expertEngine as any).searchDepth).toBe(8);
+        // Use getter method for testing
+        expect(beginnerEngine.getSearchDepth()).toBe(2);
+        expect(expertEngine.getSearchDepth()).toBe(8);
     });
 });

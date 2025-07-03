@@ -288,6 +288,41 @@ function isValidBoard(board: unknown): board is Board {
 - Test race conditions
 - Verify cleanup on unmount
 
+## AI Engine Architecture
+
+### Search Algorithm Implementation
+The AI uses an advanced search system with the following components:
+
+#### Iterative Deepening Search (`services/ai/search.ts`)
+- Gradually increases search depth to make best use of available time
+- Maintains principal variation (PV) for move ordering
+- Uses killer move heuristic to remember good moves
+- Implements transposition table for position caching
+
+#### Move Ordering Optimization
+Priority order for move exploration:
+1. Principal Variation (PV) move - best move from previous iteration
+2. Killer moves - moves that caused beta cutoffs at same depth
+3. Capture moves - ordered by MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
+4. Promotion moves - prioritize piece promotions
+5. Check moves - moves that give check
+6. Central moves - moves toward the center
+
+#### Evaluation Function (`services/ai/evaluation.ts`)
+Comprehensive position evaluation considering:
+- **Material balance**: Traditional piece values (Pawn=100, Rook=1040, etc.)
+- **Piece-square tables**: Position-specific bonuses for each piece type
+- **King safety**: Evaluates defender pieces, checks, and enemy attacks
+- **Piece mobility**: Number of legal moves available
+- **Piece coordination**: Multiple pieces controlling same squares
+- **Promotion bonuses**: Additional value for promoted pieces
+
+### Performance Optimizations
+- **Transposition Table**: Caches evaluated positions to avoid redundant calculations
+- **Alpha-Beta Pruning**: Eliminates branches that cannot affect the final result
+- **Time Management**: Uses iterative deepening to return best move within time limit
+- **WebWorker Integration**: Runs in background thread to keep UI responsive
+
 ## Additional Documentation
 
 For detailed references to reduce token usage, see:

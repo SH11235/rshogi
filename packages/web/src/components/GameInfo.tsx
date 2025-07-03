@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import { useGameStore } from "@/stores/gameStore";
 import { useState } from "react";
 import type { GameStatus, Move, Player } from "shogi-core";
+import { AIGuideDialog } from "./AIGuideDialog";
 import { DrawOfferDialog } from "./DrawOfferDialog";
 import { KeyboardHelp } from "./KeyboardHelp";
 import { TimerDisplay } from "./TimerDisplay";
@@ -60,6 +61,7 @@ export function GameInfo({
     const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
     const [isResignDialogOpen, setIsResignDialogOpen] = useState(false);
     const [isTimerSettingsOpen, setIsTimerSettingsOpen] = useState(false);
+    const [isAIGuideOpen, setIsAIGuideOpen] = useState(false);
     const timer = useGameStore((state) => state.timer);
     const pauseTimer = useGameStore((state) => state.pauseTimer);
     const resumeTimer = useGameStore((state) => state.resumeTimer);
@@ -302,6 +304,20 @@ export function GameInfo({
             {/* ヘルプ・タイマーボタン */}
             <div className="mb-3 flex gap-2 justify-center">
                 <KeyboardHelp />
+                {/* AIガイドボタン */}
+                <button
+                    type="button"
+                    onClick={() => setIsAIGuideOpen(true)}
+                    className={cn(
+                        "p-2 rounded-lg transition-colors",
+                        "touch-manipulation active:scale-95",
+                        "bg-purple-100 hover:bg-purple-200 text-purple-700",
+                        "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500",
+                    )}
+                    title="AI対戦ガイド"
+                >
+                    🤖
+                </button>
                 {!timer.config.mode && gameMode !== "review" && (
                     <button
                         type="button"
@@ -478,6 +494,9 @@ export function GameInfo({
                 onOpenChange={setIsTimerSettingsOpen}
                 isGameInProgress={hasMovesPlayed && !isGameOver}
             />
+
+            {/* AIガイドダイアログ */}
+            <AIGuideDialog open={isAIGuideOpen} onOpenChange={setIsAIGuideOpen} />
         </div>
     );
 }
