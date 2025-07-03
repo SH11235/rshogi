@@ -63,11 +63,13 @@ export interface DrawOfferMessage extends GameMessage {
 export interface TimerConfigMessage extends GameMessage {
     type: "timer_config";
     data: {
-        mode: "basic" | "fischer" | "perMove" | null;
+        mode: "basic" | "fischer" | "perMove" | "consideration" | null;
         basicTime: number;
         byoyomiTime: number;
         fischerIncrement: number;
         perMoveLimit: number;
+        considerationTime: number;
+        considerationCount: number;
     };
 }
 

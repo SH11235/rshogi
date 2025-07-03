@@ -1,5 +1,5 @@
 // Timer mode types
-export type TimerMode = "basic" | "fischer" | "perMove";
+export type TimerMode = "basic" | "fischer" | "perMove" | "consideration";
 
 // Timer configuration
 export interface TimerConfig {
@@ -8,10 +8,18 @@ export interface TimerConfig {
     byoyomiTime: number; // seconds
     fischerIncrement: number; // seconds
     perMoveLimit: number; // seconds
+    considerationTime: number; // seconds per consideration
+    considerationCount: number; // number of considerations
 }
 
 // Timer preset keys
-export type TimerPresetKey = "rapid10" | "normal30" | "fischer10plus30" | "perMove1min" | "custom";
+export type TimerPresetKey =
+    | "rapid10"
+    | "normal30"
+    | "fischer10plus30"
+    | "perMove1min"
+    | "consideration30"
+    | "custom";
 
 // Timer presets
 export const TIMER_PRESETS: Record<TimerPresetKey, TimerConfig> = {
@@ -21,6 +29,8 @@ export const TIMER_PRESETS: Record<TimerPresetKey, TimerConfig> = {
         byoyomiTime: 30, // 30 seconds
         fischerIncrement: 0,
         perMoveLimit: 0,
+        considerationTime: 0,
+        considerationCount: 0,
     },
     normal30: {
         mode: "basic",
@@ -28,6 +38,8 @@ export const TIMER_PRESETS: Record<TimerPresetKey, TimerConfig> = {
         byoyomiTime: 60, // 60 seconds
         fischerIncrement: 0,
         perMoveLimit: 0,
+        considerationTime: 0,
+        considerationCount: 0,
     },
     fischer10plus30: {
         mode: "fischer",
@@ -35,6 +47,8 @@ export const TIMER_PRESETS: Record<TimerPresetKey, TimerConfig> = {
         byoyomiTime: 0,
         fischerIncrement: 30, // 30 seconds
         perMoveLimit: 0,
+        considerationTime: 0,
+        considerationCount: 0,
     },
     perMove1min: {
         mode: "perMove",
@@ -42,6 +56,17 @@ export const TIMER_PRESETS: Record<TimerPresetKey, TimerConfig> = {
         byoyomiTime: 0,
         fischerIncrement: 0,
         perMoveLimit: 60, // 1 minute
+        considerationTime: 0,
+        considerationCount: 0,
+    },
+    consideration30: {
+        mode: "consideration",
+        basicTime: 1800, // 30 minutes
+        byoyomiTime: 60, // 60 seconds
+        fischerIncrement: 0,
+        perMoveLimit: 0,
+        considerationTime: 60, // 1 minute per consideration
+        considerationCount: 5, // 5 considerations
     },
     custom: {
         mode: null,
@@ -49,6 +74,8 @@ export const TIMER_PRESETS: Record<TimerPresetKey, TimerConfig> = {
         byoyomiTime: 0,
         fischerIncrement: 0,
         perMoveLimit: 0,
+        considerationTime: 0,
+        considerationCount: 0,
     },
 };
 
@@ -61,6 +88,10 @@ export interface TimerState {
     whiteTime: number; // milliseconds
     blackInByoyomi: boolean;
     whiteInByoyomi: boolean;
+    blackConsiderationsRemaining: number;
+    whiteConsiderationsRemaining: number;
+    isUsingConsideration: boolean;
+    considerationStartTime: number | null;
     activePlayer: "black" | "white" | null;
     isPaused: boolean;
     lastTickTime: number;
@@ -80,6 +111,8 @@ export interface TimerActions {
     resetTimer: () => void;
     tick: () => void;
     updateWarningLevels: () => void;
+    useConsideration: () => void;
+    cancelConsideration: () => void;
 }
 
 // Helper function to determine warning level
@@ -112,4 +145,9 @@ export function formatTimeWithHours(timeMs: number): string {
 export function formatByoyomiTime(timeMs: number): string {
     const seconds = Math.floor(timeMs / 1000);
     return `秒読み ${seconds}`;
+}
+
+// Format consideration time
+export function formatConsiderationTime(remainingCount: number): string {
+    return `考慮時間 残り${remainingCount}回`;
 }

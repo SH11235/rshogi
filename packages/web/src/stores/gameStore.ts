@@ -315,11 +315,17 @@ function createInitialTimerState(): TimerState {
             byoyomiTime: 0,
             fischerIncrement: 0,
             perMoveLimit: 0,
+            considerationTime: 0,
+            considerationCount: 0,
         },
         blackTime: 0,
         whiteTime: 0,
         blackInByoyomi: false,
         whiteInByoyomi: false,
+        blackConsiderationsRemaining: 0,
+        whiteConsiderationsRemaining: 0,
+        isUsingConsideration: false,
+        considerationStartTime: null,
         activePlayer: null,
         isPaused: false,
         lastTickTime: 0,
@@ -1332,6 +1338,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         const basicTimeMs = config.basicTime * 1000;
         const isPerMove = config.mode === "perMove";
         const perMoveTimeMs = config.perMoveLimit * 1000;
+        const isConsideration = config.mode === "consideration";
 
         set({
             timer: {
@@ -1340,6 +1347,10 @@ export const useGameStore = create<GameState>((set, get) => ({
                 whiteTime: isPerMove ? perMoveTimeMs : basicTimeMs,
                 blackInByoyomi: false,
                 whiteInByoyomi: false,
+                blackConsiderationsRemaining: isConsideration ? config.considerationCount : 0,
+                whiteConsiderationsRemaining: isConsideration ? config.considerationCount : 0,
+                isUsingConsideration: false,
+                considerationStartTime: null,
                 activePlayer: null,
                 isPaused: false,
                 lastTickTime: Date.now(),
@@ -1361,6 +1372,8 @@ export const useGameStore = create<GameState>((set, get) => ({
                     byoyomiTime: config.byoyomiTime,
                     fischerIncrement: config.fischerIncrement,
                     perMoveLimit: config.perMoveLimit,
+                    considerationTime: config.considerationTime,
+                    considerationCount: config.considerationCount,
                 },
                 timestamp: Date.now(),
                 playerId: webrtcConnection.getConnectionInfo().peerId,
@@ -1463,14 +1476,39 @@ export const useGameStore = create<GameState>((set, get) => ({
         if (gameStatus !== "playing" && gameStatus !== "check") return;
 
         const now = Date.now();
-        const elapsed = now - timer.lastTickTime;
         const player = timer.activePlayer;
+
+        // 考慮時間使用中の場合
+        if (timer.isUsingConsideration && timer.considerationStartTime) {
+            const considerationElapsed = now - timer.considerationStartTime;
+            const considerationLimitMs = timer.config.considerationTime * 1000;
+
+            if (considerationElapsed >= considerationLimitMs) {
+                // 考慮時間を使い切った
+                set({
+                    timer: {
+                        ...timer,
+                        isUsingConsideration: false,
+                        considerationStartTime: null,
+                        lastTickTime: now,
+                    },
+                });
+            }
+            // 考慮時間中は通常の時間を減らさない
+            return;
+        }
+
+        const elapsed = now - timer.lastTickTime;
         const currentTime = player === "black" ? timer.blackTime : timer.whiteTime;
         const inByoyomi = player === "black" ? timer.blackInByoyomi : timer.whiteInByoyomi;
         const newTime = Math.max(0, currentTime - elapsed);
 
         // 基本時間を使い切った場合
-        if (newTime === 0 && !inByoyomi && timer.config.mode === "basic") {
+        if (
+            newTime === 0 &&
+            !inByoyomi &&
+            (timer.config.mode === "basic" || timer.config.mode === "consideration")
+        ) {
             // 秒読みに移行
             set({
                 timer: {
@@ -1481,7 +1519,10 @@ export const useGameStore = create<GameState>((set, get) => ({
                 },
             });
             get().updateWarningLevels();
-        } else if (newTime === 0 && (inByoyomi || timer.config.mode !== "basic")) {
+        } else if (
+            newTime === 0 &&
+            (inByoyomi || (timer.config.mode !== "basic" && timer.config.mode !== "consideration"))
+        ) {
             // 時間切れ
             const winStatus = player === "black" ? "white_win" : "black_win";
             set({
@@ -1537,6 +1578,54 @@ export const useGameStore = create<GameState>((set, get) => ({
                     ...timer,
                     blackWarningLevel,
                     whiteWarningLevel,
+                },
+            });
+        }
+    },
+
+    useConsideration: () => {
+        const { timer, gameStatus } = get();
+        if (!timer.config.mode || timer.config.mode !== "consideration") return;
+        if (gameStatus !== "playing" && gameStatus !== "check") return;
+        if (timer.isUsingConsideration || !timer.activePlayer) return;
+
+        const player = timer.activePlayer;
+        const considerationsRemaining =
+            player === "black"
+                ? timer.blackConsiderationsRemaining
+                : timer.whiteConsiderationsRemaining;
+
+        if (considerationsRemaining <= 0) return;
+
+        // 考慮時間を開始
+        set({
+            timer: {
+                ...timer,
+                isUsingConsideration: true,
+                considerationStartTime: Date.now(),
+                [`${player}ConsiderationsRemaining`]: considerationsRemaining - 1,
+            },
+        });
+    },
+
+    cancelConsideration: () => {
+        const { timer } = get();
+        if (!timer.isUsingConsideration || !timer.considerationStartTime) return;
+
+        const now = Date.now();
+        const usedTime = now - timer.considerationStartTime;
+        const remainingTime = Math.max(0, timer.config.considerationTime * 1000 - usedTime);
+
+        // 使わなかった時間を持ち時間に追加
+        const player = timer.activePlayer;
+        if (player) {
+            const currentTime = player === "black" ? timer.blackTime : timer.whiteTime;
+            set({
+                timer: {
+                    ...timer,
+                    isUsingConsideration: false,
+                    considerationStartTime: null,
+                    [`${player}Time`]: currentTime + remainingTime,
                 },
             });
         }

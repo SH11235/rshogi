@@ -26,6 +26,12 @@ export function TimeControlSettings({ onClose }: TimeControlSettingsProps) {
     const [byoyomiTime, setByoyomiTime] = useState(timer.config.byoyomiTime || 30); // 30 seconds default
     const [fischerIncrement, setFischerIncrement] = useState(timer.config.fischerIncrement || 10); // 10 seconds default
     const [perMoveLimit, setPerMoveLimit] = useState(timer.config.perMoveLimit || 60); // 60 seconds default
+    const [considerationTime, setConsiderationTime] = useState(
+        timer.config.considerationTime || 60,
+    ); // 60 seconds default
+    const [considerationCount, setConsiderationCount] = useState(
+        timer.config.considerationCount || 5,
+    ); // 5 times default
 
     const handleApply = () => {
         if (!mode) return;
@@ -36,6 +42,8 @@ export function TimeControlSettings({ onClose }: TimeControlSettingsProps) {
             byoyomiTime,
             fischerIncrement,
             perMoveLimit,
+            considerationTime,
+            considerationCount,
         };
 
         initializeTimer(config);
@@ -64,6 +72,7 @@ export function TimeControlSettings({ onClose }: TimeControlSettingsProps) {
                         <SelectItem value="basic">持ち時間 + 秒読み</SelectItem>
                         <SelectItem value="fischer">フィッシャールール</SelectItem>
                         <SelectItem value="perMove">一手制限</SelectItem>
+                        <SelectItem value="consideration">考慮時間制</SelectItem>
                     </SelectContent>
                 </Select>
             </Card>
@@ -186,6 +195,91 @@ export function TimeControlSettings({ onClose }: TimeControlSettingsProps) {
 
                     <div className="text-sm text-gray-600">
                         各手番ごとに{perMoveLimit}秒の制限時間が設定されます
+                    </div>
+                </>
+            )}
+
+            {mode === "consideration" && (
+                <>
+                    <Card className="p-4 space-y-4">
+                        <div>
+                            <Label htmlFor="consideration-basic-time">持ち時間 (分)</Label>
+                            <div className="flex items-center gap-2">
+                                <Input
+                                    id="consideration-basic-time"
+                                    type="number"
+                                    min="0"
+                                    max="180"
+                                    value={Math.floor(basicTime / 60)}
+                                    onChange={(e) =>
+                                        setBasicTime(Number.parseInt(e.target.value) * 60)
+                                    }
+                                    className="w-24"
+                                />
+                                <span className="text-sm text-gray-600">分</span>
+                                <span className="text-sm text-gray-500">
+                                    ({formatTime(basicTime)})
+                                </span>
+                            </div>
+                        </div>
+                        <div>
+                            <Label htmlFor="consideration-byoyomi">秒読み (秒)</Label>
+                            <div className="flex items-center gap-2">
+                                <Input
+                                    id="consideration-byoyomi"
+                                    type="number"
+                                    min="10"
+                                    max="60"
+                                    step="10"
+                                    value={byoyomiTime}
+                                    onChange={(e) =>
+                                        setByoyomiTime(Number.parseInt(e.target.value))
+                                    }
+                                    className="w-24"
+                                />
+                                <span className="text-sm text-gray-600">秒</span>
+                            </div>
+                        </div>
+                        <div>
+                            <Label htmlFor="consideration-time">考慮時間 (秒)</Label>
+                            <div className="flex items-center gap-2">
+                                <Input
+                                    id="consideration-time"
+                                    type="number"
+                                    min="30"
+                                    max="300"
+                                    step="30"
+                                    value={considerationTime}
+                                    onChange={(e) =>
+                                        setConsiderationTime(Number.parseInt(e.target.value))
+                                    }
+                                    className="w-24"
+                                />
+                                <span className="text-sm text-gray-600">秒/回</span>
+                            </div>
+                        </div>
+                        <div>
+                            <Label htmlFor="consideration-count">考慮時間回数</Label>
+                            <div className="flex items-center gap-2">
+                                <Input
+                                    id="consideration-count"
+                                    type="number"
+                                    min="1"
+                                    max="10"
+                                    value={considerationCount}
+                                    onChange={(e) =>
+                                        setConsiderationCount(Number.parseInt(e.target.value))
+                                    }
+                                    className="w-24"
+                                />
+                                <span className="text-sm text-gray-600">回</span>
+                            </div>
+                        </div>
+                    </Card>
+
+                    <div className="text-sm text-gray-600">
+                        持ち時間{Math.floor(basicTime / 60)}分 + 秒読み{byoyomiTime}秒、 考慮時間
+                        {considerationTime}秒×{considerationCount}回
                     </div>
                 </>
             )}

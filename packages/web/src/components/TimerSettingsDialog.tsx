@@ -67,6 +67,8 @@ export function TimerSettingsDialog({
     const [byoyomiTime, setByoyomiTime] = useState(60); // 1分
     const [fischerIncrement, setFischerIncrement] = useState(30); // 30秒
     const [perMoveLimit, setPerMoveLimit] = useState(60); // 1分
+    const [considerationTime, setConsiderationTime] = useState(60); // 1分
+    const [considerationCount, setConsiderationCount] = useState(5); // 5回
     const [selectedPreset, setSelectedPreset] = useState<TimerPresetKey | null>(null);
 
     const handlePresetSelect = (presetKey: TimerPresetKey) => {
@@ -79,6 +81,8 @@ export function TimerSettingsDialog({
         setByoyomiTime(preset.byoyomiTime);
         setFischerIncrement(preset.fischerIncrement);
         setPerMoveLimit(preset.perMoveLimit);
+        setConsiderationTime(preset.considerationTime);
+        setConsiderationCount(preset.considerationCount);
     };
 
     const handleModeChange = (newMode: TimerMode) => {
@@ -93,6 +97,8 @@ export function TimerSettingsDialog({
             byoyomiTime,
             fischerIncrement,
             perMoveLimit,
+            considerationTime,
+            considerationCount,
         };
 
         initializeTimer(config);
@@ -157,6 +163,16 @@ export function TimerSettingsDialog({
                             >
                                 一手1分
                             </Button>
+                            <Button
+                                type="button"
+                                variant={
+                                    selectedPreset === "consideration30" ? "default" : "outline"
+                                }
+                                size="sm"
+                                onClick={() => handlePresetSelect("consideration30")}
+                            >
+                                考慮時間制30分
+                            </Button>
                         </div>
                     </div>
 
@@ -185,6 +201,15 @@ export function TimerSettingsDialog({
                                     <RadioGroupItem value="perMove" id="perMove" />
                                     <Label htmlFor="perMove" className="font-normal cursor-pointer">
                                         一手制限
+                                    </Label>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                    <RadioGroupItem value="consideration" id="consideration" />
+                                    <Label
+                                        htmlFor="consideration"
+                                        className="font-normal cursor-pointer"
+                                    >
+                                        考慮時間制
                                     </Label>
                                 </div>
                             </div>

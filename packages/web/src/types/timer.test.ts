@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { formatByoyomiTime, formatTimeWithHours, getWarningLevel } from "./timer";
+import {
+    formatByoyomiTime,
+    formatConsiderationTime,
+    formatTimeWithHours,
+    getWarningLevel,
+} from "./timer";
 
 describe("Timer Helper Functions", () => {
     describe("getWarningLevel", () => {
@@ -55,6 +60,15 @@ describe("Timer Helper Functions", () => {
         it("should truncate milliseconds", () => {
             expect(formatByoyomiTime(1500)).toBe("秒読み 1");
             expect(formatByoyomiTime(10999)).toBe("秒読み 10");
+        });
+    });
+
+    describe("formatConsiderationTime", () => {
+        it("should format consideration count correctly", () => {
+            expect(formatConsiderationTime(0)).toBe("考慮時間 残り0回");
+            expect(formatConsiderationTime(1)).toBe("考慮時間 残り1回");
+            expect(formatConsiderationTime(5)).toBe("考慮時間 残り5回");
+            expect(formatConsiderationTime(10)).toBe("考慮時間 残り10回");
         });
     });
 });
