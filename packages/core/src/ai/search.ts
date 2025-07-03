@@ -1,6 +1,10 @@
-import type { Board, Hands, Move, Player } from "shogi-core";
-import { applyMove, isCheckmate, isInCheck } from "shogi-core";
-import type { SearchOptions, SearchResult, TranspositionEntry } from "../../types/ai";
+import type { Board } from "../domain/model/board";
+import type { Move } from "../domain/model/move";
+import type { Player } from "../domain/model/piece";
+import { isCheckmate, isInCheck } from "../domain/service/checkmate";
+import type { Hands } from "../domain/service/moveService";
+import { applyMove } from "../domain/service/moveService";
+import type { SearchOptions, SearchResult, TranspositionEntry } from "../types/ai";
 
 // 置換表（Transposition Table）
 export class TranspositionTable {

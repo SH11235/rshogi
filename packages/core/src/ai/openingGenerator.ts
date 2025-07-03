@@ -1,5 +1,10 @@
-import type { Board, Column, Hands, Move, Piece, Row } from "shogi-core";
-import { applyMove, initialHands, modernInitialBoard } from "shogi-core";
+import { modernInitialBoard } from "../domain/initialBoard";
+import type { Board } from "../domain/model/board";
+import type { Move } from "../domain/model/move";
+import type { Piece } from "../domain/model/piece";
+import type { Column, Row } from "../domain/model/square";
+import type { Hands } from "../domain/service/moveService";
+import { applyMove, initialHands } from "../domain/service/moveService";
 import type { OpeningEntry, OpeningMove } from "./openingBook";
 
 // 型安全な行・列変換ヘルパー

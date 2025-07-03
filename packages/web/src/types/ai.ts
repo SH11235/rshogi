@@ -1,53 +1,17 @@
-import type { Board, Hands, Move, Player } from "shogi-core";
+import type { AIDifficulty, Board, Hands, Move, Player, PositionEvaluation } from "shogi-core";
 
-// AI difficulty levels
-export type AIDifficulty = "beginner" | "intermediate" | "advanced" | "expert";
+// Re-export core AI types for backward compatibility
+export type {
+    AIDifficulty,
+    PositionEvaluation,
+    AIPlayer,
+    AIConfig,
+    SearchOptions,
+    SearchResult,
+    TranspositionEntry,
+} from "shogi-core";
 
-// AI configuration
-export interface AIConfig {
-    difficulty: AIDifficulty;
-    searchDepth: number;
-    timeLimit: number; // milliseconds
-    useOpeningBook: boolean;
-    useEndgameDatabase: boolean;
-}
-
-// Default configurations for each difficulty
-export const AI_DIFFICULTY_CONFIGS: Record<AIDifficulty, Partial<AIConfig>> = {
-    beginner: {
-        searchDepth: 2,
-        timeLimit: 1000,
-        useOpeningBook: false,
-        useEndgameDatabase: false,
-    },
-    intermediate: {
-        searchDepth: 4,
-        timeLimit: 3000,
-        useOpeningBook: true,
-        useEndgameDatabase: false,
-    },
-    advanced: {
-        searchDepth: 6,
-        timeLimit: 5000,
-        useOpeningBook: true,
-        useEndgameDatabase: true,
-    },
-    expert: {
-        searchDepth: 8,
-        timeLimit: 10000,
-        useOpeningBook: true,
-        useEndgameDatabase: true,
-    },
-};
-
-// Position evaluation result
-export interface PositionEvaluation {
-    score: number; // centipawns (100 = 1 pawn advantage)
-    depth: number; // search depth achieved
-    pv: Move[]; // principal variation (best line)
-    nodes: number; // nodes searched
-    time: number; // time taken in ms
-}
+export { AI_DIFFICULTY_CONFIGS } from "shogi-core";
 
 // Worker message types
 export interface AIRequest {
@@ -120,15 +84,6 @@ export interface ErrorResponse extends AIResponse {
     error: string;
 }
 
-// AI player interface for game integration
-export interface AIPlayer {
-    id: string;
-    name: string;
-    difficulty: AIDifficulty;
-    isThinking: boolean;
-    lastEvaluation?: PositionEvaluation;
-}
-
 // Type guards
 export function isMoveCalculatedResponse(response: AIResponse): response is MoveCalculatedResponse {
     return response.type === "move_calculated";
@@ -142,28 +97,4 @@ export function isPositionEvaluatedResponse(
 
 export function isErrorResponse(response: AIResponse): response is ErrorResponse {
     return response.type === "error";
-}
-
-// Search related types
-export interface SearchOptions {
-    maxDepth: number;
-    timeLimit: number;
-    evaluate: (board: Board, hands: Hands, player: Player) => number;
-    generateMoves: (board: Board, hands: Hands, player: Player) => Move[];
-}
-
-export interface SearchResult {
-    bestMove: Move;
-    score: number;
-    depth: number;
-    pv: Move[];
-    nodes: number;
-    time: number;
-}
-
-export interface TranspositionEntry {
-    score: number;
-    depth: number;
-    type: "exact" | "lowerbound" | "upperbound";
-    bestMove?: Move;
 }

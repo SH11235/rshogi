@@ -41,3 +41,14 @@ export * from "./utils/i18n";
 
 // Domain utils
 export * from "./domain/utils/notation";
+
+// AI types
+export * from "./types/ai";
+
+// AI modules
+export * from "./ai/engine";
+export * from "./ai/evaluation";
+export * from "./ai/search";
+export * from "./ai/openingBook";
+export * from "./ai/endgameDatabase";
+export * from "./ai/openingGenerator";

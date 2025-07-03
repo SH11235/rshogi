@@ -1,11 +1,12 @@
-import type { Board, Column, Hands, Move, PieceType, Player, Row } from "shogi-core";
-import {
-    applyMove,
-    generateLegalDropMovesForPiece,
-    generateLegalMoves,
-    isCheckmate,
-    isInCheck,
-} from "shogi-core";
+import type { Board } from "../domain/model/board";
+import type { Move } from "../domain/model/move";
+import type { Piece, PieceType, Player } from "../domain/model/piece";
+import type { Column, Row } from "../domain/model/square";
+import { isCheckmate, isInCheck } from "../domain/service/checkmate";
+import { generateAllDropMoves } from "../domain/service/generateDropMoves";
+import { generateLegalMoves } from "../domain/service/legalMoves";
+import type { Hands } from "../domain/service/moveService";
+import { applyMove } from "../domain/service/moveService";
 
 // 終盤データベースのエントリー
 export interface EndgameEntry {
@@ -117,7 +118,7 @@ export class EndgameDatabase {
         // 飛車で王手しているか確認
         let rookChecking = false;
         for (const [_square, piece] of Object.entries(board)) {
-            if (piece && piece.owner === player && piece.type === "rook") {
+            if (piece && (piece as Piece).owner === player && (piece as Piece).type === "rook") {
                 rookChecking = true;
                 break;
             }
@@ -188,8 +189,10 @@ export class EndgameDatabase {
             const piece = board[`${square.row}${square.column}` as keyof Board];
             if (
                 piece &&
-                piece.owner === player &&
-                (piece.type === "gold" || piece.type === "silver" || piece.promoted)
+                (piece as Piece).owner === player &&
+                ((piece as Piece).type === "gold" ||
+                    (piece as Piece).type === "silver" ||
+                    (piece as Piece).promoted)
             ) {
                 goldSilverCount++;
             }
@@ -266,11 +269,11 @@ export class EndgameDatabase {
 
         // 盤上の駒
         for (const [_square, piece] of Object.entries(board)) {
-            if (piece && piece.type !== "king" && piece.type !== "gyoku") {
-                const value = pieceValues[piece.type] || 0;
-                const promotedBonus = piece.promoted ? value * 0.5 : 0;
+            if (piece && (piece as Piece).type !== "king" && (piece as Piece).type !== "gyoku") {
+                const value = pieceValues[(piece as Piece).type] || 0;
+                const promotedBonus = (piece as Piece).promoted ? value * 0.5 : 0;
 
-                if (piece.owner === player) {
+                if ((piece as Piece).owner === player) {
                     materialDiff += value + promotedBonus;
                 } else {
                     materialDiff -= value + promotedBonus;
@@ -303,8 +306,8 @@ export class EndgameDatabase {
         for (const [square, piece] of Object.entries(board)) {
             if (
                 piece &&
-                piece.owner === player &&
-                (piece.type === "king" || piece.type === "gyoku")
+                (piece as Piece).owner === player &&
+                ((piece as Piece).type === "king" || (piece as Piece).type === "gyoku")
             ) {
                 const row = Number.parseInt(square[0]);
                 const column = Number.parseInt(square[1]);
@@ -368,7 +371,7 @@ export class EndgameDatabase {
 
         // 盤上の駒の移動
         for (const [fromSquare, piece] of Object.entries(board)) {
-            if (piece && piece.owner === player) {
+            if (piece && (piece as Piece).owner === player) {
                 const square = {
                     row: Number.parseInt(fromSquare[0]) as Row,
                     column: Number.parseInt(fromSquare[1]) as Column,
@@ -402,19 +405,10 @@ export class EndgameDatabase {
         for (const pieceType of dropPieces) {
             const count = hands[player][pieceType] || 0;
             if (count > 0) {
-                const dropSquares = generateLegalDropMovesForPiece(board, hands, pieceType, player);
-                for (const toSquare of dropSquares) {
-                    const dropMove: Move = {
-                        type: "drop",
-                        to: toSquare,
-                        piece: {
-                            type: pieceType,
-                            owner: player,
-                            promoted: false,
-                        },
-                    };
-                    moves.push(dropMove);
-                }
+                // generateAllDropMovesで特定の駒のdrop movesのみをフィルタリング
+                const allDropMoves = generateAllDropMoves(board, hands, player);
+                const pieceDrps = allDropMoves.filter((m) => m.piece.type === pieceType);
+                moves.push(...pieceDrps);
             }
         }
 

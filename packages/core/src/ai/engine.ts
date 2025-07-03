@@ -1,11 +1,15 @@
-import type { Board, Column, Hands, Move, PieceType, Player, Row } from "shogi-core";
-import { generateLegalDropMovesForPiece, generateLegalMoves } from "shogi-core";
-import type { AIDifficulty, PositionEvaluation } from "../../types/ai";
-import { AI_DIFFICULTY_CONFIGS } from "../../types/ai";
+import type { Board } from "../domain/model/board";
+import type { Move } from "../domain/model/move";
+import type { Piece, PieceType, Player } from "../domain/model/piece";
+import type { Column, Row } from "../domain/model/square";
+import { generateAllDropMoves } from "../domain/service/generateDropMoves";
+import { generateLegalMoves } from "../domain/service/legalMoves";
+import type { Hands } from "../domain/service/moveService";
+import type { AIDifficulty, PositionEvaluation } from "../types/ai";
+import { AI_DIFFICULTY_CONFIGS } from "../types/ai";
 import { EndgameDatabase } from "./endgameDatabase";
 import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
-import { OpeningBook } from "./openingBook";
-import { generateMainOpenings } from "./openingGenerator";
+import { OpeningBook, type OpeningEntry } from "./openingBook";
 import { IterativeDeepeningSearch } from "./search";
 
 export class AIEngine {
@@ -29,10 +33,6 @@ export class AIEngine {
 
         // 定跡データベースを初期化
         this.openingBook = new OpeningBook();
-        if (this.useOpeningBook) {
-            const openingData = generateMainOpenings();
-            this.openingBook.loadFromData(openingData);
-        }
 
         // 終盤データベースを初期化
         this.endgameDatabase = new EndgameDatabase();
@@ -169,7 +169,7 @@ export class AIEngine {
 
         // Board moves
         for (const [fromSquare, piece] of Object.entries(board)) {
-            if (piece && piece.owner === player) {
+            if (piece && (piece as Piece).owner === player) {
                 const square = {
                     row: Number.parseInt(fromSquare[0]) as Row,
                     column: Number.parseInt(fromSquare[1]) as Column,
@@ -189,18 +189,20 @@ export class AIEngine {
 
                     // Check if promotion is possible
                     if (
-                        (piece.type === "pawn" ||
-                            piece.type === "lance" ||
-                            piece.type === "knight" ||
-                            piece.type === "silver" ||
-                            piece.type === "bishop" ||
-                            piece.type === "rook") &&
-                        !piece.promoted
+                        ((piece as Piece).type === "pawn" ||
+                            (piece as Piece).type === "lance" ||
+                            (piece as Piece).type === "knight" ||
+                            (piece as Piece).type === "silver" ||
+                            (piece as Piece).type === "bishop" ||
+                            (piece as Piece).type === "rook") &&
+                        !(piece as Piece).promoted
                     ) {
                         const canPromoteFrom =
-                            piece.owner === "black" ? square.row <= 3 : square.row >= 7;
+                            (piece as Piece).owner === "black" ? square.row <= 3 : square.row >= 7;
                         const canPromoteTo =
-                            piece.owner === "black" ? toSquare.row <= 3 : toSquare.row >= 7;
+                            (piece as Piece).owner === "black"
+                                ? toSquare.row <= 3
+                                : toSquare.row >= 7;
                         if (canPromoteFrom || canPromoteTo) {
                             const promoteMove: Move = {
                                 type: "move",
@@ -230,20 +232,10 @@ export class AIEngine {
         for (const pieceType of dropPieces) {
             const count = hands[player][pieceType] || 0;
             if (count > 0) {
-                const dropSquares = generateLegalDropMovesForPiece(board, hands, pieceType, player);
-                // Convert squares to drop moves
-                for (const toSquare of dropSquares) {
-                    const dropMove: Move = {
-                        type: "drop",
-                        to: toSquare,
-                        piece: {
-                            type: pieceType,
-                            owner: player,
-                            promoted: false,
-                        },
-                    };
-                    moves.push(dropMove);
-                }
+                // generateAllDropMovesで特定の駒のdrop movesのみをフィルタリング
+                const allDropMoves = generateAllDropMoves(board, hands, player);
+                const pieceDrps = allDropMoves.filter((m) => m.piece.type === pieceType);
+                moves.push(...pieceDrps);
             }
         }
 
@@ -272,5 +264,12 @@ export class AIEngine {
                 time: 0,
             }
         );
+    }
+
+    // 定跡データをロードするメソッドを追加
+    loadOpeningBook(data: OpeningEntry[]): void {
+        if (this.useOpeningBook) {
+            this.openingBook.loadFromData(data);
+        }
     }
 }

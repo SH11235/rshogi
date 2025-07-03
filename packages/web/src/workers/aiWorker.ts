@@ -1,4 +1,4 @@
-import { AIEngine } from "../services/ai/engine";
+import { AIEngine, generateMainOpenings } from "shogi-core";
 import type {
     AIResponse,
     AIWorkerMessage,
@@ -22,6 +22,11 @@ ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => 
             case "initialize": {
                 // Initialize AI engine with specified difficulty
                 engine = new AIEngine(message.difficulty);
+                // Load opening book data for intermediate and above
+                if (message.difficulty !== "beginner") {
+                    const openingData = generateMainOpenings();
+                    engine.loadOpeningBook(openingData);
+                }
                 const response: AIResponse = {
                     type: "initialized",
                     requestId: message.requestId,

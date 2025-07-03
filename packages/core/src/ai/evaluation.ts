@@ -1,5 +1,9 @@
-import type { Board, Hands, Piece, PieceType, Player, Square, SquareKey } from "shogi-core";
-import { generateMoves, isInCheck } from "shogi-core";
+import type { Board } from "../domain/model/board";
+import type { Piece, PieceType, Player } from "../domain/model/piece";
+import type { Square, SquareKey } from "../domain/model/square";
+import { isInCheck } from "../domain/service/checkmate";
+import type { Hands } from "../domain/service/moveService";
+import { generateMoves } from "../domain/service/moveService";
 
 // 駒の基本価値（センチポーン単位）
 export const PIECE_BASE_VALUES: Record<PieceType, number> = {
@@ -95,7 +99,7 @@ export function countAttacks(board: Board, square: Square, player: Player): numb
 
     // 全ての自分の駒からの利きをチェック
     for (const [from, piece] of Object.entries(board)) {
-        if (!piece || piece.owner !== player) continue;
+        if (!piece || (piece as Piece).owner !== player) continue;
 
         const fromSquare = {
             row: Number.parseInt(from[0]) as Square["row"],
@@ -119,7 +123,11 @@ export function evaluateKingSafety(board: Board, player: Player): number {
     // 王の位置を探す
     let kingSquare: Square | null = null;
     for (const [key, piece] of Object.entries(board)) {
-        if (piece && (piece.type === "king" || piece.type === "gyoku") && piece.owner === player) {
+        if (
+            piece &&
+            ((piece as Piece).type === "king" || (piece as Piece).type === "gyoku") &&
+            (piece as Piece).owner === player
+        ) {
             kingSquare = {
                 row: Number.parseInt(key[0]) as Square["row"],
                 column: Number.parseInt(key[1]) as Square["column"],
@@ -153,11 +161,11 @@ export function evaluateKingSafety(board: Board, player: Player): number {
 
         if (r >= 1 && r <= 9 && c >= 1 && c <= 9) {
             const piece = board[`${r}${c}` as SquareKey];
-            if (piece && piece.owner === player) {
+            if (piece && (piece as Piece).owner === player) {
                 // 味方の駒による守り
-                if (piece.type === "gold" || piece.promoted) {
+                if ((piece as Piece).type === "gold" || (piece as Piece).promoted) {
                     safety += 15; // 金と成り駒は良い守り
-                } else if (piece.type === "silver") {
+                } else if ((piece as Piece).type === "silver") {
                     safety += 10;
                 } else {
                     safety += 5;
@@ -179,7 +187,7 @@ export function evaluateMobility(board: Board, player: Player): number {
     let mobility = 0;
 
     for (const [from, piece] of Object.entries(board)) {
-        if (!piece || piece.owner !== player) continue;
+        if (!piece || (piece as Piece).owner !== player) continue;
 
         const fromSquare = {
             row: Number.parseInt(from[0]) as Square["row"],
@@ -189,7 +197,8 @@ export function evaluateMobility(board: Board, player: Player): number {
         const moves = generateMoves(board, fromSquare);
 
         // 駒種別の重み付け
-        const weight = piece.type === "rook" || piece.type === "bishop" ? 2 : 1;
+        const weight =
+            (piece as Piece).type === "rook" || (piece as Piece).type === "bishop" ? 2 : 1;
         mobility += moves.length * weight;
     }
 
@@ -248,11 +257,13 @@ export function evaluatePosition(
     for (const [square, piece] of Object.entries(board)) {
         if (!piece) continue;
 
-        const baseValue = PIECE_BASE_VALUES[piece.type];
-        const promotionBonus = piece.promoted ? PROMOTION_BONUS[piece.type] : 0;
-        const positionBonus = getPositionBonus(piece, square as SquareKey);
+        const baseValue = PIECE_BASE_VALUES[(piece as Piece).type];
+        const promotionBonus = (piece as Piece).promoted
+            ? PROMOTION_BONUS[(piece as Piece).type]
+            : 0;
+        const positionBonus = getPositionBonus(piece as Piece, square as SquareKey);
 
-        if (piece.owner === player) {
+        if ((piece as Piece).owner === player) {
             material += baseValue + promotionBonus;
             position += positionBonus;
         } else {

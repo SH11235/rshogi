@@ -50,3 +50,7 @@ packages/web/src/wasm/
 
 # private memo
 memo/
+
+# Benchmark results
+packages/core/benchmark-results.md
+packages/core/ai-benchmark-*.json

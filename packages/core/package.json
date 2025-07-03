@@ -14,7 +14,8 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "format:check": "biome check .",
-    "benchmark": "tsx src/domain/service/runBenchmark.ts"
+    "benchmark": "tsx src/domain/service/runBenchmark.ts",
+    "benchmark:ai": "tsx benchmarks/run-ai-benchmark.ts"
   },
   "dependencies": {},
   "devDependencies": {

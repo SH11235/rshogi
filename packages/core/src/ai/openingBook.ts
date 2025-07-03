@@ -1,4 +1,7 @@
-import type { Board, Hands, Move, Piece } from "shogi-core";
+import type { Board } from "../domain/model/board";
+import type { Move } from "../domain/model/move";
+import type { Piece } from "../domain/model/piece";
+import type { Hands } from "../domain/service/moveService";
 
 // 定跡エントリーの型定義
 export interface OpeningMove {
