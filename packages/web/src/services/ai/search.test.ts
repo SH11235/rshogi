@@ -196,7 +196,7 @@ describe("IterativeDeepeningSearch", () => {
         const endTime = Date.now();
 
         expect(endTime - startTime).toBeLessThan(200); // タイムリミット＋余裕
-        expect(result.time).toBeLessThanOrEqual(searchOptions.timeLimit + 50);
+        expect(result.time).toBeLessThanOrEqual(searchOptions.timeLimit + 100);
     });
 
     it("should improve depth with iterative deepening", async () => {

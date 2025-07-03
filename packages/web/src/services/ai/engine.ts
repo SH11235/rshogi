@@ -2,7 +2,10 @@ import type { Board, Column, Hands, Move, PieceType, Player, Row } from "shogi-c
 import { generateLegalDropMovesForPiece, generateLegalMoves } from "shogi-core";
 import type { AIDifficulty, PositionEvaluation } from "../../types/ai";
 import { AI_DIFFICULTY_CONFIGS } from "../../types/ai";
+import { EndgameDatabase } from "./endgameDatabase";
 import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
+import { OpeningBook } from "./openingBook";
+import { generateMainOpenings } from "./openingGenerator";
 import { IterativeDeepeningSearch } from "./search";
 
 export class AIEngine {
@@ -12,13 +15,27 @@ export class AIEngine {
     private startTime = 0;
     private lastEvaluation: PositionEvaluation | null = null;
     private iterativeSearch: IterativeDeepeningSearch;
+    private openingBook: OpeningBook;
+    private endgameDatabase: EndgameDatabase;
+    private useOpeningBook: boolean;
 
     constructor(difficulty: AIDifficulty) {
         this.difficulty = difficulty;
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
         this.timeLimit = config.timeLimit || 3000;
+        this.useOpeningBook = config.useOpeningBook || false;
         this.iterativeSearch = new IterativeDeepeningSearch();
+
+        // 定跡データベースを初期化
+        this.openingBook = new OpeningBook();
+        if (this.useOpeningBook) {
+            const openingData = generateMainOpenings();
+            this.openingBook.loadFromData(openingData);
+        }
+
+        // 終盤データベースを初期化
+        this.endgameDatabase = new EndgameDatabase();
     }
 
     setDifficulty(difficulty: AIDifficulty): void {
@@ -26,6 +43,7 @@ export class AIEngine {
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
         this.timeLimit = config.timeLimit || 3000;
+        this.useOpeningBook = config.useOpeningBook || false;
     }
 
     getSearchDepth(): number {
@@ -36,9 +54,44 @@ export class AIEngine {
         board: Board,
         hands: Hands,
         currentPlayer: Player,
-        _moveHistory: Move[],
+        moveHistory: Move[],
     ): Promise<Move> {
         this.startTime = Date.now();
+
+        // 終盤データベースをチェック
+        const endgameEval = this.endgameDatabase.evaluate(board, hands, currentPlayer);
+        if (endgameEval) {
+            // 詰みが見つかった場合
+            if (endgameEval.type === "mate" && endgameEval.movesToMate === 1) {
+                const mateMove = this.endgameDatabase.searchMate(board, hands, currentPlayer, 1);
+                if (mateMove) {
+                    this.lastEvaluation = {
+                        score: endgameEval.score,
+                        depth: 1,
+                        pv: [mateMove],
+                        nodes: 1,
+                        time: Date.now() - this.startTime,
+                    };
+                    return mateMove;
+                }
+            }
+        }
+
+        // 定跡データベースをチェック（序盤のみ）
+        if (this.useOpeningBook && moveHistory.length < 20) {
+            const bookMove = this.openingBook.getMove(board, hands, moveHistory.length);
+            if (bookMove) {
+                // 定跡の手が見つかった場合
+                this.lastEvaluation = {
+                    score: 0, // 定跡は互角と評価
+                    depth: 0,
+                    pv: [bookMove],
+                    nodes: 1,
+                    time: Date.now() - this.startTime,
+                };
+                return bookMove;
+            }
+        }
 
         // Generate all legal moves
         const legalMoves = this.generateAllLegalMoves(board, hands, currentPlayer);
@@ -66,6 +119,13 @@ export class AIEngine {
             maxDepth: this.searchDepth,
             timeLimit: this.timeLimit,
             evaluate: (b: Board, h: Hands, p: Player) => {
+                // 終盤データベースをチェック
+                const endgameEval = this.endgameDatabase.evaluate(b, h, p);
+                if (endgameEval) {
+                    return endgameEval.score;
+                }
+
+                // 通常の評価関数
                 const evaluation = advancedEvaluatePosition(b, h, p);
                 return evaluation.total;
             },

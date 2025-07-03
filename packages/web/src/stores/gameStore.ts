@@ -724,6 +724,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 originalMoveHistory: newOriginalMoveHistory,
                 gameMode: newGameMode,
                 undoStack: [], // 新しい手を指したのでundoStackをクリア
+                isAIThinking: false, // AI思考フラグをリセット
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
@@ -906,6 +907,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                 originalMoveHistory: newOriginalMoveHistory,
                 gameMode: newGameMode,
                 undoStack: [], // 新しい手を指したのでundoStackをクリア
+                isAIThinking: false, // AI思考フラグをリセット
             });
 
             // 駒音を再生（王手・詰みの音を再生してない場合のみ）
