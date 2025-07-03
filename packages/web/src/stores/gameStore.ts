@@ -758,7 +758,11 @@ export const useGameStore = create<GameState>((set, get) => ({
 
             // AI対戦時、人間の手の後にAIに思考させる
             const { gameType, localPlayerColor } = get();
-            if (gameType === "ai" && newStatus === "playing" && nextPlayer !== localPlayerColor) {
+            if (
+                gameType === "ai" &&
+                (newStatus === "playing" || newStatus === "check") &&
+                nextPlayer !== localPlayerColor
+            ) {
                 // 少し遅延を入れてからAIを実行
                 setTimeout(() => {
                     get().executeAIMove();
@@ -999,7 +1003,11 @@ export const useGameStore = create<GameState>((set, get) => ({
 
             // AI対戦時、人間の手の後にAIに思考させる
             const { gameType, localPlayerColor } = get();
-            if (gameType === "ai" && newStatus === "playing" && nextPlayer !== localPlayerColor) {
+            if (
+                gameType === "ai" &&
+                (newStatus === "playing" || newStatus === "check") &&
+                nextPlayer !== localPlayerColor
+            ) {
                 // 少し遅延を入れてからAIを実行
                 setTimeout(() => {
                     get().executeAIMove();
@@ -2564,7 +2572,11 @@ export const useGameStore = create<GameState>((set, get) => ({
     executeAIMove: async () => {
         const { aiPlayer, board, hands, currentPlayer, gameStatus, localPlayerColor } = get();
 
-        if (!aiPlayer || gameStatus !== "playing" || currentPlayer === localPlayerColor) {
+        if (
+            !aiPlayer ||
+            (gameStatus !== "playing" && gameStatus !== "check") ||
+            currentPlayer === localPlayerColor
+        ) {
             return;
         }
 
