@@ -4,7 +4,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -12,6 +14,7 @@
     "test:unit": "vitest run",
     "test:watch": "vitest",
     "lint": "biome check .",
+    "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "format:check": "biome check .",
     "typecheck": "tsc --noEmit && cd benchmarks && tsc --noEmit",
@@ -19,14 +22,19 @@
     "benchmark:ai": "tsx benchmarks/run-ai-benchmark.ts",
     "benchmark:viewer": "node benchmarks/open-viewer.js",
     "benchmark:serve": "cd benchmarks && npx http-server -p 8000 -o viewer.html",
-    "convert-opening-book": "tsx scripts/convertOpeningBook.ts"
+    "convert-opening-book": "tsx scripts/convertOpeningBook.ts",
+    "generate-beginner-openings": "tsx scripts/generateBeginnerOpenings.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "pako": "^2.1.0",
+    "@msgpack/msgpack": "^3.0.0-beta2"
+  },
   "devDependencies": {
-    "typescript": "~5.7.2",
     "@biomejs/biome": "^1.9.4",
-    "vitest": "^3.1.3",
+    "@types/pako": "^2.0.3",
     "happy-dom": "^17.4.6",
-    "tsx": "^4.20.3"
+    "tsx": "^4.20.3",
+    "typescript": "~5.7.2",
+    "vitest": "^3.1.3"
   }
 }

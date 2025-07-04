@@ -54,3 +54,6 @@ memo/
 # Benchmark results
 packages/core/benchmark-results.md
 packages/core/ai-benchmark-*.json
+
+# Opening book data (copied from core during build)
+packages/web/public/data/openings/

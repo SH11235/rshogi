@@ -32,6 +32,7 @@ export function Board({
             <button
                 type="button"
                 key={squareKey}
+                data-testid={`square-${squareKey}`}
                 className={cn(
                     // レスポンシブサイズ: モバイルで小さく、デスクトップで大きく
                     "w-10 h-10 sm:w-12 sm:h-12 lg:w-16 lg:h-16 border border-gray-700 flex items-center justify-center cursor-pointer transition-all duration-200",

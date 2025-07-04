@@ -1,7 +1,7 @@
 import { modernInitialBoard } from "../domain/initialBoard";
 import type { Board } from "../domain/model/board";
 import type { Move } from "../domain/model/move";
-import type { Piece } from "../domain/model/piece";
+import type { Piece, PieceType } from "../domain/model/piece";
 import type { Column, Row } from "../domain/model/square";
 import type { Hands } from "../domain/service/moveService";
 import { applyMove, initialHands } from "../domain/service/moveService";
@@ -50,8 +50,15 @@ export class OpeningGenerator {
         return this.moveHistory.length % 2 === 0 ? "black" : "white";
     }
 
-    // 局面をSFEN形式に変換（簡易版）
+    // 局面をSFEN形式に変換（完全版）
     boardToSFEN(): string {
+        const turn = this.getCurrentPlayer() === "black" ? "b" : "w";
+        const moveCount = this.moveHistory.length;
+        return `${this.boardToSFENBase()} ${turn} ${this.handsToSFEN()} ${moveCount}`;
+    }
+
+    // 盤面のみをSFEN形式に変換
+    private boardToSFENBase(): string {
         let sfen = "";
 
         // 盤面の各段を変換
@@ -97,6 +104,40 @@ export class OpeningGenerator {
         if (piece.owner === "black") char = char.toUpperCase();
 
         return char;
+    }
+
+    // 持ち駒をSFEN形式に変換
+    private handsToSFEN(): string {
+        let handsStr = "";
+        const pieceOrder = ["rook", "bishop", "gold", "silver", "knight", "lance", "pawn"];
+
+        // 先手の持ち駒
+        for (const pieceType of pieceOrder) {
+            const count = this.hands.black[pieceType as keyof typeof this.hands.black] || 0;
+            if (count > 0) {
+                if (count > 1) handsStr += count;
+                handsStr += this.pieceToSFEN({
+                    type: pieceType as PieceType,
+                    owner: "black",
+                    promoted: false,
+                });
+            }
+        }
+
+        // 後手の持ち駒
+        for (const pieceType of pieceOrder) {
+            const count = this.hands.white[pieceType as keyof typeof this.hands.white] || 0;
+            if (count > 0) {
+                if (count > 1) handsStr += count;
+                handsStr += this.pieceToSFEN({
+                    type: pieceType as PieceType,
+                    owner: "white",
+                    promoted: false,
+                });
+            }
+        }
+
+        return handsStr || "-";
     }
 
     // 定跡エントリーを追加

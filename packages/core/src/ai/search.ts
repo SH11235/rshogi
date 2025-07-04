@@ -190,7 +190,18 @@ export class IterativeDeepeningSearch {
 
         // 反復深化：1手から最大探索深度まで段階的に深くする
         for (let depth = 1; depth <= options.maxDepth; depth++) {
-            if (this.shouldStop || Date.now() - startTime > options.timeLimit) {
+            const elapsedTime = Date.now() - startTime;
+
+            // 早期終了条件
+            if (this.shouldStop || elapsedTime > options.timeLimit) {
+                break;
+            }
+
+            // 時間管理：残り時間が少ない場合は深い探索を避ける
+            const timePerDepth = elapsedTime / depth;
+            const estimatedTimeForNextDepth = timePerDepth * (depth + 1);
+            if (estimatedTimeForNextDepth > options.timeLimit * 0.8) {
+                console.log(`[Search] 時間管理により深度${depth + 1}の探索をスキップ`);
                 break;
             }
 
@@ -268,6 +279,11 @@ export class IterativeDeepeningSearch {
         options: SearchOptions,
     ): number {
         this.nodesSearched++;
+
+        // 探索停止チェック（一定間隔で確認）
+        if (this.nodesSearched % 1000 === 0 && this.shouldStop) {
+            return 0; // 探索停止時は中立的な評価値を返す
+        }
 
         let alpha = initialAlpha;
         let beta = initialBeta;

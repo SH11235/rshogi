@@ -124,13 +124,13 @@ export class AIService {
             });
             this.worker?.postMessage(fullMessage);
 
-            // Timeout
+            // Timeout - increased for complex positions
             setTimeout(() => {
                 if (this.pendingRequests.has(requestId)) {
                     this.pendingRequests.delete(requestId);
                     reject(new Error("Request timeout"));
                 }
-            }, 30000); // 30 seconds timeout
+            }, 60000); // 60 seconds timeout for complex positions
         });
     }
 

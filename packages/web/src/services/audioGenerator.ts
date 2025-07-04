@@ -9,8 +9,6 @@ import { audioLogger } from "./audioLogger";
  * Web Audio APIを使って短いビープ音を生成
  */
 export function generateBeep(frequency = 440, duration = 0.2, volume = 0.3): Promise<Blob> {
-    audioLogger.debug("AudioGenerator", "Creating beep", { frequency, duration, volume });
-
     return new Promise((resolve, reject) => {
         try {
             // Web Audio APIの利用可能性チェック
@@ -52,7 +50,6 @@ export function generateBeep(frequency = 440, duration = 0.2, volume = 0.3): Pro
 
             // WAVファイルとしてエンコード
             const wavBlob = encodeWAV(buffer);
-            audioLogger.debug("AudioGenerator", "Generated WAV blob", { size: wavBlob.size });
             resolve(wavBlob);
         } catch (error) {
             const audioError = error instanceof Error ? error : new Error(String(error));
@@ -117,8 +114,6 @@ function writeString(view: DataView, offset: number, string: string): void {
  * 音声タイプに応じた特徴的なビープ音を生成
  */
 export async function generateSoundForType(type: "piece" | "check" | "gameEnd"): Promise<Blob> {
-    audioLogger.debug("AudioGenerator", "Generating sound for type", { type });
-
     try {
         let blob: Blob;
         switch (type) {
@@ -140,11 +135,6 @@ export async function generateSoundForType(type: "piece" | "check" | "gameEnd"):
             default:
                 blob = await generateBeep();
         }
-
-        audioLogger.debug("AudioGenerator", "Successfully generated sound", {
-            type,
-            size: blob.size,
-        });
         return blob;
     } catch (error) {
         const audioError = error instanceof Error ? error : new Error(String(error));

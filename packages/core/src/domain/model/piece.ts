@@ -170,6 +170,4 @@ export type PieceTypeDefinition =
     | "馬"
     | "龍";
 
-// 後方互換性のためのエイリアス（段階的に削除予定）
-export const createModernPiece = createPiece;
 export type ModernPiece = Piece;

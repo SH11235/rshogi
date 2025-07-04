@@ -1,6 +1,6 @@
 import type { Board } from "../domain/model/board";
 import type { Move } from "../domain/model/move";
-import type { Piece } from "../domain/model/piece";
+import type { Piece, PieceType } from "../domain/model/piece";
 import type { Hands } from "../domain/service/moveService";
 
 // 定跡エントリーの型定義
@@ -28,10 +28,16 @@ export class OpeningBook {
     }
 
     // 定跡エントリーを追加
-    addEntry(board: Board, hands: Hands, moves: OpeningMove[], depth: number): void {
+    addEntry(
+        board: Board,
+        hands: Hands,
+        moves: OpeningMove[],
+        depth: number,
+        turn: "b" | "w" = "b",
+    ): void {
         if (depth > this.maxDepth) return;
 
-        const sfen = this.boardToKey(board, hands);
+        const sfen = this.boardToKey(board, hands, turn);
         this.entries.set(sfen, {
             position: sfen,
             moves,
@@ -40,10 +46,8 @@ export class OpeningBook {
     }
 
     // 局面から定跡手を取得
-    getMove(board: Board, hands: Hands, depth: number): Move | null {
-        if (depth > this.maxDepth) return null;
-
-        const sfen = this.boardToKey(board, hands);
+    getMove(board: Board, hands: Hands, turn: "b" | "w" = "b"): Move | null {
+        const sfen = this.boardToKey(board, hands, turn);
         const entry = this.entries.get(sfen);
 
         if (!entry || entry.moves.length === 0) {
@@ -55,20 +59,20 @@ export class OpeningBook {
     }
 
     // 局面が定跡に含まれるかチェック
-    hasPosition(board: Board, hands: Hands): boolean {
-        const sfen = this.boardToKey(board, hands);
+    hasPosition(board: Board, hands: Hands, turn: "b" | "w" = "b"): boolean {
+        const sfen = this.boardToKey(board, hands, turn);
         return this.entries.has(sfen);
     }
 
     // 定跡の候補手をすべて取得
-    getMoves(board: Board, hands: Hands): OpeningMove[] {
-        const sfen = this.boardToKey(board, hands);
+    getMoves(board: Board, hands: Hands, turn: "b" | "w" = "b"): OpeningMove[] {
+        const sfen = this.boardToKey(board, hands, turn);
         const entry = this.entries.get(sfen);
         return entry ? entry.moves : [];
     }
 
-    // 局面をキーに変換（SFEN形式の簡略版）
-    private boardToKey(board: Board, _hands: Hands): string {
+    // 局面をキーに変換（盤面＋手番＋持ち駒のみ、手数は含めない）
+    boardToKey(board: Board, hands: Hands, turn: "b" | "w" = "b"): string {
         // boardをSFEN形式に変換
         let sfen = "";
 
@@ -92,6 +96,44 @@ export class OpeningBook {
             }
             if (row < 9) sfen += "/";
         }
+
+        // 手番
+        sfen += ` ${turn} `;
+
+        // 持ち駒
+        let handsStr = "";
+        const pieceOrder = ["rook", "bishop", "gold", "silver", "knight", "lance", "pawn"];
+
+        // 先手の持ち駒
+        for (const pieceType of pieceOrder) {
+            const count = hands.black[pieceType as keyof typeof hands.black] || 0;
+            if (count > 0) {
+                if (count > 1) handsStr += count;
+                handsStr += this.pieceToSFEN({
+                    type: pieceType as PieceType,
+                    owner: "black",
+                    promoted: false,
+                });
+            }
+        }
+
+        // 後手の持ち駒
+        for (const pieceType of pieceOrder) {
+            const count = hands.white[pieceType as keyof typeof hands.white] || 0;
+            if (count > 0) {
+                if (count > 1) handsStr += count;
+                handsStr += this.pieceToSFEN({
+                    type: pieceType as PieceType,
+                    owner: "white",
+                    promoted: false,
+                });
+            }
+        }
+
+        sfen += handsStr || "-";
+
+        // 手数は定跡の判定には不要なので含めない
+        // 局面（盤面＋手番＋持ち駒）のみで判定
 
         return sfen;
     }
@@ -141,12 +183,55 @@ export class OpeningBook {
         }
     }
 
+    // 定跡データを増分追加（メモリ効率化）
+    addEntries(newEntries: OpeningEntry[]): void {
+        for (const entry of newEntries) {
+            this.entries.set(entry.position, entry);
+        }
+    }
+
     // エントリー数を取得
     size(): number {
         return this.entries.size;
     }
 
+    // メモリ使用量の推定（バイト）
+    estimateMemoryUsage(): number {
+        // 各エントリーのサイズを推定
+        // SFEN文字列: 約100バイト
+        // Move配列: 平均3手 × 50バイト = 150バイト
+        // その他のメタデータ: 50バイト
+        // 合計: 約300バイト/エントリー
+        return this.entries.size * 300;
+    }
+
+    // メモリ使用量をMB単位で取得
+    getMemoryUsageMB(): number {
+        return Math.round((this.estimateMemoryUsage() / 1024 / 1024) * 10) / 10;
+    }
+
+    // 深い定跡エントリーを削除（メモリ節約）
+    removeDeepEntries(maxDepth: number): void {
+        const entriesToRemove: string[] = [];
+
+        for (const [key, entry] of this.entries) {
+            if (entry.depth > maxDepth) {
+                entriesToRemove.push(key);
+            }
+        }
+
+        for (const key of entriesToRemove) {
+            this.entries.delete(key);
+        }
+
+        console.log(
+            `🗑️ ${entriesToRemove.length} 個の深い定跡エントリーを削除しました（深さ>${maxDepth}）`,
+        );
+    }
+
     // デバッグ用：すべてのエントリーを取得
+    // 警告：大量のエントリーがある場合はメモリ不足の原因となる可能性があります
+    // 使用する際は注意してください（80万エントリー以上ある場合があります）
     getAllEntries(): OpeningEntry[] {
         return Array.from(this.entries.values());
     }

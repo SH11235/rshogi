@@ -73,24 +73,19 @@ class AudioPool {
     }
 
     private async getAudioUrl(type: SoundType): Promise<string> {
-        console.log(`AudioPool.getAudioUrl: Getting URL for ${type}`);
-
         // 既に生成済みのURLがあれば再利用
         const existingUrl = this.generatedUrls.get(type);
         if (existingUrl) {
-            console.log(`AudioPool.getAudioUrl: Using existing generated URL for ${type}`);
             return existingUrl;
         }
 
         // 実際の音声ファイルの確認はスキップし、直接生成された音声を使用
         // （開発環境では音声ファイルがないため）
-        console.log(`AudioPool.getAudioUrl: Generating sound for ${type} (development mode)`);
 
         try {
             const blob = await generateSoundForType(type);
             const url = createAudioBlobURL(blob);
             this.generatedUrls.set(type, url);
-            console.log(`AudioPool.getAudioUrl: Generated new URL for ${type}:`, url);
             return url;
         } catch (error) {
             console.error(`AudioPool.getAudioUrl: Failed to generate sound for ${type}:`, error);
@@ -199,12 +194,7 @@ export class BrowserAudioManager implements AudioManager {
     }
 
     async play(type: SoundType, options: PlayOptions = {}): Promise<void> {
-        console.log(
-            `audioManager.play: Called for ${type}, initialized=${this.state.isInitialized}, muted=${this.state.isMuted}`,
-        );
-
         if (!this.state.isInitialized || this.state.isMuted) {
-            console.log(`audioManager.play: Skipping ${type} - not initialized or muted`);
             return;
         }
 
@@ -214,10 +204,7 @@ export class BrowserAudioManager implements AudioManager {
                 console.warn(`Unknown sound type: ${type}`);
                 return;
             }
-
-            console.log(`audioManager.play: Getting audio for ${type}`);
             const audio = await this.audioPool.getAudio(type, config);
-            console.log(`audioManager.play: Got audio element for ${type}`, audio);
 
             // 音量設定
             const volume = options.volume ?? volumeLevelToFloat(this.state.volume);
@@ -236,11 +223,9 @@ export class BrowserAudioManager implements AudioManager {
             }
 
             // 再生開始
-            console.log(`audioManager.play: Starting playback for ${type}, volume=${audio.volume}`);
             const playPromise = audio.play();
             if (playPromise) {
                 await playPromise;
-                console.log(`audioManager.play: Successfully played ${type}`);
             }
         } catch (error) {
             // ユーザーのインタラクション前の自動再生エラーなどは無視

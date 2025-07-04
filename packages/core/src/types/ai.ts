@@ -20,7 +20,7 @@ export const AI_DIFFICULTY_CONFIGS: Record<AIDifficulty, Partial<AIConfig>> = {
     beginner: {
         searchDepth: 2,
         timeLimit: 1000,
-        useOpeningBook: false,
+        useOpeningBook: true, // Enable opening book for beginners too
         useEndgameDatabase: false,
     },
     intermediate: {
@@ -37,7 +37,7 @@ export const AI_DIFFICULTY_CONFIGS: Record<AIDifficulty, Partial<AIConfig>> = {
     },
     expert: {
         searchDepth: 8,
-        timeLimit: 10000,
+        timeLimit: 30000, // Increased to 30 seconds for complex positions
         useOpeningBook: true,
         useEndgameDatabase: true,
     },

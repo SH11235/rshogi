@@ -79,9 +79,22 @@ export class AIEngine {
 
         // 定跡データベースをチェック（序盤のみ）
         if (this.useOpeningBook && moveHistory.length < 20) {
-            const bookMove = this.openingBook.getMove(board, hands, moveHistory.length);
+            console.log(
+                `[AI] 定跡チェック: 手数=${moveHistory.length}, useOpeningBook=${this.useOpeningBook}`,
+            );
+            console.log(`[AI] 定跡エントリ数: ${this.openingBook.size()}`);
+
+            // 現在の手番を判定
+            const turn = currentPlayer === "black" ? "b" : "w";
+            const bookMove = this.openingBook.getMove(board, hands, turn);
             if (bookMove) {
                 // 定跡の手が見つかった場合
+                console.log("[AI] 定跡手を発見:", bookMove);
+                // メモリ効率のため、getAllEntries()の呼び出しを避ける
+                // 代わりに、定跡エントリ数のみをログ出力
+                console.log(
+                    `[AI] 定跡データベースから選択（全${this.openingBook.size()}エントリ中）`,
+                );
                 this.lastEvaluation = {
                     score: 0, // 定跡は互角と評価
                     depth: 0,
@@ -91,6 +104,7 @@ export class AIEngine {
                 };
                 return bookMove;
             }
+            console.log("[AI] この局面の定跡が見つかりません");
         }
 
         // Generate all legal moves
@@ -270,6 +284,13 @@ export class AIEngine {
     loadOpeningBook(data: OpeningEntry[]): void {
         if (this.useOpeningBook) {
             this.openingBook.loadFromData(data);
+        }
+    }
+
+    // 定跡データベースを直接設定するメソッド
+    setOpeningBook(openingBook: OpeningBook): void {
+        if (this.useOpeningBook) {
+            this.openingBook = openingBook;
         }
     }
 }

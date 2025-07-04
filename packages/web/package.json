@@ -4,9 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b tsconfig.app.json && vite build && npm run copy:demos",
+    "dev": "npm run copy:openings && vite",
+    "build": "npm run copy:openings && tsc -b tsconfig.app.json && vite build && npm run copy:demos",
     "copy:demos": "cp webrtc-demo.html dist/ && mkdir -p dist/src/wasm && cp -r src/wasm/* dist/src/wasm/",
+    "copy:openings": "node scripts/copy-openings.js",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "preview": "vite preview",

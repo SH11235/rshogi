@@ -42,6 +42,7 @@ import {
 } from "@/types/timer";
 import {
     type Board,
+    type Column,
     type GameStatus,
     HISTORY_CURSOR,
     type Hands,
@@ -50,6 +51,7 @@ import {
     type PieceType,
     type Player,
     type PositionState,
+    type Row,
     type Square,
     type SquareKey,
     applyMove,
@@ -321,6 +323,7 @@ interface GameState {
     setAIDifficulty: (difficulty: AIDifficulty) => Promise<void>;
     stopAI: () => void;
     executeAIMove: () => Promise<void>;
+    resetAIThinking: () => void;
 }
 
 // タイマーアクションをGameStateに統合
@@ -2651,7 +2654,15 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     // AI実行のヘルパー関数
     executeAIMove: async () => {
-        const { aiPlayer, board, hands, currentPlayer, gameStatus, localPlayerColor } = get();
+        const {
+            aiPlayer,
+            board,
+            hands,
+            currentPlayer,
+            gameStatus,
+            localPlayerColor,
+            isAIThinking,
+        } = get();
 
         if (
             !aiPlayer ||
@@ -2661,7 +2672,23 @@ export const useGameStore = create<GameState>((set, get) => ({
             return;
         }
 
+        // 既にAIが思考中の場合は実行しない（重複実行を防ぐ）
+        if (isAIThinking) {
+            console.log("[executeAIMove] AI is already thinking, skipping execution");
+            return;
+        }
+
+        console.log("[executeAIMove] Starting AI move calculation");
         set({ isAIThinking: true });
+
+        // セーフティタイムアウト：10秒後に強制的にフラグをリセット
+        const safetyTimeout = setTimeout(() => {
+            const state = get();
+            if (state.isAIThinking) {
+                console.error("[executeAIMove] Safety timeout triggered - AI took too long");
+                set({ isAIThinking: false });
+            }
+        }, 10000);
 
         try {
             // AIに手を計算させる
@@ -2672,27 +2699,129 @@ export const useGameStore = create<GameState>((set, get) => ({
                 get().moveHistory,
             );
 
+            console.log("[executeAIMove] AI move calculated:", result.move);
+
             // 少し遅延を入れて人間らしくする
             await new Promise((resolve) => setTimeout(resolve, 300));
 
             // 手を実行
             const move = result.move;
             if (move.type === "drop") {
+                console.log("[executeAIMove] Executing drop move");
                 get().makeDrop(move.piece.type, move.to);
             } else {
+                console.log("[executeAIMove] Executing normal move");
                 get().makeMove(move.from, move.to, move.promote);
             }
 
-            // 念のため、手を実行した後にAI思考フラグが解除されているか確認
+            console.log("[executeAIMove] Move executed successfully");
+
+            // Check if we need to continue the game flow
+            // This is important for AI vs AI games or when the game state needs to continue
             const currentState = get();
-            if (currentState.isAIThinking) {
-                console.warn("isAIThinking was still true after AI move, resetting it");
-                set({ isAIThinking: false });
+            const {
+                gameType: currentGameType,
+                localPlayerColor: currentLocalPlayerColor,
+                currentPlayer: updatedPlayer,
+                gameStatus: updatedStatus,
+            } = currentState;
+
+            console.log(
+                `[executeAIMove] After move - currentPlayer: ${updatedPlayer}, localPlayerColor: ${currentLocalPlayerColor}, gameStatus: ${updatedStatus}`,
+            );
+
+            // If it's still an AI game and the current player is still AI (AI vs AI scenario)
+            // or if we need another AI move, schedule it
+            if (
+                currentGameType === "ai" &&
+                (updatedStatus === "playing" || updatedStatus === "check") &&
+                updatedPlayer !== currentLocalPlayerColor
+            ) {
+                console.log("[executeAIMove] Another AI move needed, scheduling...");
+                setTimeout(() => {
+                    get().executeAIMove();
+                }, 500);
             }
         } catch (error) {
             console.error("AI move error:", error);
-            // エラー時はAI思考フラグを解除
+
+            // タイムアウトエラーの場合は代替手を選択
+            if (error instanceof Error && error.message === "Request timeout") {
+                console.log("[executeAIMove] タイムアウト発生、代替手を選択中...");
+
+                try {
+                    // シンプルな代替手選択：合法手からランダムに選ぶ
+                    const { board, hands, currentPlayer } = get();
+                    // 盤面の駒からの合法手を生成
+                    const legalMoves: Move[] = [];
+                    for (const [squareKey, piece] of Object.entries(board)) {
+                        if (piece && piece.owner === currentPlayer) {
+                            const square = {
+                                row: Number.parseInt(squareKey[0]) as Row,
+                                column: Number.parseInt(squareKey[1]) as Column,
+                            };
+                            const moves = generateLegalMoves(board, hands, square, currentPlayer);
+                            for (const toSquare of moves) {
+                                legalMoves.push({
+                                    type: "move",
+                                    from: square,
+                                    to: toSquare,
+                                    piece: piece,
+                                    promote: false,
+                                    captured:
+                                        board[`${toSquare.row}${toSquare.column}` as keyof Board] ||
+                                        null,
+                                });
+                            }
+                        }
+                    }
+
+                    if (legalMoves.length > 0) {
+                        // 最初の合法手を選択（後で改善可能）
+                        const fallbackMove = legalMoves[0];
+                        console.log("[executeAIMove] 代替手を実行:", fallbackMove);
+
+                        if (fallbackMove.type === "drop") {
+                            get().makeDrop(fallbackMove.piece.type, fallbackMove.to);
+                        } else {
+                            get().makeMove(
+                                fallbackMove.from,
+                                fallbackMove.to,
+                                fallbackMove.promote,
+                            );
+                        }
+                        return;
+                    }
+                } catch (fallbackError) {
+                    console.error("代替手選択エラー:", fallbackError);
+                }
+            }
+        } finally {
+            // セーフティタイムアウトをクリア
+            clearTimeout(safetyTimeout);
+
+            // 必ずAI思考フラグを解除する
+            console.log("[executeAIMove] Resetting isAIThinking flag");
             set({ isAIThinking: false });
+        }
+    },
+
+    // AI思考状態を強制リセットする関数
+    resetAIThinking: () => {
+        console.log("[resetAIThinking] AI思考状態を強制リセット");
+        const { aiPlayer } = get();
+
+        // AI思考フラグをリセット
+        set({ isAIThinking: false });
+
+        // AIワーカーに停止命令を送信
+        if (aiPlayer) {
+            try {
+                aiPlayer.dispose();
+                console.log("[resetAIThinking] AIワーカーを停止しました");
+            } catch (error) {
+                console.error("[resetAIThinking] AIワーカー停止エラー:", error);
+            }
         }
     },
 }));

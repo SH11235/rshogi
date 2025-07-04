@@ -53,3 +53,6 @@ export * from "./ai/openingBook";
 export * from "./ai/openingBookSearch";
 export * from "./ai/endgameDatabase";
 export * from "./ai/openingGenerator";
+export * from "./ai/openingBookLoader";
+export * from "./ai/binaryOpeningTypes";
+export * from "./ai/binaryOpeningBookLoader";

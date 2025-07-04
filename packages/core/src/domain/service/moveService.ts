@@ -33,13 +33,10 @@ export type Hands = {
     white: Record<string, number>;
 };
 
-export const createEmptyHands = (): Hands => ({
+export const initialHands = (): Hands => ({
     black: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
     white: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
 });
-
-// Alias for compatibility
-export const initialHands = createEmptyHands;
 
 /** 手番を反転するユーティリティ */
 export const toggleSide = (p: Player): Player => (p === "black" ? "white" : "black");
@@ -104,7 +101,7 @@ export function isUchifuzume(board: Board, dropSquare: Square, player: Player): 
         return false;
     }
 
-    return isCheckmate(testBoard, createEmptyHands(), opponent);
+    return isCheckmate(testBoard, initialHands(), opponent);
 }
 
 //--------------------------------------------------------

@@ -29,6 +29,9 @@ const config: KnipConfig = {
         "src/services/audioLogger.ts",
         "src/services/audioManager.ts",
 
+        // WebWorker files (動的インポートで使用)
+        "src/workers/aiWorker.ts",
+
         // Storybook設定ファイル
         ".storybook/preview.ts",
     ],

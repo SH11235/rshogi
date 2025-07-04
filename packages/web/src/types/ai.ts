@@ -11,8 +11,6 @@ export type {
     TranspositionEntry,
 } from "shogi-core";
 
-export { AI_DIFFICULTY_CONFIGS } from "shogi-core";
-
 // Worker message types
 export interface AIRequest {
     requestId: string;
@@ -64,8 +62,10 @@ export interface AIResponse {
         | "position_evaluated"
         | "stopped"
         | "difficulty_set"
-        | "error";
+        | "error"
+        | "opening_book_progress";
     requestId?: string;
+    progress?: number;
 }
 
 export interface MoveCalculatedResponse extends AIResponse {

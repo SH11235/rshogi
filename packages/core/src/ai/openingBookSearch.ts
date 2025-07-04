@@ -1,5 +1,5 @@
 import type { Board } from "../domain/model/board";
-import type { Piece } from "../domain/model/piece";
+import type { Piece, PieceType } from "../domain/model/piece";
 import type { Hands } from "../domain/service/moveService";
 import type { OpeningEntry, OpeningMove } from "./openingBook";
 
@@ -129,6 +129,8 @@ export class EfficientOpeningSearch {
     searchMoves(
         board: Board,
         hands: Hands,
+        turn: "b" | "w",
+        moveCount: number,
         options?: {
             maxDepth?: number;
             openingName?: string;
@@ -145,7 +147,7 @@ export class EfficientOpeningSearch {
         }
 
         // SFEN形式での検索（フォールバック）
-        const sfenKey = this.boardToSFEN(board, hands);
+        const sfenKey = this.boardToSFEN(board, hands, turn, moveCount);
         const entry = this.index.positionMap.get(sfenKey);
 
         if (!entry) {
@@ -227,11 +229,12 @@ export class EfficientOpeningSearch {
     }
 
     /**
-     * SFEN形式への変換（既存実装の簡易版）
+     * SFEN形式への変換（YaneuraOu形式に対応）
      */
-    private boardToSFEN(board: Board, _hands: Hands): string {
+    private boardToSFEN(board: Board, hands: Hands, turn: "b" | "w" = "b", moveCount = 0): string {
         let sfen = "";
 
+        // 盤面
         for (let row = 1; row <= 9; row++) {
             let emptyCount = 0;
             for (let col = 9; col >= 1; col--) {
@@ -251,6 +254,44 @@ export class EfficientOpeningSearch {
             }
             if (row < 9) sfen += "/";
         }
+
+        // 手番
+        sfen += ` ${turn} `;
+
+        // 持ち駒
+        let handsStr = "";
+        const pieceOrder = ["rook", "bishop", "gold", "silver", "knight", "lance", "pawn"];
+
+        // 先手の持ち駒
+        for (const pieceType of pieceOrder) {
+            const count = hands.black[pieceType as keyof typeof hands.black] || 0;
+            if (count > 0) {
+                if (count > 1) handsStr += count;
+                handsStr += this.pieceToSFEN({
+                    type: pieceType as PieceType,
+                    owner: "black",
+                    promoted: false,
+                });
+            }
+        }
+
+        // 後手の持ち駒
+        for (const pieceType of pieceOrder) {
+            const count = hands.white[pieceType as keyof typeof hands.white] || 0;
+            if (count > 0) {
+                if (count > 1) handsStr += count;
+                handsStr += this.pieceToSFEN({
+                    type: pieceType as PieceType,
+                    owner: "white",
+                    promoted: false,
+                });
+            }
+        }
+
+        sfen += handsStr || "-";
+
+        // 手数
+        sfen += ` ${moveCount}`;
 
         return sfen;
     }
