@@ -8,6 +8,10 @@ pub use simple_webrtc::*;
 mod mate_search;
 pub use mate_search::*;
 
+// Add opening book module
+pub mod opening_book;
+pub use opening_book::*;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
