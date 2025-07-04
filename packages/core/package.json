@@ -18,7 +18,8 @@
     "benchmark": "tsx src/domain/service/runBenchmark.ts",
     "benchmark:ai": "tsx benchmarks/run-ai-benchmark.ts",
     "benchmark:viewer": "node benchmarks/open-viewer.js",
-    "benchmark:serve": "cd benchmarks && npx http-server -p 8000 -o viewer.html"
+    "benchmark:serve": "cd benchmarks && npx http-server -p 8000 -o viewer.html",
+    "convert-opening-book": "tsx scripts/convertOpeningBook.ts"
   },
   "dependencies": {},
   "devDependencies": {

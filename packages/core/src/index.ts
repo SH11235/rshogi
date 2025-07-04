@@ -50,5 +50,6 @@ export * from "./ai/engine";
 export * from "./ai/evaluation";
 export * from "./ai/search";
 export * from "./ai/openingBook";
+export * from "./ai/openingBookSearch";
 export * from "./ai/endgameDatabase";
 export * from "./ai/openingGenerator";

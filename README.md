@@ -290,6 +290,11 @@ npm run benchmark:ai
 
 MIT License
 
+## 🙏 クレジット
+
+### 定跡データベース
+本プロジェクトでは、[YaneuraOu](https://github.com/yaneurao/YaneuraOu)プロジェクトの定跡データベース（user_book1.db）を使用しています。この定跡データベースはMITライセンスで提供されており、AIエンジンの序盤の指し手に活用されています。
+
 ---
 
 **多プラットフォーム対応の将棋ゲーム開発プロジェクト**
