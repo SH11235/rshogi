@@ -30,7 +30,9 @@ This project includes the following third-party software:
 - Source: https://github.com/yaneurao/YaneuraOu
 - License: MIT License
 - Copyright (c) YaneuraOu project contributors
-- File: user_book1.db
+- Original file: user_book1.db (not included in this repository)
 
-The opening book database (user_book1.db) is distributed under the MIT License
-and is used to provide opening theory knowledge to the AI engine.
+The opening book data included in this project (packages/core/data/openings/) 
+was derived from YaneuraOu's user_book1.db file, which is distributed under 
+the MIT License. The original database file is not included in this repository, 
+but the processed data is used to provide opening theory knowledge to the AI engine.
