@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { createGzip } from "node:zlib";
 import type { OpeningEntry } from "../src/ai/openingBook";
-import { convertMove, getMoveString, parseLine, valueToWinRate } from "../src/ai/yaneuraouParser";
+import { convertMove, getMoveString, parseLine, valueToWinRate } from "./yaneuraouParser";
 
 /**
  * YaneuraOu定跡データベースを変換するスクリプト
