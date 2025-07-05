@@ -91,7 +91,7 @@ impl OpeningBookReader {
                 let depth = move_buf[4];
 
                 moves.push(BookMove {
-                    notation: format!("move_{move_encoded}"), // 後で実装
+                    notation: format!("move_{move_encoded}"), // Phase 2.5で実装
                     evaluation,
                     depth,
                 });
@@ -108,7 +108,7 @@ impl OpeningBookReader {
     }
 
     pub fn find_moves(&self, sfen: &str) -> Vec<BookMove> {
-        // 仮実装：初期局面なら固定ハッシュ値を返す
+        // 仮実装：初期局面なら固定ハッシュ値を返す（Phase 2.5で実装）
         if sfen == "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1" {
             return self.find_moves_by_hash(123456789);
         }
