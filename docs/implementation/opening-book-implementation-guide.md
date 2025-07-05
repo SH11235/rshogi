@@ -1,5 +1,7 @@
 # Opening Book Implementation Quick Guide
 
+> **Note**: このガイドは実装の概要を示しています。TDD（テスト駆動開発）アプローチで実装を進める場合は、[Opening Book TDD Implementation Guide](./opening-book-tdd-implementation-guide.md)を参照してください。
+
 ## Quick Start
 
 This guide provides step-by-step instructions for implementing the opening book feature in the Shogi web application. The implementation starts with the early game version (13MB) which provides excellent coverage of common openings while maintaining fast load times.
@@ -56,7 +58,7 @@ cd packages/rust-core
 
 ## Step 2: Implement Rust WebAssembly Reader
 
-### 2.1 Create `src/opening_book_reader.rs`
+### 2.1 Create `packages/rust-core/src/opening_book_reader.rs`
 
 ```rust
 use wasm_bindgen::prelude::*;
@@ -131,7 +133,7 @@ impl OpeningBookReader {
 }
 ```
 
-### 2.2 Update `src/lib.rs`
+### 2.2 Update `packages/rust-core/src/lib.rs`
 
 ```rust
 pub mod opening_book;
@@ -628,17 +630,22 @@ describe('OpeningBookService', () => {
 
 ## Next Steps
 
-1. **Optimization**
+1. **TDD Implementation**
+   - 詳細なテスト駆動開発手順は[Opening Book TDD Implementation Guide](./opening-book-tdd-implementation-guide.md)を参照
+   - 各機能を小さなステップに分解して実装
+   - Red-Green-Refactorサイクルの実践
+
+2. **Optimization**
    - Implement Web Worker for background processing
    - Add IndexedDB caching
    - Optimize WASM bundle size
 
-2. **Features**
+3. **Features**
    - Add opening name display
    - Show variation trees
    - Implement opening training mode
 
-3. **Analytics**
+4. **Analytics**
    - Track which openings are most viewed
    - Monitor load times
    - Collect user feedback
