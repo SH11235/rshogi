@@ -5,11 +5,18 @@ echo "🔍 Running pre-commit checks..."
 echo "📝 Formatting and linting staged files..."
 lint-staged
 
-# 2. 影響のあるパッケージの型チェック（高速）
+# 2. Check if any Rust files are staged
+if git diff --cached --name-only | grep -q "packages/rust-core/.*\.rs$"; then
+    echo "🦀 Rust files detected, running Rust-specific checks..."
+    # Run Rust checks
+    (cd packages/rust-core && ./scripts/pre-commit-rust.sh)
+fi
+
+# 3. 影響のあるパッケージの型チェック（高速）
 echo "🔍 Type checking affected packages..."
 npm run typecheck:affected
 
-# 3. 影響のあるパッケージのテスト（オプション：重い場合はコメントアウト）
+# 4. 影響のあるパッケージのテスト（オプション：重い場合はコメントアウト）
 # echo "🧪 Testing affected packages..."
 # npm run test:affected
 

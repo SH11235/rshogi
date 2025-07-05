@@ -54,7 +54,8 @@ impl BinaryConverter {
     /// Convert a single SFEN entry to binary format
     pub fn convert_entry(&self, entry: &RawSfenEntry) -> Result<BinaryEntry> {
         // Hash the position
-        let _position_str = format!("{} {} {} {}", entry.position, entry.turn, entry.hand, entry.move_count);
+        let _position_str =
+            format!("{} {} {} {}", entry.position, entry.turn, entry.hand, entry.move_count);
         let position_hash = PositionHasher::hash_position(&entry.position)?;
 
         // Find best move
@@ -79,11 +80,7 @@ impl BinaryConverter {
         };
 
         // Convert moves
-        let moves = entry
-            .moves
-            .iter()
-            .map(|m| self.convert_move(m))
-            .collect::<Result<Vec<_>>>()?;
+        let moves = entry.moves.iter().map(|m| self.convert_move(m)).collect::<Result<Vec<_>>>()?;
 
         Ok(BinaryEntry { header, moves })
     }
@@ -125,7 +122,7 @@ impl BinaryConverter {
     /// Encode position header to bytes
     pub fn encode_position_header(header: &CompactPosition) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(16);
-        
+
         bytes.extend_from_slice(&header.position_hash.to_le_bytes());
         bytes.extend_from_slice(&header.best_move.to_le_bytes());
         bytes.extend_from_slice(&header.evaluation.to_le_bytes());
@@ -212,10 +209,8 @@ impl BinaryConverter {
         entries: &[RawSfenEntry],
         writer: &mut W,
     ) -> Result<ConversionStats> {
-        let binary_entries: Vec<BinaryEntry> = entries
-            .iter()
-            .map(|e| self.convert_entry(e))
-            .collect::<Result<Vec<_>>>()?;
+        let binary_entries: Vec<BinaryEntry> =
+            entries.iter().map(|e| self.convert_entry(e)).collect::<Result<Vec<_>>>()?;
 
         let mut data = Vec::new();
         let mut total_moves = 0;

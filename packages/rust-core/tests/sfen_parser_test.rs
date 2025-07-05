@@ -56,10 +56,7 @@ mod sfen_parser_tests {
         assert!(entry.is_some());
 
         let entry = entry.unwrap();
-        assert_eq!(
-            entry.position,
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL"
-        );
+        assert_eq!(entry.position, "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL");
         assert_eq!(entry.turn, 'b');
         assert_eq!(entry.hand, "-");
         assert_eq!(entry.move_count, 1);
@@ -143,7 +140,7 @@ mod sfen_parser_tests {
             "sfen +B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R b NLP2sl2p 0",
         );
         assert!(result.is_ok());
-        
+
         let first_entry = result.unwrap();
         assert!(first_entry.is_some());
         let entry = first_entry.unwrap();
@@ -206,19 +203,19 @@ mod sfen_parser_tests {
 
         // Should have parsed 3 positions
         assert_eq!(entries.len(), 3);
-        
+
         // First position
         assert_eq!(entries[0].move_count, 1);
         assert_eq!(entries[0].moves.len(), 2);
         assert_eq!(entries[0].moves[0].move_notation, "7g7f");
         assert_eq!(entries[0].moves[1].move_notation, "2g2f");
-        
+
         // Second position
         assert_eq!(entries[1].move_count, 2);
         assert_eq!(entries[1].moves.len(), 2);
         assert_eq!(entries[1].moves[0].move_notation, "3c3d");
         assert_eq!(entries[1].moves[1].move_notation, "8c8d");
-        
+
         // Third position
         assert_eq!(entries[2].move_count, 3);
         assert_eq!(entries[2].moves.len(), 1);
@@ -228,7 +225,7 @@ mod sfen_parser_tests {
     #[test]
     fn test_move_line_without_position() {
         let mut parser = SfenParser::new();
-        
+
         // Try to parse a move without setting up a position first
         let result = parser.parse_line("7g7f none 50 10 100000");
         assert!(result.is_err());
@@ -240,17 +237,20 @@ mod sfen_parser_tests {
         let mut entries = Vec::new();
 
         // First position
-        let result1 = parser.parse_line("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+        let result1 = parser
+            .parse_line("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
         assert!(result1.unwrap().is_none());
 
         // Second position immediately - should return first position
-        let result2 = parser.parse_line("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
+        let result2 = parser
+            .parse_line("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
         let entry = result2.unwrap();
         assert!(entry.is_some());
         entries.push(entry.unwrap());
 
         // Third position - should return second position
-        let result3 = parser.parse_line("sfen lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3");
+        let result3 = parser
+            .parse_line("sfen lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3");
         let entry = result3.unwrap();
         assert!(entry.is_some());
         entries.push(entry.unwrap());
@@ -294,7 +294,10 @@ sfen lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3
         assert_eq!(entries.len(), 3);
 
         // First position: 3 moves
-        assert_eq!(entries[0].position, "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL");
+        assert_eq!(
+            entries[0].position,
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL"
+        );
         assert_eq!(entries[0].turn, 'b');
         assert_eq!(entries[0].move_count, 1);
         assert_eq!(entries[0].moves.len(), 3);
@@ -303,7 +306,10 @@ sfen lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3
         assert_eq!(entries[0].moves[2].move_notation, "6g6f");
 
         // Second position: 2 moves
-        assert_eq!(entries[1].position, "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL");
+        assert_eq!(
+            entries[1].position,
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL"
+        );
         assert_eq!(entries[1].turn, 'w');
         assert_eq!(entries[1].move_count, 2);
         assert_eq!(entries[1].moves.len(), 2);
@@ -311,7 +317,10 @@ sfen lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3
         assert_eq!(entries[1].moves[1].move_notation, "8c8d");
 
         // Third position: 2 moves
-        assert_eq!(entries[2].position, "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL");
+        assert_eq!(
+            entries[2].position,
+            "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL"
+        );
         assert_eq!(entries[2].turn, 'b');
         assert_eq!(entries[2].move_count, 3);
         assert_eq!(entries[2].moves.len(), 2);
@@ -351,7 +360,10 @@ P*6g none -208 0 0"#;
         assert_eq!(entries.len(), 2);
 
         // First complex position
-        assert_eq!(entries[0].position, "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R");
+        assert_eq!(
+            entries[0].position,
+            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R"
+        );
         assert_eq!(entries[0].hand, "NLP2sl2p");
         assert_eq!(entries[0].move_count, 0);
         assert_eq!(entries[0].moves.len(), 4);
@@ -359,7 +371,10 @@ P*6g none -208 0 0"#;
         assert_eq!(entries[0].moves[1].evaluation, -203);
 
         // Second complex position
-        assert_eq!(entries[1].position, "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1pprP4/P1N2P2N/1PG1G4/L1K5R");
+        assert_eq!(
+            entries[1].position,
+            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1pprP4/P1N2P2N/1PG1G4/L1K5R"
+        );
         assert_eq!(entries[1].hand, "NL2P2slp");
         assert_eq!(entries[1].moves.len(), 4);
     }

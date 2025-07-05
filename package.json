@@ -40,6 +40,9 @@
   "lint-staged": {
     "**/*.{ts,tsx,js,jsx,css}": [
       "biome check --write --files-ignore-unknown=true"
+    ],
+    "packages/rust-core/**/*.rs": [
+      "cargo fmt --manifest-path packages/rust-core/Cargo.toml --"
     ]
   }
 }

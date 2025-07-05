@@ -1,4 +1,4 @@
-.PHONY: build build-dev test clean
+.PHONY: build build-dev test clean check-all
 
 # Default target
 build:
@@ -23,8 +23,37 @@ test-wasm-firefox:
 format:
 	cargo fmt
 
+format-check:
+	cargo fmt -- --check
+
 lint:
-	cargo clippy
+	cargo clippy -- -D warnings
+
+check:
+	cargo check
+
+# Run all quality checks
+check-all: format-check lint check test
+	@echo "✅ All quality checks passed!"
+
+# Install additional development tools
+install-dev-tools:
+	cargo install cargo-audit
+	cargo install cargo-outdated
+	cargo install cargo-machete
+	@echo "✅ Development tools installed!"
+
+# Security audit
+audit:
+	cargo audit
+
+# Check for outdated dependencies
+outdated:
+	cargo outdated
+
+# Find unused dependencies
+unused-deps:
+	cargo machete
 
 clean:
 	cargo clean

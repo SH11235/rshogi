@@ -101,8 +101,8 @@ impl SimpleWebRTCPeer {
         let offer_data: OfferData =
             serde_json::from_str(&json).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        let mut offer_desc = web_sys::RtcSessionDescriptionInit::new(web_sys::RtcSdpType::Offer);
-        offer_desc.sdp(&offer_data.sdp);
+        let offer_desc = web_sys::RtcSessionDescriptionInit::new(web_sys::RtcSdpType::Offer);
+        offer_desc.set_sdp(&offer_data.sdp);
 
         wasm_bindgen_futures::JsFuture::from(self.connection.set_remote_description(&offer_desc))
             .await?;
@@ -141,8 +141,8 @@ impl SimpleWebRTCPeer {
         let answer_data: OfferData =
             serde_json::from_str(&json).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        let mut answer_desc = web_sys::RtcSessionDescriptionInit::new(web_sys::RtcSdpType::Answer);
-        answer_desc.sdp(&answer_data.sdp);
+        let answer_desc = web_sys::RtcSessionDescriptionInit::new(web_sys::RtcSdpType::Answer);
+        answer_desc.set_sdp(&answer_data.sdp);
 
         wasm_bindgen_futures::JsFuture::from(self.connection.set_remote_description(&answer_desc))
             .await?;
@@ -158,12 +158,7 @@ pub async fn create_webrtc_peer(is_host: bool) -> Result<SimpleWebRTCPeer, JsVal
     // Generate peer ID
     let peer_id = format!(
         "peer-{}",
-        js_sys::Math::random()
-            .to_string()
-            .chars()
-            .skip(2)
-            .take(8)
-            .collect::<String>()
+        js_sys::Math::random().to_string().chars().skip(2).take(8).collect::<String>()
     );
 
     // Configure STUN servers
@@ -176,8 +171,8 @@ pub async fn create_webrtc_peer(is_host: bool) -> Result<SimpleWebRTCPeer, JsVal
     Reflect::set(&stun_server, &JsValue::from_str("urls"), &urls)?;
     ice_servers.push(&stun_server);
 
-    let mut config = RtcConfiguration::new();
-    config.ice_servers(&ice_servers);
+    let config = RtcConfiguration::new();
+    config.set_ice_servers(&ice_servers);
 
     let connection = RtcPeerConnection::new_with_configuration(&config)?;
     let (tx, _rx) = mpsc::unbounded();
@@ -307,11 +302,9 @@ fn dispatch_webrtc_event(event_type: &str, data: &str) {
     let event_init = web_sys::CustomEventInit::new();
     event_init.set_detail(&JsValue::from_str(data));
     let event = web_sys::CustomEvent::new_with_event_init_dict(
-        &format!("webrtc-{}", event_type),
+        &format!("webrtc-{event_type}"),
         &event_init,
     )
     .expect("Failed to create custom event");
-    window
-        .dispatch_event(&event)
-        .expect("Failed to dispatch event");
+    window.dispatch_event(&event).expect("Failed to dispatch event");
 }

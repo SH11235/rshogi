@@ -22,10 +22,10 @@ pub struct PositionFilter {
 impl Default for PositionFilter {
     fn default() -> Self {
         Self {
-            max_moves: 50,          // Focus on opening and early middle game
-            min_depth: 0,           // Accept all analyzed positions
-            min_evaluation: -1000,  // Exclude clearly losing positions
-            max_evaluation: 1000,   // Exclude clearly winning positions
+            max_moves: 50,         // Focus on opening and early middle game
+            min_depth: 0,          // Accept all analyzed positions
+            min_evaluation: -1000, // Exclude clearly losing positions
+            max_evaluation: 1000,  // Exclude clearly winning positions
         }
     }
 }
@@ -40,57 +40,53 @@ impl PositionFilter {
             max_evaluation,
         }
     }
-    
+
     /// Check if a position should be included based on filter criteria
     pub fn should_include(&self, entry: &RawSfenEntry) -> bool {
         // Check move count (early game filter)
         if entry.move_count as usize > self.max_moves {
             return false;
         }
-        
+
         // Must have at least one move
         if entry.moves.is_empty() {
             return false;
         }
-        
+
         // Check if at least one move meets depth requirement
-        let has_sufficient_depth = entry.moves.iter()
-            .any(|m| m.depth >= self.min_depth);
-        
+        let has_sufficient_depth = entry.moves.iter().any(|m| m.depth >= self.min_depth);
+
         if !has_sufficient_depth {
             return false;
         }
-        
+
         // Check evaluation range (best move's evaluation)
-        let best_evaluation = entry.moves.iter()
-            .map(|m| m.evaluation)
-            .max()
-            .unwrap_or(0);
-        
+        let best_evaluation = entry.moves.iter().map(|m| m.evaluation).max().unwrap_or(0);
+
         if best_evaluation < self.min_evaluation || best_evaluation > self.max_evaluation {
             return false;
         }
-        
+
         true
     }
-    
+
     /// Filter moves within a position (keep top moves, sorted by evaluation)
     pub fn filter_moves(&self, entry: &mut RawSfenEntry) {
         // Sort moves by evaluation (best first)
         entry.moves.sort_by(|a, b| b.evaluation.cmp(&a.evaluation));
-        
+
         // Keep only top 8 moves
         if entry.moves.len() > 8 {
             entry.moves.truncate(8);
         }
     }
-    
+
     /// Apply full filtering to an entry (position and moves)
     pub fn filter_entry(&self, entry: &mut RawSfenEntry) -> bool {
         if !self.should_include(entry) {
             return false;
         }
-        
+
         self.filter_moves(entry);
         true
     }
@@ -100,7 +96,7 @@ impl PositionFilter {
 mod tests {
     use super::*;
     use crate::opening_book::RawMove;
-    
+
     #[test]
     fn test_default_values() {
         let filter = PositionFilter::default();
@@ -109,7 +105,7 @@ mod tests {
         assert_eq!(filter.min_evaluation, -1000);
         assert_eq!(filter.max_evaluation, 1000);
     }
-    
+
     #[test]
     fn test_custom_filter() {
         let filter = PositionFilter::new(30, 5, -500, 500);
@@ -118,14 +114,14 @@ mod tests {
         assert_eq!(filter.min_evaluation, -500);
         assert_eq!(filter.max_evaluation, 500);
     }
-    
+
     #[test]
     fn test_move_count_filtering() {
         let filter = PositionFilter {
             max_moves: 20,
             ..Default::default()
         };
-        
+
         let mut entry = RawSfenEntry {
             position: "test".to_string(),
             turn: 'b',
@@ -139,9 +135,9 @@ mod tests {
                 nodes: 1000,
             }],
         };
-        
+
         assert!(filter.should_include(&entry));
-        
+
         entry.move_count = 25;
         assert!(!filter.should_include(&entry));
     }

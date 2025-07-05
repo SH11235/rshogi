@@ -48,14 +48,14 @@ pub struct Square {
 
 impl Square {
     pub fn new(row: u8, column: u8) -> Option<Square> {
-        if row >= 1 && row <= 9 && column >= 1 && column <= 9 {
+        if (1..=9).contains(&row) && (1..=9).contains(&column) {
             Some(Square { row, column })
         } else {
             None
         }
     }
 
-    pub fn to_key(&self) -> String {
+    pub fn to_key(self) -> String {
         format!("{}{}", self.row, self.column)
     }
 }
@@ -175,13 +175,7 @@ impl MateSearchEngine {
             }
 
             // 受け方の応手を探索
-            if self.search_defense(
-                &new_board,
-                &new_hands,
-                attacker.opponent(),
-                depth - 1,
-                moves,
-            ) {
+            if self.search_defense(&new_board, &new_hands, attacker.opponent(), depth - 1, moves) {
                 return true;
             }
 
@@ -222,13 +216,8 @@ impl MateSearchEngine {
             moves.push(mv.clone());
 
             // 攻め方の次の手を探索
-            let is_mate = self.search_mate(
-                &new_board,
-                &new_hands,
-                defender.opponent(),
-                depth - 1,
-                moves,
-            );
+            let is_mate =
+                self.search_mate(&new_board, &new_hands, defender.opponent(), depth - 1, moves);
 
             moves.pop();
 

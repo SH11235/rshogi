@@ -14,11 +14,11 @@ mod move_encoder_tests {
 
         for (move_notation, description) in test_cases {
             let result = MoveEncoder::encode_move(move_notation);
-            assert!(result.is_ok(), "Failed to encode {}: {}", description, move_notation);
-            
+            assert!(result.is_ok(), "Failed to encode {description}: {move_notation}");
+
             let encoded = result.unwrap();
             let decoded = MoveEncoder::decode_move(encoded).unwrap();
-            assert_eq!(move_notation, decoded, "Round-trip failed for {}", description);
+            assert_eq!(move_notation, decoded, "Round-trip failed for {description}");
         }
     }
 
@@ -33,7 +33,7 @@ mod move_encoder_tests {
         for (move_notation, description) in test_cases {
             let encoded = MoveEncoder::encode_move(move_notation).unwrap();
             let decoded = MoveEncoder::decode_move(encoded).unwrap();
-            assert_eq!(move_notation, decoded, "Promotion encoding failed for {}", description);
+            assert_eq!(move_notation, decoded, "Promotion encoding failed for {description}");
         }
     }
 
@@ -52,14 +52,14 @@ mod move_encoder_tests {
         for (move_notation, description) in test_cases {
             let encoded = MoveEncoder::encode_move(move_notation).unwrap();
             let decoded = MoveEncoder::decode_move(encoded).unwrap();
-            assert_eq!(move_notation, decoded, "Drop encoding failed for {}", description);
+            assert_eq!(move_notation, decoded, "Drop encoding failed for {description}");
         }
     }
 
     #[test]
     fn test_move_encoding_uniqueness() {
         let moves = vec![
-            "7g7f", "7f7g", "7g8f", "8f7g",  // Different normal moves
+            "7g7f", "7f7g", "7g8f", "8f7g", // Different normal moves
             "P*7f", "N*7f", "B*7f", "R*7f", // Different drops to same square
             "3d3c+", "3d3c", "4e4d+", "4e4d", // Promotion vs non-promotion
         ];
@@ -67,8 +67,10 @@ mod move_encoder_tests {
         let mut encoded_set = std::collections::HashSet::new();
         for move_notation in moves {
             let encoded = MoveEncoder::encode_move(move_notation).unwrap();
-            assert!(!encoded_set.contains(&encoded), 
-                   "Duplicate encoding detected for: {}", move_notation);
+            assert!(
+                !encoded_set.contains(&encoded),
+                "Duplicate encoding detected for: {move_notation}"
+            );
             encoded_set.insert(encoded);
         }
     }
@@ -80,7 +82,10 @@ mod move_encoder_tests {
             for from_rank in b'a'..=b'i' {
                 for to_file in 1..=9 {
                     for to_rank in b'a'..=b'i' {
-                        let move_notation = format!("{}{}{}{}", from_file, from_rank as char, to_file, to_rank as char);
+                        let move_notation = format!(
+                            "{}{}{}{}",
+                            from_file, from_rank as char, to_file, to_rank as char
+                        );
                         let encoded = MoveEncoder::encode_move(&move_notation).unwrap();
                         let decoded = MoveEncoder::decode_move(encoded).unwrap();
                         assert_eq!(move_notation, decoded);
@@ -93,18 +98,17 @@ mod move_encoder_tests {
     #[test]
     fn test_invalid_move_encoding() {
         let invalid_moves = vec![
-            "invalid",
-            "7g",      // Too short
-            "7g7f7e",  // Too long
-            "0g7f",    // Invalid file
-            "7j7f",    // Invalid rank
-            "P*0f",    // Invalid drop square
-            "K*5e",    // Invalid piece for drop
+            "invalid", "7g",     // Too short
+            "7g7f7e", // Too long
+            "0g7f",   // Invalid file
+            "7j7f",   // Invalid rank
+            "P*0f",   // Invalid drop square
+            "K*5e",   // Invalid piece for drop
         ];
 
         for invalid_move in invalid_moves {
             let result = MoveEncoder::encode_move(invalid_move);
-            assert!(result.is_err(), "Should fail for invalid move: {}", invalid_move);
+            assert!(result.is_err(), "Should fail for invalid move: {invalid_move}");
         }
     }
 
@@ -112,8 +116,8 @@ mod move_encoder_tests {
     fn test_decode_invalid_encoding() {
         // Test decoding invalid bit patterns
         let invalid_encodings = vec![
-            0xFFFF,  // All bits set
-            0x0000,  // All bits clear (if not a valid encoding)
+            0xFFFF, // All bits set
+            0x0000, // All bits clear (if not a valid encoding)
         ];
 
         for encoding in invalid_encodings {
@@ -131,14 +135,11 @@ mod move_encoder_tests {
     #[test]
     fn test_encoding_bit_efficiency() {
         // Test that we're using the 16-bit space efficiently
-        let moves = vec![
-            "1a1b", "9i9h", "5e5d", "P*5f", "R*9a", "7g7f+",
-        ];
+        let moves = vec!["1a1b", "9i9h", "5e5d", "P*5f", "R*9a", "7g7f+"];
 
         for move_notation in moves {
             let encoded = MoveEncoder::encode_move(move_notation).unwrap();
-            // Should fit in 16 bits
-            assert!(encoded <= 0xFFFF);
+            // Encoded moves are u16, so they always fit in 16 bits by definition
             // Should not be zero (reserved for invalid)
             assert_ne!(encoded, 0);
         }

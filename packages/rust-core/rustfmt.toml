@@ -1,0 +1,27 @@
+# Rust formatting configuration
+# https://rust-lang.github.io/rustfmt/
+# Note: Only stable features are enabled
+
+# Maximum width of each line
+max_width = 100
+
+# Use field initialize shorthand if possible
+use_field_init_shorthand = true
+
+# Edition (should match Cargo.toml)
+edition = "2021"
+
+# Tab spaces
+tab_spaces = 4
+
+# Function call style
+fn_call_width = 80
+
+# Chain indent
+chain_width = 80
+
+# Newline style
+newline_style = "Unix"
+
+# Use small heuristics
+use_small_heuristics = "Default"
