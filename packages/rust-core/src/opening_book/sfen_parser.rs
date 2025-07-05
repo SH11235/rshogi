@@ -41,9 +41,13 @@ impl SfenParser {
 
         // Position lines start with "sfen"
         if line.starts_with("sfen ") {
-            // If we have a current position, we're starting a new one
+            // If we have a current position, return it before starting a new one
+            let mut result = None;
+            if let Some(current) = self.current_position.take() {
+                result = Some(current);
+            }
             self.current_position = Some(self.parse_position_line(line)?);
-            return Ok(None);
+            return Ok(result);
         }
 
         // Otherwise, it should be a move line

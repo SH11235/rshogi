@@ -6,7 +6,13 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# Binary executables will be added when implementing conversion scripts
+[[bin]]
+name = "convert_opening_book"
+path = "src/bin/convert_opening_book.rs"
+
+[[bin]]
+name = "verify_opening_book"
+path = "src/bin/verify_opening_book.rs"
 
 [dependencies]
 wasm-bindgen = "0.2"
