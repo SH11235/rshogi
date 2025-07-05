@@ -66,6 +66,8 @@ impl OpeningBookReader {
     }
 
     fn parse_binary_data(&mut self, data: &[u8]) -> Result<(), String> {
+        use crate::opening_book::MoveEncoder;
+
         let mut cursor = Cursor::new(data);
 
         while cursor.position() < data.len() as u64 {
@@ -90,8 +92,11 @@ impl OpeningBookReader {
                 let evaluation = i16::from_le_bytes(move_buf[2..4].try_into().unwrap());
                 let depth = move_buf[4];
 
+                let move_notation = MoveEncoder::decode_move(move_encoded)
+                    .unwrap_or_else(|_| format!("invalid_{move_encoded}"));
+
                 moves.push(BookMove {
-                    notation: format!("move_{move_encoded}"), // Phase 2.5で実装
+                    notation: move_notation,
                     evaluation,
                     depth,
                 });
@@ -108,11 +113,12 @@ impl OpeningBookReader {
     }
 
     pub fn find_moves(&self, sfen: &str) -> Vec<BookMove> {
-        // 仮実装：初期局面なら固定ハッシュ値を返す（Phase 2.5で実装）
-        if sfen == "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1" {
-            return self.find_moves_by_hash(123456789);
+        use crate::opening_book::PositionHasher;
+
+        match PositionHasher::hash_position(sfen) {
+            Ok(hash) => self.find_moves_by_hash(hash),
+            Err(_) => vec![],
         }
-        vec![]
     }
 }
 
@@ -257,13 +263,16 @@ mod tests {
 
     #[test]
     fn test_find_moves_by_sfen() {
+        use crate::opening_book::PositionHasher;
+
         // Arrange
         let mut reader = OpeningBookReader::new();
         let initial_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
 
-        // 仮のハッシュ値とムーブを設定
+        // 実際のハッシュ値を計算して使用
+        let hash = PositionHasher::hash_position(initial_sfen).unwrap();
         reader.positions.insert(
-            123456789, // 初期局面の仮ハッシュ
+            hash,
             vec![BookMove {
                 notation: "7g7f".to_string(),
                 evaluation: 50,
@@ -278,10 +287,64 @@ mod tests {
         assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].notation, "7g7f");
     }
+
+    #[test]
+    fn test_find_moves_with_real_hash() {
+        use crate::opening_book::PositionHasher;
+
+        // Arrange
+        let mut reader = OpeningBookReader::new();
+        let initial_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+        // 実際のハッシュ値を計算
+        let real_hash = PositionHasher::hash_position(initial_sfen).unwrap();
+
+        reader.positions.insert(
+            real_hash,
+            vec![BookMove {
+                notation: "7g7f".to_string(),
+                evaluation: 50,
+                depth: 10,
+            }],
+        );
+
+        // Act
+        let moves = reader.find_moves(initial_sfen);
+
+        // Assert
+        assert_eq!(moves.len(), 1);
+        assert_eq!(moves[0].notation, "7g7f");
+    }
+
+    #[test]
+    fn test_decode_real_moves() {
+        use crate::opening_book::MoveEncoder;
+
+        // Arrange
+        let mut reader = OpeningBookReader::new();
+        let move_7g7f = MoveEncoder::encode_move("7g7f").unwrap();
+
+        // バイナリデータを作成
+        let mut data = Vec::new();
+        data.extend_from_slice(&12345u64.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&[0u8; 6]);
+        data.extend_from_slice(&move_7g7f.to_le_bytes());
+        data.extend_from_slice(&50i16.to_le_bytes());
+        data.push(10);
+        data.push(0);
+
+        // Act
+        reader.parse_binary_data(&data).unwrap();
+
+        // Assert
+        let moves = reader.find_moves_by_hash(12345);
+        assert_eq!(moves[0].notation, "7g7f");
+    }
 }
 
 // WebAssembly specific tests
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
     use super::*;
     use wasm_bindgen_test::*;
