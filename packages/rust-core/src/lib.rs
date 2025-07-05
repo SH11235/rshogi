@@ -12,6 +12,9 @@ pub use mate_search::*;
 pub mod opening_book;
 pub use opening_book::*;
 
+// Add opening book reader module
+pub mod opening_book_reader;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
