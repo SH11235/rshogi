@@ -111,9 +111,28 @@ Note: Format and lint checks are automatically run via Hooks after file edits.
 
 When working with rust-core:
 1. Make changes to Rust code
-2. Run `npm run build:wasm` from packages/rust-core directory
-3. The built WASM files are automatically copied to packages/web/src/wasm/
-4. Test changes in the web application
+2. Run quality checks: `cargo fmt`, `cargo clippy`, `cargo test`
+3. Run `npm run build:wasm` from packages/rust-core directory
+4. The built WASM files are automatically copied to packages/web/src/wasm/
+5. Test changes in the web application
+
+### Code Quality Tools
+
+**Required checks (run automatically on pre-commit):**
+- `cargo fmt` - Code formatting according to Rust style guidelines
+- `cargo clippy -- -D warnings` - Linting with warnings as errors
+- `cargo check` - Fast type checking without code generation
+
+**Additional quality tools:**
+- `cargo test` - Run all tests
+- `cargo audit` - Check for security vulnerabilities in dependencies
+- `cargo outdated` - Check for outdated dependencies
+- `cargo machete` - Find unused dependencies (requires installation)
+
+**Quick commands:**
+- `make check-all` - Run all quality checks at once
+- `make format-check` - Check formatting without modifying files
+- `make install-dev-tools` - Install additional development tools
 
 ### Testing Strategy
 
