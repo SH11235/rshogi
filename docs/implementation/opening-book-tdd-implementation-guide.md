@@ -28,6 +28,11 @@
 □ 2-5. エラーハンドリング
 □ 2-6. キャッシュ機能
 
+=== Phase 2.5: Rust統合（既存モジュールとの連携） ===
+□ 2.5-1. PositionHasherとの統合
+□ 2.5-2. MoveEncoderとの統合
+□ 2.5-3. 実バイナリデータでの統合テスト
+
 === Phase 3: React統合 ===
 □ 3-1. useOpeningBookフック基本構造
 □ 3-2. 初期化と自動読み込み
@@ -274,7 +279,7 @@ impl OpeningBookReader {
                 let depth = move_buf[4];
                 
                 moves.push(BookMove {
-                    notation: format!("move_{}", move_encoded), // 後で実装
+                    notation: format!("move_{}", move_encoded), // Phase 2.5で実装
                     evaluation,
                     depth,
                 });
@@ -338,7 +343,7 @@ impl OpeningBookReader {
 }
 ```
 
-**実際のハッシュ計算は既存のPositionHasherを使用するため、後で統合**
+**実際のハッシュ計算は既存のPositionHasherを使用するため、Phase 2.5で統合**
 
 ### Step 1-6: WebAssemblyバインディングのテスト
 
@@ -572,6 +577,157 @@ export class OpeningBookService {
   }
 }
 ```
+
+## Phase 2.5: Rust統合（既存モジュールとの連携）
+
+このフェーズでは、Phase 1で作成した仮実装を実際のモジュールと統合します。TypeScriptサービス層の基本実装が完了し、モックデータでの動作確認ができた後に実施します。
+
+### 統合タイミングの判断基準
+
+以下の条件が満たされたら統合を開始：
+1. TypeScriptサービス層（Phase 2）が完了
+2. モックデータでの基本動作が確認済み
+3. 実際のバイナリファイルでのテストを開始する前
+
+### Step 2.5-1: PositionHasherとの統合
+
+**Red: 実際のハッシュ計算のテスト**
+
+```rust
+#[test]
+fn test_find_moves_with_real_hash() {
+    use crate::opening_book::PositionHasher;
+    
+    // Arrange
+    let mut reader = OpeningBookReader::new();
+    let initial_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+    
+    // 実際のハッシュ値を計算
+    let real_hash = PositionHasher::hash_position(initial_sfen).unwrap();
+    
+    reader.positions.insert(
+        real_hash,
+        vec![BookMove {
+            notation: "7g7f".to_string(),
+            evaluation: 50,
+            depth: 10,
+        }]
+    );
+    
+    // Act
+    let moves = reader.find_moves(initial_sfen);
+    
+    // Assert
+    assert_eq!(moves.len(), 1);
+    assert_eq!(moves[0].notation, "7g7f");
+}
+```
+
+**Green: PositionHasherを使用した実装**
+
+```rust
+use crate::opening_book::PositionHasher;
+
+impl OpeningBookReader {
+    pub fn find_moves(&self, sfen: &str) -> Vec<BookMove> {
+        match PositionHasher::hash_position(sfen) {
+            Ok(hash) => self.find_moves_by_hash(hash),
+            Err(_) => vec![],
+        }
+    }
+}
+```
+
+### Step 2.5-2: MoveEncoderとの統合
+
+**Red: 実際のムーブデコードのテスト**
+
+```rust
+#[test]
+fn test_decode_real_moves() {
+    use crate::opening_book::MoveEncoder;
+    
+    // Arrange
+    let mut reader = OpeningBookReader::new();
+    let move_7g7f = MoveEncoder::encode_move("7g7f").unwrap();
+    
+    // バイナリデータを作成
+    let mut data = Vec::new();
+    data.extend_from_slice(&12345u64.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&[0u8; 6]);
+    data.extend_from_slice(&move_7g7f.to_le_bytes());
+    data.extend_from_slice(&50i16.to_le_bytes());
+    data.push(10);
+    data.push(0);
+    
+    // Act
+    reader.parse_binary_data(&data).unwrap();
+    
+    // Assert
+    let moves = reader.find_moves_by_hash(12345);
+    assert_eq!(moves[0].notation, "7g7f");
+}
+```
+
+**Green: MoveEncoderを使用した実装**
+
+```rust
+use crate::opening_book::MoveEncoder;
+
+impl OpeningBookReader {
+    fn parse_binary_data(&mut self, data: &[u8]) -> Result<(), String> {
+        // ... existing code ...
+        
+        let move_notation = MoveEncoder::decode_move(move_encoded)
+            .unwrap_or_else(|_| format!("invalid_{}", move_encoded));
+        
+        moves.push(BookMove {
+            notation: move_notation,
+            evaluation,
+            depth,
+        });
+        
+        // ... rest of the code ...
+    }
+}
+```
+
+### Step 2.5-3: 実バイナリデータでの統合テスト
+
+**Red: 実際のバイナリファイルのテスト**
+
+```rust
+#[test]
+fn test_load_real_binary_file() {
+    use std::fs;
+    
+    // Arrange
+    let mut reader = OpeningBookReader::new();
+    let test_data = fs::read("converted_openings/opening_book_early.bin.gz").unwrap();
+    
+    // Act
+    let result = reader.load_data(&test_data);
+    
+    // Assert
+    assert!(result.is_ok());
+    assert!(reader.position_count() > 0);
+    
+    // 初期局面の定跡を確認
+    let initial_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+    let moves = reader.find_moves(initial_sfen);
+    assert!(!moves.is_empty());
+    assert!(moves.iter().any(|m| m.notation == "7g7f" || m.notation == "2g2f"));
+}
+```
+
+### リファクタリング考慮事項
+
+統合後に検討すべきリファクタリング：
+1. エラーハンドリングの統一
+2. パフォーマンス最適化（大量データ処理）
+3. メモリ使用量の最適化
+4. より詳細なエラーメッセージ
 
 ## Phase 3: React統合
 
