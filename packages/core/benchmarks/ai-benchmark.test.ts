@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AIBenchmark, BENCHMARK_POSITIONS, measureOpeningBookUsage } from "./ai-benchmark";
+import { AIBenchmark, BENCHMARK_POSITIONS } from "./ai-benchmark";
 
 describe("AI Benchmark", () => {
     it("should run benchmark for beginner difficulty", async () => {
@@ -37,17 +37,6 @@ describe("AI Benchmark", () => {
         // 中級の方が多くのノードを探索する
         expect(intermediateResult.averageNodes).toBeGreaterThan(beginnerResult.averageNodes);
     }, 60000); // 60秒のタイムアウト
-
-    it("should measure opening book usage", async () => {
-        // 定跡を使わない初級
-        const beginnerUsage = await measureOpeningBookUsage("beginner", 2);
-        expect(beginnerUsage.bookUsageRate).toBe(0);
-
-        // 定跡を使う中級
-        const intermediateUsage = await measureOpeningBookUsage("intermediate", 2);
-        expect(intermediateUsage.bookUsageRate).toBeGreaterThan(0);
-        expect(intermediateUsage.bookMoves).toBeGreaterThan(0);
-    }, 30000);
 
     it("should format benchmark results correctly", async () => {
         const benchmark = new AIBenchmark();

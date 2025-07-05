@@ -1,5 +1,4 @@
 import { AIEngine } from "../src/ai/engine";
-import { generateMainOpenings } from "../src/ai/openingGenerator";
 import { modernInitialBoard } from "../src/domain/initialBoard";
 import type { Board } from "../src/domain/model/board";
 import type { Move } from "../src/domain/model/move";
@@ -127,11 +126,6 @@ export const BENCHMARK_POSITIONS = [
 export class AIBenchmark {
     async runBenchmark(difficulty: AIDifficulty): Promise<BenchmarkSummary> {
         const engine = new AIEngine(difficulty);
-        // Load opening book for appropriate difficulties
-        if (difficulty !== "beginner") {
-            const openingData = generateMainOpenings();
-            engine.loadOpeningBook(openingData);
-        }
         const results: BenchmarkResult[] = [];
 
         console.log(`Running benchmark for ${difficulty}...`);
@@ -232,61 +226,4 @@ export class AIBenchmark {
 
         return output;
     }
-}
-
-// 定跡使用率の測定
-export async function measureOpeningBookUsage(
-    difficulty: AIDifficulty,
-    numGames = 10,
-): Promise<{
-    totalMoves: number;
-    bookMoves: number;
-    bookUsageRate: number;
-}> {
-    const engine = new AIEngine(difficulty);
-    // Load opening book for appropriate difficulties
-    if (difficulty !== "beginner") {
-        const openingData = generateMainOpenings();
-        engine.loadOpeningBook(openingData);
-    }
-    let totalMoves = 0;
-    let bookMoves = 0;
-
-    for (let game = 0; game < numGames; game++) {
-        const board = modernInitialBoard;
-        const hands = initialHands();
-        const moveHistory: Move[] = [];
-
-        // 最初の20手まで測定
-        for (let moveNum = 0; moveNum < 20 && moveNum < 40; moveNum++) {
-            const player = moveNum % 2 === 0 ? "black" : "white";
-
-            try {
-                const move = await engine.calculateBestMove(
-                    board,
-                    hands,
-                    player as "black" | "white",
-                    moveHistory,
-                );
-                const evaluation = engine.getLastEvaluation();
-
-                totalMoves++;
-                // 深さ0は定跡からの手
-                if (evaluation.depth === 0) {
-                    bookMoves++;
-                }
-
-                // 実際に手を指す処理（省略）
-                moveHistory.push(move);
-            } catch (error) {
-                break;
-            }
-        }
-    }
-
-    return {
-        totalMoves,
-        bookMoves,
-        bookUsageRate: totalMoves > 0 ? (bookMoves / totalMoves) * 100 : 0,
-    };
 }

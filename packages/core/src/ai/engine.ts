@@ -9,7 +9,6 @@ import type { AIDifficulty, PositionEvaluation } from "../types/ai";
 import { AI_DIFFICULTY_CONFIGS } from "../types/ai";
 import { EndgameDatabase } from "./endgameDatabase";
 import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
-import { OpeningBook, type OpeningEntry } from "./openingBook";
 import { IterativeDeepeningSearch } from "./search";
 
 export class AIEngine {
@@ -19,20 +18,14 @@ export class AIEngine {
     private startTime = 0;
     private lastEvaluation: PositionEvaluation | null = null;
     private iterativeSearch: IterativeDeepeningSearch;
-    private openingBook: OpeningBook;
     private endgameDatabase: EndgameDatabase;
-    private useOpeningBook: boolean;
 
     constructor(difficulty: AIDifficulty) {
         this.difficulty = difficulty;
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
         this.timeLimit = config.timeLimit || 3000;
-        this.useOpeningBook = config.useOpeningBook || false;
         this.iterativeSearch = new IterativeDeepeningSearch();
-
-        // 定跡データベースを初期化
-        this.openingBook = new OpeningBook();
 
         // 終盤データベースを初期化
         this.endgameDatabase = new EndgameDatabase();
@@ -43,7 +36,6 @@ export class AIEngine {
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
         this.timeLimit = config.timeLimit || 3000;
-        this.useOpeningBook = config.useOpeningBook || false;
     }
 
     getSearchDepth(): number {
@@ -75,36 +67,6 @@ export class AIEngine {
                     return mateMove;
                 }
             }
-        }
-
-        // 定跡データベースをチェック（序盤のみ）
-        if (this.useOpeningBook && moveHistory.length < 20) {
-            console.log(
-                `[AI] 定跡チェック: 手数=${moveHistory.length}, useOpeningBook=${this.useOpeningBook}`,
-            );
-            console.log(`[AI] 定跡エントリ数: ${this.openingBook.size()}`);
-
-            // 現在の手番を判定
-            const turn = currentPlayer === "black" ? "b" : "w";
-            const bookMove = this.openingBook.getMove(board, hands, turn);
-            if (bookMove) {
-                // 定跡の手が見つかった場合
-                console.log("[AI] 定跡手を発見:", bookMove);
-                // メモリ効率のため、getAllEntries()の呼び出しを避ける
-                // 代わりに、定跡エントリ数のみをログ出力
-                console.log(
-                    `[AI] 定跡データベースから選択（全${this.openingBook.size()}エントリ中）`,
-                );
-                this.lastEvaluation = {
-                    score: 0, // 定跡は互角と評価
-                    depth: 0,
-                    pv: [bookMove],
-                    nodes: 1,
-                    time: Date.now() - this.startTime,
-                };
-                return bookMove;
-            }
-            console.log("[AI] この局面の定跡が見つかりません");
         }
 
         // Generate all legal moves
@@ -278,19 +240,5 @@ export class AIEngine {
                 time: 0,
             }
         );
-    }
-
-    // 定跡データをロードするメソッドを追加
-    loadOpeningBook(data: OpeningEntry[]): void {
-        if (this.useOpeningBook) {
-            this.openingBook.loadFromData(data);
-        }
-    }
-
-    // 定跡データベースを直接設定するメソッド
-    setOpeningBook(openingBook: OpeningBook): void {
-        if (this.useOpeningBook) {
-            this.openingBook = openingBook;
-        }
     }
 }

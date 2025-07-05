@@ -59,3 +59,15 @@ clean:
 	cargo clean
 	rm -rf pkg
 	rm -rf ../web/src/wasm/*
+
+# Generate opening book files
+generate-openings:
+	./scripts/generate-and-copy-openings.sh
+
+# Convert opening book from JSON to binary format
+convert-opening-book:
+	cargo run --bin convert_opening_book -- --help
+
+# Verify opening book binary files
+verify-opening-book:
+	cargo run --bin verify_opening_book -- --help
