@@ -10,14 +10,14 @@
 //!
 //! Square encoding: file * 9 + rank - 10 (0-80 for squares 1a-9i)
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 /// Move encoder for converting between move notation and 16-bit integers
 pub struct MoveEncoder;
 
 impl MoveEncoder {
     /// Encode a move notation string to a 16-bit integer
-    /// 
+    ///
     /// Supports:
     /// - Normal moves: "7g7f", "8i7g"
     /// - Promotion moves: "3d3c+", "2e2d+"
@@ -42,9 +42,9 @@ impl MoveEncoder {
         let move_type = (encoded >> 14) & 0x3;
 
         match move_type {
-            0 => Self::decode_normal_move(encoded, false),  // Normal move
-            1 => Self::decode_normal_move(encoded, true),   // Promotion move
-            2 => Self::decode_drop_move(encoded),           // Drop move
+            0 => Self::decode_normal_move(encoded, false), // Normal move
+            1 => Self::decode_normal_move(encoded, true),  // Promotion move
+            2 => Self::decode_drop_move(encoded),          // Drop move
             _ => Err(anyhow!("Reserved move type: {}", move_type)),
         }
     }
@@ -63,20 +63,27 @@ impl MoveEncoder {
         }
 
         // Parse squares: "7g7f" -> from=7g, to=7f
-        let from_file = move_part.chars().nth(0).unwrap()
-            .to_digit(10).ok_or_else(|| anyhow!("Invalid from file: {}", move_part))? as u8;
-        let from_rank = move_part.chars().nth(1).unwrap()
-            .to_ascii_lowercase() as u8;
-        let to_file = move_part.chars().nth(2).unwrap()
-            .to_digit(10).ok_or_else(|| anyhow!("Invalid to file: {}", move_part))? as u8;
-        let to_rank = move_part.chars().nth(3).unwrap()
-            .to_ascii_lowercase() as u8;
+        let from_file = move_part
+            .chars()
+            .nth(0)
+            .unwrap()
+            .to_digit(10)
+            .ok_or_else(|| anyhow!("Invalid from file: {}", move_part))?
+            as u8;
+        let from_rank = move_part.chars().nth(1).unwrap().to_ascii_lowercase() as u8;
+        let to_file = move_part
+            .chars()
+            .nth(2)
+            .unwrap()
+            .to_digit(10)
+            .ok_or_else(|| anyhow!("Invalid to file: {}", move_part))? as u8;
+        let to_rank = move_part.chars().nth(3).unwrap().to_ascii_lowercase() as u8;
 
         // Validate ranges
         if !(1..=9).contains(&from_file) || !(1..=9).contains(&to_file) {
             return Err(anyhow!("Invalid file range: {}", move_notation));
         }
-        if from_rank < b'a' || from_rank > b'i' || to_rank < b'a' || to_rank > b'i' {
+        if !(b'a'..=b'i').contains(&from_rank) || !(b'a'..=b'i').contains(&to_rank) {
             return Err(anyhow!("Invalid rank range: {}", move_notation));
         }
 
@@ -123,8 +130,8 @@ impl MoveEncoder {
         let to_file = (to_square / 9) + 1;
         let to_rank = (to_square % 9) + b'a';
 
-        let mut result = format!("{}{}{}{}", 
-            from_file, from_rank as char, to_file, to_rank as char);
+        let mut result =
+            format!("{}{}{}{}", from_file, from_rank as char, to_file, to_rank as char);
 
         if promotion {
             result.push('+');
@@ -146,19 +153,19 @@ impl MoveEncoder {
         let piece = Self::decode_piece(piece_code)?;
         let square_notation = Self::decode_square(square)?;
 
-        Ok(format!("{}*{}", piece, square_notation))
+        Ok(format!("{piece}*{square_notation}"))
     }
 
     /// Encode piece type to number
     fn encode_piece(piece: &str) -> Result<u8> {
         match piece {
-            "P" => Ok(0),  // Pawn
-            "L" => Ok(1),  // Lance
-            "N" => Ok(2),  // Knight
-            "S" => Ok(3),  // Silver
-            "G" => Ok(4),  // Gold
-            "B" => Ok(5),  // Bishop
-            "R" => Ok(6),  // Rook
+            "P" => Ok(0), // Pawn
+            "L" => Ok(1), // Lance
+            "N" => Ok(2), // Knight
+            "S" => Ok(3), // Silver
+            "G" => Ok(4), // Gold
+            "B" => Ok(5), // Bishop
+            "R" => Ok(6), // Rook
             _ => Err(anyhow!("Invalid piece type: {}", piece)),
         }
     }
@@ -183,14 +190,18 @@ impl MoveEncoder {
             return Err(anyhow!("Invalid square notation: {}", square));
         }
 
-        let file = square.chars().nth(0).unwrap()
-            .to_digit(10).ok_or_else(|| anyhow!("Invalid file: {}", square))? as u8;
+        let file = square
+            .chars()
+            .nth(0)
+            .unwrap()
+            .to_digit(10)
+            .ok_or_else(|| anyhow!("Invalid file: {}", square))? as u8;
         let rank = square.chars().nth(1).unwrap().to_ascii_lowercase() as u8;
 
         if !(1..=9).contains(&file) {
             return Err(anyhow!("Invalid file range: {}", square));
         }
-        if rank < b'a' || rank > b'i' {
+        if !(b'a'..=b'i').contains(&rank) {
             return Err(anyhow!("Invalid rank range: {}", square));
         }
 

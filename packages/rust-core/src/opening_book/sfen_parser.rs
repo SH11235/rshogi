@@ -53,11 +53,7 @@ impl SfenParser {
         // Otherwise, it should be a move line
         if self.current_position.is_some() {
             let move_data = self.parse_move_line(line)?;
-            self.current_position
-                .as_mut()
-                .unwrap()
-                .moves
-                .push(move_data);
+            self.current_position.as_mut().unwrap().moves.push(move_data);
             Ok(None)
         } else {
             Err(anyhow!("Move line without position: {}", line))
@@ -110,12 +106,8 @@ impl SfenParser {
         let evaluation = parts[2]
             .parse::<i32>()
             .map_err(|_| anyhow!("Invalid evaluation: {}", parts[2]))?;
-        let depth = parts[3]
-            .parse::<u32>()
-            .map_err(|_| anyhow!("Invalid depth: {}", parts[3]))?;
-        let nodes = parts[4]
-            .parse::<u64>()
-            .map_err(|_| anyhow!("Invalid nodes: {}", parts[4]))?;
+        let depth = parts[3].parse::<u32>().map_err(|_| anyhow!("Invalid depth: {}", parts[3]))?;
+        let nodes = parts[4].parse::<u64>().map_err(|_| anyhow!("Invalid nodes: {}", parts[4]))?;
 
         Ok(RawMove {
             move_notation,

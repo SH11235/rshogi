@@ -32,15 +32,13 @@ mod binary_converter_tests {
                 turn: 'w',
                 hand: "-".to_string(),
                 move_count: 2,
-                moves: vec![
-                    RawMove {
-                        move_notation: "3c3d".to_string(),
-                        move_type: "none".to_string(),
-                        evaluation: -45,
-                        depth: 9,
-                        nodes: 9000,
-                    },
-                ],
+                moves: vec![RawMove {
+                    move_notation: "3c3d".to_string(),
+                    move_type: "none".to_string(),
+                    evaluation: -45,
+                    depth: 9,
+                    nodes: 9000,
+                }],
             },
         ]
     }
@@ -49,10 +47,10 @@ mod binary_converter_tests {
     fn test_convert_single_entry() {
         let converter = BinaryConverter::new();
         let entry = create_test_entries().into_iter().next().unwrap();
-        
+
         let result = converter.convert_entry(&entry);
         assert!(result.is_ok());
-        
+
         let binary_entry = result.unwrap();
         assert_ne!(binary_entry.header.position_hash, 0);
         assert_eq!(binary_entry.header.move_count, 2);
@@ -70,10 +68,10 @@ mod binary_converter_tests {
             popularity: 1,
             reserved: 0,
         };
-        
+
         let encoded = BinaryConverter::encode_position_header(&header);
         assert_eq!(encoded.len(), 16); // Should be exactly 16 bytes
-        
+
         let decoded = BinaryConverter::decode_position_header(&encoded).unwrap();
         assert_eq!(decoded.position_hash, header.position_hash);
         assert_eq!(decoded.best_move, header.best_move);
@@ -91,10 +89,10 @@ mod binary_converter_tests {
             depth: 15,
             reserved: 0,
         };
-        
+
         let encoded = BinaryConverter::encode_move(&move_data);
         assert_eq!(encoded.len(), 6); // Should be exactly 6 bytes
-        
+
         let decoded = BinaryConverter::decode_move(&encoded).unwrap();
         assert_eq!(decoded.move_encoded, move_data.move_encoded);
         assert_eq!(decoded.evaluation, move_data.evaluation);
@@ -105,19 +103,19 @@ mod binary_converter_tests {
     fn test_write_read_binary_file() {
         let converter = BinaryConverter::new();
         let entries = create_test_entries();
-        
+
         // Write to memory buffer
         let mut buffer = Vec::new();
         let stats = converter.write_binary(&entries, &mut buffer).unwrap();
-        
+
         assert!(stats.positions_written > 0);
         assert!(stats.bytes_written > 0);
         assert_eq!(stats.positions_written, 2);
-        
+
         // Read back from buffer
         let mut cursor = Cursor::new(buffer);
         let read_entries = converter.read_binary(&mut cursor).unwrap();
-        
+
         assert_eq!(read_entries.len(), 2);
     }
 
@@ -130,10 +128,10 @@ mod binary_converter_tests {
             position_count: 100,
             checksum: 0x12345678,
         };
-        
+
         let encoded = converter.encode_file_header(&header);
         assert_eq!(encoded.len(), 16); // Fixed header size
-        
+
         let decoded = converter.decode_file_header(&encoded).unwrap();
         assert_eq!(&decoded.magic, b"SFEN");
         assert_eq!(decoded.version, 1);
@@ -150,13 +148,13 @@ mod binary_converter_tests {
             min_evaluation: -200,
             max_evaluation: 200,
         };
-        
+
         let mut entries = create_test_entries();
         let filtered = converter.filter_and_convert(&mut entries, &filter).unwrap();
-        
+
         // Should filter based on criteria
         assert!(filtered.len() <= entries.len());
-        
+
         // Check that filtered entries meet criteria
         for entry in &filtered {
             assert!(entry.header.depth >= filter.min_depth as u8);
@@ -175,18 +173,18 @@ mod binary_converter_tests {
             entry.move_count = i + 1;
             entries.push(entry);
         }
-        
+
         // Convert to binary
         let mut uncompressed = Vec::new();
         converter.write_binary(&entries, &mut uncompressed).unwrap();
-        
+
         // Compress - with small data, compressed might be larger due to gzip headers
         let compressed = converter.compress_data(&uncompressed).unwrap();
-        
+
         // For small data, just verify compression/decompression works correctly
         let decompressed = converter.decompress_data(&compressed).unwrap();
         assert_eq!(decompressed, uncompressed);
-        
+
         // For larger data (>1KB), compression should reduce size
         if uncompressed.len() > 1024 {
             assert!(compressed.len() < uncompressed.len());
@@ -197,10 +195,10 @@ mod binary_converter_tests {
     fn test_statistics() {
         let converter = BinaryConverter::new();
         let entries = create_test_entries();
-        
+
         let mut buffer = Vec::new();
         let stats = converter.write_binary(&entries, &mut buffer).unwrap();
-        
+
         assert_eq!(stats.positions_written, 2);
         assert_eq!(stats.total_moves, 3); // 2 + 1
         assert!(stats.bytes_written > 0);
@@ -211,21 +209,21 @@ mod binary_converter_tests {
     fn test_checksum_validation() {
         let converter = BinaryConverter::new();
         let entries = create_test_entries();
-        
+
         // Write with checksum
         let mut buffer = Vec::new();
         converter.write_binary(&entries, &mut buffer).unwrap();
-        
+
         // Verify checksum on read
         let mut cursor = Cursor::new(&buffer);
         let result = converter.read_binary(&mut cursor);
         assert!(result.is_ok()); // Should validate checksum successfully
-        
+
         // Corrupt data
         if buffer.len() > 20 {
             buffer[20] ^= 0xFF; // Flip some bits
         }
-        
+
         // Should fail checksum validation
         let mut cursor = Cursor::new(&buffer);
         let result = converter.read_binary(&mut cursor);
@@ -236,16 +234,16 @@ mod binary_converter_tests {
     fn test_incremental_conversion() {
         let converter = BinaryConverter::new();
         let entries = create_test_entries();
-        
+
         // Test chunk-based processing
         let chunk_size = 1;
         let mut all_converted = Vec::new();
-        
+
         for chunk in entries.chunks(chunk_size) {
             let converted = converter.convert_entries(chunk).unwrap();
             all_converted.extend(converted);
         }
-        
+
         assert_eq!(all_converted.len(), entries.len());
     }
 }

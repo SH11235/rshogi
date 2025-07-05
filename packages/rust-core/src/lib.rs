@@ -18,6 +18,7 @@ extern "C" {
     fn log(s: &str);
 }
 
+#[allow(unused_macros)]
 macro_rules! console_log {
     ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
 }
@@ -64,11 +65,12 @@ mod tests {
     wasm_bindgen_test_configure!(run_in_browser);
 
     #[wasm_bindgen_test]
+    #[cfg(target_arch = "wasm32")]
     fn test_piece_creation() {
         let piece = Piece::new(PieceType::Pawn, Player::Black);
         assert_eq!(piece.piece_type, PieceType::Pawn);
         assert_eq!(piece.owner, Player::Black);
-        assert_eq!(piece.promoted, false);
+        assert!(!piece.promoted);
     }
 
     #[test]
