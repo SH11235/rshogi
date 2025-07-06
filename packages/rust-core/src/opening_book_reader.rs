@@ -83,10 +83,7 @@ impl OpeningBookReader {
                 let version = u32::from_le_bytes(file_header[4..8].try_into().unwrap());
                 let position_count = u32::from_le_bytes(file_header[8..12].try_into().unwrap());
                 // ファイルヘッダー情報（必要に応じてログ出力）
-                println!(
-                    "Found SFEN header: version={}, position_count={}",
-                    version, position_count
-                );
+                println!("Found SFEN header: version={version}, position_count={position_count}");
             } else {
                 // ファイルヘッダーがない場合は位置を戻す
                 println!("No SFEN header found, parsing from beginning");
@@ -155,7 +152,7 @@ impl OpeningBookReader {
             positions_read += 1;
         }
 
-        println!("Successfully parsed {} positions", positions_read);
+        println!("Successfully parsed {positions_read} positions");
 
         Ok(())
     }
