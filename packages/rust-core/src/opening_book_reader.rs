@@ -83,7 +83,10 @@ impl OpeningBookReader {
                 let version = u32::from_le_bytes(file_header[4..8].try_into().unwrap());
                 let position_count = u32::from_le_bytes(file_header[8..12].try_into().unwrap());
                 // ファイルヘッダー情報（必要に応じてログ出力）
-                println!("Found SFEN header: version={}, position_count={}", version, position_count);
+                println!(
+                    "Found SFEN header: version={}, position_count={}",
+                    version, position_count
+                );
             } else {
                 // ファイルヘッダーがない場合は位置を戻す
                 println!("No SFEN header found, parsing from beginning");
@@ -104,11 +107,16 @@ impl OpeningBookReader {
             let _evaluation = i16::from_le_bytes(header_buf[10..12].try_into().unwrap());
             let _depth = header_buf[12];
             let move_count = header_buf[13] as u16; // move_countは1バイト
-            
+
             // デバッグ用（必要に応じてコメントアウト）
             if positions_read < 3 {
-                println!("Position {}: hash={}, move_count={}, cursor_pos={}", 
-                        positions_read, position_hash, move_count, cursor.position());
+                println!(
+                    "Position {}: hash={}, move_count={}, cursor_pos={}",
+                    positions_read,
+                    position_hash,
+                    move_count,
+                    cursor.position()
+                );
             }
 
             // ムーブ読み込み
@@ -118,11 +126,16 @@ impl OpeningBookReader {
                     return Err(format!("Not enough data for move {} at position {}: need 6 bytes but only {} remaining", 
                                      move_idx, cursor.position(), data.len() as u64 - cursor.position()));
                 }
-                
+
                 let mut move_buf = [0u8; 6];
-                cursor
-                    .read_exact(&mut move_buf)
-                    .map_err(|e| format!("Failed to read move {} at position {}: {}", move_idx, cursor.position(), e))?;
+                cursor.read_exact(&mut move_buf).map_err(|e| {
+                    format!(
+                        "Failed to read move {} at position {}: {}",
+                        move_idx,
+                        cursor.position(),
+                        e
+                    )
+                })?;
 
                 let move_encoded = u16::from_le_bytes(move_buf[0..2].try_into().unwrap());
                 let evaluation = i16::from_le_bytes(move_buf[2..4].try_into().unwrap());
@@ -141,7 +154,7 @@ impl OpeningBookReader {
             self.positions.insert(position_hash, moves);
             positions_read += 1;
         }
-        
+
         println!("Successfully parsed {} positions", positions_read);
 
         Ok(())
@@ -391,18 +404,18 @@ mod tests {
 
         // ファイルヘッダー付きバイナリデータを作成
         let mut data = Vec::new();
-        
+
         // ファイルヘッダー（16バイト）
-        data.extend_from_slice(b"SFEN");           // magic (4バイト)
-        data.extend_from_slice(&1u32.to_le_bytes());  // version (4バイト)
-        data.extend_from_slice(&1u32.to_le_bytes());  // position_count (4バイト)
-        data.extend_from_slice(&0u32.to_le_bytes());  // checksum (4バイト)
-        
+        data.extend_from_slice(b"SFEN"); // magic (4バイト)
+        data.extend_from_slice(&1u32.to_le_bytes()); // version (4バイト)
+        data.extend_from_slice(&1u32.to_le_bytes()); // position_count (4バイト)
+        data.extend_from_slice(&0u32.to_le_bytes()); // checksum (4バイト)
+
         // 位置ヘッダー（16バイト）
         data.extend_from_slice(&12345u64.to_le_bytes()); // position_hash
-        data.extend_from_slice(&1u16.to_le_bytes());     // move_count
-        data.extend_from_slice(&[0u8; 6]);              // padding
-        
+        data.extend_from_slice(&1u16.to_le_bytes()); // move_count
+        data.extend_from_slice(&[0u8; 6]); // padding
+
         // ムーブデータ（6バイト）
         data.extend_from_slice(&move_7g7f.to_le_bytes());
         data.extend_from_slice(&50i16.to_le_bytes());
@@ -428,24 +441,25 @@ mod tests {
 
         // テストファイルのパスを調整（CI環境では使用できない場合があるため）
         let file_path = "converted_openings/opening_book_tournament.bin.gz";
-        
+
         if let Ok(mut file) = File::open(file_path) {
             let mut data = Vec::new();
             if file.read_to_end(&mut data).is_ok() {
                 let mut reader = OpeningBookReader::new();
-                
+
                 // Act
                 println!("Loading file with {} bytes", data.len());
                 let result = reader.load_data(&data);
-                
+
                 // Assert
                 assert!(result.is_ok(), "Failed to load real opening book file: {:?}", result);
                 println!("Load result: {:?}", result);
                 println!("Position count: {}", reader.position_count());
                 assert!(reader.position_count() > 0, "No positions loaded from file");
-                
+
                 // 初期局面での手があることを確認
-                let initial_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+                let initial_sfen =
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
                 let moves = reader.find_moves(initial_sfen);
                 // 定跡ファイルによっては初期局面の手がない場合もあるため、エラーチェックのみ
                 println!("Initial position moves found: {}", moves.len());

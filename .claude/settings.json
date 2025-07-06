@@ -11,5 +11,22 @@
                 ]
             }
         ]
+    },
+    "permissions": {
+        "allow": [
+            "mcp__typescript__list_tools",
+            "mcp__typescript__move_file",
+            "mcp__typescript__move_directory",
+            "mcp__typescript__rename_symbol",
+            "mcp__typescript__delete_symbol",
+            "mcp__typescript__get_module_symbols",
+            "mcp__typescript__get_type_in_module",
+            "mcp__typescript__get_type_at_symbol",
+            "mcp__typescript__get_symbols_in_scope",
+            "mcp__typescript__find_references",
+            "mcp__typescript__get_definitions",
+            "mcp__typescript__get_diagnostics"
+        ],
+        "deny": []
     }
 }
