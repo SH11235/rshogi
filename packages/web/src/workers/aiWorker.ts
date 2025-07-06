@@ -1,4 +1,4 @@
-import { AIEngine, OpeningBookLoader, generateMainOpenings } from "shogi-core";
+import { AIEngine } from "shogi-core";
 import type {
     AIResponse,
     AIWorkerMessage,
@@ -6,13 +6,55 @@ import type {
     MoveCalculatedResponse,
     PositionEvaluatedResponse,
 } from "../types/ai";
+import { WasmOpeningBookLoader } from "../services/wasmOpeningBookLoader";
+import init from "@/wasm/shogi_core";
+
+// WebWorker環境でのWASMモジュール可用性をチェック
+console.log("[Worker Debug] Worker environment loaded");
+console.log(
+    "[Worker Debug] Is WebWorker environment:",
+    typeof (self as any).importScripts !== "undefined",
+);
+console.log("[Worker Debug] WebAssembly support:", typeof WebAssembly !== "undefined");
 
 // WebWorker context
 const ctx: Worker = self as unknown as Worker;
 
 // AI engine instance
 let engine: AIEngine | null = null;
-let openingBookLoader: OpeningBookLoader | null = null;
+
+// WASM opening book loader（WebWorker環境での初期化）
+let openingBookLoader: WasmOpeningBookLoader | null = null;
+let wasmInitialized = false;
+
+// WebWorker環境でのWASMモジュール初期化
+async function initializeWasm(): Promise<void> {
+    if (wasmInitialized) return;
+
+    try {
+        console.log("[Worker Debug] Initializing WASM module in Worker");
+        await init(); // WASMモジュールを初期化
+        wasmInitialized = true;
+        console.log("[Worker Debug] WASM module initialized successfully");
+    } catch (error) {
+        console.error("[Worker Debug] Failed to initialize WASM module:", error);
+        throw new Error(
+            `WASM initialization failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
+    }
+}
+
+// WebWorker環境でのWASMローダー初期化
+async function initializeWasmLoader(): Promise<WasmOpeningBookLoader> {
+    // WASMモジュールが初期化されていない場合は初期化
+    await initializeWasm();
+
+    if (!openingBookLoader) {
+        console.log("[Worker Debug] Creating WasmOpeningBookLoader in Worker");
+        openingBookLoader = new WasmOpeningBookLoader();
+    }
+    return openingBookLoader;
+}
 
 // Message handler
 ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => {
@@ -21,73 +63,29 @@ ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => 
     try {
         switch (message.type) {
             case "initialize": {
-                // Initialize AI engine with specified difficulty
-                engine = new AIEngine(message.difficulty);
-
-                // Load opening book data
+                // WebWorker環境でWASMローダーを初期化
                 console.log(`[Worker] AI難易度: ${message.difficulty}`);
-                if (message.difficulty === "beginner") {
-                    // ビギナー向けの豊富な定跡データを使用
-                    try {
-                        const response = await fetch("/data/beginner-openings.json");
-                        if (response.ok) {
-                            const data = await response.json();
-                            engine.loadOpeningBook(data.entries);
-                            console.log(
-                                `📚 ビギナー定跡: ${data.entries.length} エントリ読み込み完了`,
-                            );
-                        } else {
-                            // フォールバック：基本定跡を使用
-                            console.log(
-                                "[Worker] ビギナー定跡ファイルが見つかりません。基本定跡を使用します。",
-                            );
-                            const openingData = generateMainOpenings();
-                            engine.loadOpeningBook(openingData);
-                            console.log(`[Worker] 基本定跡: ${openingData.length} エントリ生成`);
-                        }
-                    } catch (error) {
-                        console.error("ビギナー定跡読み込みエラー:", error);
-                        const openingData = generateMainOpenings();
-                        engine.loadOpeningBook(openingData);
-                        console.log(
-                            `[Worker] エラー時フォールバック: ${openingData.length} エントリ生成`,
-                        );
-                    }
-                } else {
-                    // 中級以上は大容量定跡データベースを使用
-                    try {
-                        // 定跡データのベースURL（ビルド時に置き換え）
-                        const baseUrl = "/data/openings";
-                        openingBookLoader = new OpeningBookLoader(baseUrl);
 
-                        // 初期ロード（最初の5ファイル）
-                        await openingBookLoader.initialize({
-                            preloadCount: 5,
-                            onProgress: (progress) => {
-                                // 進捗をメインスレッドに通知
-                                const progressResponse: AIResponse = {
-                                    type: "opening_book_progress",
-                                    requestId: message.requestId,
-                                    progress,
-                                };
-                                ctx.postMessage(progressResponse);
-                            },
-                        });
+                try {
+                    const loader = await initializeWasmLoader();
+                    console.log("[Worker Debug] WASM loader initialized successfully");
 
-                        // 定跡データをエンジンに設定
-                        const openingBook = openingBookLoader.getOpeningBook();
-                        engine.setOpeningBook(openingBook);
-                        console.log(
-                            `[Worker] 初期定跡データ: ${openingBook.size()} エントリ読み込み完了 (残りはバックグラウンドで読み込み中)`,
-                        );
+                    // Initialize AI engine with specified difficulty
+                    engine = new AIEngine(message.difficulty, loader);
+
+                    // 定跡データを読み込む
+                    try {
+                        await engine.loadOpeningBook();
+                        console.log(`[Worker] 定跡データを読み込みました`);
                     } catch (error) {
-                        console.error("定跡データベース読み込みエラー:", error);
-                        // フォールバック：基本定跡を使用
-                        console.log("[Worker] 大容量定跡読み込み失敗。基本定跡を使用します。");
-                        const openingData = generateMainOpenings();
-                        engine.loadOpeningBook(openingData);
-                        console.log(`[Worker] 基本定跡: ${openingData.length} エントリ生成`);
+                        console.warn(`[Worker] 定跡データの読み込みに失敗しました:`, error);
+                        // エラーが発生しても続行（フォールバックが使用される）
                     }
+                } catch (error) {
+                    console.error("[Worker Debug] Failed to initialize WASM loader:", error);
+                    throw new Error(
+                        `Failed to initialize WASM loader: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    );
                 }
 
                 const response: AIResponse = {
@@ -104,6 +102,10 @@ ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => 
                 }
 
                 // Calculate best move
+                console.log(
+                    "[Worker] calculateBestMove called with moveHistory:",
+                    message.moveHistory?.length || 0,
+                );
                 const move = await engine.calculateBestMove(
                     message.board,
                     message.hands,
@@ -165,6 +167,19 @@ ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => 
                     throw new Error("AI engine not initialized");
                 }
                 engine.setDifficulty(message.difficulty);
+
+                // 難易度変更時に定跡データも再読み込み
+                try {
+                    // WASMローダーの再初期化が必要な場合
+                    await initializeWasmLoader();
+                    await engine.loadOpeningBook();
+                    console.log(
+                        `[Worker] 定跡データを再読み込みしました（難易度: ${message.difficulty}）`,
+                    );
+                } catch (error) {
+                    console.warn(`[Worker] 定跡データの再読み込みに失敗しました:`, error);
+                }
+
                 const response: AIResponse = {
                     type: "difficulty_set",
                     requestId: message.requestId,

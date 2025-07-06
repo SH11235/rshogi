@@ -99,7 +99,7 @@ describe("PromotionDialog", () => {
         );
 
         expect(screen.getByText("銀")).toBeInTheDocument();
-        expect(screen.getByText("成銀")).toBeInTheDocument();
+        expect(screen.getByText("全")).toBeInTheDocument();
     });
 
     it("成るボタンをクリックすると、onConfirm(true)が呼ばれる", () => {
@@ -182,12 +182,12 @@ describe("PromotionDialog", () => {
             {
                 piece: { type: "knight", owner: "black", promoted: false },
                 normal: "桂",
-                promoted: "成桂",
+                promoted: "圭",
             },
             {
                 piece: { type: "silver", owner: "black", promoted: false },
                 normal: "銀",
-                promoted: "成銀",
+                promoted: "全",
             },
             {
                 piece: { type: "rook", owner: "black", promoted: false },

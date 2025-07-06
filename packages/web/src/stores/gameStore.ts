@@ -60,6 +60,7 @@ import {
     checkPerpetualCheck,
     checkSennichite,
     checkTryRule,
+    exportToSfen,
     generateLegalDropMovesForPiece,
     generateLegalMoves,
     initialHands,
@@ -324,6 +325,9 @@ interface GameState {
     stopAI: () => void;
     executeAIMove: () => Promise<void>;
     resetAIThinking: () => void;
+
+    // SFEN取得機能
+    getCurrentSfen: () => string;
 }
 
 // タイマーアクションをGameStateに統合
@@ -768,7 +772,13 @@ export const useGameStore = create<GameState>((set, get) => ({
                 nextPlayer !== localPlayerColor
             ) {
                 // 少し遅延を入れてからAIを実行
+                // 更新されたmoveHistoryを確実に渡すため、クロージャで保持
+                const updatedMoveHistory = newMoveHistory;
                 setTimeout(() => {
+                    console.log(
+                        "[makeDrop] Calling executeAIMove with moveHistory length:",
+                        updatedMoveHistory.length,
+                    );
                     get().executeAIMove();
                 }, 500);
             }
@@ -1013,7 +1023,13 @@ export const useGameStore = create<GameState>((set, get) => ({
                 nextPlayer !== localPlayerColor
             ) {
                 // 少し遅延を入れてからAIを実行
+                // 更新されたmoveHistoryを確実に渡すため、クロージャで保持
+                const updatedMoveHistory = newMoveHistory;
                 setTimeout(() => {
+                    console.log(
+                        "[makeMove] Calling executeAIMove with moveHistory length:",
+                        updatedMoveHistory.length,
+                    );
                     get().executeAIMove();
                 }, 500);
             }
@@ -2664,11 +2680,18 @@ export const useGameStore = create<GameState>((set, get) => ({
             isAIThinking,
         } = get();
 
-        if (
-            !aiPlayer ||
-            (gameStatus !== "playing" && gameStatus !== "check") ||
-            currentPlayer === localPlayerColor
-        ) {
+        // AIが手を指すべきかチェック
+        const shouldExecuteAI =
+            aiPlayer &&
+            (gameStatus === "playing" || gameStatus === "check") &&
+            currentPlayer !== localPlayerColor;
+
+        console.log(
+            `[executeAIMove] AI execution check - aiPlayer: ${!!aiPlayer}, gameStatus: ${gameStatus}, currentPlayer: ${currentPlayer}, localPlayerColor: ${localPlayerColor}, shouldExecute: ${shouldExecuteAI}`,
+        );
+
+        if (!shouldExecuteAI) {
+            console.log("[executeAIMove] Conditions not met for AI execution, skipping");
             return;
         }
 
@@ -2692,12 +2715,9 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         try {
             // AIに手を計算させる
-            const result = await aiPlayer.calculateMove(
-                board,
-                hands,
-                currentPlayer,
-                get().moveHistory,
-            );
+            const moveHistory = get().moveHistory;
+            console.log("[executeAIMove] Passing moveHistory to AI:", moveHistory.length);
+            const result = await aiPlayer.calculateMove(board, hands, currentPlayer, moveHistory);
 
             console.log("[executeAIMove] AI move calculated:", result.move);
 
@@ -2730,17 +2750,26 @@ export const useGameStore = create<GameState>((set, get) => ({
                 `[executeAIMove] After move - currentPlayer: ${updatedPlayer}, localPlayerColor: ${currentLocalPlayerColor}, gameStatus: ${updatedStatus}`,
             );
 
-            // If it's still an AI game and the current player is still AI (AI vs AI scenario)
-            // or if we need another AI move, schedule it
+            // Only schedule another AI move in specific scenarios:
+            // 1. AI vs AI games (both players are AI)
+            // 2. AI vs Human where the next turn is AI's turn
+            const isAIvsAI = currentGameType === "ai" && currentLocalPlayerColor === null;
+            const isAITurn = currentGameType === "ai" && updatedPlayer !== currentLocalPlayerColor;
+
             if (
-                currentGameType === "ai" &&
                 (updatedStatus === "playing" || updatedStatus === "check") &&
-                updatedPlayer !== currentLocalPlayerColor
+                (isAIvsAI || isAITurn)
             ) {
                 console.log("[executeAIMove] Another AI move needed, scheduling...");
+                console.log(`[executeAIMove] isAIvsAI: ${isAIvsAI}, isAITurn: ${isAITurn}`);
                 setTimeout(() => {
                     get().executeAIMove();
                 }, 500);
+            } else {
+                console.log("[executeAIMove] No more AI moves needed");
+                console.log(
+                    `[executeAIMove] gameType: ${currentGameType}, localPlayerColor: ${currentLocalPlayerColor}, currentPlayer: ${updatedPlayer}`,
+                );
             }
         } catch (error) {
             console.error("AI move error:", error);
@@ -2823,5 +2852,75 @@ export const useGameStore = create<GameState>((set, get) => ({
                 console.error("[resetAIThinking] AIワーカー停止エラー:", error);
             }
         }
+    },
+
+    getCurrentSfen: () => {
+        const { historyCursor, moveHistory, gameMode, branchInfo, reviewBasePosition } = get();
+
+        // 現在の状態を取得（分岐や閲覧モードも考慮）
+        let currentBoard: Board;
+        let currentHands: Hands;
+        let currentPlayer: Player;
+        let moveNumber: number;
+
+        if (gameMode === "review" && reviewBasePosition) {
+            // 閲覧モードの場合
+            const historyToApply = branchInfo
+                ? [...moveHistory, ...branchInfo.branchMoves]
+                : moveHistory;
+            const reconstructed = reconstructGameStateWithInitial(
+                historyToApply.slice(0, historyCursor),
+                historyCursor,
+                reviewBasePosition.board,
+                reviewBasePosition.hands,
+            );
+            currentBoard = reconstructed.board;
+            currentHands = reconstructed.hands;
+            currentPlayer = reconstructed.currentPlayer;
+            // historyCursor は -1 から始まるので、手数は historyCursor + 2
+            moveNumber = historyCursor + 2;
+        } else if (branchInfo) {
+            // 分岐がある場合
+            const allMoves = [...moveHistory, ...branchInfo.branchMoves];
+            const state = reconstructGameStateWithInitial(
+                allMoves.slice(0, historyCursor),
+                historyCursor,
+                get().initialBoard,
+                get().initialHandsData,
+            );
+            currentBoard = state.board;
+            currentHands = state.hands;
+            currentPlayer = state.currentPlayer;
+            moveNumber = historyCursor + 2;
+        } else {
+            // 通常の場合（対局中や履歴移動中）
+            if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {
+                // 最新の状態
+                currentBoard = get().board;
+                currentHands = get().hands;
+                currentPlayer = get().currentPlayer;
+                moveNumber = moveHistory.length + 1;
+            } else if (historyCursor === HISTORY_CURSOR.INITIAL_POSITION) {
+                // 初期位置
+                currentBoard = get().initialBoard;
+                currentHands = get().initialHandsData;
+                currentPlayer = "black";
+                moveNumber = 1;
+            } else {
+                // 履歴の途中
+                const state = reconstructGameStateWithInitial(
+                    moveHistory.slice(0, historyCursor + 1),
+                    historyCursor + 1,
+                    get().initialBoard,
+                    get().initialHandsData,
+                );
+                currentBoard = state.board;
+                currentHands = state.hands;
+                currentPlayer = state.currentPlayer;
+                moveNumber = historyCursor + 2;
+            }
+        }
+
+        return exportToSfen(currentBoard, currentHands, currentPlayer, moveNumber);
     },
 }));

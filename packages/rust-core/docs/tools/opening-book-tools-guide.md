@@ -75,7 +75,7 @@ cargo build --release --bin verify_opening_book
 ```bash
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_web.bin.gz \
+  --output converted_openings/opening_book_web.binz \
   --max-moves 50 \
   --min-depth 5 \
   --min-eval=-500 \
@@ -107,7 +107,7 @@ This creates a compressed file optimized for web use:
 # With compression (recommended for storage/transfer)
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_full.bin.gz \
+  --output converted_openings/opening_book_full.binz \
   --max-moves 999999 \
   --min-depth 0 \
   --min-eval=-99999 \
@@ -123,7 +123,7 @@ This preserves all data without filtering. The compressed version reduces file s
 ```bash
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_early.bin.gz \
+  --output converted_openings/opening_book_early.binz \
   --max-moves 20 \
   --min-depth 8 \
   --min-eval=-300 \
@@ -138,7 +138,7 @@ Creates a very small file (~5-10MB) with only high-quality early game positions.
 ```bash
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_tournament.bin.gz \
+  --output converted_openings/opening_book_tournament.binz \
   --max-moves 100 \
   --min-depth 10 \
   --min-eval=-200 \
@@ -311,7 +311,7 @@ Shows only statistical information without sample entries.
 # Step 1: Convert with web-optimized settings
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_web.bin.gz \
+  --output converted_openings/opening_book_web.binz \
   --max-moves 50 \
   --min-depth 5 \
   --min-eval=-500 \
@@ -321,16 +321,16 @@ Shows only statistical information without sample entries.
 
 # Step 2: Verify the conversion
 ./target/release/verify_opening_book \
-  --binary converted_openings/opening_book_web.bin.gz \
+  --binary converted_openings/opening_book_web.binz \
   --original user_book1.db
 
 # Step 3: Check key positions
 ./target/release/verify_opening_book \
-  --binary converted_openings/opening_book_web.bin.gz \
+  --binary converted_openings/opening_book_web.binz \
   --check-position "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
 
 # Step 4: If satisfied, copy to web directory
-cp converted_openings/opening_book_web.bin.gz ../web/public/data/
+cp converted_openings/opening_book_web.binz ../web/public/data/
 ```
 
 ### 2. Multi-Level Conversion for Progressive Loading
@@ -339,7 +339,7 @@ cp converted_openings/opening_book_web.bin.gz ../web/public/data/
 # Early game (5-10MB)
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_early.bin.gz \
+  --output converted_openings/opening_book_early.binz \
   --max-moves 20 \
   --min-depth 8 \
   --compress
@@ -347,7 +347,7 @@ cp converted_openings/opening_book_web.bin.gz ../web/public/data/
 # Standard (20-30MB)
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_standard.bin.gz \
+  --output converted_openings/opening_book_standard.binz \
   --max-moves 50 \
   --min-depth 5 \
   --min-eval=-500 \
@@ -357,7 +357,7 @@ cp converted_openings/opening_book_web.bin.gz ../web/public/data/
 # Full (50MB+)
 ./target/release/convert_opening_book \
   --input user_book1.db \
-  --output converted_openings/opening_book_full.bin.gz \
+  --output converted_openings/opening_book_full.binz \
   --max-moves 100 \
   --compress
 
@@ -365,7 +365,7 @@ cp converted_openings/opening_book_web.bin.gz ../web/public/data/
 for level in early standard full; do
   echo "Verifying $level..."
   ./target/release/verify_opening_book \
-    --binary converted_openings/opening_book_${level}.bin.gz \
+    --binary converted_openings/opening_book_${level}.binz \
     --stats-only
 done
 ```
@@ -454,7 +454,7 @@ If running out of memory:
      IFS=':' read -r name moves depth min_eval max_eval <<< "$config"
      ./target/release/convert_opening_book \
        --input user_book1.db \
-       --output converted_openings/opening_book_${name}.bin.gz \
+       --output converted_openings/opening_book_${name}.binz \
        --max-moves $moves \
        --min-depth $depth \
        --min-eval=$min_eval \
@@ -472,9 +472,9 @@ Here are actual verification results from generated binary files:
 #### Early Game Version (13MB)
 
 ```bash
-$ ./target/release/verify_opening_book --binary converted_openings/opening_book_early.bin.gz --stats-only
+$ ./target/release/verify_opening_book --binary converted_openings/opening_book_early.binz --stats-only
 
-Verifying binary file: converted_openings/opening_book_early.bin.gz
+Verifying binary file: converted_openings/opening_book_early.binz
 ============================================================
 Detected gzip compressed file
 Successfully loaded 436484 positions
@@ -502,7 +502,7 @@ Evaluation distribution:
 #### Initial Position Check
 
 ```bash
-$ ./target/release/verify_opening_book --binary converted_openings/opening_book_early.bin.gz \
+$ ./target/release/verify_opening_book --binary converted_openings/opening_book_early.binz \
     --check-position "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
 
 Position FOUND in binary!
@@ -522,7 +522,7 @@ Details:
 #### Comparison with Original
 
 ```bash
-$ ./target/release/verify_opening_book --binary converted_openings/opening_book_early.bin.gz \
+$ ./target/release/verify_opening_book --binary converted_openings/opening_book_early.binz \
     --original user_book1.db
 
 Comparison results:
@@ -538,10 +538,10 @@ The retention rate of 19.4% is expected given the filtering criteria (max 20 mov
 
 | File | Size | Positions | Moves | Avg Moves/Pos |
 |------|------|-----------|-------|---------------|
-| opening_book_early.bin.gz | 13MB | 436,484 | 2,328,762 | 5.34 |
-| opening_book_web.bin.gz | 24MB | 800,506 | 4,168,955 | 5.21 |
-| opening_book_tournament.bin.gz | 8.6MB | - | - | - |
-| opening_book_full.bin.gz | 67MB | - | - | - |
+| opening_book_early.binz | 13MB | 436,484 | 2,328,762 | 5.34 |
+| opening_book_web.binz | 24MB | 800,506 | 4,168,955 | 5.21 |
+| opening_book_tournament.binz | 8.6MB | - | - | - |
+| opening_book_full.binz | 67MB | - | - | - |
 | opening_book_full.bin | 105MB | - | - | - |
 
 ## Output Format Details

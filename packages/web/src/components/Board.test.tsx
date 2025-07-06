@@ -87,7 +87,7 @@ describe("Board component", () => {
         // Find the selected square and check its styling
         const squares = screen.getAllByRole("button");
         const selectedSquareElement = squares.find((square) =>
-            square.className.includes("bg-blue-200"),
+            square.className.includes("!bg-blue-300"),
         );
 
         expect(selectedSquareElement).toBeDefined();
@@ -110,7 +110,7 @@ describe("Board component", () => {
         // Should have squares with valid move highlighting
         const squares = screen.getAllByRole("button");
         const validMoveSquares = squares.filter((square) =>
-            square.className.includes("bg-green-100"),
+            square.className.includes("!bg-green-200"),
         );
 
         expect(validMoveSquares).toHaveLength(2);
@@ -164,5 +164,22 @@ describe("Board component", () => {
         fireEvent.click(lastSquare);
 
         expect(mockOnSquareClick).toHaveBeenCalledWith({ row: 9, column: 1 });
+    });
+
+    it("highlights valid drop squares", () => {
+        const validDropSquares = [
+            { row: 6 as const, column: 7 as const },
+            { row: 5 as const, column: 7 as const },
+        ];
+
+        render(<Board {...defaultProps} validDropSquares={validDropSquares} />);
+
+        // Should have squares with valid drop highlighting
+        const squares = screen.getAllByRole("button");
+        const validDropSquareElements = squares.filter((square) =>
+            square.className.includes("!bg-purple-200"),
+        );
+
+        expect(validDropSquareElements).toHaveLength(2);
     });
 });

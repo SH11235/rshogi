@@ -3,14 +3,28 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { useOpeningBook } from "@/hooks/useOpeningBook";
 import { useGameStore } from "@/stores/gameStore";
+import type { Square } from "shogi-core";
 
 export function OpeningBook() {
-    const sfen = useGameStore((state) => state.getCurrentSfen?.() || "");
+    const getCurrentSfen = useGameStore((state) => state.getCurrentSfen);
     const makeMove = useGameStore((state) => state.makeMove);
+    const sfen = getCurrentSfen();
     const { moves, loading, error, progress, level, loadMoreData } = useOpeningBook(sfen);
 
     const handleMoveClick = (notation: string) => {
-        makeMove?.(notation);
+        // 記譜法から移動を解析（例: "7g7f" -> from: {row: 7, column: 7}, to: {row: 7, column: 6}）
+        if (notation.length >= 4) {
+            const fromCol = Number.parseInt(notation[0]);
+            const fromRow = notation.charCodeAt(1) - 96; // 'a' = 1, 'b' = 2, ..., 'i' = 9
+            const toCol = Number.parseInt(notation[2]);
+            const toRow = notation.charCodeAt(3) - 96;
+            const promote = notation.endsWith("+");
+
+            const from: Square = { row: fromRow as any, column: fromCol as any };
+            const to: Square = { row: toRow as any, column: toCol as any };
+
+            makeMove(from, to, promote);
+        }
     };
 
     const formatEval = (evaluation: number): string => {

@@ -1,7 +1,6 @@
 #!/usr/bin/env tsx
 
-import type { AIDifficulty } from "../src/types/ai";
-import { AIBenchmark, measureOpeningBookUsage } from "./ai-benchmark";
+import { AIBenchmark } from "./ai-benchmark";
 
 async function runFullBenchmark() {
     console.log("🏁 Starting AI Performance Benchmark...\n");
@@ -15,18 +14,8 @@ async function runFullBenchmark() {
     const formatted = benchmark.formatResults(results);
     console.log(`\n${formatted}`);
 
-    // 定跡使用率の測定
-    console.log("\n📚 Opening Book Usage Analysis:\n");
-
-    const difficulties: AIDifficulty[] = ["beginner", "intermediate", "advanced", "expert"];
-    for (const difficulty of difficulties) {
-        console.log(`${difficulty.toUpperCase()}:`);
-        const usage = await measureOpeningBookUsage(difficulty, 5);
-        console.log(`  Total moves: ${usage.totalMoves}`);
-        console.log(`  Book moves: ${usage.bookMoves}`);
-        console.log(`  Book usage rate: ${usage.bookUsageRate.toFixed(1)}%`);
-        console.log("");
-    }
+    // 定跡使用率の測定（将来実装）
+    console.log("\n📚 Opening Book Usage Analysis: [TO BE IMPLEMENTED]\n");
 
     // 性能比較サマリー
     console.log("\n📊 Performance Summary:\n");

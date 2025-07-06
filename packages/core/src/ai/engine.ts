@@ -10,6 +10,18 @@ import { AI_DIFFICULTY_CONFIGS } from "../types/ai";
 import { EndgameDatabase } from "./endgameDatabase";
 import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
 import { IterativeDeepeningSearch } from "./search";
+import { OpeningBook } from "./openingBook";
+import { OpeningBookLoader } from "./openingBookLoader";
+import type { OpeningBookLoaderInterface } from "./openingBookInterface";
+import type { PositionState } from "../domain/service/repetitionService";
+
+export interface AIEngineConfig {
+    difficulty: AIDifficulty;
+    searchDepth: number;
+    timeLimit: number;
+    useEndgameDatabase: boolean;
+    useOpeningBook: boolean;
+}
 
 export class AIEngine {
     private difficulty: AIDifficulty;
@@ -19,8 +31,11 @@ export class AIEngine {
     private lastEvaluation: PositionEvaluation | null = null;
     private iterativeSearch: IterativeDeepeningSearch;
     private endgameDatabase: EndgameDatabase;
+    private openingBook: OpeningBook | null = null;
+    private openingBookLoader: OpeningBookLoaderInterface;
+    private useOpeningBook: boolean;
 
-    constructor(difficulty: AIDifficulty) {
+    constructor(difficulty: AIDifficulty, openingBookLoader?: OpeningBookLoaderInterface) {
         this.difficulty = difficulty;
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
@@ -29,6 +44,11 @@ export class AIEngine {
 
         // 終盤データベースを初期化
         this.endgameDatabase = new EndgameDatabase();
+
+        // 定跡の初期化（ローダーが提供されない場合はデフォルト実装を使用）
+        this.openingBookLoader = openingBookLoader || new OpeningBookLoader();
+        // 初心者レベルでは定跡を使用しない
+        this.useOpeningBook = difficulty !== "beginner";
     }
 
     setDifficulty(difficulty: AIDifficulty): void {
@@ -36,6 +56,54 @@ export class AIEngine {
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
         this.timeLimit = config.timeLimit || 3000;
+        // 初心者レベルでは定跡を使用しない
+        this.useOpeningBook = difficulty !== "beginner";
+    }
+
+    /**
+     * 定跡を読み込む
+     */
+    async loadOpeningBook(): Promise<void> {
+        if (!this.useOpeningBook) {
+            this.openingBook = null;
+            return;
+        }
+
+        try {
+            this.openingBook = await this.openingBookLoader.loadForDifficulty(this.difficulty);
+        } catch (error) {
+            console.warn("Failed to load opening book:", error);
+            // フォールバックを使用
+            this.openingBook = this.openingBookLoader.loadFromFallback();
+        }
+    }
+
+    /**
+     * 設定を取得
+     */
+    getConfig(): AIEngineConfig {
+        return {
+            difficulty: this.difficulty,
+            searchDepth: this.searchDepth,
+            timeLimit: this.timeLimit,
+            useEndgameDatabase: AI_DIFFICULTY_CONFIGS[this.difficulty].useEndgameDatabase || false,
+            useOpeningBook: this.useOpeningBook,
+        };
+    }
+
+    /**
+     * 設定を更新
+     */
+    setConfig(config: Partial<AIEngineConfig>): void {
+        if (config.useOpeningBook !== undefined) {
+            this.useOpeningBook = config.useOpeningBook;
+        }
+        if (config.searchDepth !== undefined) {
+            this.searchDepth = config.searchDepth;
+        }
+        if (config.timeLimit !== undefined) {
+            this.timeLimit = config.timeLimit;
+        }
     }
 
     getSearchDepth(): number {
@@ -49,6 +117,36 @@ export class AIEngine {
         moveHistory: Move[],
     ): Promise<Move> {
         this.startTime = Date.now();
+        console.log(
+            "[AIEngine] calculateBestMove called with moveHistory:",
+            moveHistory?.length || 0,
+        );
+
+        // 定跡をチェック
+        if (this.useOpeningBook && this.openingBook) {
+            const positionState: PositionState = {
+                board,
+                hands,
+                currentPlayer,
+            };
+
+            const openingMoves = this.openingBook.findMoves(positionState, {
+                randomize: true,
+                moveHistory,
+            });
+            if (openingMoves.length > 0) {
+                // 重み付きランダムで選択される（findMovesでrandomize: true）
+                const selectedMove = openingMoves[0];
+                this.lastEvaluation = {
+                    score: 0,
+                    depth: selectedMove.depth || 0,
+                    pv: [selectedMove.move],
+                    nodes: 1,
+                    time: Date.now() - this.startTime,
+                };
+                return selectedMove.move;
+            }
+        }
 
         // 終盤データベースをチェック
         const endgameEval = this.endgameDatabase.evaluate(board, hands, currentPlayer);

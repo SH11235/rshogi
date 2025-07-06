@@ -147,6 +147,10 @@ export class AIService {
         this.aiPlayer.isThinking = true;
 
         try {
+            console.log(
+                "[AIService] Sending calculate_move with moveHistory:",
+                moveHistory?.length || 0,
+            );
             const response = await this.sendRequest<CalculateMoveRequest>({
                 type: "calculate_move",
                 board,

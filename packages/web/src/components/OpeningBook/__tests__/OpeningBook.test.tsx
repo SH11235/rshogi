@@ -1,5 +1,5 @@
 import * as useOpeningBookModule from "@/hooks/useOpeningBook";
-import { fireEvent, render } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OpeningBook } from "../OpeningBook";
 
@@ -9,15 +9,17 @@ describe("OpeningBook", () => {
     beforeEach(() => {
         vi.clearAllMocks();
     });
-    it("should render title", () => {
+    it("should render title", async () => {
         // Arrange & Act
         const { getByText } = render(<OpeningBook />);
 
         // Assert
-        expect(getByText("定跡")).toBeInTheDocument();
+        await waitFor(() => {
+            expect(getByText("定跡")).toBeInTheDocument();
+        });
     });
 
-    it("should display book moves", () => {
+    it("should display book moves", async () => {
         // Arrange
         vi.spyOn(useOpeningBookModule, "useOpeningBook").mockReturnValue({
             moves: [
@@ -35,11 +37,13 @@ describe("OpeningBook", () => {
         const { getByText } = render(<OpeningBook />);
 
         // Assert
-        expect(getByText("7g7f")).toBeInTheDocument();
-        expect(getByText("評価: +50 深さ: 10")).toBeInTheDocument();
+        await waitFor(() => {
+            expect(getByText("7g7f")).toBeInTheDocument();
+            expect(getByText("評価: +50 深さ: 10")).toBeInTheDocument();
+        });
     });
 
-    it("should display error message", () => {
+    it("should display error message", async () => {
         // Arrange
         vi.spyOn(useOpeningBookModule, "useOpeningBook").mockReturnValue({
             moves: [],
@@ -54,10 +58,12 @@ describe("OpeningBook", () => {
         const { getByText } = render(<OpeningBook />);
 
         // Assert
-        expect(getByText("エラー: 定跡データの読み込みに失敗しました")).toBeInTheDocument();
+        await waitFor(() => {
+            expect(getByText("エラー: 定跡データの読み込みに失敗しました")).toBeInTheDocument();
+        });
     });
 
-    it("should display data level selector", () => {
+    it("should display data level selector", async () => {
         // Arrange
         vi.spyOn(useOpeningBookModule, "useOpeningBook").mockReturnValue({
             moves: [],
@@ -72,12 +78,14 @@ describe("OpeningBook", () => {
         const { getByText } = render(<OpeningBook />);
 
         // Assert
-        expect(getByText("序盤")).toBeInTheDocument();
-        expect(getByText("標準")).toBeInTheDocument();
-        expect(getByText("完全版")).toBeInTheDocument();
+        await waitFor(() => {
+            expect(getByText("序盤")).toBeInTheDocument();
+            expect(getByText("標準")).toBeInTheDocument();
+            expect(getByText("完全版")).toBeInTheDocument();
+        });
     });
 
-    it("should call loadMoreData when level button clicked", () => {
+    it("should call loadMoreData when level button clicked", async () => {
         // Arrange
         const loadMoreData = vi.fn();
         vi.spyOn(useOpeningBookModule, "useOpeningBook").mockReturnValue({
@@ -91,9 +99,14 @@ describe("OpeningBook", () => {
 
         // Act
         const { getByText } = render(<OpeningBook />);
-        fireEvent.click(getByText("標準"));
+
+        await act(async () => {
+            fireEvent.click(getByText("標準"));
+        });
 
         // Assert
-        expect(loadMoreData).toHaveBeenCalledWith("standard");
+        await waitFor(() => {
+            expect(loadMoreData).toHaveBeenCalledWith("standard");
+        });
     });
 });

@@ -7,7 +7,30 @@ import wasm from "vite-plugin-wasm";
 
 // https://vite.dev/config/
 export default defineConfig({
-    plugins: [wasm(), topLevelAwait(), react(), tailwindcss()],
+    plugins: [
+        wasm(),
+        topLevelAwait(),
+        react(),
+        tailwindcss(),
+        // .gzファイルの自動解凍を無効化するプラグイン
+        {
+            name: "disable-gz-decompression",
+            configureServer(server) {
+                server.middlewares.use((req, res, next) => {
+                    if (req.url?.endsWith(".bin.gz")) {
+                        const originalSetHeader = res.setHeader;
+                        res.setHeader = function (name, value) {
+                            if (name.toLowerCase() === "content-encoding") {
+                                return res;
+                            }
+                            return originalSetHeader.call(this, name, value);
+                        };
+                    }
+                    next();
+                });
+            },
+        },
+    ],
     resolve: {
         alias: {
             "@": path.resolve(__dirname, "./src"),
@@ -18,6 +41,9 @@ export default defineConfig({
         outDir: "dist",
         assetsDir: "assets",
         sourcemap: false,
+    },
+    worker: {
+        plugins: () => [wasm(), topLevelAwait()],
     },
     assetsInclude: ["**/*.gz"],
 });

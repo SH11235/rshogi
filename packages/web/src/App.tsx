@@ -18,6 +18,7 @@ import type { ImportFormat } from "./components/KifuImportDialog";
 import { MateSearchPanel } from "./components/MateSearchPanel";
 import { MoveHistory } from "./components/MoveHistory";
 import { OnlineGameDialog } from "./components/OnlineGameDialog";
+import { OpeningBook } from "./components/OpeningBook";
 import { PlaybackControls } from "./components/PlaybackControls";
 import { PromotionDialog } from "./components/PromotionDialog";
 import { SavedGamesDialog } from "./components/SavedGamesDialog";
@@ -276,6 +277,8 @@ function App() {
                                 />
                                 {/* 詰み探索パネル - 解析モードまたは詰将棋モードで表示 */}
                                 {(gameMode === "analysis" || isTsumeShogi) && <MateSearchPanel />}
+                                {/* 定跡表示 - オンライン対戦以外で表示 */}
+                                {gameType !== "online" && <OpeningBook />}
                                 {/* AI対戦セットアップまたはステータス表示 */}
                                 {gameType !== "online" && (
                                     <>
@@ -340,6 +343,8 @@ function App() {
                         )}
                         {/* 詰み探索パネル - 解析モードまたは詰将棋モードで表示 */}
                         {(gameMode === "analysis" || isTsumeShogi) && <MateSearchPanel />}
+                        {/* 定跡表示 - オンライン対戦以外で表示 */}
+                        {gameType !== "online" && <OpeningBook />}
                         {/* AI対戦セットアップまたはステータス表示 */}
                         {gameType !== "online" && (
                             <>
