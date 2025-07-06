@@ -53,7 +53,8 @@ mod position_hasher_tests {
 
     #[test]
     fn test_hash_complex_position() {
-        let complex_pos = "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R b 2P2p 35";
+        let complex_pos =
+            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R b 2P2p 35";
         let hash = PositionHasher::hash_position(complex_pos).unwrap();
 
         // Should handle complex positions with multiple promoted pieces

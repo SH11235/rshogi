@@ -225,7 +225,7 @@ impl PositionHasher {
                 // Multiple pieces (e.g., "2P" for 2 pawns, "10P" for 10 pawns)
                 let mut count_str = String::new();
                 count_str.push(ch);
-                
+
                 // Collect all consecutive digits
                 while let Some(&next_ch) = chars.peek() {
                     if next_ch.is_ascii_digit() {
@@ -234,10 +234,10 @@ impl PositionHasher {
                         break;
                     }
                 }
-                
-                let count: usize = count_str.parse()
-                    .map_err(|_| anyhow!("Invalid piece count: {}", count_str))?;
-                
+
+                let count: usize =
+                    count_str.parse().map_err(|_| anyhow!("Invalid piece count: {}", count_str))?;
+
                 if let Some(piece_ch) = chars.next() {
                     (count, piece_ch)
                 } else {
@@ -250,7 +250,7 @@ impl PositionHasher {
 
             // Get hand piece index (0-13: 7 piece types * 2 players)
             let hand_index = self.get_hand_piece_index(piece_ch)?;
-            
+
             // XOR hash for each piece in hand
             // Use different hash for different counts
             for i in 0..count {
@@ -276,7 +276,11 @@ impl PositionHasher {
             _ => return Err(anyhow!("Invalid hand piece type: {}", piece_type)),
         };
 
-        let player_offset = if piece_type.is_ascii_uppercase() { 0 } else { 7 };
+        let player_offset = if piece_type.is_ascii_uppercase() {
+            0
+        } else {
+            7
+        };
         Ok(base_index + player_offset)
     }
 
@@ -328,64 +332,67 @@ mod tests {
     #[test]
     fn test_different_turn_different_hash() {
         let hasher = PositionHasher::new();
-        
+
         // Same position, different turn
         let sfen_black = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
         let sfen_white = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1";
-        
+
         let hash_black = hasher.hash_sfen_position(sfen_black).unwrap();
         let hash_white = hasher.hash_sfen_position(sfen_white).unwrap();
-        
+
         assert_ne!(hash_black, hash_white, "Different turn should produce different hash");
     }
 
     #[test]
     fn test_different_hands_different_hash() {
         let hasher = PositionHasher::new();
-        
+
         // Same position and turn, different hands
         let sfen_no_hands = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
         let sfen_with_pawn = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b P 1";
         let sfen_with_2pawns = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 2P 1";
-        
+
         let hash_no_hands = hasher.hash_sfen_position(sfen_no_hands).unwrap();
         let hash_with_pawn = hasher.hash_sfen_position(sfen_with_pawn).unwrap();
         let hash_with_2pawns = hasher.hash_sfen_position(sfen_with_2pawns).unwrap();
-        
+
         assert_ne!(hash_no_hands, hash_with_pawn, "Different hands should produce different hash");
-        assert_ne!(hash_with_pawn, hash_with_2pawns, "Different number of pieces should produce different hash");
+        assert_ne!(
+            hash_with_pawn, hash_with_2pawns,
+            "Different number of pieces should produce different hash"
+        );
         assert_ne!(hash_no_hands, hash_with_2pawns, "No hands vs 2 pawns should be different");
     }
 
     #[test]
     fn test_after_move_different_hash() {
         let hasher = PositionHasher::new();
-        
+
         // Initial position
         let sfen_initial = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
         // After 7g7f
         let sfen_after_76 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/LNSGKGSNL w - 2";
-        
+
         let hash_initial = hasher.hash_sfen_position(sfen_initial).unwrap();
         let hash_after = hasher.hash_sfen_position(sfen_after_76).unwrap();
-        
+
         assert_ne!(hash_initial, hash_after, "Position after 76歩 should have different hash");
     }
 
     #[test]
     fn test_multi_digit_hands() {
         let hasher = PositionHasher::new();
-        
+
         // Test various hand combinations including multi-digit counts
         let sfen_10pawns = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 10P 1";
         let sfen_mixed = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 10P2n3s 1";
         let sfen_18pawns = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 18p 1";
-        
+
         // These should all parse without error
         let hash1 = hasher.hash_sfen_position(sfen_10pawns).unwrap();
         let hash2 = hasher.hash_sfen_position(sfen_mixed).unwrap();
         let hash3 = hasher.hash_sfen_position(sfen_18pawns).unwrap();
-        
+
         // All should be different
         assert_ne!(hash1, hash2);
         assert_ne!(hash2, hash3);
