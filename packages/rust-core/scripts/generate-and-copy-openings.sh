@@ -4,22 +4,46 @@
 
 set -e
 
-echo "🔄 Generating opening book files..."
+echo "🔄 Copying opening book files from converted_openings..."
 
-# Create data directory if it doesn't exist
-mkdir -p data/openings
+# Check if converted_openings directory exists
+if [ ! -d "converted_openings" ]; then
+    echo "❌ Error: converted_openings directory not found!"
+    echo "Please run the conversion tool first to generate opening book files."
+    exit 1
+fi
 
-# Generate opening book files (placeholder for now)
-# TODO: Run actual conversion commands here when ready
-# cargo run --bin convert_opening_book -- [options]
+# Check for required files
+REQUIRED_FILES=(
+    "opening_book_early.binz"
+    "opening_book_web.binz"
+    "opening_book_full.binz"
+)
 
-echo "📦 Creating placeholder opening book files..."
-touch data/openings/opening_book_early.bin.gz
-touch data/openings/opening_book_standard.bin.gz
-touch data/openings/opening_book_full.bin.gz
+echo "📋 Checking for required files..."
+for file in "${REQUIRED_FILES[@]}"; do
+    if [ ! -f "converted_openings/$file" ]; then
+        echo "⚠️  Warning: $file not found in converted_openings/"
+    fi
+done
 
 echo "📋 Copying files to web package..."
 mkdir -p ../web/public/data
-cp data/openings/*.bin.gz ../web/public/data/
 
-echo "✅ Opening book files copied successfully!"
+# Copy available .binz files
+if ls converted_openings/*.binz 1> /dev/null 2>&1; then
+    cp converted_openings/*.binz ../web/public/data/
+    
+    # Rename files to match expected names
+    if [ -f "../web/public/data/opening_book_web.binz" ] && [ ! -f "../web/public/data/opening_book_standard.binz" ]; then
+        echo "📝 Creating opening_book_standard.binz from opening_book_web.binz..."
+        cp ../web/public/data/opening_book_web.binz ../web/public/data/opening_book_standard.binz
+    fi
+    
+    echo "✅ Opening book files copied successfully!"
+    echo "📁 Files in web/public/data:"
+    ls -lh ../web/public/data/*.binz 2>/dev/null || echo "No .binz files found"
+else
+    echo "❌ No .binz files found in converted_openings/"
+    exit 1
+fi

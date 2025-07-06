@@ -4,7 +4,7 @@ mod position_hasher_tests {
 
     #[test]
     fn test_hash_initial_position() {
-        let initial_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
+        let initial_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
         let hash = PositionHasher::hash_position(initial_sfen).unwrap();
 
         // Hash should be deterministic
@@ -17,8 +17,8 @@ mod position_hasher_tests {
 
     #[test]
     fn test_hash_different_positions() {
-        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
-        let pos2 = "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R";
+        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let pos2 = "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R w 2P2p 30";
 
         let hash1 = PositionHasher::hash_position(pos1).unwrap();
         let hash2 = PositionHasher::hash_position(pos2).unwrap();
@@ -29,8 +29,8 @@ mod position_hasher_tests {
 
     #[test]
     fn test_hash_position_with_promotion() {
-        let normal_pos = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
-        let promoted_pos = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1+B5R1/LNSGKGSNL";
+        let normal_pos = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let promoted_pos = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1+B5R1/LNSGKGSNL b - 1";
 
         let hash1 = PositionHasher::hash_position(normal_pos).unwrap();
         let hash2 = PositionHasher::hash_position(promoted_pos).unwrap();
@@ -41,8 +41,8 @@ mod position_hasher_tests {
 
     #[test]
     fn test_hash_empty_squares() {
-        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
-        let pos2 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/4P4/PPPPP1PPP/1B5R1/LNSGKGSNL";
+        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let pos2 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/4P4/PPPPP1PPP/1B5R1/LNSGKGSNL w - 2";
 
         let hash1 = PositionHasher::hash_position(pos1).unwrap();
         let hash2 = PositionHasher::hash_position(pos2).unwrap();
@@ -53,7 +53,7 @@ mod position_hasher_tests {
 
     #[test]
     fn test_hash_complex_position() {
-        let complex_pos = "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R";
+        let complex_pos = "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R b 2P2p 35";
         let hash = PositionHasher::hash_position(complex_pos).unwrap();
 
         // Should handle complex positions with multiple promoted pieces
@@ -67,11 +67,11 @@ mod position_hasher_tests {
     #[test]
     fn test_hash_position_uniqueness() {
         let positions = vec![
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL",
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL",
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL",
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSN1",
-            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL w - 2",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSN1 b - 1",
+            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R b 2P2p 35",
         ];
 
         let mut hash_set = std::collections::HashSet::new();
@@ -102,8 +102,8 @@ mod position_hasher_tests {
 
     #[test]
     fn test_hash_zobrist_properties() {
-        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
-        let pos2 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL";
+        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let pos2 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL w - 2";
 
         let hash1 = PositionHasher::hash_position(pos1).unwrap();
         let hash2 = PositionHasher::hash_position(pos2).unwrap();
@@ -121,8 +121,8 @@ mod position_hasher_tests {
     fn test_hash_collision_detection() {
         let mut hasher = PositionHasher::new();
 
-        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL";
-        let pos2 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL";
+        let pos1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let pos2 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL w - 2";
 
         let hash1 = hasher.hash_and_track(pos1).unwrap();
         let hash2 = hasher.hash_and_track(pos2).unwrap();
@@ -138,11 +138,11 @@ mod position_hasher_tests {
     #[test]
     fn test_hash_statistics() {
         let positions = vec![
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL",
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL",
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSN1",
-            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R",
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PPPPP1PPP/1B5R1/LNSGKGSNL w - 2",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSN1 b - 1",
+            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R b 2P2p 35",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
         ];
 
         let mut hasher = PositionHasher::new();
