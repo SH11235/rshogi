@@ -49,7 +49,11 @@ export * from "./types/ai";
 export * from "./ai/engine";
 export * from "./ai/evaluation";
 export * from "./ai/search";
-export { OpeningBook } from "./ai/openingBook";
 export { generateMainOpenings } from "./ai/openingData";
-export type { OpeningEntry, OpeningMove, FindMovesOptions } from "./ai/openingBook";
-export type { OpeningBookLoaderInterface } from "./ai/openingBookInterface";
+export type {
+    OpeningEntry,
+    OpeningMove,
+    FindMovesOptions,
+    OpeningBookInterface,
+    OpeningBookLoaderInterface,
+} from "./ai/openingBookInterface";

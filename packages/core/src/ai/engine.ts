@@ -10,7 +10,7 @@ import type { PositionState } from "../domain/service/repetitionService";
 import type { AIDifficulty, PositionEvaluation } from "../types/ai";
 import { AI_DIFFICULTY_CONFIGS } from "../types/ai";
 import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
-import type { OpeningBook } from "./openingBook";
+import type { OpeningBookInterface } from "./openingBookInterface";
 import type { OpeningBookLoaderInterface } from "./openingBookInterface";
 import { IterativeDeepeningSearch } from "./search";
 
@@ -28,7 +28,7 @@ export class AIEngine {
     private startTime = 0;
     private lastEvaluation: PositionEvaluation | null = null;
     private iterativeSearch: IterativeDeepeningSearch;
-    private openingBook: OpeningBook | null = null;
+    private openingBook: OpeningBookInterface | null = null;
     private openingBookLoader: OpeningBookLoaderInterface;
     private useOpeningBook: boolean;
 

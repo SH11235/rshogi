@@ -20,10 +20,10 @@ describe("generateMainOpenings", () => {
         );
 
         expect(initialPosition).toBeDefined();
-        expect(initialPosition!.moves.length).toBeGreaterThan(0);
+        expect(initialPosition?.moves.length).toBeGreaterThan(0);
 
         // 基本的な初手が含まれているか
-        const moveNotations = initialPosition!.moves.map((m) => m.notation);
+        const moveNotations = initialPosition?.moves.map((m) => m.notation);
         expect(moveNotations).toContain("7g7f"); // 居飛車
         expect(moveNotations).toContain("2g2f"); // 振り飛車
     });
