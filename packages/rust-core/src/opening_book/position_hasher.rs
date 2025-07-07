@@ -109,22 +109,39 @@ impl PositionHasher {
             return Err(anyhow!("Invalid SFEN: expected at least 3 parts, got {}", parts.len()));
         }
 
-        // Start with board position hash
-        let mut hash = self.hash_board_position(parts[0])?;
+        let board = parts[0];
+        // let turn = parts[1];
+        let hands = parts[2];
 
-        match parts[1] {
-            "b" => {
-                // 先手の場合は基準値なので追加のXORは不要
-            }
-            "w" => {
-                // 後手の場合は手番を区別するためのハッシュ値をXOR
-                hash ^= self.zobrist_turn;
-            }
-            _ => return Err(anyhow!("Invalid turn: {}", parts[1])),
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_sys::console::log_1(&format!("[Rust PositionHasher] Parts: board={}, turn={}, hands={}, move_count={}", 
+                board, turn, hands, parts.get(3).unwrap_or(&"none")).into());
         }
 
+        // Start with board position hash
+        let mut hash = self.hash_board_position(board)?;
+
+
+        // 手番によらず、盤面・手駒だけでハッシュを計算するので十分
+        // match turn {
+        //     "b" => {
+        //         // 先手の場合は基準値なので追加のXORは不要
+        //     }
+        //     "w" => {
+        //         // 後手の場合は手番を区別するためのハッシュ値をXOR
+        //         hash ^= self.zobrist_turn;
+        //     }
+        //     _ => return Err(anyhow!("Invalid turn: {}", turn)),
+        // }
+
         // XOR with hands hash
-        hash ^= self.hash_hands(parts[2])?;
+        hash ^= self.hash_hands(hands)?;
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_sys::console::log_1(&format!("[Rust PositionHasher] Generated hash: {:#016x}", hash).into());
+        }
 
         Ok(hash)
     }

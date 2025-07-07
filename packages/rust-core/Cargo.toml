@@ -25,6 +25,7 @@ wasm-logger = "0.2"
 js-sys = "0.3.77"
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 web-sys = { version = "0.3", features = [
+    "console",
     "CustomEvent", "CustomEventInit", "Window", "Location",
     "RtcPeerConnection", "RtcConfiguration", "RtcDataChannel", "RtcDataChannelEvent",
     "RtcPeerConnectionIceEvent", "RtcIceCandidate", "RtcSessionDescription",
