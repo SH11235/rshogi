@@ -2,7 +2,7 @@ import {
     OpeningBook,
     type OpeningBookLoaderInterface,
     type OpeningEntry,
-    type Difficulty,
+    type AIDifficulty,
     generateMainOpenings,
     exportToSfen,
     type Move,
@@ -21,11 +21,11 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
     private loadedFiles = new Set<string>();
 
     // 難易度ごとのファイルマッピング
-    private static readonly DIFFICULTY_FILES: Record<Difficulty, string> = {
-        beginner: "/data/opening_book_tournament.bin.binz",
-        intermediate: "/data/opening_book_early.bin.binz",
-        advanced: "/data/opening_book_standard.bin.binz",
-        expert: "/data/opening_book_full.bin.binz",
+    private static readonly DIFFICULTY_FILES: Record<AIDifficulty, string> = {
+        beginner: "/data/opening_book_tournament.binz",
+        intermediate: "/data/opening_book_early.binz",
+        advanced: "/data/opening_book_standard.binz",
+        expert: "/data/opening_book_full.binz",
     };
 
     private async initialize(): Promise<void> {
@@ -100,7 +100,7 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
         }
     }
 
-    async loadForDifficulty(difficulty: Difficulty): Promise<OpeningBook> {
+    async loadForDifficulty(difficulty: AIDifficulty): Promise<OpeningBook> {
         const filePath = WasmOpeningBookLoader.DIFFICULTY_FILES[difficulty];
         return this.load(filePath);
     }
@@ -143,9 +143,9 @@ function convertNotationToMove(
 
     try {
         // 通常の移動（例: "2g2f"）
-        const fromCol = parseInt(notation[0]) as Column;
+        const fromCol = Number.parseInt(notation[0]) as Column;
         const fromRowChar = notation[1];
-        const toCol = parseInt(notation[2]) as Column;
+        const toCol = Number.parseInt(notation[2]) as Column;
         const toRowChar = notation[3];
 
         // 行文字（a=1, b=2, ..., i=9）を数値に変換
@@ -211,16 +211,14 @@ class WasmBackedOpeningBook extends OpeningBook {
         console.log("[Opening Book Debug] positionOrSfen type:", typeof positionOrSfen);
         console.log("[Opening Book Debug] positionOrSfen value:", positionOrSfen);
 
+        console.log("[Opening Book Debug] positionOrSfen:", positionOrSfen);
+        console.log("[Opening Book Debug] options:", options);
+
         // 文字列（SFEN）が渡された場合とPositionStateが渡された場合の処理
         let sfen: string;
         if (typeof positionOrSfen === "string") {
             sfen = positionOrSfen;
-        } else if (
-            positionOrSfen &&
-            positionOrSfen.board &&
-            positionOrSfen.hands &&
-            positionOrSfen.currentPlayer
-        ) {
+        } else if (positionOrSfen?.board && positionOrSfen.hands && positionOrSfen.currentPlayer) {
             // PositionState から SFEN を生成
             console.log("[Opening Book Debug] Converting PositionState to SFEN");
             try {
@@ -240,7 +238,7 @@ class WasmBackedOpeningBook extends OpeningBook {
                     positionOrSfen.board,
                     positionOrSfen.hands,
                     positionOrSfen.currentPlayer,
-                    moveNumber, // 正しい手数を使用
+                    moveNumber,
                 );
                 console.log("[Opening Book Debug] Generated SFEN:", sfen);
                 console.log("[Opening Book Debug] SFEN turn indicator:", sfen.split(" ")[2]); // "b" or "w"
@@ -274,12 +272,6 @@ class WasmBackedOpeningBook extends OpeningBook {
             // Strip "sfen" prefix if present - the Rust hasher expects just the position part
             const sfenForSearch = sfen.startsWith("sfen ") ? sfen.slice(5) : sfen;
             console.log("[Opening Book Debug] SFEN for search (without prefix):", sfenForSearch);
-
-            // Test initial position for comparison
-            const initialSfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
-            console.log("[Opening Book Debug] Testing initial position:", initialSfen);
-            const initialMovesJson = this.reader.find_moves(initialSfen);
-            console.log("[Opening Book Debug] Initial position moves:", initialMovesJson);
 
             const movesJson = this.reader.find_moves(sfenForSearch);
             console.log("[Opening Book Debug] WASM find_moves returned:", movesJson);

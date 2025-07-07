@@ -1,4 +1,6 @@
+import init from "@/wasm/shogi_core";
 import { AIEngine } from "shogi-core";
+import { WasmOpeningBookLoader } from "../services/wasmOpeningBookLoader";
 import type {
     AIResponse,
     AIWorkerMessage,
@@ -6,14 +8,12 @@ import type {
     MoveCalculatedResponse,
     PositionEvaluatedResponse,
 } from "../types/ai";
-import { WasmOpeningBookLoader } from "../services/wasmOpeningBookLoader";
-import init from "@/wasm/shogi_core";
 
 // WebWorker環境でのWASMモジュール可用性をチェック
 console.log("[Worker Debug] Worker environment loaded");
 console.log(
     "[Worker Debug] Is WebWorker environment:",
-    typeof (self as any).importScripts !== "undefined",
+    typeof (self as unknown as { importScripts?: unknown }).importScripts !== "undefined",
 );
 console.log("[Worker Debug] WebAssembly support:", typeof WebAssembly !== "undefined");
 
@@ -76,9 +76,9 @@ ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => 
                     // 定跡データを読み込む
                     try {
                         await engine.loadOpeningBook();
-                        console.log(`[Worker] 定跡データを読み込みました`);
+                        console.log("[Worker] 定跡データを読み込みました");
                     } catch (error) {
-                        console.warn(`[Worker] 定跡データの読み込みに失敗しました:`, error);
+                        console.warn("[Worker] 定跡データの読み込みに失敗しました:", error);
                         // エラーが発生しても続行（フォールバックが使用される）
                     }
                 } catch (error) {
@@ -177,7 +177,7 @@ ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => 
                         `[Worker] 定跡データを再読み込みしました（難易度: ${message.difficulty}）`,
                     );
                 } catch (error) {
-                    console.warn(`[Worker] 定跡データの再読み込みに失敗しました:`, error);
+                    console.warn("[Worker] 定跡データの再読み込みに失敗しました:", error);
                 }
 
                 const response: AIResponse = {

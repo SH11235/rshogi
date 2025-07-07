@@ -37,7 +37,7 @@ export class OpeningBookService {
 
         if (this.currentLevel === level) return;
 
-        const url = `/data/opening_book_${level}.bin.binz`;
+        const url = `/data/opening_book_${level}.binz`;
         const response = await fetch(url);
         const contentLength = Number(response.headers.get("content-length") || 0);
 
@@ -87,6 +87,7 @@ export class OpeningBookService {
 
         try {
             // WASMから手を取得
+            console.log(`Searching moves for SFEN: ${sfen}`);
             const movesJson = this.reader.find_moves(sfen);
             return JSON.parse(movesJson);
         } catch (error) {

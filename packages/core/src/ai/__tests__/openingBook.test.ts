@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { OpeningBook, type OpeningEntry, type OpeningMove } from "../openingBook";
-import type { PositionState } from "../../domain/model/positionState";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { Move } from "../../domain/model/move";
+import type { PositionState } from "../../domain/model/positionState";
+import { OpeningBook, type OpeningEntry } from "../openingBook";
 
 describe("OpeningBook", () => {
     let openingBook: OpeningBook;

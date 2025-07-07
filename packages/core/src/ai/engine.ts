@@ -5,15 +5,14 @@ import type { Column, Row } from "../domain/model/square";
 import { generateAllDropMoves } from "../domain/service/generateDropMoves";
 import { generateLegalMoves } from "../domain/service/legalMoves";
 import type { Hands } from "../domain/service/moveService";
+import type { PositionState } from "../domain/service/repetitionService";
 import type { AIDifficulty, PositionEvaluation } from "../types/ai";
 import { AI_DIFFICULTY_CONFIGS } from "../types/ai";
 import { EndgameDatabase } from "./endgameDatabase";
 import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
-import { IterativeDeepeningSearch } from "./search";
-import { OpeningBook } from "./openingBook";
-import { OpeningBookLoader } from "./openingBookLoader";
+import type { OpeningBook } from "./openingBook";
 import type { OpeningBookLoaderInterface } from "./openingBookInterface";
-import type { PositionState } from "../domain/service/repetitionService";
+import { IterativeDeepeningSearch } from "./search";
 
 export interface AIEngineConfig {
     difficulty: AIDifficulty;
@@ -35,7 +34,7 @@ export class AIEngine {
     private openingBookLoader: OpeningBookLoaderInterface;
     private useOpeningBook: boolean;
 
-    constructor(difficulty: AIDifficulty, openingBookLoader?: OpeningBookLoaderInterface) {
+    constructor(difficulty: AIDifficulty, openingBookLoader: OpeningBookLoaderInterface) {
         this.difficulty = difficulty;
         const config = AI_DIFFICULTY_CONFIGS[difficulty];
         this.searchDepth = config.searchDepth || 4;
@@ -46,7 +45,7 @@ export class AIEngine {
         this.endgameDatabase = new EndgameDatabase();
 
         // 定跡の初期化（ローダーが提供されない場合はデフォルト実装を使用）
-        this.openingBookLoader = openingBookLoader || new OpeningBookLoader();
+        this.openingBookLoader = openingBookLoader;
         // 初心者レベルでは定跡を使用しない
         this.useOpeningBook = difficulty !== "beginner";
     }

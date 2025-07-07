@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b tsconfig.app.json && vite build && npm run copy:demos",
-    "copy:demos": "cp webrtc-demo.html dist/ && mkdir -p dist/src/wasm && cp -r src/wasm/* dist/src/wasm/",
+    "build": "tsc -b tsconfig.app.json && vite build && npm run copy:demos && npm run copy:wasm",
+    "copy:demos": "cp webrtc-demo.html dist/",
+    "copy:wasm": "mkdir -p dist/src/wasm && cp -r src/wasm/* dist/src/wasm/",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "preview": "vite preview",

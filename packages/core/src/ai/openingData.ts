@@ -1,5 +1,5 @@
-import type { OpeningEntry } from "./openingBook";
 import type { Move } from "../domain/model/move";
+import type { OpeningEntry } from "./openingBook";
 
 /**
  * 基本的な定跡データを生成

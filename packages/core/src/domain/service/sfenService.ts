@@ -3,7 +3,7 @@ import type { Board } from "../model/board";
 import { getPiece } from "../model/board";
 import type { Piece, PieceType, Player } from "../model/piece";
 import { convertToJapaneseName } from "../model/piece";
-import type { Square } from "../model/square";
+import type { Column, Row, Square } from "../model/square";
 import { initialHands } from "./moveService";
 import type { Hands } from "./moveService";
 
@@ -89,8 +89,8 @@ function boardToSfen(board: Board): string {
 
         for (let col = 9; col >= 1; col--) {
             const square: Square = {
-                row: row as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
-                column: col as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                row: row as Row,
+                column: col as Column,
             };
             const piece = getPiece(board, square);
 
@@ -167,10 +167,10 @@ export function exportToSfen(
     moveNumber: number,
 ): string {
     const boardStr = boardToSfen(board);
-    const handsStr = handsToSfen(hands);
     const turnStr = currentPlayer === "black" ? "b" : "w";
+    const handsStr = handsToSfen(hands);
 
-    return `sfen ${boardStr} ${turnStr} ${handsStr} ${moveNumber}`;
+    return `${boardStr} ${turnStr} ${handsStr} ${moveNumber}`;
 }
 
 /**
@@ -215,8 +215,8 @@ function parseSfenBoard(sfenBoard: string): Board {
                 }
 
                 const square: Square = {
-                    row: row as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
-                    column: col as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    row: row as Row,
+                    column: col as Column,
                 };
 
                 const piece: Piece = {
@@ -236,8 +236,8 @@ function parseSfenBoard(sfenBoard: string): Board {
                 }
 
                 const square: Square = {
-                    row: row as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
-                    column: col as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9,
+                    row: row as Row,
+                    column: col as Column,
                 };
 
                 const piece: Piece = {
@@ -323,22 +323,22 @@ export function parseSfen(sfen: string): SfenPosition {
     }
 
     if (parts.length < 4) {
-        throw new Error("無効なSFEN: 最低4つの要素が必要です (盤面 手番 持ち駒 手数)");
+        throw new Error("無効なSFEN: 最低4つの要素が必要です (盤面 持ち駒 手番 手数)");
     }
 
-    const [boardStr, turnStr, handsStr, moveNumberStr] = parts;
+    const [boardStr, handsStr, turnStr, moveNumberStr] = parts;
 
     // 盤面の解析
     const board = parseSfenBoard(boardStr);
+
+    // 持ち駒の解析
+    const hands = parseSfenHands(handsStr);
 
     // 手番の解析
     if (turnStr !== "b" && turnStr !== "w") {
         throw new Error(`無効な手番: ${turnStr}`);
     }
     const currentPlayer: Player = turnStr === "b" ? "black" : "white";
-
-    // 持ち駒の解析
-    const hands = parseSfenHands(handsStr);
 
     // 手数の解析
     const moveNumber = Number.parseInt(moveNumberStr, 10);
