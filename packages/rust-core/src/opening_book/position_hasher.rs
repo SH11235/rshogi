@@ -112,11 +112,16 @@ impl PositionHasher {
         // Start with board position hash
         let mut hash = self.hash_board_position(parts[0])?;
 
-        // XOR with turn hash
-        if parts[1] == "w" {
-            hash ^= self.zobrist_turn;
+        match parts[1] {
+            "b" => {
+                // 先手の場合は基準値なので追加のXORは不要
+            }
+            "w" => {
+                // 後手の場合は手番を区別するためのハッシュ値をXOR
+                hash ^= self.zobrist_turn;
+            }
+            _ => return Err(anyhow!("Invalid turn: {}", parts[1])),
         }
-        // "b" (black) is 0, so no XOR needed
 
         // XOR with hands hash
         hash ^= self.hash_hands(parts[2])?;
