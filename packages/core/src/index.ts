@@ -49,7 +49,6 @@ export * from "./types/ai";
 export * from "./ai/engine";
 export * from "./ai/evaluation";
 export * from "./ai/search";
-export * from "./ai/endgameDatabase";
 export { OpeningBook } from "./ai/openingBook";
 export { generateMainOpenings } from "./ai/openingData";
 export type { OpeningEntry, OpeningMove, FindMovesOptions } from "./ai/openingBook";

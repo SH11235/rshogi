@@ -1,14 +1,14 @@
 import type { Board } from "../domain/model/board";
 import type { Move } from "../domain/model/move";
-import type { Piece, PieceType, Player } from "../domain/model/piece";
+import type { Piece, Player } from "../domain/model/piece";
 import type { Column, Row } from "../domain/model/square";
 import { generateAllDropMoves } from "../domain/service/generateDropMoves";
 import { generateLegalMoves } from "../domain/service/legalMoves";
 import type { Hands } from "../domain/service/moveService";
+import { mustPromote } from "../domain/service/promotionService";
 import type { PositionState } from "../domain/service/repetitionService";
 import type { AIDifficulty, PositionEvaluation } from "../types/ai";
 import { AI_DIFFICULTY_CONFIGS } from "../types/ai";
-import { EndgameDatabase } from "./endgameDatabase";
 import { evaluatePosition as advancedEvaluatePosition } from "./evaluation";
 import type { OpeningBook } from "./openingBook";
 import type { OpeningBookLoaderInterface } from "./openingBookInterface";
@@ -18,7 +18,6 @@ export interface AIEngineConfig {
     difficulty: AIDifficulty;
     searchDepth: number;
     timeLimit: number;
-    useEndgameDatabase: boolean;
     useOpeningBook: boolean;
 }
 
@@ -29,7 +28,6 @@ export class AIEngine {
     private startTime = 0;
     private lastEvaluation: PositionEvaluation | null = null;
     private iterativeSearch: IterativeDeepeningSearch;
-    private endgameDatabase: EndgameDatabase;
     private openingBook: OpeningBook | null = null;
     private openingBookLoader: OpeningBookLoaderInterface;
     private useOpeningBook: boolean;
@@ -41,10 +39,7 @@ export class AIEngine {
         this.timeLimit = config.timeLimit || 3000;
         this.iterativeSearch = new IterativeDeepeningSearch();
 
-        // 終盤データベースを初期化
-        this.endgameDatabase = new EndgameDatabase();
-
-        // 定跡の初期化（ローダーが提供されない場合はデフォルト実装を使用）
+        // 定跡の初期化
         this.openingBookLoader = openingBookLoader;
         // 初心者レベルでは定跡を使用しない
         this.useOpeningBook = difficulty !== "beginner";
@@ -85,7 +80,6 @@ export class AIEngine {
             difficulty: this.difficulty,
             searchDepth: this.searchDepth,
             timeLimit: this.timeLimit,
-            useEndgameDatabase: AI_DIFFICULTY_CONFIGS[this.difficulty].useEndgameDatabase || false,
             useOpeningBook: this.useOpeningBook,
         };
     }
@@ -147,25 +141,6 @@ export class AIEngine {
             }
         }
 
-        // 終盤データベースをチェック
-        const endgameEval = this.endgameDatabase.evaluate(board, hands, currentPlayer);
-        if (endgameEval) {
-            // 詰みが見つかった場合
-            if (endgameEval.type === "mate" && endgameEval.movesToMate === 1) {
-                const mateMove = this.endgameDatabase.searchMate(board, hands, currentPlayer, 1);
-                if (mateMove) {
-                    this.lastEvaluation = {
-                        score: endgameEval.score,
-                        depth: 1,
-                        pv: [mateMove],
-                        nodes: 1,
-                        time: Date.now() - this.startTime,
-                    };
-                    return mateMove;
-                }
-            }
-        }
-
         // Generate all legal moves
         const legalMoves = this.generateAllLegalMoves(board, hands, currentPlayer);
 
@@ -192,12 +167,6 @@ export class AIEngine {
             maxDepth: this.searchDepth,
             timeLimit: this.timeLimit,
             evaluate: (b: Board, h: Hands, p: Player) => {
-                // 終盤データベースをチェック
-                const endgameEval = this.endgameDatabase.evaluate(b, h, p);
-                if (endgameEval) {
-                    return endgameEval.score;
-                }
-
                 // 通常の評価関数
                 const evaluation = advancedEvaluatePosition(b, h, p);
                 return evaluation.total;
@@ -227,6 +196,17 @@ export class AIEngine {
     evaluatePosition(board: Board, hands: Hands, player: Player): PositionEvaluation {
         // Use advanced evaluation function
         const evaluation = advancedEvaluatePosition(board, hands, player);
+
+        // Return the last evaluation if available to provide search information
+        if (this.lastEvaluation) {
+            return {
+                score: evaluation.total,
+                depth: this.lastEvaluation.depth,
+                pv: this.lastEvaluation.pv,
+                nodes: this.lastEvaluation.nodes,
+                time: this.lastEvaluation.time,
+            };
+        }
 
         return {
             score: evaluation.total,
@@ -277,43 +257,37 @@ export class AIEngine {
                                 ? toSquare.row <= 3
                                 : toSquare.row >= 7;
                         if (canPromoteFrom || canPromoteTo) {
-                            const promoteMove: Move = {
-                                type: "move",
-                                from: move.from,
-                                to: move.to,
-                                piece: move.piece,
-                                promote: true,
-                                captured: move.captured,
-                            };
-                            moves.push(promoteMove);
+                            // Check if promotion is forced
+                            if (mustPromote(piece as Piece, toSquare)) {
+                                // Replace the non-promoted move with promoted version
+                                const lastMove = moves[moves.length - 1];
+                                if (lastMove.type === "move") {
+                                    lastMove.promote = true;
+                                }
+                            } else {
+                                // Add promoted version as an option
+                                const promoteMove: Move = {
+                                    type: "move",
+                                    from: move.from,
+                                    to: move.to,
+                                    piece: move.piece,
+                                    promote: true,
+                                    captured: move.captured,
+                                };
+                                moves.push(promoteMove);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Drop moves
-        const dropPieces: PieceType[] = [
-            "pawn",
-            "lance",
-            "knight",
-            "silver",
-            "gold",
-            "bishop",
-            "rook",
-        ];
-        for (const pieceType of dropPieces) {
-            const count = hands[player][pieceType] || 0;
-            if (count > 0) {
-                // generateAllDropMovesで特定の駒のdrop movesのみをフィルタリング
-                const allDropMoves = generateAllDropMoves(board, hands, player);
-                const pieceDrps = allDropMoves.filter((m) => m.piece.type === pieceType);
-                moves.push(...pieceDrps);
-            }
-        }
+        // Drop moves - generate once and push all
+        const dropMoves = generateAllDropMoves(board, hands, player);
+        moves.push(...dropMoves);
 
-        // Shuffle moves for variety (especially for beginner level)
-        if (this.difficulty === "beginner" || this.difficulty === "intermediate") {
+        // Shuffle moves for variety (only for beginner level)
+        if (this.difficulty === "beginner") {
             for (let i = moves.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [moves[i], moves[j]] = [moves[j], moves[i]];

@@ -60,32 +60,6 @@ export class OpeningBook {
         return [...moves].sort((a, b) => b.weight - a.weight);
     }
 
-    /**
-     * 局面からSFENキーを生成（手数を除く）
-     * @param position 現在の局面
-     * @returns SFEN形式の文字列（手数なし）
-     */
-    generatePositionKey(position: PositionState): string {
-        // TODO: 実装優先度高
-        // 1. boardServiceのtoSFEN関数を利用する
-        // 2. 手数部分を除去する正規表現処理
-        // 3. 持ち駒の順序を正規化する
-
-        const { board } = position;
-
-        // 仮実装：テスト用の処理
-        if (board && (board as any)._testInitialPosition) {
-            return "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -";
-        }
-
-        if (!board || Object.keys(board).length === 0) {
-            return "test-position";
-        }
-
-        // デフォルトは初期局面
-        return "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -";
-    }
-
     getMemoryUsage(): number {
         return this.memoryUsage;
     }
@@ -136,5 +110,11 @@ export class OpeningBook {
 
         // fallback（通常は到達しない）
         return moves[0];
+    }
+
+    private generatePositionKey(_position: PositionState): string {
+        // TODO: Implement proper position key generation
+        // For now, return a placeholder to avoid build errors
+        return "placeholder";
     }
 }

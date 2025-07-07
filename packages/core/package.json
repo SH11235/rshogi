@@ -17,11 +17,7 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "format:check": "biome check .",
-    "typecheck": "tsc --noEmit && cd benchmarks && tsc --noEmit",
-    "benchmark": "tsx src/domain/service/runBenchmark.ts",
-    "benchmark:ai": "tsx benchmarks/run-ai-benchmark.ts",
-    "benchmark:viewer": "node benchmarks/open-viewer.js",
-    "benchmark:serve": "cd benchmarks && npx http-server -p 8000 -o viewer.html"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "pako": "^2.1.0",

@@ -1,4 +1,3 @@
-import type { OpeningBookReaderWasm } from "@/wasm/shogi_core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OpeningBookService } from "../openingBook";
 

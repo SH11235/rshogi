@@ -1,6 +1,0 @@
-# Temporary benchmark files
-*.tmp.json
-*.log
-
-# Keep only stable benchmark results
-# *.benchmark.json files should be committed when stable
