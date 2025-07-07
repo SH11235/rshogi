@@ -53,9 +53,9 @@ impl BinaryConverter {
 
     /// Convert a single SFEN entry to binary format
     pub fn convert_entry(&self, entry: &RawSfenEntry) -> Result<BinaryEntry> {
-        // Hash the position - now includes turn and hands
-        let position_str =
-            format!("{} {} {} {}", entry.position, entry.turn, entry.hand, entry.move_count);
+        // Hash the position - includes board, turn and hands (but NOT move count)
+        // 手数は定跡検索では使用しないため、ハッシュ生成時に含めない
+        let position_str = format!("{} {} {}", entry.position, entry.turn, entry.hand);
         let position_hash = PositionHasher::hash_position(&position_str)?;
 
         // Find best move
