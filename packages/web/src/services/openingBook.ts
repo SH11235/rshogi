@@ -1,5 +1,5 @@
 import type { BookLevel, BookMove, LoadProgress } from "@/types/openingBook";
-import { OpeningBookReaderWasm } from "@/wasm/shogi_core";
+import init, { OpeningBookReaderWasm } from "@/wasm/shogi_core";
 
 export type ProgressCallback = (progress: LoadProgress) => void;
 
@@ -15,6 +15,9 @@ async function initialize(): Promise<void> {
 
     try {
         // WASMモジュールを初期化
+        await init();
+
+        // WASMが初期化された後でインスタンスを作成
         state.reader = new OpeningBookReaderWasm();
         state.initialized = true;
     } catch (error) {

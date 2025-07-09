@@ -1,4 +1,4 @@
-import { OpeningBookReaderWasm } from "@/wasm/shogi_core";
+import init, { OpeningBookReaderWasm } from "@/wasm/shogi_core";
 import {
     type AIDifficulty,
     type Board,
@@ -22,6 +22,7 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
     private reader: OpeningBookReaderWasm | null = null;
     private initialized = false;
     private loadedFiles = new Set<string>();
+    private wasmInitialized = false;
 
     // 難易度ごとのファイルマッピング
     private static readonly DIFFICULTY_FILES: Record<AIDifficulty, string> = {
@@ -32,6 +33,28 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
     };
 
     constructor() {
+        // コンストラクタは同期的にするため、初期化は別メソッドで行う
+        console.log("[WasmOpeningBookLoader] Constructor called");
+    }
+
+    private async ensureWasmInitialized(): Promise<void> {
+        if (this.wasmInitialized) return;
+
+        try {
+            await init();
+            this.wasmInitialized = true;
+            console.log("[WasmOpeningBookLoader] WASM initialized successfully");
+        } catch (error) {
+            console.error("[WasmOpeningBookLoader] Failed to initialize WASM:", error);
+            throw error;
+        }
+    }
+
+    private async initializeReader(): Promise<void> {
+        if (this.initialized) return;
+
+        await this.ensureWasmInitialized();
+
         try {
             this.reader = new OpeningBookReaderWasm();
             this.initialized = true;
@@ -54,6 +77,7 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
         } catch (error) {
             console.error("[WasmOpeningBookLoader] Failed to create reader:", error);
             this.initialized = false;
+            throw error;
         }
     }
 
@@ -85,6 +109,9 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
     }
 
     async load(filePath: string): Promise<OpeningBookInterface> {
+        // 初期化を確実に行う
+        await this.initializeReader();
+
         if (!this.initialized || !this.reader) {
             throw new Error("Opening book reader not initialized");
         }
