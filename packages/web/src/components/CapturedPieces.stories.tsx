@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { initialHands } from "shogi-core";
 import { CapturedPieces } from "./CapturedPieces";
 
 const meta: Meta<typeof CapturedPieces> = {
@@ -19,10 +20,7 @@ const meta: Meta<typeof CapturedPieces> = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-const emptyHands = {
-    black: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
-    white: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
-};
+const emptyHands = initialHands();
 
 const sampleHands = {
     black: { 歩: 3, 香: 1, 桂: 0, 銀: 1, 金: 0, 角: 0, 飛: 1 },

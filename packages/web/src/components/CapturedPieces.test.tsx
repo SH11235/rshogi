@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { initialHands } from "shogi-core";
 import { describe, expect, it } from "vitest";
 import { CapturedPieces } from "./CapturedPieces";
 
@@ -9,10 +10,7 @@ const defaultProps = {
 };
 
 describe("CapturedPieces component", () => {
-    const emptyHands = {
-        black: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
-        white: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
-    };
+    const emptyHands = initialHands();
 
     const sampleHands = {
         black: { 歩: 3, 香: 1, 桂: 0, 銀: 1, 金: 0, 角: 0, 飛: 1 },

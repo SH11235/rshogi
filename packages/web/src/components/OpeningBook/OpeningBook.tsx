@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { useOpeningBook } from "@/hooks/useOpeningBook";
 import { useGameStore } from "@/stores/gameStore";
-import type { Square } from "shogi-core";
+import type { Column, Row, Square } from "shogi-core";
 
 export function OpeningBook() {
     const getCurrentSfen = useGameStore((state) => state.getCurrentSfen);
@@ -20,8 +20,8 @@ export function OpeningBook() {
             const toRow = notation.charCodeAt(3) - 96;
             const promote = notation.endsWith("+");
 
-            const from: Square = { row: fromRow as any, column: fromCol as any };
-            const to: Square = { row: toRow as any, column: toCol as any };
+            const from: Square = { row: fromRow as Row, column: fromCol as Column };
+            const to: Square = { row: toRow as Row, column: toCol as Column };
 
             makeMove(from, to, promote);
         }

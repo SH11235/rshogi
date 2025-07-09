@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { useGameStore } from "../gameStore";
-import type { Move, Row, Column, Square } from "shogi-core";
+import type { Column, Move, Row } from "shogi-core";
+import { beforeEach, describe, expect, it } from "vitest";
+import { useGameStore } from "./gameStore";
 
 describe("gameStore getCurrentSfen", () => {
     beforeEach(() => {

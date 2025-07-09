@@ -5,17 +5,14 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { exportToSfen, initialBoard } from "shogi-core";
+import { exportToSfen, initialBoard, initialHands } from "shogi-core";
 import type { PositionState } from "shogi-core";
 import { beforeAll, describe, expect, test } from "vitest";
-import { WasmOpeningBookLoader } from "../wasmOpeningBookLoader";
+import { WasmOpeningBookLoader } from "./wasmOpeningBookLoader";
 
 // ヘルパー関数
 const createInitialBoard = () => initialBoard;
-const createInitialHands = () => ({
-    black: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
-    white: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
-});
+const createInitialHands = () => initialHands();
 
 describe("Real Opening Book Integration Tests", () => {
     let openingBookLoader: WasmOpeningBookLoader;
