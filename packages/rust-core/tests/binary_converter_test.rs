@@ -246,4 +246,47 @@ mod binary_converter_tests {
 
         assert_eq!(all_converted.len(), entries.len());
     }
+
+    #[test]
+    fn test_binary_format_validation_from_integration() {
+        // Moved from integration_test.rs - comprehensive format validation
+        let _converter = BinaryConverter::new();
+
+        // Test header encoding/decoding
+        let header = CompactPosition {
+            position_hash: 0x123456789ABCDEF0,
+            best_move: 0x1234,
+            evaluation: 50,
+            depth: 10,
+            move_count: 3,
+            popularity: 1,
+            reserved: 0,
+        };
+
+        let encoded = BinaryConverter::encode_position_header(&header);
+        assert_eq!(encoded.len(), 16, "Position header must be exactly 16 bytes");
+
+        let decoded = BinaryConverter::decode_position_header(&encoded).unwrap();
+        assert_eq!(decoded.position_hash, header.position_hash);
+        assert_eq!(decoded.best_move, header.best_move);
+        assert_eq!(decoded.evaluation, header.evaluation);
+        assert_eq!(decoded.depth, header.depth);
+        assert_eq!(decoded.move_count, header.move_count);
+
+        // Test move encoding/decoding
+        let move_data = CompactMove {
+            move_encoded: 0x5678,
+            evaluation: -25,
+            depth: 8,
+            reserved: 0,
+        };
+
+        let encoded_move = BinaryConverter::encode_move(&move_data);
+        assert_eq!(encoded_move.len(), 6, "Move must be exactly 6 bytes");
+
+        let decoded_move = BinaryConverter::decode_move(&encoded_move).unwrap();
+        assert_eq!(decoded_move.move_encoded, move_data.move_encoded);
+        assert_eq!(decoded_move.evaluation, move_data.evaluation);
+        assert_eq!(decoded_move.depth, move_data.depth);
+    }
 }

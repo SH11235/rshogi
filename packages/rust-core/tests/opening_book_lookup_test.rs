@@ -14,18 +14,6 @@ const AFTER_26_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/L
 const AFTER_76_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 2";
 
 #[test]
-fn test_initial_position_hash_calculation() {
-    // ハッシュを計算
-    let hash = PositionHasher::hash_position(INITIAL_SFEN).unwrap();
-
-    println!("Initial position SFEN: {}", INITIAL_SFEN);
-    println!("Generated hash: {:#016x}", hash);
-
-    // ハッシュが生成されることを確認
-    assert_ne!(hash, 0, "Hash should not be zero");
-}
-
-#[test]
 fn test_initial_position_opening_moves() {
     // OpeningBookReaderを初期化
     let mut reader = OpeningBookReader::new();
@@ -77,38 +65,6 @@ fn test_initial_position_opening_moves() {
     } else {
         println!("Warning: Opening book file not found at {}. Skipping test.", test_file);
     }
-}
-
-#[test]
-fn test_hash_consistency_with_move_count() {
-    // 同じ局面で手数が異なる場合のハッシュを比較
-    let sfen_move0 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 0";
-    let sfen_move1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
-    let sfen_move15 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 15";
-
-    let hash0 = PositionHasher::hash_position(sfen_move0).unwrap();
-    let hash1 = PositionHasher::hash_position(sfen_move1).unwrap();
-    let hash15 = PositionHasher::hash_position(sfen_move15).unwrap();
-
-    println!("Hash for move 0:  {:#016x}", hash0);
-    println!("Hash for move 1:  {:#016x}", hash1);
-    println!("Hash for move 15: {:#016x}", hash15);
-
-    // 手数が異なっても同じハッシュになることを確認
-    assert_eq!(hash0, hash1, "Hash should be the same regardless of move count");
-    assert_eq!(hash0, hash15, "Hash should be the same regardless of move count");
-}
-
-#[test]
-fn test_different_positions_different_hashes() {
-    let hash_initial = PositionHasher::hash_position(INITIAL_SFEN).unwrap();
-    let hash_after_26 = PositionHasher::hash_position(AFTER_26_SFEN).unwrap();
-
-    println!("Initial position hash: {:#016x}", hash_initial);
-    println!("After 2g2f hash:      {:#016x}", hash_after_26);
-
-    // 異なる局面は異なるハッシュになることを確認
-    assert_ne!(hash_initial, hash_after_26, "Different positions should have different hashes");
 }
 
 // 7六歩の後の盤面での定跡が正しく取得できるかテスト

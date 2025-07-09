@@ -82,45 +82,8 @@ N*4e none 140 14 190000
         assert_eq!(read_entries.len(), entries.len());
     }
 
-    #[test]
-    fn test_move_encoding_roundtrip() {
-        let test_moves = vec![
-            "7g7f",  // Normal move
-            "2g2f",  // Normal move
-            "8h2b+", // Promotion
-            "P*5e",  // Drop
-            "G*5f",  // Gold drop
-            "N*4e",  // Knight drop
-        ];
-
-        for move_str in test_moves {
-            let encoded = MoveEncoder::encode_move(move_str).unwrap();
-            let decoded = MoveEncoder::decode_move(encoded).unwrap();
-            assert_eq!(move_str, decoded, "Failed roundtrip for move: {move_str}");
-        }
-    }
-
-    #[test]
-    fn test_position_hash_uniqueness() {
-        let positions = vec![
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL",
-            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL",
-            "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL",
-            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R",
-        ];
-
-        let mut hasher = PositionHasher::new();
-        let mut hashes = std::collections::HashSet::new();
-
-        for pos in &positions {
-            let hash = hasher.hash_and_track(pos).unwrap();
-            assert!(hashes.insert(hash), "Hash collision detected for position: {pos}");
-        }
-
-        let stats = hasher.get_statistics();
-        assert_eq!(stats.collision_count, 0);
-        assert_eq!(stats.unique_positions, positions.len());
-    }
+    // Note: test_move_encoding_roundtrip moved to move_encoder_test.rs
+    // Note: test_position_hash_uniqueness moved to position_hasher_test.rs
 
     #[test]
     fn test_large_file_processing() {
@@ -218,47 +181,7 @@ N*4e none 140 14 190000
         }
     }
 
-    #[test]
-    fn test_binary_format_validation() {
-        let _converter = BinaryConverter::new();
-
-        // Test header encoding/decoding
-        let header = CompactPosition {
-            position_hash: 0x123456789ABCDEF0,
-            best_move: 0x1234,
-            evaluation: 50,
-            depth: 10,
-            move_count: 3,
-            popularity: 1,
-            reserved: 0,
-        };
-
-        let encoded = BinaryConverter::encode_position_header(&header);
-        assert_eq!(encoded.len(), 16, "Position header must be exactly 16 bytes");
-
-        let decoded = BinaryConverter::decode_position_header(&encoded).unwrap();
-        assert_eq!(decoded.position_hash, header.position_hash);
-        assert_eq!(decoded.best_move, header.best_move);
-        assert_eq!(decoded.evaluation, header.evaluation);
-        assert_eq!(decoded.depth, header.depth);
-        assert_eq!(decoded.move_count, header.move_count);
-
-        // Test move encoding/decoding
-        let move_data = CompactMove {
-            move_encoded: 0x5678,
-            evaluation: -25,
-            depth: 8,
-            reserved: 0,
-        };
-
-        let encoded_move = BinaryConverter::encode_move(&move_data);
-        assert_eq!(encoded_move.len(), 6, "Move must be exactly 6 bytes");
-
-        let decoded_move = BinaryConverter::decode_move(&encoded_move).unwrap();
-        assert_eq!(decoded_move.move_encoded, move_data.move_encoded);
-        assert_eq!(decoded_move.evaluation, move_data.evaluation);
-        assert_eq!(decoded_move.depth, move_data.depth);
-    }
+    // Note: test_binary_format_validation moved to binary_converter_test.rs
 
     #[test]
     fn test_error_handling() {

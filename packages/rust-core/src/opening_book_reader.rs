@@ -218,6 +218,69 @@ impl OpeningBookReaderWasm {
 mod tests {
     use super::*;
 
+    // テスト用ヘルパー関数
+    /// 正しい形式の位置ヘッダーを作成（16バイト）
+    fn create_position_header(
+        position_hash: u64,
+        best_move: u16,
+        evaluation: i16,
+        depth: u8,
+        move_count: u8,
+    ) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(&position_hash.to_le_bytes()); // 0-7: position_hash
+        header.extend_from_slice(&best_move.to_le_bytes()); // 8-9: best_move
+        header.extend_from_slice(&evaluation.to_le_bytes()); // 10-11: evaluation
+        header.push(depth); // 12: depth
+        header.push(move_count); // 13: move_count
+        header.extend_from_slice(&[0u8; 2]); // 14-15: padding
+        header
+    }
+
+    /// ムーブデータを作成（6バイト）
+    fn create_move_data(move_encoded: u16, evaluation: i16, depth: u8) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&move_encoded.to_le_bytes()); // 0-1: move
+        data.extend_from_slice(&evaluation.to_le_bytes()); // 2-3: evaluation
+        data.push(depth); // 4: depth
+        data.push(0); // 5: padding
+        data
+    }
+
+    /// テスト用の完全なバイナリデータを作成
+    fn create_test_binary_data(
+        positions: Vec<(u64, Vec<(u16, i16, u8)>)>, // (hash, moves)
+        with_file_header: bool,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // ファイルヘッダー（オプション）
+        if with_file_header {
+            data.extend_from_slice(b"SFEN"); // magic
+            data.extend_from_slice(&1u32.to_le_bytes()); // version
+            data.extend_from_slice(&(positions.len() as u32).to_le_bytes()); // position_count
+            data.extend_from_slice(&0u32.to_le_bytes()); // checksum
+        }
+
+        // 各位置のデータ
+        for (hash, moves) in positions {
+            let move_count = moves.len() as u8;
+            let best_move = if moves.is_empty() { 0 } else { moves[0].0 };
+            let best_eval = if moves.is_empty() { 0 } else { moves[0].1 };
+            let best_depth = if moves.is_empty() { 0 } else { moves[0].2 };
+
+            // 位置ヘッダー
+            data.extend(create_position_header(hash, best_move, best_eval, best_depth, move_count));
+
+            // ムーブデータ
+            for (move_encoded, eval, depth) in moves {
+                data.extend(create_move_data(move_encoded, eval, depth));
+            }
+        }
+
+        data
+    }
+
     #[test]
     fn test_create_new_reader() {
         // Arrange & Act
@@ -282,18 +345,10 @@ mod tests {
     #[test]
     fn test_read_single_position() {
         // Arrange: 1つの位置データを作成
-        let mut data = Vec::new();
-
-        // ヘッダー: position_hash(8) + move_count(2) + padding(6)
-        data.extend_from_slice(&12345u64.to_le_bytes()); // position_hash
-        data.extend_from_slice(&1u16.to_le_bytes()); // move_count
-        data.extend_from_slice(&[0u8; 6]); // padding
-
-        // ムーブデータ: move_encoded(2) + evaluation(2) + depth(1) + padding(1)
-        data.extend_from_slice(&0x1234u16.to_le_bytes()); // move
-        data.extend_from_slice(&50i16.to_le_bytes()); // eval
-        data.push(10); // depth
-        data.push(0); // padding
+        let data = create_test_binary_data(
+            vec![(12345, vec![(0x1234, 50, 10)])], // 1つの位置に1つのムーブ
+            false,                                 // ファイルヘッダーなし
+        );
 
         let mut reader = OpeningBookReader::new();
 
@@ -374,21 +429,20 @@ mod tests {
         let move_7g7f = MoveEncoder::encode_move("7g7f").unwrap();
 
         // バイナリデータを作成
-        let mut data = Vec::new();
-        data.extend_from_slice(&12345u64.to_le_bytes());
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.extend_from_slice(&[0u8; 6]);
-        data.extend_from_slice(&move_7g7f.to_le_bytes());
-        data.extend_from_slice(&50i16.to_le_bytes());
-        data.push(10);
-        data.push(0);
+        let data = create_test_binary_data(
+            vec![(12345, vec![(move_7g7f, 50, 10)])], // 7g7fのムーブ
+            false,
+        );
 
         // Act
         reader.parse_binary_data(&data).unwrap();
 
         // Assert
         let moves = reader.find_moves_by_hash(12345);
+        assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].notation, "7g7f");
+        assert_eq!(moves[0].evaluation, 50);
+        assert_eq!(moves[0].depth, 10);
     }
 
     #[test]
@@ -400,24 +454,10 @@ mod tests {
         let move_7g7f = MoveEncoder::encode_move("7g7f").unwrap();
 
         // ファイルヘッダー付きバイナリデータを作成
-        let mut data = Vec::new();
-
-        // ファイルヘッダー（16バイト）
-        data.extend_from_slice(b"SFEN"); // magic (4バイト)
-        data.extend_from_slice(&1u32.to_le_bytes()); // version (4バイト)
-        data.extend_from_slice(&1u32.to_le_bytes()); // position_count (4バイト)
-        data.extend_from_slice(&0u32.to_le_bytes()); // checksum (4バイト)
-
-        // 位置ヘッダー（16バイト）
-        data.extend_from_slice(&12345u64.to_le_bytes()); // position_hash
-        data.extend_from_slice(&1u16.to_le_bytes()); // move_count
-        data.extend_from_slice(&[0u8; 6]); // padding
-
-        // ムーブデータ（6バイト）
-        data.extend_from_slice(&move_7g7f.to_le_bytes());
-        data.extend_from_slice(&50i16.to_le_bytes());
-        data.push(10);
-        data.push(0);
+        let data = create_test_binary_data(
+            vec![(12345, vec![(move_7g7f, 50, 10)])], // 7g7fのムーブ
+            true,                                     // ファイルヘッダーあり
+        );
 
         // Act
         let result = reader.parse_binary_data(&data);
@@ -428,6 +468,101 @@ mod tests {
         let moves = reader.find_moves_by_hash(12345);
         assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].notation, "7g7f");
+        assert_eq!(moves[0].evaluation, 50);
+        assert_eq!(moves[0].depth, 10);
+    }
+
+    #[test]
+    fn test_initial_position_hash_calculation() {
+        use crate::opening_book::PositionHasher;
+
+        // 初期盤面のSFEN
+        const INITIAL_SFEN: &str =
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 0";
+
+        // ハッシュを計算
+        let hash = PositionHasher::hash_position(INITIAL_SFEN).unwrap();
+
+        // ハッシュが生成されることを確認
+        assert_ne!(hash, 0, "Hash should not be zero");
+    }
+
+    #[test]
+    fn test_hash_consistency_with_move_count() {
+        use crate::opening_book::PositionHasher;
+
+        // 同じ局面で手数が異なる場合のハッシュを比較
+        let sfen_move0 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 0";
+        let sfen_move1 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let sfen_move15 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 15";
+
+        let hash0 = PositionHasher::hash_position(sfen_move0).unwrap();
+        let hash1 = PositionHasher::hash_position(sfen_move1).unwrap();
+        let hash15 = PositionHasher::hash_position(sfen_move15).unwrap();
+
+        // 手数が異なっても同じハッシュになることを確認
+        assert_eq!(hash0, hash1, "Hash should be the same regardless of move count");
+        assert_eq!(hash0, hash15, "Hash should be the same regardless of move count");
+    }
+
+    #[test]
+    fn test_different_positions_different_hashes() {
+        use crate::opening_book::PositionHasher;
+
+        // 初期盤面のSFEN（手数0）
+        const INITIAL_SFEN: &str =
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 0";
+        // 2六歩の後の盤面
+        const AFTER_26_SFEN: &str =
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/LNSGKGSNL b - 1";
+
+        let hash_initial = PositionHasher::hash_position(INITIAL_SFEN).unwrap();
+        let hash_after_26 = PositionHasher::hash_position(AFTER_26_SFEN).unwrap();
+
+        // 異なる局面は異なるハッシュになることを確認
+        assert_ne!(hash_initial, hash_after_26, "Different positions should have different hashes");
+    }
+
+    #[test]
+    fn test_multiple_positions_with_moves() {
+        use crate::opening_book::MoveEncoder;
+
+        // Arrange
+        let mut reader = OpeningBookReader::new();
+        let move_7g7f = MoveEncoder::encode_move("7g7f").unwrap();
+        let move_2g2f = MoveEncoder::encode_move("2g2f").unwrap();
+        let move_8h7g = MoveEncoder::encode_move("8h7g").unwrap();
+
+        // 複数の位置データを作成
+        let data = create_test_binary_data(
+            vec![
+                (12345, vec![(move_7g7f, 50, 10), (move_2g2f, 45, 9)]), // 位置1: 2つのムーブ
+                (67890, vec![(move_8h7g, 30, 8)]),                      // 位置2: 1つのムーブ
+                (11111, vec![]),                                        // 位置3: ムーブなし
+            ],
+            false,
+        );
+
+        // Act
+        reader.parse_binary_data(&data).unwrap();
+
+        // Assert
+        assert_eq!(reader.position_count(), 3);
+
+        // 位置1のムーブを確認
+        let moves1 = reader.find_moves_by_hash(12345);
+        assert_eq!(moves1.len(), 2);
+        assert_eq!(moves1[0].notation, "7g7f");
+        assert_eq!(moves1[1].notation, "2g2f");
+
+        // 位置2のムーブを確認
+        let moves2 = reader.find_moves_by_hash(67890);
+        assert_eq!(moves2.len(), 1);
+        assert_eq!(moves2[0].notation, "8h7g");
+
+        // 位置3のムーブを確認（空）
+        let moves3 = reader.find_moves_by_hash(11111);
+        assert_eq!(moves3.len(), 0);
     }
 
     #[test]

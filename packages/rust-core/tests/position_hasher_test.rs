@@ -137,6 +137,29 @@ mod position_hasher_tests {
     }
 
     #[test]
+    fn test_hash_uniqueness_from_integration() {
+        // Moved from integration_test.rs - comprehensive uniqueness test
+        let positions = vec![
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+            "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b P 3",
+            "+B+B1Sg2nl/5kg2/4p2p1/3pspP1p/p6PP/1p1rP4/P1p2P2N/1PG1G4/LNK5R w GSN3Prsl3p 120",
+        ];
+
+        let mut hasher = PositionHasher::new();
+        let mut hashes = std::collections::HashSet::new();
+
+        for pos in &positions {
+            let hash = hasher.hash_and_track(pos).unwrap();
+            assert!(hashes.insert(hash), "Hash collision detected for position: {pos}");
+        }
+
+        let stats = hasher.get_statistics();
+        assert_eq!(stats.collision_count, 0);
+        assert_eq!(stats.unique_positions, positions.len());
+    }
+
+    #[test]
     fn test_hash_statistics() {
         let positions = vec![
             "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
