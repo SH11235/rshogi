@@ -218,35 +218,6 @@ export const deserializeGameState = (json: string): GameState => {
 };
 
 /**
- * ゲーム状態の比較（千日手判定用）
- */
-
-export const compareGamePositions = (state1: GameState, state2: GameState): boolean => {
-    return (
-        JSON.stringify(state1.board) === JSON.stringify(state2.board) &&
-        JSON.stringify(state1.hands) === JSON.stringify(state2.hands) &&
-        state1.currentPlayer === state2.currentPlayer
-    );
-};
-
-export const findRepetition = (gameState: GameState): number => {
-    let count = 0;
-
-    // 過去の局面と比較（簡易実装）
-    for (let i = gameState.moveHistory.length - 1; i >= 0; i -= 2) {
-        // 2手前ずつチェック（同じプレイヤーの手番）
-        // 実際の実装では局面ハッシュを使った効率的な比較が必要
-        count++;
-        if (count >= 4) {
-            // 4回繰り返しで千日手
-            return 4;
-        }
-    }
-
-    return count;
-};
-
-/**
  * 初期状態から指定した手数まで再構築する関数
  *
  * @param moveHistory 手の履歴
