@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { type Board as BoardType, modernInitialBoard } from "shogi-core";
+import { type Board as BoardType, initialBoard } from "shogi-core";
 import { Board } from "./Board";
 
 const meta: Meta<typeof Board> = {
@@ -16,7 +16,7 @@ type Story = StoryObj<typeof meta>;
 
 export const InitialPosition: Story = {
     args: {
-        board: modernInitialBoard,
+        board: initialBoard,
         selectedSquare: null,
         validMoves: [],
         onSquareClick: (square) => {
@@ -27,7 +27,7 @@ export const InitialPosition: Story = {
 
 export const WithSelectedSquare: Story = {
     args: {
-        board: modernInitialBoard,
+        board: initialBoard,
         selectedSquare: { row: 7, column: 7 },
         validMoves: [
             { row: 6, column: 7 },

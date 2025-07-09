@@ -1,4 +1,4 @@
-import { modernInitialBoard } from "../initialBoard";
+import { initialBoard } from "../initialBoard";
 import type { Board } from "../model/board";
 import { HISTORY_CURSOR } from "../model/history";
 import type { Move } from "../model/move";
@@ -8,7 +8,7 @@ import { applyMove, initialHands } from "./moveService";
 import { determineGameStatus } from "./utils";
 
 // 持ち駒の型定義（moveService から独立）
-export type Hands = {
+type Hands = {
     black: Record<string, number>;
     white: Record<string, number>;
 };
@@ -27,11 +27,11 @@ export type GameState = {
     readonly metadata: GameMetadata;
 };
 
-export type SerializableBoard = {
+type SerializableBoard = {
     readonly pieces: SerializablePiece[];
 };
 
-export type SerializablePiece = {
+type SerializablePiece = {
     readonly position: Square;
     readonly type: Piece["type"];
     readonly promoted: boolean;
@@ -73,7 +73,7 @@ export type TimeControl = {
  */
 
 // Board -> SerializableBoard 変換
-export const serializeBoard = (board: Board): SerializableBoard => {
+const serializeBoard = (board: Board): SerializableBoard => {
     const pieces: SerializablePiece[] = [];
 
     for (const [positionKey, piece] of Object.entries(board)) {
@@ -93,30 +93,30 @@ export const serializeBoard = (board: Board): SerializableBoard => {
 };
 
 // SerializableBoard -> Board 変換
-export const deserializeBoard = (serializableBoard: SerializableBoard): Board => {
-    // 空の盤面から開始
-    const board: Board = { ...modernInitialBoard };
+// const _deserializeBoard = (serializableBoard: SerializableBoard): Board => {
+//     // 空の盤面から開始
+//     const board: Board = { ...initialBoard };
 
-    // 全マスを null で初期化
-    for (let row = 1; row <= 9; row++) {
-        for (let col = 1; col <= 9; col++) {
-            const key = `${row}${col}` as keyof Board;
-            board[key] = null;
-        }
-    }
+//     // 全マスを null で初期化
+//     for (let row = 1; row <= 9; row++) {
+//         for (let col = 1; col <= 9; col++) {
+//             const key = `${row}${col}` as keyof Board;
+//             board[key] = null;
+//         }
+//     }
 
-    // 駒を配置
-    for (const piece of serializableBoard.pieces) {
-        const key = `${piece.position.row}${piece.position.column}` as keyof Board;
-        board[key] = {
-            type: piece.type,
-            promoted: piece.promoted,
-            owner: piece.owner,
-        };
-    }
+//     // 駒を配置
+//     for (const piece of serializableBoard.pieces) {
+//         const key = `${piece.position.row}${piece.position.column}` as keyof Board;
+//         board[key] = {
+//             type: piece.type,
+//             promoted: piece.promoted,
+//             owner: piece.owner,
+//         };
+//     }
 
-    return board;
-};
+//     return board;
+// };
 
 // Position文字列をパース
 const parsePosition = (positionKey: string): Square => {
@@ -138,7 +138,7 @@ export const createInitialGameState = (
     const now = new Date().toISOString();
 
     return {
-        board: serializeBoard(modernInitialBoard), // 初期盤面から開始
+        board: serializeBoard(initialBoard), // 初期盤面から開始
         hands: {
             black: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
             white: { 歩: 0, 香: 0, 桂: 0, 銀: 0, 金: 0, 角: 0, 飛: 0 },
@@ -182,7 +182,7 @@ export const updateGameState = (
  * ゲーム状態の検証
  */
 
-export const isValidGameState = (gameState: unknown): gameState is GameState => {
+const isValidGameState = (gameState: unknown): gameState is GameState => {
     if (typeof gameState !== "object" || gameState === null) {
         return false;
     }
@@ -257,7 +257,7 @@ export function reconstructGameState(moveHistory: Move[], targetMoveIndex: numbe
     return reconstructGameStateWithInitial(
         moveHistory,
         targetMoveIndex,
-        modernInitialBoard,
+        initialBoard,
         initialHands(),
     );
 }

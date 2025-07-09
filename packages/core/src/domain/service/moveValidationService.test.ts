@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { modernInitialBoard } from "../initialBoard";
+import { initialBoard } from "../initialBoard";
 import type { Board } from "../model/board";
-import type { PieceType } from "../model/piece";
 import { initialHands } from "./moveService";
 import type { Hands } from "./moveService";
 import { validateReceivedMove } from "./moveValidationService";
@@ -11,7 +10,7 @@ describe("validateReceivedMove", () => {
     let hands: Hands;
 
     beforeEach(() => {
-        board = structuredClone(modernInitialBoard);
+        board = structuredClone(initialBoard);
         hands = structuredClone(initialHands());
     });
 
@@ -30,6 +29,7 @@ describe("validateReceivedMove", () => {
         it("無効な移動先座標を拒否する", () => {
             const result = validateReceivedMove(board, hands, "black", {
                 from: "77",
+                // @ts-expect-error
                 to: "00", // 無効な座標
             });
             expect(result.valid).toBe(false);
@@ -38,6 +38,7 @@ describe("validateReceivedMove", () => {
 
         it("無効な移動元座標を拒否する", () => {
             const result = validateReceivedMove(board, hands, "black", {
+                // @ts-expect-error
                 from: "00", // 無効な座標
                 to: "76",
             });
@@ -48,6 +49,7 @@ describe("validateReceivedMove", () => {
         it("範囲外の座標を拒否する", () => {
             const result = validateReceivedMove(board, hands, "black", {
                 from: "99",
+                // @ts-expect-error
                 to: "10", // 範囲外
             });
             expect(result.valid).toBe(false);
@@ -131,7 +133,7 @@ describe("validateReceivedMove", () => {
             const result = validateReceivedMove(board, hands, "black", {
                 to: "55",
                 // @ts-expect-error テスト用に無効な駒タイプを指定
-                drop: "invalid" as PieceType,
+                drop: "invalid",
             });
             expect(result.valid).toBe(false);
             expect(result.error).toContain("不正な駒タイプ");
@@ -163,6 +165,7 @@ describe("validateReceivedMove", () => {
 
         it("空のfromを持つ移動データを拒否する", () => {
             const result = validateReceivedMove(board, hands, "black", {
+                // @ts-expect-error
                 from: "",
                 to: "76",
             });

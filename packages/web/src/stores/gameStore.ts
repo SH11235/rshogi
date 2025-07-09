@@ -63,10 +63,10 @@ import {
     exportToSfen,
     generateLegalDropMovesForPiece,
     generateLegalMoves,
+    initialBoard,
     initialHands,
     isCheckmate,
     isInCheck,
-    modernInitialBoard,
     mustPromote,
     parseKifMoves,
     parseSfen,
@@ -364,7 +364,7 @@ function createInitialTimerState(): TimerState {
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
-    board: modernInitialBoard,
+    board: initialBoard,
     hands: structuredClone(initialHands()),
     currentPlayer: "black",
     selectedSquare: null,
@@ -378,7 +378,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     resignedPlayer: null,
     branchInfo: null,
     originalMoveHistory: [],
-    initialBoard: modernInitialBoard,
+    initialBoard: initialBoard,
     initialHandsData: structuredClone(initialHands()),
     isTsumeShogi: false,
     gameMode: "playing",
@@ -1068,7 +1068,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
 
         set({
-            board: modernInitialBoard,
+            board: initialBoard,
             hands: structuredClone(initialHands()),
             currentPlayer: "black",
             selectedSquare: null,
@@ -1082,7 +1082,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             resignedPlayer: null,
             branchInfo: null,
             originalMoveHistory: [],
-            initialBoard: modernInitialBoard,
+            initialBoard: initialBoard,
             initialHandsData: structuredClone(initialHands()),
             isTsumeShogi: false,
             gameMode: "playing",
@@ -1211,14 +1211,14 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     importGame: (moves: Move[], kifContent?: string) => {
         // KIFコンテンツがある場合は初期局面を解析
-        let initialBoard = modernInitialBoard;
+        let board = initialBoard;
         let initialHandsData = structuredClone(initialHands());
         let isTsumeShogi = false;
 
         if (kifContent) {
             const parseResult = parseKifMoves(kifContent);
             if (parseResult.initialBoard) {
-                initialBoard = parseResult.initialBoard;
+                board = parseResult.initialBoard;
             }
             if (parseResult.initialHands) {
                 initialHandsData = parseResult.initialHands;
@@ -1230,8 +1230,8 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // 初期局面のゲーム状態を判定
         let initialGameStatus: GameStatus = "playing";
-        if (isInCheck(initialBoard, "black")) {
-            if (isCheckmate(initialBoard, initialHandsData, "black")) {
+        if (isInCheck(board, "black")) {
+            if (isCheckmate(board, initialHandsData, "black")) {
                 initialGameStatus = "checkmate";
             } else {
                 initialGameStatus = "check";
@@ -1240,7 +1240,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         // ゲームをリセットしてから棋譜を読み込む（初期局面から開始）
         set({
-            board: initialBoard,
+            board: board,
             hands: initialHandsData,
             currentPlayer: "black",
             selectedSquare: null,
@@ -1252,7 +1252,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             gameStatus: initialGameStatus,
             promotionPending: null,
             resignedPlayer: null,
-            initialBoard: initialBoard, // 初期局面を保存
+            initialBoard: board, // 初期局面を保存
             initialHandsData: initialHandsData, // 初期持ち駒を保存
             branchInfo: null,
             originalMoveHistory: [],
@@ -2618,7 +2618,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             localPlayerColor: playerColor,
             gameMode: "playing",
             gameStatus: "playing",
-            board: modernInitialBoard,
+            board: initialBoard,
             hands: structuredClone(initialHands()),
             currentPlayer: "black",
             moveHistory: [],

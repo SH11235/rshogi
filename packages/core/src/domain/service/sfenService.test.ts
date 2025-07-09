@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { modernInitialBoard } from "../initialBoard";
+import { initialBoard } from "../initialBoard";
 import { getPiece } from "../model/board";
 import { initialHands } from "./moveService";
 import {
@@ -13,7 +13,7 @@ import {
 describe("sfenService", () => {
     describe("exportToSfen", () => {
         it("exports initial position correctly", () => {
-            const sfen = exportToSfen(modernInitialBoard, initialHands(), "black", 1);
+            const sfen = exportToSfen(initialBoard, initialHands(), "black", 1);
             expect(sfen).toBe(`sfen ${INITIAL_SFEN}`);
         });
 
@@ -23,14 +23,14 @@ describe("sfenService", () => {
             hands.white.銀 = 1;
             hands.white.桂 = 1;
 
-            const sfen = exportToSfen(modernInitialBoard, hands, "white", 10);
+            const sfen = exportToSfen(initialBoard, hands, "white", 10);
             expect(sfen).toContain(" w ");
             expect(sfen).toContain("sn2P");
             expect(sfen).toContain(" 10");
         });
 
         it("exports position with promoted pieces", () => {
-            const board = { ...modernInitialBoard };
+            const board = { ...initialBoard };
             // 成銀を5五に配置
             board["55"] = { type: "silver", owner: "black", promoted: true };
 
@@ -143,12 +143,12 @@ describe("sfenService", () => {
 
     describe("isInitialPosition", () => {
         it("recognizes initial position", () => {
-            const result = isInitialPosition(modernInitialBoard, initialHands());
+            const result = isInitialPosition(initialBoard, initialHands());
             expect(result).toBe(true);
         });
 
         it("rejects position with moved pieces", () => {
-            const board = { ...modernInitialBoard };
+            const board = { ...initialBoard };
             // 歩を一つ前に
             const piece = board["77"];
             if (piece) {
@@ -164,7 +164,7 @@ describe("sfenService", () => {
             const hands = initialHands();
             hands.black.歩 = 1;
 
-            const result = isInitialPosition(modernInitialBoard, hands);
+            const result = isInitialPosition(initialBoard, hands);
             expect(result).toBe(false);
         });
     });

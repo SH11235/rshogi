@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Move, Player } from "shogi-core";
-import { initialHands, modernInitialBoard } from "shogi-core";
+import { initialBoard, initialHands } from "shogi-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { KifuExportDialog } from "./KifuExportDialog";
 
@@ -47,7 +47,7 @@ describe("KifuExportDialog", () => {
         open: true,
         onOpenChange: mockOnOpenChange,
         moveHistory: mockMoveHistory,
-        currentBoard: modernInitialBoard,
+        currentBoard: initialBoard,
         currentHands: initialHands(),
         currentPlayer: "black" as Player,
         historyCursor: -1,

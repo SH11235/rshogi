@@ -1,4 +1,4 @@
-import { modernInitialBoard } from "../initialBoard";
+import { initialBoard } from "../initialBoard";
 import type { Board } from "../model/board";
 import { getPiece } from "../model/board";
 import type { Piece, PieceType, Player } from "../model/piece";
@@ -378,7 +378,7 @@ export const INITIAL_SFEN = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNS
  * 平手初期局面かどうかを判定
  */
 export function isInitialPosition(board: Board, hands: Hands): boolean {
-    const initialSfen = exportToSfen(modernInitialBoard, initialHands(), "black", 1);
+    const initialSfen = exportToSfen(initialBoard, initialHands(), "black", 1);
     const currentSfen = exportToSfen(board, hands, "black", 1);
 
     // 手番と手数を除いて比較

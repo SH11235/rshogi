@@ -17,17 +17,13 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "format:check": "biome check .",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "pako": "^2.1.0",
-    "@msgpack/msgpack": "^3.0.0-beta2"
+    "typecheck": "tsc --noEmit",
+    "knip": "knip --config knip.config.js"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@types/pako": "^2.0.3",
     "happy-dom": "^17.4.6",
-    "tsx": "^4.20.3",
+    "knip": "^5.61.3",
     "typescript": "~5.7.2",
     "vitest": "^3.1.3"
   }

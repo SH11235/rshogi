@@ -1,12 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { type Board as BoardType, createPiece, modernInitialBoard } from "shogi-core";
+import { type Board as BoardType, createPiece, initialBoard } from "shogi-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Board } from "./Board";
 
 describe("Board component", () => {
     const mockOnSquareClick = vi.fn();
     const defaultProps = {
-        board: modernInitialBoard,
+        board: initialBoard,
         selectedSquare: null,
         validMoves: [],
         validDropSquares: [],

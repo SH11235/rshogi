@@ -9,7 +9,7 @@ const makePiece = (type: PieceType, owner: Piece["owner"]): Piece =>
 /** 行列 → SquareKey 変換ヘルパ */
 const key = (row: Row, col: Column): SquareKey => `${row}${col}` as SquareKey;
 
-export const modernInitialBoard: Board = (() => {
+export const initialBoard: Board = (() => {
     const board = {} as Record<SquareKey, Piece | null>;
 
     // 先手（black）の初期配置

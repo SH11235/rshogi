@@ -1,4 +1,4 @@
-import { modernInitialBoard } from "../initialBoard";
+import { initialBoard } from "../initialBoard";
 import type { Board } from "../model/board";
 import { getPiece } from "../model/board";
 import type { Move } from "../model/move";
@@ -199,7 +199,7 @@ function parseInitialPosition(lines: string[]): {
     hands: Hands;
     foundPosition: boolean;
 } {
-    let board = modernInitialBoard;
+    let board = initialBoard;
     const hands = initialHands();
     let foundPosition = false;
     let inBoardSection = false;
@@ -373,7 +373,7 @@ export function parseKifMoves(kifContent: string): KifParseResult {
     } = parseInitialPosition(lines);
 
     // 現在の盤面状態を管理（移動元推定のため）
-    let currentBoard = foundPosition ? initialBoard : modernInitialBoard;
+    let currentBoard = foundPosition ? initialBoard : initialBoard;
     let currentHands = foundPosition ? initialHandsData : initialHands();
     let currentPlayer: Player = "black";
 
