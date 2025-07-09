@@ -115,13 +115,20 @@ impl PositionHasher {
 
         #[cfg(target_arch = "wasm32")]
         {
-            web_sys::console::log_1(&format!("[Rust PositionHasher] Parts: board={}, turn={}, hands={}, move_count={}", 
-                board, turn, hands, parts.get(3).unwrap_or(&"none")).into());
+            web_sys::console::log_1(
+                &format!(
+                    "[Rust PositionHasher] Parts: board={}, turn={}, hands={}, move_count={}",
+                    board,
+                    turn,
+                    hands,
+                    parts.get(3).unwrap_or(&"none")
+                )
+                .into(),
+            );
         }
 
         // Start with board position hash
         let mut hash = self.hash_board_position(board)?;
-
 
         // 手番によらず、盤面・手駒だけでハッシュを計算するので十分
         // match turn {
@@ -140,7 +147,9 @@ impl PositionHasher {
 
         #[cfg(target_arch = "wasm32")]
         {
-            web_sys::console::log_1(&format!("[Rust PositionHasher] Generated hash: {:#016x}", hash).into());
+            web_sys::console::log_1(
+                &format!("[Rust PositionHasher] Generated hash: {:#016x}", hash).into(),
+            );
         }
 
         Ok(hash)
