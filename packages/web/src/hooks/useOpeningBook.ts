@@ -23,11 +23,8 @@ export function useOpeningBook(sfen: string) {
     // 局面変更時の検索
     useEffect(() => {
         if (!sfen) return;
-        // 定跡DBでは手数は0で記録されているため、手数を0に置き換える
-        const normalizedSfen = sfen.replace(/\s(\d+)$/, " 0");
-
         openingBook
-            .findMoves(normalizedSfen)
+            .findMoves(sfen)
             .then(setMoves)
             .catch((err) => {
                 console.error("Failed to find moves:", err);

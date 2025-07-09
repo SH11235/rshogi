@@ -95,8 +95,10 @@ describe("KifuExportDialog", () => {
         await user.click(sfenRadio);
 
         const preview = screen.getByLabelText("プレビュー") as HTMLTextAreaElement;
-        expect(preview.value).toContain("sfen");
-        expect(preview.value).toMatch(/^sfen .+ [bw] .+ \d+$/);
+        // SFEN形式は "sfen" プレフィックスなしで返される
+        expect(preview.value).toMatch(
+            /^[lnsgkrbpLNSGKRBP1-9\/+]+ [bw] [RBGSNLPrbgsnlp0-9\-]+ \d+$/,
+        );
     });
 
     it("copies to clipboard", async () => {

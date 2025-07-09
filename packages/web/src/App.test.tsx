@@ -95,6 +95,8 @@ const mockState = {
     // AI properties
     gameType: "human" as const,
     switchToAnalysisMode: vi.fn(),
+    // SFEN method
+    getCurrentSfen: vi.fn(() => "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"),
 };
 
 // GameStateの部分型を定義

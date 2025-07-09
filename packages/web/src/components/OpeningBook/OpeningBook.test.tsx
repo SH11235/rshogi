@@ -3,7 +3,21 @@ import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OpeningBook } from "../OpeningBook";
 
-vi.mock("@/stores/gameStore");
+// gameStoreのモック
+const mockGetCurrentSfen = vi.fn(
+    () => "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+);
+const mockMakeMove = vi.fn();
+
+vi.mock("@/stores/gameStore", () => ({
+    useGameStore: (selector: any) => {
+        const state = {
+            getCurrentSfen: mockGetCurrentSfen,
+            makeMove: mockMakeMove,
+        };
+        return selector ? selector(state) : state;
+    },
+}));
 
 describe("OpeningBook", () => {
     beforeEach(() => {

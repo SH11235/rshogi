@@ -491,7 +491,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                     validDropSquares: [],
                 });
                 console.log(
-                    `Selected piece at ${square.row}${square.column}, legal moves:`,
+                    `Selected piece at ${square.column}${square.row}, legal moves:`,
                     validMoves,
                 );
             } catch (error) {
@@ -531,7 +531,7 @@ export const useGameStore = create<GameState>((set, get) => ({
                     // 通常の移動
                     else {
                         console.log(
-                            `Making move from ${selectedSquare.row}${selectedSquare.column} to ${square.row}${square.column}`,
+                            `Making move from ${selectedSquare.column}${selectedSquare.row} to ${square.row}${square.column}`,
                         );
                         get().makeMove(selectedSquare, square);
                     }
@@ -2881,17 +2881,38 @@ export const useGameStore = create<GameState>((set, get) => ({
             moveNumber = historyCursor + 2;
         } else if (branchInfo) {
             // 分岐がある場合
-            const allMoves = [...moveHistory, ...branchInfo.branchMoves];
-            const state = reconstructGameStateWithInitial(
-                allMoves.slice(0, historyCursor),
-                historyCursor,
-                get().initialBoard,
-                get().initialHandsData,
-            );
-            currentBoard = state.board;
-            currentHands = state.hands;
-            currentPlayer = state.currentPlayer;
-            moveNumber = historyCursor + 2;
+            // 分岐点までの本譜の手順と、その後の分岐の手順を組み合わせる
+            const allMoves = [
+                ...moveHistory.slice(0, branchInfo.branchPoint + 1),
+                ...branchInfo.branchMoves,
+            ];
+
+            if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {
+                // 最新位置の場合は全ての手を使用
+                const state = reconstructGameStateWithInitial(
+                    allMoves,
+                    allMoves.length,
+                    get().initialBoard,
+                    get().initialHandsData,
+                );
+                currentBoard = state.board;
+                currentHands = state.hands;
+                currentPlayer = state.currentPlayer;
+                // 分岐の場合、手数は分岐点 + 分岐内の手数 + 1
+                moveNumber = branchInfo.branchPoint + branchInfo.branchMoves.length + 1;
+            } else {
+                // 履歴の途中の場合
+                const state = reconstructGameStateWithInitial(
+                    allMoves.slice(0, historyCursor + 1),
+                    historyCursor + 1,
+                    get().initialBoard,
+                    get().initialHandsData,
+                );
+                currentBoard = state.board;
+                currentHands = state.hands;
+                currentPlayer = state.currentPlayer;
+                moveNumber = historyCursor + 2;
+            }
         } else {
             // 通常の場合（対局中や履歴移動中）
             if (historyCursor === HISTORY_CURSOR.LATEST_POSITION) {

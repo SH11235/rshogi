@@ -11,7 +11,7 @@ describe("gameStore getCurrentSfen", () => {
         const store = useGameStore.getState();
         const sfen = store.getCurrentSfen();
 
-        expect(sfen).toBe("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+        expect(sfen).toBe("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
     });
 
     it("手を指した後の正しいSFENを返す", () => {
@@ -24,7 +24,7 @@ describe("gameStore getCurrentSfen", () => {
         const sfen = store.getCurrentSfen();
 
         // 7七の歩を7六に動かした後のSFEN（moveNumber=2）
-        expect(sfen).toBe("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
+        expect(sfen).toBe("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
     });
 
     it("履歴移動中の正しいSFENを返す", () => {
@@ -45,7 +45,7 @@ describe("gameStore getCurrentSfen", () => {
         const sfen = store.getCurrentSfen();
 
         // 1手目の後のSFEN（手番は白、moveNumber=2）
-        expect(sfen).toBe("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
+        expect(sfen).toBe("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
     });
 
     it("分岐中の正しいSFENを返す", () => {
@@ -58,7 +58,7 @@ describe("gameStore getCurrentSfen", () => {
         store.selectSquare({ row: 3 as Row, column: 3 as Column });
         store.selectSquare({ row: 4 as Row, column: 3 as Column }); // 3三歩→3四
 
-        // 1手目まで戻る（0が最初の手の後）
+        // 1手目後まで戻る
         store.goToMove(0);
 
         // 別の手を指して分岐を作る（後手番なので後手の駒を動かす）
@@ -66,19 +66,14 @@ describe("gameStore getCurrentSfen", () => {
         store.selectSquare({ row: 4 as Row, column: 1 as Column }); // 1三歩→1四（分岐）
 
         const sfen = store.getCurrentSfen();
+        console.log("現在のSFEN:", sfen);
 
-        // デバッグ情報を出力
-        const state = store;
-        console.log("historyCursor:", state.historyCursor);
-        console.log("moveHistory length:", state.moveHistory.length);
-        console.log("branchInfo:", state.branchInfo);
-        console.log("gameMode:", state.gameMode);
+        // Expected: "lnsgkgsnl/1r5b1/pppppppp1/8p/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3"
+        // Received: "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
 
         // 分岐した手の後のSFEN（後手が1三歩を1四に動かした後）
         // 現在の手番は先手（b）、手数は2（分岐なので元の履歴位置+1）
-        expect(sfen).toBe(
-            "sfen lnsgkgsnl/1r5b1/1pppppppp/p8/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 2",
-        );
+        expect(sfen).toBe("lnsgkgsnl/1r5b1/pppppppp1/8p/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 2");
     });
 
     it("閲覧モードでの正しいSFENを返す", () => {
@@ -109,6 +104,6 @@ describe("gameStore getCurrentSfen", () => {
         const sfen = store.getCurrentSfen();
 
         // 1手目の後のSFEN（moveNumber=2）
-        expect(sfen).toBe("sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
+        expect(sfen).toBe("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
     });
 });
