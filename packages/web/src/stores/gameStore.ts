@@ -1211,7 +1211,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     importGame: (moves: Move[], kifContent?: string) => {
         // KIFコンテンツがある場合は初期局面を解析
-        let board = initialBoard;
+        let board = structuredClone(initialBoard);
         let initialHandsData = structuredClone(initialHands());
         let isTsumeShogi = false;
 
