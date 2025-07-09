@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Move } from "../model/move";
-import { exportToKif, parseKifMoves, validateKifFormat } from "./kifService";
+import type { Move } from "../../domain/model/move";
+import { exportToKif, parseKifMoves, validateKifFormat } from "./kifConverter";
 
 describe("kifService", () => {
     describe("parseKifMoves with initial position", () => {

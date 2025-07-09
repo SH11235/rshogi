@@ -1,19 +1,19 @@
-import { initialBoard } from "../initialBoard";
-import type { Board } from "../model/board";
-import { getPiece } from "../model/board";
-import type { Move } from "../model/move";
-import type { PieceType, Player } from "../model/piece";
-import { convertToJapaneseName } from "../model/piece";
-import type { Column, Row, Square } from "../model/square";
+import { initialBoard } from "../../domain/initialBoard";
+import type { Board } from "../../domain/model/board";
+import { getPiece } from "../../domain/model/board";
+import type { Move } from "../../domain/model/move";
+import type { PieceType, Player } from "../../domain/model/piece";
+import { convertToJapaneseName } from "../../domain/model/piece";
+import type { Column, Row, Square } from "../../domain/model/square";
+import { applyMove, generateMoves, initialHands } from "../../domain/service/moveService";
+import type { Hands } from "../../domain/service/moveService";
 import {
     fullWidthToHalfWidth,
     kanjiToNumber,
     kanjiToPieceType,
     numberToKanji,
     pieceTypeToKanji,
-} from "../utils/notation";
-import { applyMove, generateMoves, initialHands } from "./moveService";
-import type { Hands } from "./moveService";
+} from "../../domain/utils/notation";
 
 /**
  * KIF形式の棋譜エクスポート/インポート機能

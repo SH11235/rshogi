@@ -12,14 +12,13 @@ export * from "./domain/service/checkmate";
 export * from "./domain/service/generateDropMoves";
 export * from "./domain/service/legalMoves";
 export * from "./domain/service/promotionService";
-export * from "./domain/service/kifService";
-export * from "./domain/service/sfenService";
 export * from "./domain/service/moveValidationService";
-export * from "./domain/service/timerService";
 export * from "./domain/service/repetitionService";
 export { checkTryRule } from "./domain/service/repetitionService";
 export * from "./domain/service/mateSearch";
 export * from "./domain/service/mateSearchBenchmark";
+
+// Application services
 export {
     type GameState,
     type GameStatus,
@@ -31,7 +30,12 @@ export {
     updateGameState,
     reconstructGameState,
     reconstructGameStateWithInitial,
-} from "./domain/service/gameState";
+} from "./application/service/gameState";
+export * from "./application/service/timerService";
+
+// Application converters
+export * from "./application/converter/kifConverter";
+export * from "./application/converter/sfenConverter";
 
 // Initial board
 export * from "./domain/initialBoard";

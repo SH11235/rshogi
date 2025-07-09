@@ -1,4 +1,4 @@
-import type { Player } from "../model/piece";
+import type { Player } from "../../domain/model/piece";
 
 export type TimerMode = "basic" | "fischer" | "perMove" | null;
 export type WarningLevel = "normal" | "low" | "critical" | "byoyomi";

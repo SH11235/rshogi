@@ -1,7 +1,7 @@
+import type { GameStatus } from "../../application/service/gameState";
 import type { Board } from "../model/board";
 import type { Player } from "../model/piece";
 import { isCheckmate, isInCheck } from "./checkmate";
-import type { GameStatus } from "./gameState";
 import type { Hands } from "./moveService";
 
 /**

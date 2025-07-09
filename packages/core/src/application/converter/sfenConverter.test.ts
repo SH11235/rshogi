@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { initialBoard } from "../initialBoard";
-import { type Board, getPiece } from "../model/board";
-import { type Hands, initialHands } from "./moveService";
-import { exportToSfen, parseSfen, validateSfenFormat } from "./sfenService";
+import { initialBoard } from "../../domain/initialBoard";
+import { type Board, getPiece } from "../../domain/model/board";
+import { type Hands, initialHands } from "../../domain/service/moveService";
+import { exportToSfen, parseSfen, validateSfenFormat } from "./sfenConverter";
 
 /**
  * 平手初期局面のSFEN

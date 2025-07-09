@@ -1,10 +1,10 @@
-import type { Board } from "../model/board";
-import { getPiece } from "../model/board";
-import type { Piece, PieceType, Player } from "../model/piece";
-import { convertToJapaneseName } from "../model/piece";
-import type { Column, Row, Square } from "../model/square";
-import { initialHands } from "./moveService";
-import type { Hands } from "./moveService";
+import type { Board } from "../../domain/model/board";
+import { getPiece } from "../../domain/model/board";
+import type { Piece, PieceType, Player } from "../../domain/model/piece";
+import { convertToJapaneseName } from "../../domain/model/piece";
+import type { Column, Row, Square } from "../../domain/model/square";
+import { initialHands } from "../../domain/service/moveService";
+import type { Hands } from "../../domain/service/moveService";
 
 /**
  * SFEN (Shogi Forsyth-Edwards Notation) 形式のサポート
