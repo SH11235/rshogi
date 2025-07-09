@@ -3,7 +3,7 @@ import type { Board } from "../model/board";
 import type { Piece } from "../model/piece";
 import type { Square } from "../model/square";
 import { isCheckmate } from "./checkmate";
-import { createEmptyHands } from "./moveService";
+import { initialHands } from "./moveService";
 
 // 駒配置ユーティリティ
 const place = (board: Board, square: Square, piece: Piece): Board => ({
@@ -26,7 +26,7 @@ describe("Checkmate detection tests", () => {
             },
         } as Board;
 
-        const hands = createEmptyHands();
+        const hands = initialHands();
         const result = isCheckmate(board, hands, "black");
         expect(result).toBe(false);
     });
@@ -52,7 +52,7 @@ describe("Checkmate detection tests", () => {
             },
         );
 
-        const hands = createEmptyHands();
+        const hands = initialHands();
         const result = isCheckmate(board, hands, "black");
         expect(result).toBe(false); // 王は左や右に逃げられる
     });
@@ -105,7 +105,7 @@ describe("Checkmate detection tests", () => {
             { type: "gold", promoted: false, owner: "white" },
         ); // 右下
 
-        const hands = createEmptyHands();
+        const hands = initialHands();
         const result = isCheckmate(board, hands, "black");
         expect(result).toBe(true); // 王がどこにも動けない
     });
@@ -119,7 +119,7 @@ describe("Checkmate detection tests", () => {
             },
         } as Board;
 
-        const hands = createEmptyHands();
+        const hands = initialHands();
         const result = isCheckmate(board, hands, "white");
         expect(result).toBe(false);
     });
@@ -172,10 +172,10 @@ describe("Checkmate detection tests", () => {
             { type: "pawn", promoted: false, owner: "black" },
         );
 
-        const noHand = createEmptyHands();
+        const noHand = initialHands();
         expect(isCheckmate(board, noHand, "black")).toBe(true);
 
-        const hands = createEmptyHands();
+        const hands = initialHands();
         hands.black.金 = 1;
         expect(isCheckmate(board, hands, "black")).toBe(false);
     });

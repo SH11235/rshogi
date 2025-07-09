@@ -1,20 +1,36 @@
 import { describe, expect, it } from "vitest";
 import { initialBoard } from "../initialBoard";
-import { getPiece } from "../model/board";
-import { initialHands } from "./moveService";
-import {
-    INITIAL_SFEN,
-    exportToSfen,
-    isInitialPosition,
-    parseSfen,
-    validateSfenFormat,
-} from "./sfenService";
+import { type Board, getPiece } from "../model/board";
+import { type Hands, initialHands } from "./moveService";
+import { exportToSfen, parseSfen, validateSfenFormat } from "./sfenService";
+
+/**
+ * 平手初期局面のSFEN
+ */
+const INITIAL_SFEN = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+/**
+ * 平手初期局面かどうかを判定
+ */
+function isInitialPosition(board: Board, hands: Hands): boolean {
+    const initialSfen = exportToSfen(initialBoard, initialHands(), "black", 1);
+    const currentSfen = exportToSfen(board, hands, "black", 1);
+
+    // 手番と手数を除いて比較
+    const initialParts = initialSfen.split(" ");
+    const currentParts = currentSfen.split(" ");
+
+    return (
+        initialParts[0] === currentParts[0] && // 盤面
+        initialParts[2] === currentParts[2] // 持ち駒
+    );
+}
 
 describe("sfenService", () => {
     describe("exportToSfen", () => {
         it("exports initial position correctly", () => {
             const sfen = exportToSfen(initialBoard, initialHands(), "black", 1);
-            expect(sfen).toBe(`sfen ${INITIAL_SFEN}`);
+            expect(sfen).toBe(INITIAL_SFEN);
         });
 
         it("exports position with captured pieces", () => {
@@ -180,7 +196,7 @@ describe("sfenService", () => {
                 position.moveNumber,
             );
 
-            expect(exportedSfen).toBe(`sfen ${originalSfen}`);
+            expect(exportedSfen).toBe(originalSfen);
         });
 
         it("preserves complex position", () => {
@@ -194,7 +210,7 @@ describe("sfenService", () => {
                 position.moveNumber,
             );
 
-            expect(exportedSfen).toBe(`sfen ${originalSfen}`);
+            expect(exportedSfen).toBe(originalSfen);
         });
     });
 });

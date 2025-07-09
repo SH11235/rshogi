@@ -1,4 +1,3 @@
-import { initialBoard } from "../initialBoard";
 import type { Board } from "../model/board";
 import { getPiece } from "../model/board";
 import type { Piece, PieceType, Player } from "../model/piece";
@@ -323,10 +322,10 @@ export function parseSfen(sfen: string): SfenPosition {
     }
 
     if (parts.length < 4) {
-        throw new Error("無効なSFEN: 最低4つの要素が必要です (盤面 持ち駒 手番 手数)");
+        throw new Error("無効なSFEN: 最低4つの要素が必要です (盤面 手番 持ち駒 手数)");
     }
 
-    const [boardStr, handsStr, turnStr, moveNumberStr] = parts;
+    const [boardStr, turnStr, handsStr, moveNumberStr] = parts;
 
     // 盤面の解析
     const board = parseSfenBoard(boardStr);
@@ -367,26 +366,4 @@ export function validateSfenFormat(sfen: string): { valid: boolean; error?: stri
             error: error instanceof Error ? error.message : "不明なエラー",
         };
     }
-}
-
-/**
- * 平手初期局面のSFEN
- */
-export const INITIAL_SFEN = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
-
-/**
- * 平手初期局面かどうかを判定
- */
-export function isInitialPosition(board: Board, hands: Hands): boolean {
-    const initialSfen = exportToSfen(initialBoard, initialHands(), "black", 1);
-    const currentSfen = exportToSfen(board, hands, "black", 1);
-
-    // 手番と手数を除いて比較
-    const initialParts = initialSfen.split(" ");
-    const currentParts = currentSfen.split(" ");
-
-    return (
-        initialParts[1] === currentParts[1] && // 盤面
-        initialParts[3] === currentParts[3] // 持ち駒
-    );
 }

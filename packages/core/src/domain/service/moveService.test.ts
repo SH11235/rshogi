@@ -6,9 +6,9 @@ import type { Piece, PieceType } from "../model/piece";
 import type { Column, Row, Square } from "../model/square";
 import {
     applyMove,
-    createEmptyHands,
     generateMoves,
     hasNifuViolation,
+    initialHands,
     isDeadPiece,
     isUchifuzume,
     revertMove,
@@ -126,7 +126,7 @@ describe("applyMove / revertMove", () => {
         // 7六に黒の歩
         let board: Board = { ...nullBoard };
         board = setPiece(board, sq(7, 6), makePiece("pawn", "black"));
-        const hands = createEmptyHands();
+        const hands = initialHands();
 
         const move: Move = {
             type: "move",
@@ -160,7 +160,7 @@ describe("applyMove / revertMove", () => {
     it("成りを適用・巻き戻し", () => {
         let board: Board = { ...nullBoard };
         board = setPiece(board, sq(2, 2), makePiece("bishop", "white"));
-        const hands = createEmptyHands();
+        const hands = initialHands();
 
         const move: Move = {
             type: "move",
@@ -190,7 +190,7 @@ describe("applyMove / revertMove", () => {
         let board: Board = { ...nullBoard };
         board = setPiece(board, sq(2, 2), makePiece("bishop", "white"));
         board = setPiece(board, sq(8, 8), makePiece("rook", "black"));
-        const hands = createEmptyHands();
+        const hands = initialHands();
 
         const move: Move = {
             type: "move",
@@ -212,7 +212,7 @@ describe("applyMove / revertMove", () => {
 
     it("打ち手を適用・巻き戻し", () => {
         const board: Board = { ...nullBoard };
-        const hands = createEmptyHands();
+        const hands = initialHands();
         hands.black.歩 = 3;
 
         const dropMove: Move = {
@@ -336,7 +336,7 @@ describe("applyMove - 特殊ルール", () => {
     it("二歩の場合はエラーを投げる", () => {
         let board = nullBoard;
         board = setPiece(board, sq(7, 1), makePiece("pawn", "black"));
-        const hands = createEmptyHands();
+        const hands = initialHands();
         hands.black.歩 = 1;
 
         const dropMove: Move = {
@@ -350,7 +350,7 @@ describe("applyMove - 特殊ルール", () => {
 
     it("行き所のない駒を打つ場合はエラーを投げる", () => {
         const board = nullBoard;
-        const hands = createEmptyHands();
+        const hands = initialHands();
         hands.black.歩 = 1;
 
         const dropMove: Move = {
@@ -365,7 +365,7 @@ describe("applyMove - 特殊ルール", () => {
     it("行き所のない位置に移動する場合は自動的に成る", () => {
         let board = nullBoard;
         board = setPiece(board, sq(2, 5), makePiece("pawn", "black"));
-        const hands = createEmptyHands();
+        const hands = initialHands();
 
         const move: Move = {
             type: "move",
@@ -392,7 +392,7 @@ describe("applyMove - 特殊ルール", () => {
         board = setPiece(board, sq(1, 3), makePiece("silver", "black"));
         // 2一に歩を打つと詰みになる局面
 
-        const hands = createEmptyHands();
+        const hands = initialHands();
         hands.black.歩 = 1;
 
         const dropMove: Move = {
