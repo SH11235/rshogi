@@ -57,6 +57,25 @@ mod move_encoder_tests {
     }
 
     #[test]
+    fn test_integration_roundtrip() {
+        // Moved from integration_test.rs - comprehensive roundtrip test
+        let test_moves = vec![
+            "7g7f",  // Normal move
+            "2g2f",  // Normal move
+            "8h2b+", // Promotion
+            "P*5e",  // Drop
+            "G*5f",  // Gold drop
+            "N*4e",  // Knight drop
+        ];
+
+        for move_str in test_moves {
+            let encoded = MoveEncoder::encode_move(move_str).unwrap();
+            let decoded = MoveEncoder::decode_move(encoded).unwrap();
+            assert_eq!(move_str, decoded, "Failed roundtrip for move: {move_str}");
+        }
+    }
+
+    #[test]
     fn test_move_encoding_uniqueness() {
         let moves = vec![
             "7g7f", "7f7g", "7g8f", "8f7g", // Different normal moves

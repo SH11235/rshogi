@@ -117,9 +117,8 @@ impl PositionHasher {
         {
             web_sys::console::log_1(
                 &format!(
-                    "[Rust PositionHasher] Parts: board={}, turn={}, hands={}, move_count={}",
+                    "[Rust PositionHasher] Parts: board={}, hands={}, move_count={}",
                     board,
-                    turn,
                     hands,
                     parts.get(3).unwrap_or(&"none")
                 )
@@ -361,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn test_different_turn_different_hash() {
+    fn test_different_turn_same_hash() {
         let hasher = PositionHasher::new();
 
         // Same position, different turn
@@ -370,8 +369,10 @@ mod tests {
 
         let hash_black = hasher.hash_sfen_position(sfen_black).unwrap();
         let hash_white = hasher.hash_sfen_position(sfen_white).unwrap();
-
-        assert_ne!(hash_black, hash_white, "Different turn should produce different hash");
+        assert_eq!(
+            hash_black, hash_white,
+            "Same position should produce same hash regardless of turn"
+        );
     }
 
     #[test]
