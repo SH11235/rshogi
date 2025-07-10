@@ -18,12 +18,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Testing
 - `npm run test` - Run tests once with Vitest
+- `npm run test:unit` - Run unit tests only
 - `npm run test:watch` - Run tests in watch mode
 - `npm run coverage` - Generate test coverage report
+- `npm run test:e2e` - Run Playwright end-to-end tests
+- `npm run test:e2e:ui` - Run Playwright tests with UI mode
 - To run a single test file: `npm run test path/to/test.ts`
 
 ### Code Quality
-- `npm run lint` - Run ESLint
+- `npm run lint` - Run Biome linter
+- `npm run lint:fix` - Run Biome linter with auto-fix
 - `npm run format` - Format code with Biome
 - `npm run format:check` - Check and fix code with Biome
 - `npm run typecheck` - Run TypeScript type checking without emitting files
@@ -45,15 +49,44 @@ This is a Shogi (Japanese Chess) web application built with React and TypeScript
 ### Current Implementation (packages/web/)
 
 #### Components (`/src/components/`)
-- `Board.tsx` - 9x9 shogi board with square click handling
+- `Board.tsx` - 9x9 shogi board with square click handling and move visualization
 - `Piece.tsx` - Individual piece rendering with Japanese characters
-- `GameInfo.tsx` - Game status, turn indicator, and controls
+- `GameInfo.tsx` - Game status, turn indicator, and game controls
 - `CapturedPieces.tsx` - Display captured pieces (hands) for both players
-- `ui/` - shadcn/ui component library (Button, Card, Input, Table)
+- `MoveHistory.tsx` - Move history display with navigation
+- `Timer.tsx` & `TimerDisplay.tsx` - Game timer functionality
+- `PromotionDialog.tsx` - Piece promotion selection dialog
+- `KifuImportDialog.tsx` & `KifuExportDialog.tsx` - KIF format import/export
+- `OnlineGameDialog.tsx` - WebRTC-based online multiplayer setup
+- `AIGameSetup.tsx` & `AIStatus.tsx` - AI opponent configuration and status
+- `SavedGamesDialog.tsx` - Local game save/load functionality
+- `GameRecordManager.tsx` - Game recording and management
+- `MateSearchPanel.tsx` - Mate search analysis tool
+- `KeyboardHelp.tsx` - Keyboard shortcuts reference
+- `DrawOfferDialog.tsx` - Draw offer handling for online games
+- `OpeningBook/` - Opening book display and selection
+- `ui/` - shadcn/ui component library (Button, Card, Dialog, Input, Table, Tabs, etc.)
 
 #### State Management (`/src/stores/`)
 - `gameStore.ts` - Zustand store with game state, move validation, and history
 - Centralized state for board, current player, selected square, valid moves, hands
+- Includes move history management, game recording, and state persistence
+
+#### Custom Hooks (`/src/hooks/`)
+- `useKeyboardShortcuts.ts` - Keyboard navigation and shortcuts
+- `useGameSettings.ts` - Game settings management with persistence
+- `useLocalStorage.ts` - Type-safe localStorage wrapper
+- `useAudio.ts` - Audio playback hook for sound effects
+- `useOpeningBook.ts` - Opening book data access
+
+#### Type Definitions (`/src/types/`)
+- `ai.ts` - AI player, difficulty levels, and worker message types
+- `audio.ts` - Audio system types and configurations
+- `online.ts` - WebRTC and online game message types
+- `timer.ts` - Game timer settings and state types
+- `mateSearch.ts` - Mate search analysis types
+- `openingBook.ts` - Opening book data structures
+- `settings.ts` - Game settings and preferences
 
 #### Key Domain Concepts
 - **Board**: Record<SquareKey, Piece | null> (e.g., "11" → piece or null)
@@ -62,24 +95,34 @@ This is a Shogi (Japanese Chess) web application built with React and TypeScript
 - **Move**: NormalMove (board moves) or DropMove (placing captured pieces)
 - **Hands**: Captured pieces available for dropping
 
+#### Services (`/src/services/`)
+- `ai/aiService.ts` - AI opponent implementation with WebWorker integration
+- `webrtc.ts` - WebRTC connection management for online play
+- `audioManager.ts` & `audioGenerator.ts` - Sound effects and audio management
+- `openingBook.ts` & `wasmOpeningBookLoader.ts` - Opening book loading and management
+- `online/` - Online game services and signaling
+
 #### UI Library & Styling
 - **shadcn/ui**: Modern component library with Radix UI primitives
-- **Tailwind CSS**: Utility-first CSS framework
+- **Tailwind CSS**: Utility-first CSS framework (v4 with Vite integration)
 - **Storybook**: Component development and documentation tool
-- Components: Button, Card, Input, Table (configured and tested)
+- Components: Button, Card, Dialog, Input, Table, Tabs, Alert, Select, Radio, ScrollArea, etc.
 
 #### Testing Strategy
 - **Framework**: Vitest with @testing-library/react
-- **Coverage**: 83 tests across 8 test files
-- **Test Types**: Unit tests for utils, component tests, store integration tests
+- **Coverage**: 28 test files distributed across components, stores, hooks, and services
+- **Test Types**: Unit tests for utils, component tests, store integration tests, hook tests
 - **Co-location**: Tests next to source files (`.test.ts/.test.tsx`)
-- **Setup**: Global test utilities, happy-dom environment
+- **Setup**: Global test utilities in `test/setup.ts`
+- **E2E Testing**: Playwright for end-to-end testing with MCP support
 
 #### Development Notes
 - TypeScript strict mode enabled, NO "any" type usage allowed
 - Path alias `@/*` maps to `src/*`
 - Biome for linting and formatting (4 spaces, 100 char line width)
-- ESLint rules: prefer for-of over forEach, explicit button types
+- Linting rules: prefer for-of over forEach, explicit button types
+- WASM integration for opening book functionality
+- WebWorker for AI processing to maintain UI responsiveness
 
 ## Code Quality Standards
 
@@ -309,38 +352,27 @@ function isValidBoard(board: unknown): board is Board {
 
 ## AI Engine Architecture
 
-### Search Algorithm Implementation
-The AI uses an advanced search system with the following components:
+### AI Service Implementation
+The AI opponent is implemented through a service layer with WebWorker integration:
 
-#### Iterative Deepening Search (`services/ai/search.ts`)
-- Gradually increases search depth to make best use of available time
-- Maintains principal variation (PV) for move ordering
-- Uses killer move heuristic to remember good moves
-- Implements transposition table for position caching
+#### AI Service (`services/ai/aiService.ts`)
+- Manages AI player state and difficulty levels (beginner, intermediate, advanced, expert)
+- Communicates with WebWorker for move calculation
+- Handles position evaluation requests
+- Provides async interface for UI interaction
 
-#### Move Ordering Optimization
-Priority order for move exploration:
-1. Principal Variation (PV) move - best move from previous iteration
-2. Killer moves - moves that caused beta cutoffs at same depth
-3. Capture moves - ordered by MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
-4. Promotion moves - prioritize piece promotions
-5. Check moves - moves that give check
-6. Central moves - moves toward the center
+#### WebWorker Integration (`workers/aiWorker.ts`)
+- Runs AI calculations in background thread to maintain UI responsiveness
+- Handles move calculation and position evaluation messages
+- Implements difficulty-based time limits and search depth
+- Prevents UI blocking during complex calculations
 
-#### Evaluation Function (`services/ai/evaluation.ts`)
-Comprehensive position evaluation considering:
-- **Material balance**: Traditional piece values (Pawn=100, Rook=1040, etc.)
-- **Piece-square tables**: Position-specific bonuses for each piece type
-- **King safety**: Evaluates defender pieces, checks, and enemy attacks
-- **Piece mobility**: Number of legal moves available
-- **Piece coordination**: Multiple pieces controlling same squares
-- **Promotion bonuses**: Additional value for promoted pieces
-
-### Performance Optimizations
-- **Transposition Table**: Caches evaluated positions to avoid redundant calculations
-- **Alpha-Beta Pruning**: Eliminates branches that cannot affect the final result
-- **Time Management**: Uses iterative deepening to return best move within time limit
-- **WebWorker Integration**: Runs in background thread to keep UI responsive
+#### AI Features
+- **Difficulty Levels**: Four skill levels from beginner to expert
+- **Time Management**: Configurable thinking time per difficulty
+- **Position Evaluation**: Real-time position assessment
+- **Error Handling**: Graceful error recovery with fallback moves
+- **State Management**: Tracks AI thinking state for UI feedback
 
 ## Additional Documentation
 

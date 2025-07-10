@@ -1,68 +1,64 @@
-# Shogi Application Documentation
+# 将棋アプリケーション ドキュメント
 
-このディレクトリには、将棋アプリケーション全体の設計・実装ドキュメントが含まれています。
+このディレクトリには、将棋アプリケーションの技術文書が整理されています。
 
-## ディレクトリ構造
+## 📁 ドキュメント構成
 
-### `/development/`
-開発手法・ベストプラクティスに関するドキュメント
-- [TDD Implementation Guide](./development/tdd-implementation-guide.md) - t-wada氏のTDDスタイルに基づく開発ガイド
+### 🏗️ architecture/ - アーキテクチャ設計
+- [`state-management-patterns.md`](./architecture/state-management-patterns.md) - Zustandを使った状態管理パターン
+- [`webrtc-patterns.md`](./architecture/webrtc-patterns.md) - WebRTC通信の実装パターン
 
-### `/implementation/`
-機能実装のためのガイドとプラン
-- [Opening Book Implementation Guide](./implementation/opening-book-implementation-guide.md) - 定跡機能の実装ガイド（概要版）
-- [Opening Book TDD Implementation Guide](./implementation/opening-book-tdd-implementation-guide.md) - 定跡機能のTDD実装ガイド（詳細版）
-- [Online Play Implementation Plan](./online-play-implementation-plan.md) - オンライン対戦機能の実装計画
+### 🚀 features/ - 機能仕様
+- [`ai-engine.md`](./features/ai-engine.md) - AIエンジンの詳細仕様
+- [`opening-book.md`](./features/opening-book.md) - 定跡システムの統合仕様書
+- [`shogi-app-enhanced-requirements.md`](./features/shogi-app-enhanced-requirements.md) - アプリケーション機能要件
+- [`ai-benchmark.md`](./ai-benchmark.md) - AIのベンチマーク結果
 
-### `/features/`
-各機能の仕様・設計ドキュメント
-- [AI Engine](./features/ai-engine.md) - AIエンジンの設計と実装
-- [Enhanced Requirements](./features/shogi-app-enhanced-requirements.md) - アプリケーションの拡張要件
+### 🔧 development/ - 開発ガイド
+- [`tdd-implementation-guide.md`](./development/tdd-implementation-guide.md) - TDD実装ガイド
+- [`testing-strategies.md`](./development/testing-strategies.md) - テスト戦略とベストプラクティス
+- [`online-play-implementation-plan.md`](./development/online-play-implementation-plan.md) - オンライン対戦の実装計画
+- [`online-play-test-guide.md`](./development/online-play-test-guide.md) - オンライン対戦のテストガイド
 
-### `/user-guide/`
-ユーザー向けガイド
-- [AI Guide](./user-guide/ai-guide.md) - AI機能の使い方
+### 📚 implementation/ - 実装ガイド
+- [`opening-book-implementation-guide.md`](./implementation/opening-book-implementation-guide.md) - 定跡実装の詳細ガイド
+- [`opening-book-tdd-implementation-guide.md`](./implementation/opening-book-tdd-implementation-guide.md) - 定跡のTDD実装ガイド
 
-### `/summaries/`
-実装完了機能のまとめ
-- [Opening Book Implementation Summary](./opening-book-implementation-summary.md) - 定跡機能実装のまとめ
+### 👤 user-guide/ - ユーザーガイド
+- [`ai-guide.md`](./user-guide/ai-guide.md) - AIモードの使い方
 
-### その他のドキュメント
-- [AI Benchmark](./ai-benchmark.md) - AIパフォーマンスのベンチマーク結果
-- [State Management Patterns](./state-management-patterns.md) - 状態管理のパターン
-- [Testing Strategies](./testing-strategies.md) - テスト戦略
-- [WebRTC Patterns](./webrtc-patterns.md) - WebRTC実装パターン
-- [Online Play Test Guide](./online-play-test-guide.md) - オンライン対戦のテストガイド
+### 🗄️ archive/ - アーカイブ
+過去のドキュメントや古いバージョンの仕様書を保管しています。
 
-## パッケージ固有のドキュメント
+## 🔗 関連ドキュメント
 
-### Rust Core (`packages/rust-core/docs/`)
-- `/tools/` - CLIツールのドキュメント
-- `/reference/` - 技術仕様・フォーマット定義
-- `/development/` - Rust固有の開発ガイド
+### プロジェクトルート
+- [`/README.md`](../README.md) - プロジェクト概要
+- [`/CLAUDE.md`](../CLAUDE.md) - Claude Code用の開発ガイドライン
+- [`/GEMINI.md`](../GEMINI.md) - Gemini関連の設定
 
-### Web (`packages/web/`)
-- `/.claude/` - Claude Code用の参照ドキュメント
-- `/src/` - コンポーネント・サービスのドキュメント
+### パッケージ別
+- [`/packages/web/README.md`](../packages/web/README.md) - Webフロントエンドの詳細
+- [`/packages/rust-core/README.md`](../packages/rust-core/README.md) - Rustコアライブラリの詳細
 
-## ドキュメント作成ガイドライン
+## 📝 ドキュメント更新ガイドライン
 
-1. **配置場所の決定**
-   - モノレポ全体に関わるドキュメント → ルートの`/docs`
-   - パッケージ固有のドキュメント → 各パッケージの`docs`ディレクトリ
+1. **カテゴリの選択**: 新しいドキュメントは適切なカテゴリに配置してください
+2. **命名規則**: ケバブケース（kebab-case）を使用し、内容が分かりやすい名前を付けてください
+3. **更新時の注意**: 実装が変更された場合は、関連するドキュメントも必ず更新してください
+4. **アーカイブ**: 古くなったドキュメントは削除せず、`archive/`ディレクトリに移動してください
 
-2. **命名規則**
-   - ケバブケース（kebab-case）を使用
-   - 機能名を明確に含める
-   - 実装ガイドは`-implementation-guide.md`で終わる
+## 🔍 クイックリンク
 
-3. **内容の構成**
-   - 概要と前提条件を明記
-   - ステップバイステップの手順
-   - コード例を豊富に含める
-   - トラブルシューティングセクション
+### 開発を始める
+- [TDD実装ガイド](./development/tdd-implementation-guide.md)
+- [テスト戦略](./development/testing-strategies.md)
 
-4. **更新頻度**
-   - 実装と同時にドキュメントを更新
-   - 破壊的変更時は必ず更新
-   - レビュー時にドキュメントも確認
+### 機能を理解する
+- [AIエンジン仕様](./features/ai-engine.md)
+- [定跡システム](./features/opening-book.md)
+- [オンライン対戦](./development/online-play-implementation-plan.md)
+
+### アーキテクチャを学ぶ
+- [状態管理パターン](./architecture/state-management-patterns.md)
+- [WebRTCパターン](./architecture/webrtc-patterns.md)
