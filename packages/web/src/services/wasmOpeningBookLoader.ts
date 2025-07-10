@@ -66,33 +66,6 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
         }
     }
 
-    private fileExists(path: string): boolean {
-        try {
-            const xhr = new XMLHttpRequest();
-            xhr.open("HEAD", path, false);
-            xhr.send();
-            return xhr.status === 200;
-        } catch {
-            return false;
-        }
-    }
-
-    private loadFileSync(path: string): Uint8Array | null {
-        try {
-            const xhr = new XMLHttpRequest();
-            xhr.open("GET", path, false);
-            xhr.responseType = "arraybuffer";
-            xhr.send();
-            if (xhr.status === 200) {
-                return new Uint8Array(xhr.response);
-            }
-            return null;
-        } catch (error) {
-            console.error(`[WasmOpeningBookLoader] Failed to load file ${path}:`, error);
-            return null;
-        }
-    }
-
     async load(filePath: string): Promise<OpeningBookInterface> {
         // 初期化を確実に行う
         await this.initializeReader();
@@ -115,16 +88,25 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
             }
 
             const buffer = await response.arrayBuffer();
-            const success = this.reader.load_data(new Uint8Array(buffer));
-
-            if (!success) {
-                throw new Error("Failed to load opening book data");
-            }
-
-            this.loadedFiles.add(filePath);
+            const data = new Uint8Array(buffer);
             console.log(
-                `[WasmOpeningBookLoader] Loaded ${filePath}, positions: ${this.reader.position_count}`,
+                `[WasmOpeningBookLoader] Loading file ${filePath}, size: ${data.length} bytes`,
             );
+
+            try {
+                const result = this.reader.load_data(data);
+                console.log(`[WasmOpeningBookLoader] Load result: ${result}`);
+
+                this.loadedFiles.add(filePath);
+                console.log(
+                    `[WasmOpeningBookLoader] Successfully loaded ${filePath}, positions: ${this.reader.position_count}`,
+                );
+            } catch (e) {
+                console.error("[WasmOpeningBookLoader] Failed to load data:", e);
+                throw new Error(
+                    `Failed to load opening book data: ${e instanceof Error ? e.message : String(e)}`,
+                );
+            }
 
             return this.createOpeningBookFromWasm();
         } catch (error) {
