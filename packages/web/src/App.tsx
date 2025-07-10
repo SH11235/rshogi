@@ -25,6 +25,7 @@ import { SavedGamesDialog } from "./components/SavedGamesDialog";
 import { Button } from "./components/ui/button";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useGameStore } from "./stores/gameStore";
+import { getWasmInitializer } from "./utils/wasmInit";
 
 function App() {
     const {
@@ -93,6 +94,16 @@ function App() {
     const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
     const [isOnlineDialogOpen, setIsOnlineDialogOpen] = useState(false);
     const [isSavedGamesDialogOpen, setIsSavedGamesDialogOpen] = useState(false);
+
+    // WASMをバックグラウンドでプリロード（レンダリングをブロックしない）
+    useEffect(() => {
+        getWasmInitializer()
+            .ensureInitialized()
+            .catch((error) => {
+                console.error("Failed to preload WASM:", error);
+                // プリロードの失敗は無視する（実際の使用時に再試行される）
+            });
+    }, []);
 
     // キーボードショートカットの設定
     useKeyboardShortcuts({

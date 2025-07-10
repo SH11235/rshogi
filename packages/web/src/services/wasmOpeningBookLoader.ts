@@ -1,4 +1,5 @@
-import init, { OpeningBookReaderWasm } from "@/wasm/shogi_core";
+import { ensureWasmInitialized } from "@/utils/wasmInit";
+import { OpeningBookReaderWasm } from "@/wasm/shogi_core";
 import {
     type AIDifficulty,
     type Board,
@@ -120,32 +121,18 @@ export const parseNotation = (
 // WASM管理
 // ===========================================
 
-// WASM管理のインターフェース
+// WASM管理のインターフェース（後方互換性のため維持）
 export interface WasmManager {
     initialize(): Promise<void>;
 }
 
 /**
  * WASM初期化マネージャーを作成する
- * 各インスタンスは独立した初期化状態を持つ
+ * WasmInitializerを使用するようにリファクタリング
  */
 export const createWasmManager = (): WasmManager => {
-    // インスタンスごとの状態をクロージャーで管理
-    let initialized = false;
-    let initPromise: Promise<void> | null = null;
-
     const initialize = async (): Promise<void> => {
-        if (initialized) return;
-
-        if (initPromise) {
-            return initPromise;
-        }
-
-        initPromise = init().then(() => {
-            initialized = true;
-        });
-
-        return initPromise;
+        await ensureWasmInitialized();
     };
 
     return { initialize };
@@ -347,35 +334,45 @@ export function createWasmOpeningBookLoader(options?: {
     // インスタンスごとの状態
     const logger = options?.logger ?? createLogger("WasmOpeningBookLoader");
     const wasmManager = options?.wasmManager ?? getDefaultWasmManager();
-    let reader: OpeningBookReaderWasm | null = null;
-    const loadedFiles = new Set<string>();
+    // 各ファイルごとに個別のreaderインスタンスを管理
+    const readers = new Map<string, OpeningBookReaderWasm>();
 
-    // リーダーの初期化
-    const ensureReader = async (): Promise<OpeningBookReaderWasm> => {
-        if (reader) return reader;
+    // リーダーの初期化（ファイルごとに新しいインスタンスを作成）
+    const getOrCreateReader = async (filePath: string): Promise<OpeningBookReaderWasm> => {
+        // 既存のreaderがあればそれを返す
+        const existingReader = readers.get(filePath);
+        if (existingReader) {
+            logger.info(`Reusing existing reader for: ${filePath}`);
+            return existingReader;
+        }
 
+        // WASMを初期化してから新しいreaderを作成
         await wasmManager.initialize();
-        reader = new OpeningBookReaderWasm();
-        logger.info("Reader created successfully");
+        const newReader = new OpeningBookReaderWasm();
+        readers.set(filePath, newReader);
+        logger.info(`Created new reader for: ${filePath}`);
 
-        return reader;
+        return newReader;
     };
 
     // ファイル読み込み
-    const loadFile = async (filePath: string): Promise<void> => {
-        if (loadedFiles.has(filePath)) {
-            logger.info(`File already loaded: ${filePath}`);
-            return;
+    const loadFile = async (filePath: string): Promise<OpeningBookReaderWasm> => {
+        // このファイル用のreaderを取得または作成
+        const reader = await getOrCreateReader(filePath);
+
+        // 既にデータが読み込まれているかチェック
+        if (reader.position_count > 0) {
+            logger.info(`File already loaded: ${filePath}, positions: ${reader.position_count}`);
+            return reader;
         }
 
-        const currentReader = await ensureReader();
+        // データを読み込む
         const data = await fetchOpeningBookData(filePath, logger);
-
-        const result = currentReader.load_data(data);
+        const result = reader.load_data(data);
         logger.info(`Load result: ${result}`);
+        logger.info(`Successfully loaded ${filePath}, positions: ${reader.position_count}`);
 
-        loadedFiles.add(filePath);
-        logger.info(`Successfully loaded ${filePath}, positions: ${currentReader.position_count}`);
+        return reader;
     };
 
     // OpeningBookLoaderInterface実装
@@ -383,9 +380,8 @@ export function createWasmOpeningBookLoader(options?: {
         logger.info(`Loading opening book from: ${filePath}`);
 
         try {
-            await loadFile(filePath);
-            const currentReader = await ensureReader();
-            return createWasmOpeningBook(currentReader, logger);
+            const reader = await loadFile(filePath);
+            return createWasmOpeningBook(reader, logger);
         } catch (error) {
             const message = error instanceof Error ? error.message : "Unknown error";
             throw new Error(`Failed to load opening book: ${message}`);

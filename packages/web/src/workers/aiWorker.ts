@@ -8,6 +8,7 @@ import type {
     MoveCalculatedResponse,
     PositionEvaluatedResponse,
 } from "../types/ai";
+import { getWasmPath } from "../utils/wasmInit";
 
 // WebWorker環境でのWASMモジュール可用性をチェック
 console.log("[Worker Debug] Worker environment loaded");
@@ -33,7 +34,9 @@ async function initializeWasm(): Promise<void> {
 
     try {
         console.log("[Worker Debug] Initializing WASM module in Worker");
-        await init(); // WASMモジュールを初期化
+        // 一元管理されたパスを使用
+        const wasmPath = getWasmPath();
+        await init(wasmPath); // WASMモジュールを初期化
         wasmInitialized = true;
         console.log("[Worker Debug] WASM module initialized successfully");
     } catch (error) {
