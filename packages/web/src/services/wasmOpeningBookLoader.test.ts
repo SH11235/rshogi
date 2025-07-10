@@ -40,12 +40,18 @@ vi.mock("shogi-core", async () => {
 });
 
 // WASMモジュールのモック
+let mockPositionCount = 0;
 vi.mock("@/wasm/shogi_core", () => ({
     default: vi.fn(() => Promise.resolve()),
     OpeningBookReaderWasm: vi.fn(() => ({
         find_moves: vi.fn(),
-        load_data: vi.fn(),
-        position_count: 100,
+        load_data: vi.fn(() => {
+            mockPositionCount = 100; // load_dataが呼ばれたら100に設定
+            return true;
+        }),
+        get position_count() {
+            return mockPositionCount;
+        },
     })),
 }));
 
@@ -55,6 +61,7 @@ global.fetch = vi.fn();
 describe("wasmOpeningBookLoader", () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mockPositionCount = 0; // 各テストでリセット
     });
 
     describe("squareToKey", () => {
@@ -335,6 +342,7 @@ describe("wasmOpeningBookLoader", () => {
 
             // fetch mock setup
             const mockData = new Uint8Array([1, 2, 3]);
+            (global.fetch as Mock).mockReset();
             (global.fetch as Mock).mockResolvedValue({
                 ok: true,
                 arrayBuffer: vi.fn().mockResolvedValue(mockData.buffer),
@@ -353,7 +361,9 @@ describe("wasmOpeningBookLoader", () => {
             expect(mockLogger.info).toHaveBeenCalledWith(
                 "Loading opening book from: /test/opening.binz",
             );
-            expect(mockLogger.info).toHaveBeenCalledWith("Reader created successfully");
+            expect(mockLogger.info).toHaveBeenCalledWith(
+                "Created new reader for: /test/opening.binz",
+            );
             expect(openingBook).toBeDefined();
             expect(openingBook.size()).toBe(100); // モックの値
         });
@@ -368,7 +378,12 @@ describe("wasmOpeningBookLoader", () => {
             await loader.load("/test/opening.binz"); // 2回目
 
             expect(global.fetch).toHaveBeenCalledTimes(1); // 1回だけ
-            expect(mockLogger.info).toHaveBeenCalledWith("File already loaded: /test/opening.binz");
+            expect(mockLogger.info).toHaveBeenCalledWith(
+                "Reusing existing reader for: /test/opening.binz",
+            );
+            expect(mockLogger.info).toHaveBeenCalledWith(
+                "File already loaded: /test/opening.binz, positions: 100",
+            );
         });
 
         it("should load correct file for difficulty", async () => {
