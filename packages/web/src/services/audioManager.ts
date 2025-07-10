@@ -32,49 +32,26 @@ const SOUND_FILES: SoundMap = {
 };
 
 /**
- * HTMLAudioElementのプールを管理するクラス
+ * AudioPoolインターフェース
  */
-class AudioPool {
-    private pool: Map<SoundType, HTMLAudioElement[]> = new Map();
-    private generatedUrls: Map<SoundType, string> = new Map();
-    private maxPoolSize = 3; // 同時再生可能数
+interface AudioPool {
+    getAudio: (type: SoundType, config: SoundConfig) => Promise<HTMLAudioElement>;
+    stopAll: () => void;
+    preload: (type: SoundType, config: SoundConfig) => Promise<void>;
+    cleanup: () => void;
+}
 
-    async getAudio(type: SoundType, config: SoundConfig): Promise<HTMLAudioElement> {
-        if (!this.pool.has(type)) {
-            this.pool.set(type, []);
-        }
+/**
+ * HTMLAudioElementのプールを作成する関数
+ */
+function createAudioPool(): AudioPool {
+    const pool = new Map<SoundType, HTMLAudioElement[]>();
+    const generatedUrls = new Map<SoundType, string>();
+    const maxPoolSize = 3; // 同時再生可能数
 
-        const pool = this.pool.get(type);
-        if (!pool) {
-            throw new Error(`Pool not initialized for type: ${type}`);
-        }
-
-        // 再生可能な音声要素を探す
-        for (const audio of pool) {
-            if (audio.ended || audio.paused) {
-                return audio;
-            }
-        }
-
-        // プールに空きがあれば新しい要素を作成
-        if (pool.length < this.maxPoolSize) {
-            const audioUrl = await this.getAudioUrl(type);
-            const audio = new Audio(audioUrl);
-            audio.preload = config.preload ? "auto" : "metadata";
-            pool.push(audio);
-            return audio;
-        }
-
-        // プールが満杯なら古い音声を停止して再利用
-        const audio = pool[0];
-        audio.pause();
-        audio.currentTime = 0;
-        return audio;
-    }
-
-    private async getAudioUrl(type: SoundType): Promise<string> {
+    const getAudioUrl = async (type: SoundType): Promise<string> => {
         // 既に生成済みのURLがあれば再利用
-        const existingUrl = this.generatedUrls.get(type);
+        const existingUrl = generatedUrls.get(type);
         if (existingUrl) {
             return existingUrl;
         }
@@ -85,26 +62,59 @@ class AudioPool {
         try {
             const blob = await generateSoundForType(type);
             const url = createAudioBlobURL(blob);
-            this.generatedUrls.set(type, url);
+            generatedUrls.set(type, url);
             return url;
         } catch (error) {
             console.error(`AudioPool.getAudioUrl: Failed to generate sound for ${type}:`, error);
             throw error;
         }
-    }
+    };
 
-    stopAll(): void {
-        for (const pool of this.pool.values()) {
-            for (const audio of pool) {
+    const getAudio = async (type: SoundType, config: SoundConfig): Promise<HTMLAudioElement> => {
+        if (!pool.has(type)) {
+            pool.set(type, []);
+        }
+
+        const typePool = pool.get(type);
+        if (!typePool) {
+            throw new Error(`Pool not initialized for type: ${type}`);
+        }
+
+        // 再生可能な音声要素を探す
+        for (const audio of typePool) {
+            if (audio.ended || audio.paused) {
+                return audio;
+            }
+        }
+
+        // プールに空きがあれば新しい要素を作成
+        if (typePool.length < maxPoolSize) {
+            const audioUrl = await getAudioUrl(type);
+            const audio = new Audio(audioUrl);
+            audio.preload = config.preload ? "auto" : "metadata";
+            typePool.push(audio);
+            return audio;
+        }
+
+        // プールが満杯なら古い音声を停止して再利用
+        const audio = typePool[0];
+        audio.pause();
+        audio.currentTime = 0;
+        return audio;
+    };
+
+    const stopAll = (): void => {
+        for (const typePool of pool.values()) {
+            for (const audio of typePool) {
                 audio.pause();
                 audio.currentTime = 0;
             }
         }
-    }
+    };
 
-    async preload(type: SoundType, config: SoundConfig): Promise<void> {
+    const preload = async (type: SoundType, config: SoundConfig): Promise<void> => {
         try {
-            const audio = await this.getAudio(type, config);
+            const audio = await getAudio(type, config);
 
             if (audio.readyState >= 3) {
                 // HAVE_FUTURE_DATA or better
@@ -133,35 +143,42 @@ class AudioPool {
         } catch (error) {
             throw new Error(`Failed to preload ${type}: ${error}`);
         }
-    }
+    };
 
-    cleanup(): void {
+    const cleanup = (): void => {
         // 生成されたBlobURLを解放
-        for (const url of this.generatedUrls.values()) {
+        for (const url of generatedUrls.values()) {
             revokeBlobURL(url);
         }
-        this.generatedUrls.clear();
+        generatedUrls.clear();
 
         // 音声プールをクリア
-        this.stopAll();
-        this.pool.clear();
-    }
+        stopAll();
+        pool.clear();
+    };
+
+    return {
+        getAudio,
+        stopAll,
+        preload,
+        cleanup,
+    };
 }
 
 /**
- * ブラウザベースの音声マネージャー実装
+ * ブラウザベースの音声マネージャーを作成する関数
  */
-export class BrowserAudioManager implements AudioManager {
-    private audioPool = new AudioPool();
-    private state: AudioPlayerState = {
+export function createBrowserAudioManager(): AudioManager {
+    const audioPool = createAudioPool();
+    const state: AudioPlayerState = {
         isInitialized: false,
         volume: 50,
         isMuted: false,
         loadedSounds: new Set(),
     };
 
-    async initialize(): Promise<void> {
-        if (this.state.isInitialized) {
+    const initialize = async (): Promise<void> => {
+        if (state.isInitialized) {
             return;
         }
 
@@ -179,22 +196,22 @@ export class BrowserAudioManager implements AudioManager {
                 SoundConfig,
             ][]) {
                 if (config.preload) {
-                    preloadPromises.push(this.preload(type));
+                    preloadPromises.push(preload(type));
                 }
             }
 
             await Promise.all(preloadPromises);
 
-            this.state.isInitialized = true;
+            state.isInitialized = true;
         } catch (error) {
             console.warn("Audio initialization failed:", error);
             // エラーが発生しても初期化済みとして扱う（無音で動作）
-            this.state.isInitialized = true;
+            state.isInitialized = true;
         }
-    }
+    };
 
-    async play(type: SoundType, options: PlayOptions = {}): Promise<void> {
-        if (!this.state.isInitialized || this.state.isMuted) {
+    const play = async (type: SoundType, options: PlayOptions = {}): Promise<void> => {
+        if (!state.isInitialized || state.isMuted) {
             return;
         }
 
@@ -204,10 +221,10 @@ export class BrowserAudioManager implements AudioManager {
                 console.warn(`Unknown sound type: ${type}`);
                 return;
             }
-            const audio = await this.audioPool.getAudio(type, config);
+            const audio = await audioPool.getAudio(type, config);
 
             // 音量設定
-            const volume = options.volume ?? volumeLevelToFloat(this.state.volume);
+            const volume = options.volume ?? volumeLevelToFloat(state.volume);
             const defaultVolume = volumeLevelToFloat(config.defaultVolume ?? 50);
             audio.volume = Math.min(volume, defaultVolume);
 
@@ -231,44 +248,50 @@ export class BrowserAudioManager implements AudioManager {
             // ユーザーのインタラクション前の自動再生エラーなどは無視
             console.error(`audioManager.play: Failed to play ${type}:`, error);
         }
-    }
+    };
 
-    setVolume(volume: VolumeLevel): void {
-        this.state.volume = volume;
-    }
+    const setVolume = (volume: VolumeLevel): void => {
+        state.volume = volume;
+    };
 
-    setMuted(muted: boolean): void {
-        this.state.isMuted = muted;
-    }
+    const setMuted = (muted: boolean): void => {
+        state.isMuted = muted;
+    };
 
-    async preload(type: SoundType): Promise<void> {
+    const preload = async (type: SoundType): Promise<void> => {
         const config = SOUND_FILES[type];
         if (!config) {
             throw new Error(`Unknown sound type: ${type}`);
         }
 
         try {
-            await this.audioPool.preload(type, config);
-            this.state.loadedSounds.add(type);
+            await audioPool.preload(type, config);
+            state.loadedSounds.add(type);
         } catch (error) {
             console.warn(`Failed to preload ${type}:`, error);
         }
-    }
+    };
 
-    stopAll(): void {
-        this.audioPool.stopAll();
-    }
+    const stopAll = (): void => {
+        audioPool.stopAll();
+    };
 
-    cleanup(): void {
-        this.audioPool.cleanup();
-    }
+    const getState = (): AudioPlayerState => {
+        return { ...state, loadedSounds: new Set(state.loadedSounds) };
+    };
 
-    getState(): AudioPlayerState {
-        return { ...this.state };
-    }
+    return {
+        initialize,
+        play,
+        setVolume,
+        setMuted,
+        preload,
+        stopAll,
+        getState,
+    };
 }
 
 /**
  * グローバル音声マネージャーインスタンス
  */
-export const audioManager = new BrowserAudioManager();
+export const audioManager = createBrowserAudioManager();
