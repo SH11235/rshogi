@@ -1,6 +1,6 @@
 # 定跡データディレクトリ
 
-user_book1.dbから変換された定跡データ（.binzファイル）を配置します。
+[user_book1.db](https://github.com/yaneurao/YaneuraOu/releases/tag/new_petabook233)から変換された定跡データ（.binzファイル）を配置します。
 
 ## 必要なファイル
 
