@@ -26,10 +26,10 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
 
     // 難易度ごとのファイルマッピング
     private static readonly DIFFICULTY_FILES: Record<AIDifficulty, string> = {
-        beginner: "./data/opening_book_tournament.binz",
-        intermediate: "./data/opening_book_early.binz",
-        advanced: "./data/opening_book_standard.binz",
-        expert: "./data/opening_book_full.binz",
+        beginner: `${import.meta.env.BASE_URL}data/opening_book_tournament.binz`,
+        intermediate: `${import.meta.env.BASE_URL}data/opening_book_early.binz`,
+        advanced: `${import.meta.env.BASE_URL}data/opening_book_standard.binz`,
+        expert: `${import.meta.env.BASE_URL}data/opening_book_full.binz`,
     };
 
     constructor() {
@@ -83,6 +83,13 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
 
         try {
             const response = await fetch(filePath);
+            console.log(`[WasmOpeningBookLoader] Fetch response headers for ${filePath}:`, {
+                "content-type": response.headers.get("content-type"),
+                "content-encoding": response.headers.get("content-encoding"),
+                "content-length": response.headers.get("content-length"),
+                "cache-control": response.headers.get("cache-control"),
+            });
+
             if (!response.ok) {
                 throw new Error(`Failed to fetch: ${response.statusText}`);
             }
