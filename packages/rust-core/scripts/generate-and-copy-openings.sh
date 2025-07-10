@@ -8,9 +8,9 @@ echo "🔄 Copying opening book files from converted_openings..."
 
 # Check if converted_openings directory exists
 if [ ! -d "converted_openings" ]; then
-    echo "❌ Error: converted_openings directory not found!"
-    echo "Please run the conversion tool first to generate opening book files."
-    exit 1
+    echo "⚠️  Warning: converted_openings directory not found!"
+    echo "Skipping opening book copy (likely in CI/CD environment)"
+    exit 0
 fi
 
 # Check for required files
@@ -44,6 +44,7 @@ if ls converted_openings/*.binz 1> /dev/null 2>&1; then
     echo "📁 Files in web/public/data:"
     ls -lh ../web/public/data/*.binz 2>/dev/null || echo "No .binz files found"
 else
-    echo "❌ No .binz files found in converted_openings/"
-    exit 1
+    echo "⚠️  No .binz files found in converted_openings/"
+    echo "Skipping opening book copy (likely in CI/CD environment)"
+    exit 0
 fi

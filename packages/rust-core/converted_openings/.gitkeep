@@ -1,0 +1,3 @@
+# This directory holds converted opening book files (.binz)
+# Files in this directory are generated from `make convert-opening-books-parallel`
+# command in packages/rust-core/ and copied to web/public/data/

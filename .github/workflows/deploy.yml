@@ -85,6 +85,16 @@ jobs:
       - name: Build WASM files
         run: npm run build:wasm
 
+      - name: Copy opening book data
+        run: |
+          cd packages/rust-core
+          if [ -d "converted_openings" ] && ls converted_openings/*.binz 1> /dev/null 2>&1; then
+            echo "📋 Copying opening book files to web package..."
+            ./scripts/generate-and-copy-openings.sh
+          else
+            echo "⚠️  No opening book files found in converted_openings/, skipping..."
+          fi
+
       # デプロイ用の本番ビルドのみ実行（品質チェックはCIで完了済み）
       - name: Build packages
         run: npm run build
