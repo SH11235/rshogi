@@ -1,6 +1,6 @@
 import init from "@/wasm/shogi_core";
-import { AIEngine } from "shogi-core";
-import { WasmOpeningBookLoader } from "../services/wasmOpeningBookLoader";
+import { type AIEngineInterface, createAIEngine } from "shogi-core";
+import { createWasmOpeningBookLoader } from "../services/wasmOpeningBookLoader";
 import type {
     AIResponse,
     AIWorkerMessage,
@@ -21,10 +21,10 @@ console.log("[Worker Debug] WebAssembly support:", typeof WebAssembly !== "undef
 const ctx: Worker = self as unknown as Worker;
 
 // AI engine instance
-let engine: AIEngine | null = null;
+let engine: AIEngineInterface | null = null;
 
 // WASM opening book loader（WebWorker環境での初期化）
-let openingBookLoader: WasmOpeningBookLoader | null = null;
+let openingBookLoader: ReturnType<typeof createWasmOpeningBookLoader> | null = null;
 let wasmInitialized = false;
 
 // WebWorker環境でのWASMモジュール初期化
@@ -45,13 +45,13 @@ async function initializeWasm(): Promise<void> {
 }
 
 // WebWorker環境でのWASMローダー初期化
-async function initializeWasmLoader(): Promise<WasmOpeningBookLoader> {
+async function initializeWasmLoader(): Promise<ReturnType<typeof createWasmOpeningBookLoader>> {
     // WASMモジュールが初期化されていない場合は初期化
     await initializeWasm();
 
     if (!openingBookLoader) {
         console.log("[Worker Debug] Creating WasmOpeningBookLoader in Worker");
-        openingBookLoader = new WasmOpeningBookLoader();
+        openingBookLoader = createWasmOpeningBookLoader();
     }
     return openingBookLoader;
 }
@@ -71,7 +71,7 @@ ctx.addEventListener("message", async (event: MessageEvent<AIWorkerMessage>) => 
                     console.log("[Worker Debug] WASM loader initialized successfully");
 
                     // Initialize AI engine with specified difficulty
-                    engine = new AIEngine(message.difficulty, loader);
+                    engine = createAIEngine(message.difficulty, loader);
 
                     // 定跡データを読み込む
                     try {

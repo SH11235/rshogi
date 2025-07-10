@@ -7,290 +7,370 @@ import {
     type Move,
     type OpeningBookInterface,
     type OpeningBookLoaderInterface,
-    type OpeningEntry,
     type OpeningMove,
     type PositionState,
     type Row,
     exportToSfen,
 } from "shogi-core";
 
-/**
- * WASM実装を使った定跡ローダー
- */
-export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
-    private reader: OpeningBookReaderWasm | null = null;
-    private initialized = false;
-    private loadedFiles = new Set<string>();
-    private wasmInitialized = false;
+// ===========================================
+// 型定義と定数
+// ===========================================
 
-    // 難易度ごとのファイルマッピング
-    private static readonly DIFFICULTY_FILES: Record<AIDifficulty, string> = {
-        beginner: `${import.meta.env.BASE_URL}data/opening_book_tournament.binz`,
-        intermediate: `${import.meta.env.BASE_URL}data/opening_book_early.binz`,
-        advanced: `${import.meta.env.BASE_URL}data/opening_book_standard.binz`,
-        expert: `${import.meta.env.BASE_URL}data/opening_book_full.binz`,
+// 難易度ごとのファイルマッピング
+const DIFFICULTY_FILES: Record<AIDifficulty, string> = {
+    beginner: `${import.meta.env.BASE_URL}data/opening_book_tournament.binz`,
+    intermediate: `${import.meta.env.BASE_URL}data/opening_book_early.binz`,
+    advanced: `${import.meta.env.BASE_URL}data/opening_book_standard.binz`,
+    expert: `${import.meta.env.BASE_URL}data/opening_book_full.binz`,
+};
+
+// WASMから返される定跡データの型
+interface WasmMoveData {
+    notation: string;
+    evaluation: number;
+    depth: number;
+}
+
+// ログレベルの型
+type LogLevel = "debug" | "info" | "warn" | "error";
+
+// ===========================================
+// ユーティリティ関数
+// ===========================================
+
+// ロガーファクトリー（環境に応じてログレベルを制御）
+const createLogger = (prefix: string, enabled = true) => {
+    const log = (level: LogLevel, message: string, ...args: unknown[]) => {
+        if (!enabled) return;
+
+        const methods: Record<LogLevel, typeof console.log> = {
+            debug: console.log,
+            info: console.log,
+            warn: console.warn,
+            error: console.error,
+        };
+
+        methods[level](`[${prefix}] ${message}`, ...args);
     };
 
-    constructor() {
-        // コンストラクタは同期的にするため、初期化は別メソッドで行う
-        console.log("[WasmOpeningBookLoader] Constructor called");
-    }
+    return {
+        debug: (message: string, ...args: unknown[]) => log("debug", message, ...args),
+        info: (message: string, ...args: unknown[]) => log("info", message, ...args),
+        warn: (message: string, ...args: unknown[]) => log("warn", message, ...args),
+        error: (message: string, ...args: unknown[]) => log("error", message, ...args),
+    };
+};
 
-    private async ensureWasmInitialized(): Promise<void> {
-        if (this.wasmInitialized) return;
+// 座標のキー作成
+export const squareToKey = (row: Row, column: Column): keyof Board => {
+    return `${column}${row}` as keyof Board;
+};
 
-        try {
-            await init();
-            this.wasmInitialized = true;
-            console.log("[WasmOpeningBookLoader] WASM initialized successfully");
-        } catch (error) {
-            console.error("[WasmOpeningBookLoader] Failed to initialize WASM:", error);
-            throw error;
-        }
-    }
-
-    private async initializeReader(): Promise<void> {
-        if (this.initialized) return;
-
-        await this.ensureWasmInitialized();
-
-        try {
-            this.reader = new OpeningBookReaderWasm();
-            this.initialized = true;
-            console.log("[WasmOpeningBookLoader] Reader created successfully");
-        } catch (error) {
-            console.error("[WasmOpeningBookLoader] Failed to create reader:", error);
-            this.initialized = false;
-            throw error;
-        }
-    }
-
-    async load(filePath: string): Promise<OpeningBookInterface> {
-        // 初期化を確実に行う
-        await this.initializeReader();
-
-        if (!this.initialized || !this.reader) {
-            throw new Error("Opening book reader not initialized");
-        }
-
-        if (this.loadedFiles.has(filePath)) {
-            console.log(
-                `[WasmOpeningBookLoader] File already loaded: ${filePath}, positions: ${this.reader.position_count}`,
-            );
-            return this.createOpeningBookFromWasm();
-        }
-
-        try {
-            const response = await fetch(filePath);
-            console.log(`[WasmOpeningBookLoader] Fetch response headers for ${filePath}:`, {
-                "content-type": response.headers.get("content-type"),
-                "content-encoding": response.headers.get("content-encoding"),
-                "content-length": response.headers.get("content-length"),
-                "cache-control": response.headers.get("cache-control"),
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to fetch: ${response.statusText}`);
-            }
-
-            const buffer = await response.arrayBuffer();
-            const data = new Uint8Array(buffer);
-            console.log(
-                `[WasmOpeningBookLoader] Loading file ${filePath}, size: ${data.length} bytes`,
-            );
-
-            try {
-                const result = this.reader.load_data(data);
-                console.log(`[WasmOpeningBookLoader] Load result: ${result}`);
-
-                this.loadedFiles.add(filePath);
-                console.log(
-                    `[WasmOpeningBookLoader] Successfully loaded ${filePath}, positions: ${this.reader.position_count}`,
-                );
-            } catch (e) {
-                console.error("[WasmOpeningBookLoader] Failed to load data:", e);
-                throw new Error(
-                    `Failed to load opening book data: ${e instanceof Error ? e.message : String(e)}`,
-                );
-            }
-
-            return this.createOpeningBookFromWasm();
-        } catch (error) {
-            throw new Error(
-                `Failed to load opening book: ${error instanceof Error ? error.message : "Unknown error"}`,
-            );
-        }
-    }
-
-    async loadForDifficulty(difficulty: AIDifficulty): Promise<OpeningBookInterface> {
-        const filePath = WasmOpeningBookLoader.DIFFICULTY_FILES[difficulty];
-        return this.load(filePath);
-    }
-
-    // loadFromFallback(): OpeningBookInterface {
-    //     // generateMainOpeningsを使ってフォールバックデータを生成
-    //     const book = new FallbackOpeningBook();
-    //     const entries = generateMainOpenings();
-
-    //     for (const entry of entries) {
-    //         book.addEntry(entry);
-    //     }
-
-    //     return book;
-    // }
-
-    private createOpeningBookFromWasm(): OpeningBookInterface {
-        if (!this.reader) {
-            throw new Error("WASM reader not initialized");
-        }
-        // WASM実装をラップしたOpeningBookインスタンスを返す
-        return new WasmBackedOpeningBook(this.reader);
-    }
-}
-
-// 棋譜記法を座標に変換
-function convertNotationToMove(
-    moveNotation: string,
-): { from: { row: Row; column: Column }; to: { row: Row; column: Column } } | null {
+// 棋譜記法のパース
+export const parseNotation = (
+    notation: string,
+): {
+    fromCol: Column;
+    fromRow: Row;
+    toCol: Column;
+    toRow: Row;
+    promote: boolean;
+} | null => {
     try {
-        // 定跡の記法は簡略化されたフォーマット（例: "7g7f"）
-        // 変換: 列（数字）+ 行（アルファベット） -> { row, column }
-        const fromCol = Number.parseInt(moveNotation[0]) as Column;
-        const fromRow = (moveNotation.charCodeAt(1) - "a".charCodeAt(0) + 1) as Row;
-        const toCol = Number.parseInt(moveNotation[2]) as Column;
-        const toRow = (moveNotation.charCodeAt(3) - "a".charCodeAt(0) + 1) as Row;
+        // 定跡の記法: "7g7f" or "7g7f+"
+        const baseNotation = notation.replace("+", "");
+
+        if (baseNotation.length !== 4) {
+            return null;
+        }
+
+        const fromCol = Number.parseInt(baseNotation[0]) as Column;
+        const fromRow = (baseNotation.charCodeAt(1) - "a".charCodeAt(0) + 1) as Row;
+        const toCol = Number.parseInt(baseNotation[2]) as Column;
+        const toRow = (baseNotation.charCodeAt(3) - "a".charCodeAt(0) + 1) as Row;
+
+        // 範囲チェック
+        if (
+            fromCol < 1 ||
+            fromCol > 9 ||
+            fromRow < 1 ||
+            fromRow > 9 ||
+            toCol < 1 ||
+            toCol > 9 ||
+            toRow < 1 ||
+            toRow > 9
+        ) {
+            return null;
+        }
 
         return {
-            from: { row: fromRow, column: fromCol },
-            to: { row: toRow, column: toCol },
+            fromCol,
+            fromRow,
+            toCol,
+            toRow,
+            promote: notation.includes("+"),
         };
-    } catch (error) {
-        console.error("Failed to convert notation to move:", moveNotation, error);
+    } catch {
         return null;
+    }
+};
+
+// ===========================================
+// WASM管理
+// ===========================================
+
+// WASM初期化を管理するシングルトン
+class WasmManager {
+    private static instance: WasmManager;
+    private initialized = false;
+    private initPromise: Promise<void> | null = null;
+
+    static getInstance(): WasmManager {
+        if (!WasmManager.instance) {
+            WasmManager.instance = new WasmManager();
+        }
+        return WasmManager.instance;
+    }
+
+    async initialize(): Promise<void> {
+        if (this.initialized) return;
+
+        if (this.initPromise) {
+            return this.initPromise;
+        }
+
+        this.initPromise = init().then(() => {
+            this.initialized = true;
+        });
+
+        return this.initPromise;
     }
 }
 
-/**
- * WASMリーダーをラップしたOpeningBook実装
- */
-class WasmBackedOpeningBook implements OpeningBookInterface {
-    constructor(private reader: OpeningBookReaderWasm) {}
+// ===========================================
+// データ読み込み
+// ===========================================
 
-    addEntry(_entry: OpeningEntry): boolean {
-        // WASM実装では動的な追加はサポートしない
-        console.warn("addEntry is not supported in WASM-backed implementation");
-        return false;
+// ファイル読み込み関数
+export const fetchOpeningBookData = async (
+    filePath: string,
+    logger = createLogger("Fetch", false),
+): Promise<Uint8Array> => {
+    logger.info(`Fetching file: ${filePath}`);
+
+    const response = await fetch(filePath);
+
+    if (!response.ok) {
+        throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
     }
 
-    findMoves(positionOrSfen: PositionState, options?: FindMovesOptions): OpeningMove[] {
-        // 文字列（SFEN）が渡された場合とPositionStateが渡された場合の処理
-        let sfen: string;
-        if (typeof positionOrSfen === "string") {
-            sfen = positionOrSfen;
-        } else if (positionOrSfen?.board && positionOrSfen.hands && positionOrSfen.currentPlayer) {
-            try {
-                // 手数を計算（moveHistoryがあればその長さ+1、なければ1）
-                const moveNumber = options?.moveHistory ? options.moveHistory.length + 1 : 1;
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
 
-                sfen = exportToSfen(
-                    positionOrSfen.board,
-                    positionOrSfen.hands,
-                    positionOrSfen.currentPlayer,
-                    moveNumber,
-                );
-                console.log("[Opening Book Debug] Generated SFEN:", sfen);
-            } catch (conversionError) {
-                console.error(
-                    "[Opening Book Debug] Failed to convert PositionState to SFEN:",
-                    conversionError,
-                );
-                return [];
-            }
-        } else {
-            console.error(
-                "[Opening Book Debug] Invalid input - not a string or PositionState:",
-                positionOrSfen,
-            );
-            return [];
-        }
+    logger.info(`Fetched ${bytes.length} bytes from ${filePath}`);
 
-        if (!sfen) {
-            console.error("[Opening Book Debug] SFEN is null or undefined");
-            return [];
-        }
+    return bytes;
+};
+
+// ===========================================
+// 定跡データ変換
+// ===========================================
+
+// WASMの定跡データをOpeningMoveに変換
+export const convertWasmMoveToOpeningMove = (
+    wasmMove: WasmMoveData,
+    board: Board,
+    logger = createLogger("Convert", false),
+): OpeningMove | null => {
+    const parsed = parseNotation(wasmMove.notation);
+    if (!parsed) {
+        logger.warn(`Failed to parse notation: ${wasmMove.notation}`);
+        return null;
+    }
+
+    const fromKey = squareToKey(parsed.fromRow, parsed.fromCol);
+    const piece = board[fromKey];
+
+    if (!piece) {
+        logger.warn(`No piece found at ${fromKey}`);
+        return null;
+    }
+
+    const toKey = squareToKey(parsed.toRow, parsed.toCol);
+    const captured = board[toKey] || null;
+
+    const move: Move = {
+        type: "move",
+        from: { row: parsed.fromRow, column: parsed.fromCol },
+        to: { row: parsed.toRow, column: parsed.toCol },
+        piece,
+        promote: parsed.promote,
+        captured,
+    };
+
+    return {
+        move,
+        notation: wasmMove.notation,
+        weight: wasmMove.evaluation || 1,
+        depth: wasmMove.depth,
+    };
+};
+
+// 位置情報をSFEN形式に変換
+export const positionToSfen = (position: PositionState, moveCount: number): string => {
+    return exportToSfen(position.board, position.hands, position.currentPlayer, moveCount);
+};
+
+// ===========================================
+// OpeningBook実装
+// ===========================================
+
+// WASMベースの定跡実装を作成
+const createWasmOpeningBook = (
+    reader: OpeningBookReaderWasm,
+    logger = createLogger("OpeningBook", false),
+): OpeningBookInterface => {
+    // SFEN形式で定跡を検索
+    const searchBySfen = (sfen: string): WasmMoveData[] => {
+        const sfenForSearch = sfen.startsWith("sfen ") ? sfen.slice(5) : sfen;
 
         try {
-            const sfenForSearch = sfen.startsWith("sfen ") ? sfen.slice(5) : sfen;
-            console.log("[Opening Book Debug] SFEN for search (without prefix):", sfenForSearch);
-            const movesJson = this.reader.find_moves(sfenForSearch);
-            const moves = JSON.parse(movesJson);
-            console.log("[Opening Book Debug] Parsed moves:", moves);
-            console.log("[Opening Book Debug] Number of moves found:", moves?.length || 0);
-
-            if (!moves || moves.length === 0) {
-                console.log("[Opening Book Debug] No moves found for position");
-                console.log("[Opening Book Debug] Search SFEN was:", sfenForSearch);
-                return [];
-            }
-
-            // positionOrSfenが文字列の場合はOpeningEntryを返す
-            if (typeof positionOrSfen === "string") {
-                console.log("[Opening Book Debug] Returning OpeningEntry format");
-                return moves;
-            }
-
-            // PositionStateの場合はOpeningMove[]を返す
-            const openingMoves: OpeningMove[] = [];
-
-            for (const moveData of moves) {
-                const coords = convertNotationToMove(moveData.notation);
-                console.log("[Opening Book Debug] Converted coords:", coords);
-
-                if (coords) {
-                    const board = (positionOrSfen as PositionState).board;
-                    const piece = board[`${coords.from.column}${coords.from.row}` as keyof Board];
-                    console.log(
-                        "[Opening Book Debug] Piece at from position:",
-                        piece,
-                        `at ${coords.from.column}${coords.from.row}`,
-                    );
-
-                    if (piece) {
-                        const move: Move = {
-                            type: "move",
-                            from: coords.from,
-                            to: coords.to,
-                            piece,
-                            promote: moveData.notation.includes("+") || false,
-                            captured:
-                                board[`${coords.to.column}${coords.to.row}` as keyof Board] || null,
-                        };
-
-                        console.log("[Opening Book Debug] Created move:", move);
-
-                        openingMoves.push({
-                            move,
-                            notation: moveData.notation,
-                            weight: moveData.evaluation || 1,
-                            depth: moveData.depth,
-                        });
-                    } else {
-                        console.error(
-                            "[Opening Book Debug] No piece found at:",
-                            `${coords.from.column}${coords.from.row}`,
-                        );
-                    }
-                }
-            }
-            return openingMoves;
+            const movesJson = reader.find_moves(sfenForSearch);
+            const moves = JSON.parse(movesJson) as WasmMoveData[];
+            return moves || [];
         } catch (error) {
-            console.error("[Opening Book Debug] Error in findMoves:", error);
+            logger.error("Failed to search moves", error);
             return [];
+        }
+    };
+
+    // FindMoves実装
+    const findMoves = (position: PositionState, options?: FindMovesOptions): OpeningMove[] => {
+        const moveCount = options?.moveHistory ? options.moveHistory.length + 1 : 1;
+
+        let sfen: string;
+        try {
+            sfen = positionToSfen(position, moveCount);
+        } catch (error) {
+            logger.error("Failed to convert position to SFEN", error);
+            return [];
+        }
+
+        const wasmMoves = searchBySfen(sfen);
+
+        if (wasmMoves.length === 0) {
+            logger.debug(`No moves found for position: ${sfen}`);
+            return [];
+        }
+
+        const openingMoves: OpeningMove[] = [];
+
+        for (const wasmMove of wasmMoves) {
+            const openingMove = convertWasmMoveToOpeningMove(wasmMove, position.board, logger);
+
+            if (openingMove) {
+                openingMoves.push(openingMove);
+            }
+        }
+
+        // 重み付きランダム選択（オプション）
+        if (options?.randomize && openingMoves.length > 0) {
+            return [selectWeightedRandom(openingMoves)];
+        }
+
+        return openingMoves;
+    };
+
+    return {
+        addEntry: () => {
+            logger.warn("addEntry is not supported in WASM implementation");
+            return false;
+        },
+        findMoves,
+        size: () => reader.position_count,
+    };
+};
+
+// 重み付きランダム選択
+export const selectWeightedRandom = (moves: OpeningMove[]): OpeningMove => {
+    const totalWeight = moves.reduce((sum, move) => sum + move.weight, 0);
+    let random = Math.random() * totalWeight;
+
+    for (const move of moves) {
+        random -= move.weight;
+        if (random <= 0) {
+            return move;
         }
     }
 
-    size(): number {
-        // 実装を読み込まれた局面数を返す
-        return this.reader.position_count;
-    }
+    return moves[0]; // フォールバック
+};
+
+// ===========================================
+// メインファクトリー
+// ===========================================
+
+/**
+ * WASM定跡ローダーのファクトリー関数
+ * インスタンスごとに独立した状態を保持
+ */
+export function createWasmOpeningBookLoader(options?: {
+    logger?: ReturnType<typeof createLogger>;
+    wasmManager?: WasmManager;
+}): OpeningBookLoaderInterface {
+    // インスタンスごとの状態
+    const logger = options?.logger ?? createLogger("WasmOpeningBookLoader");
+    const wasmManager = options?.wasmManager ?? WasmManager.getInstance();
+    let reader: OpeningBookReaderWasm | null = null;
+    const loadedFiles = new Set<string>();
+
+    // リーダーの初期化
+    const ensureReader = async (): Promise<OpeningBookReaderWasm> => {
+        if (reader) return reader;
+
+        await wasmManager.initialize();
+        reader = new OpeningBookReaderWasm();
+        logger.info("Reader created successfully");
+
+        return reader;
+    };
+
+    // ファイル読み込み
+    const loadFile = async (filePath: string): Promise<void> => {
+        if (loadedFiles.has(filePath)) {
+            logger.info(`File already loaded: ${filePath}`);
+            return;
+        }
+
+        const currentReader = await ensureReader();
+        const data = await fetchOpeningBookData(filePath, logger);
+
+        const result = currentReader.load_data(data);
+        logger.info(`Load result: ${result}`);
+
+        loadedFiles.add(filePath);
+        logger.info(`Successfully loaded ${filePath}, positions: ${currentReader.position_count}`);
+    };
+
+    // OpeningBookLoaderInterface実装
+    const load = async (filePath: string): Promise<OpeningBookInterface> => {
+        logger.info(`Loading opening book from: ${filePath}`);
+
+        try {
+            await loadFile(filePath);
+            const currentReader = await ensureReader();
+            return createWasmOpeningBook(currentReader, logger);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : "Unknown error";
+            throw new Error(`Failed to load opening book: ${message}`);
+        }
+    };
+
+    const loadForDifficulty = async (difficulty: AIDifficulty): Promise<OpeningBookInterface> => {
+        const filePath = DIFFICULTY_FILES[difficulty];
+        return load(filePath);
+    };
+
+    return { load, loadForDifficulty };
 }

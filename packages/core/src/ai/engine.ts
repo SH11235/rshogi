@@ -21,159 +21,298 @@ export interface AIEngineConfig {
     useOpeningBook: boolean;
 }
 
-export class AIEngine {
-    private difficulty: AIDifficulty;
-    private searchDepth: number;
-    private timeLimit: number;
-    private startTime = 0;
-    private lastEvaluation: PositionEvaluation | null = null;
-    private iterativeSearch: IterativeDeepeningSearch;
-    private openingBook: OpeningBookInterface | null = null;
-    private openingBookLoader: OpeningBookLoaderInterface;
-    private useOpeningBook: boolean;
-
-    constructor(difficulty: AIDifficulty, openingBookLoader: OpeningBookLoaderInterface) {
-        this.difficulty = difficulty;
-        const config = AI_DIFFICULTY_CONFIGS[difficulty];
-        this.searchDepth = config.searchDepth || 4;
-        this.timeLimit = config.timeLimit || 3000;
-        this.iterativeSearch = new IterativeDeepeningSearch();
-
-        // 定跡の初期化
-        this.openingBookLoader = openingBookLoader;
-        // 初心者レベルでは定跡を使用しない
-        this.useOpeningBook = difficulty !== "beginner";
-    }
-
-    setDifficulty(difficulty: AIDifficulty): void {
-        this.difficulty = difficulty;
-        const config = AI_DIFFICULTY_CONFIGS[difficulty];
-        this.searchDepth = config.searchDepth || 4;
-        this.timeLimit = config.timeLimit || 3000;
-        // 初心者レベルでは定跡を使用しない
-        this.useOpeningBook = difficulty !== "beginner";
-    }
-
-    /**
-     * 定跡を読み込む
-     */
-    async loadOpeningBook(): Promise<void> {
-        if (!this.useOpeningBook) {
-            this.openingBook = null;
-            return;
-        }
-
-        try {
-            this.openingBook = await this.openingBookLoader.loadForDifficulty(this.difficulty);
-        } catch (error) {
-            console.error("Failed to load opening book:", error);
-            this.openingBook = null;
-        }
-    }
-
-    /**
-     * 設定を取得
-     */
-    getConfig(): AIEngineConfig {
-        return {
-            difficulty: this.difficulty,
-            searchDepth: this.searchDepth,
-            timeLimit: this.timeLimit,
-            useOpeningBook: this.useOpeningBook,
-        };
-    }
-
-    /**
-     * 設定を更新
-     */
-    setConfig(config: Partial<AIEngineConfig>): void {
-        if (config.useOpeningBook !== undefined) {
-            this.useOpeningBook = config.useOpeningBook;
-        }
-        if (config.searchDepth !== undefined) {
-            this.searchDepth = config.searchDepth;
-        }
-        if (config.timeLimit !== undefined) {
-            this.timeLimit = config.timeLimit;
-        }
-    }
-
-    getSearchDepth(): number {
-        return this.searchDepth;
-    }
-
-    async calculateBestMove(
+export interface AIEngineInterface {
+    setDifficulty(difficulty: AIDifficulty): void;
+    loadOpeningBook(): Promise<void>;
+    getConfig(): AIEngineConfig;
+    setConfig(config: Partial<AIEngineConfig>): void;
+    getSearchDepth(): number;
+    calculateBestMove(
         board: Board,
         hands: Hands,
         currentPlayer: Player,
         moveHistory: Move[],
-    ): Promise<Move> {
-        this.startTime = Date.now();
+    ): Promise<Move>;
+    evaluatePosition(board: Board, hands: Hands, player: Player): PositionEvaluation;
+    generateAllLegalMoves(board: Board, hands: Hands, player: Player): Move[];
+    stop(): void;
+    getLastEvaluation(): PositionEvaluation;
+}
+
+// ヘルパー関数：座標からキーを作成
+export const squareToKey = (row: Row, column: Column): keyof Board => {
+    return `${row}${column}` as keyof Board;
+};
+
+// ヘルパー関数：キーから座標を作成
+export const keyToSquare = (key: string): { row: Row; column: Column } => {
+    return {
+        row: Number.parseInt(key[0]) as Row,
+        column: Number.parseInt(key[1]) as Column,
+    };
+};
+
+// 成れる駒の種類かチェック
+export const canPromotePieceType = (piece: Piece): boolean => {
+    return (
+        (piece.type === "pawn" ||
+            piece.type === "lance" ||
+            piece.type === "knight" ||
+            piece.type === "silver" ||
+            piece.type === "bishop" ||
+            piece.type === "rook") &&
+        !piece.promoted
+    );
+};
+
+// 成れる位置かチェック
+export const isPromotablePosition = (
+    from: { row: Row },
+    to: { row: Row },
+    owner: Player,
+): boolean => {
+    const canPromoteFrom = owner === "black" ? from.row <= 3 : from.row >= 7;
+    const canPromoteTo = owner === "black" ? to.row <= 3 : to.row >= 7;
+    return canPromoteFrom || canPromoteTo;
+};
+
+// 盤上の駒の移動を生成
+const generateBoardMoves = (board: Board, player: Player): Move[] => {
+    const moves: Move[] = [];
+
+    for (const [squareKey, piece] of Object.entries(board)) {
+        if (piece && piece.owner === player) {
+            const from = keyToSquare(squareKey);
+            const legalSquares = generateLegalMoves(board, {} as Hands, from, player);
+
+            for (const to of legalSquares) {
+                const capturedPiece = board[squareToKey(to.row, to.column)] || null;
+                const move: Move = {
+                    type: "move",
+                    from,
+                    to,
+                    piece,
+                    promote: false,
+                    captured: capturedPiece,
+                };
+                moves.push(move);
+
+                // 成り移動の生成
+                if (canPromotePieceType(piece) && isPromotablePosition(from, to, player)) {
+                    if (mustPromote(piece, to)) {
+                        // 必須成りの場合は元の移動を成り移動に置き換え
+                        const lastMove = moves[moves.length - 1];
+                        if (lastMove.type === "move") {
+                            lastMove.promote = true;
+                        }
+                    } else {
+                        // 任意成りの場合は成り移動を追加
+                        moves.push({
+                            ...move,
+                            promote: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    return moves;
+};
+
+// 初心者向けに手をシャッフル
+const shuffleMovesForBeginner = (moves: Move[]): Move[] => {
+    const shuffled = [...moves];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+};
+
+// 全ての合法手を生成（分割された関数を使用）
+const generateAllLegalMovesInternal = (
+    board: Board,
+    hands: Hands,
+    player: Player,
+    difficulty: AIDifficulty,
+): Move[] => {
+    const boardMoves = generateBoardMoves(board, player);
+    const dropMoves = generateAllDropMoves(board, hands, player);
+    const allMoves = [...boardMoves, ...dropMoves];
+
+    // 初心者レベルの場合はシャッフル
+    return difficulty === "beginner" ? shuffleMovesForBeginner(allMoves) : allMoves;
+};
+
+// 内部設定の型
+export type InternalAIConfig = {
+    readonly difficulty: AIDifficulty;
+    readonly searchDepth: number;
+    readonly timeLimit: number;
+    readonly useOpeningBook: boolean;
+};
+
+// 設定の更新関数
+export const updateAIConfig = (
+    current: InternalAIConfig,
+    updates: Partial<AIEngineConfig>,
+): InternalAIConfig => {
+    const newDifficulty = updates.difficulty ?? current.difficulty;
+    const difficultyConfig = updates.difficulty ? AI_DIFFICULTY_CONFIGS[newDifficulty] : null;
+
+    return {
+        difficulty: newDifficulty,
+        searchDepth: updates.searchDepth ?? difficultyConfig?.searchDepth ?? current.searchDepth,
+        timeLimit: updates.timeLimit ?? difficultyConfig?.timeLimit ?? current.timeLimit,
+        useOpeningBook:
+            updates.useOpeningBook ?? (newDifficulty !== "beginner" && current.useOpeningBook),
+    };
+};
+
+// 難易度から初期設定を作成
+export const createInitialConfig = (difficulty: AIDifficulty): InternalAIConfig => {
+    const config = AI_DIFFICULTY_CONFIGS[difficulty];
+    return {
+        difficulty,
+        searchDepth: config.searchDepth || 4,
+        timeLimit: config.timeLimit || 3000,
+        useOpeningBook: difficulty !== "beginner",
+    };
+};
+
+/**
+ * AIエンジンのファクトリー関数
+ */
+export function createAIEngine(
+    difficulty: AIDifficulty,
+    openingBookLoader: OpeningBookLoaderInterface,
+): AIEngineInterface {
+    // 内部状態
+    let config = createInitialConfig(difficulty);
+    let startTime = 0;
+    let lastEvaluation: PositionEvaluation | null = null;
+    const iterativeSearch = new IterativeDeepeningSearch();
+    let openingBook: OpeningBookInterface | null = null;
+
+    // 難易度設定
+    const setDifficulty = (newDifficulty: AIDifficulty): void => {
+        config = updateAIConfig(config, { difficulty: newDifficulty });
+    };
+
+    // 定跡の読み込み
+    const loadOpeningBook = async (): Promise<void> => {
+        if (!config.useOpeningBook) {
+            openingBook = null;
+            return;
+        }
+
+        try {
+            openingBook = await openingBookLoader.loadForDifficulty(config.difficulty);
+        } catch (error) {
+            console.error("Failed to load opening book:", error);
+            openingBook = null;
+        }
+    };
+
+    // 設定の取得
+    const getConfig = (): AIEngineConfig => {
+        return {
+            difficulty: config.difficulty,
+            searchDepth: config.searchDepth,
+            timeLimit: config.timeLimit,
+            useOpeningBook: config.useOpeningBook,
+        };
+    };
+
+    // 設定の更新
+    const setConfig = (updates: Partial<AIEngineConfig>): void => {
+        config = updateAIConfig(config, updates);
+    };
+
+    // 探索深度の取得
+    const getSearchDepth = (): number => {
+        return config.searchDepth;
+    };
+
+    // 全合法手生成（公開API）
+    const generateAllLegalMoves = (board: Board, hands: Hands, player: Player): Move[] => {
+        return generateAllLegalMovesInternal(board, hands, player, config.difficulty);
+    };
+
+    // 最良手の計算
+    const calculateBestMove = async (
+        board: Board,
+        hands: Hands,
+        currentPlayer: Player,
+        moveHistory: Move[],
+    ): Promise<Move> => {
+        startTime = Date.now();
         console.log(
             "[AIEngine] calculateBestMove called with moveHistory:",
             moveHistory?.length || 0,
         );
 
         // 定跡をチェック
-        if (this.useOpeningBook && this.openingBook) {
+        if (config.useOpeningBook && openingBook) {
             const positionState: PositionState = {
                 board,
                 hands,
                 currentPlayer,
             };
 
-            const openingMoves = this.openingBook.findMoves(positionState, {
+            const openingMoves = openingBook.findMoves(positionState, {
                 randomize: true,
                 moveHistory,
             });
             if (openingMoves.length > 0) {
                 // 重み付きランダムで選択される（findMovesでrandomize: true）
                 const selectedMove = openingMoves[0];
-                this.lastEvaluation = {
+                lastEvaluation = {
                     score: 0,
                     depth: selectedMove.depth || 0,
                     pv: [selectedMove.move],
                     nodes: 1,
-                    time: Date.now() - this.startTime,
+                    time: Date.now() - startTime,
                 };
                 return selectedMove.move;
             }
         }
 
         // Generate all legal moves
-        const legalMoves = this.generateAllLegalMoves(board, hands, currentPlayer);
+        const legalMoves = generateAllLegalMoves(board, hands, currentPlayer);
 
         if (legalMoves.length === 0) {
             throw new Error("No legal moves available");
         }
 
         // For beginner level, sometimes make random moves
-        if (this.difficulty === "beginner" && Math.random() < 0.3) {
+        if (config.difficulty === "beginner" && Math.random() < 0.3) {
             const randomIndex = Math.floor(Math.random() * legalMoves.length);
             const move = legalMoves[randomIndex];
-            this.lastEvaluation = {
+            lastEvaluation = {
                 score: 0,
                 depth: 1,
                 pv: [move],
                 nodes: legalMoves.length,
-                time: Date.now() - this.startTime,
+                time: Date.now() - startTime,
             };
             return move;
         }
 
         // Use iterative deepening search for better move ordering and time management
         const searchOptions = {
-            maxDepth: this.searchDepth,
-            timeLimit: this.timeLimit,
+            maxDepth: config.searchDepth,
+            timeLimit: config.timeLimit,
             evaluate: (b: Board, h: Hands, p: Player) => {
                 // 通常の評価関数
                 const evaluation = advancedEvaluatePosition(b, h, p);
                 return evaluation.total;
             },
-            generateMoves: (b: Board, h: Hands, p: Player) => this.generateAllLegalMoves(b, h, p),
+            generateMoves: (b: Board, h: Hands, p: Player) => generateAllLegalMoves(b, h, p),
         };
 
-        const searchResult = await this.iterativeSearch.search(
+        const searchResult = await iterativeSearch.search(
             board,
             hands,
             currentPlayer,
@@ -181,7 +320,7 @@ export class AIEngine {
             searchOptions,
         );
 
-        this.lastEvaluation = {
+        lastEvaluation = {
             score: searchResult.score,
             depth: searchResult.depth,
             pv: searchResult.pv,
@@ -190,20 +329,21 @@ export class AIEngine {
         };
 
         return searchResult.bestMove;
-    }
+    };
 
-    evaluatePosition(board: Board, hands: Hands, player: Player): PositionEvaluation {
+    // 局面評価
+    const evaluatePosition = (board: Board, hands: Hands, player: Player): PositionEvaluation => {
         // Use advanced evaluation function
         const evaluation = advancedEvaluatePosition(board, hands, player);
 
         // Return the last evaluation if available to provide search information
-        if (this.lastEvaluation) {
+        if (lastEvaluation) {
             return {
                 score: evaluation.total,
-                depth: this.lastEvaluation.depth,
-                pv: this.lastEvaluation.pv,
-                nodes: this.lastEvaluation.nodes,
-                time: this.lastEvaluation.time,
+                depth: lastEvaluation.depth,
+                pv: lastEvaluation.pv,
+                nodes: lastEvaluation.nodes,
+                time: lastEvaluation.time,
             };
         }
 
@@ -214,95 +354,17 @@ export class AIEngine {
             nodes: 0,
             time: 0,
         };
-    }
+    };
 
-    generateAllLegalMoves(board: Board, hands: Hands, player: Player): Move[] {
-        const moves: Move[] = [];
+    // 停止
+    const stop = (): void => {
+        iterativeSearch.stop();
+    };
 
-        // Board moves
-        for (const [fromSquare, piece] of Object.entries(board)) {
-            if (piece && (piece as Piece).owner === player) {
-                const square = {
-                    row: Number.parseInt(fromSquare[0]) as Row,
-                    column: Number.parseInt(fromSquare[1]) as Column,
-                };
-                const legalSquares = generateLegalMoves(board, hands, square, player);
-                // Convert squares to moves
-                for (const toSquare of legalSquares) {
-                    const move: Move = {
-                        type: "move",
-                        from: square,
-                        to: toSquare,
-                        piece,
-                        promote: false,
-                        captured: board[`${toSquare.row}${toSquare.column}` as keyof Board] || null,
-                    };
-                    moves.push(move);
-
-                    // Check if promotion is possible
-                    if (
-                        ((piece as Piece).type === "pawn" ||
-                            (piece as Piece).type === "lance" ||
-                            (piece as Piece).type === "knight" ||
-                            (piece as Piece).type === "silver" ||
-                            (piece as Piece).type === "bishop" ||
-                            (piece as Piece).type === "rook") &&
-                        !(piece as Piece).promoted
-                    ) {
-                        const canPromoteFrom =
-                            (piece as Piece).owner === "black" ? square.row <= 3 : square.row >= 7;
-                        const canPromoteTo =
-                            (piece as Piece).owner === "black"
-                                ? toSquare.row <= 3
-                                : toSquare.row >= 7;
-                        if (canPromoteFrom || canPromoteTo) {
-                            // Check if promotion is forced
-                            if (mustPromote(piece as Piece, toSquare)) {
-                                // Replace the non-promoted move with promoted version
-                                const lastMove = moves[moves.length - 1];
-                                if (lastMove.type === "move") {
-                                    lastMove.promote = true;
-                                }
-                            } else {
-                                // Add promoted version as an option
-                                const promoteMove: Move = {
-                                    type: "move",
-                                    from: move.from,
-                                    to: move.to,
-                                    piece: move.piece,
-                                    promote: true,
-                                    captured: move.captured,
-                                };
-                                moves.push(promoteMove);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Drop moves - generate once and push all
-        const dropMoves = generateAllDropMoves(board, hands, player);
-        moves.push(...dropMoves);
-
-        // Shuffle moves for variety (only for beginner level)
-        if (this.difficulty === "beginner") {
-            for (let i = moves.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [moves[i], moves[j]] = [moves[j], moves[i]];
-            }
-        }
-
-        return moves;
-    }
-
-    stop(): void {
-        this.iterativeSearch.stop();
-    }
-
-    getLastEvaluation(): PositionEvaluation {
+    // 最後の評価を取得
+    const getLastEvaluation = (): PositionEvaluation => {
         return (
-            this.lastEvaluation || {
+            lastEvaluation || {
                 score: 0,
                 depth: 0,
                 pv: [],
@@ -310,5 +372,21 @@ export class AIEngine {
                 time: 0,
             }
         );
-    }
+    };
+
+    return {
+        setDifficulty,
+        loadOpeningBook,
+        getConfig,
+        setConfig,
+        getSearchDepth,
+        calculateBestMove,
+        evaluatePosition,
+        generateAllLegalMoves,
+        stop,
+        getLastEvaluation,
+    };
 }
+
+// 後方互換性のため、クラス風のエクスポート
+export const AIEngine = createAIEngine;
