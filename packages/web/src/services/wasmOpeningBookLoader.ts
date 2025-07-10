@@ -26,10 +26,10 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
 
     // 難易度ごとのファイルマッピング
     private static readonly DIFFICULTY_FILES: Record<AIDifficulty, string> = {
-        beginner: "/data/opening_book_tournament.binz",
-        intermediate: "/data/opening_book_early.binz",
-        advanced: "/data/opening_book_standard.binz",
-        expert: "/data/opening_book_full.binz",
+        beginner: "./data/opening_book_tournament.binz",
+        intermediate: "./data/opening_book_early.binz",
+        advanced: "./data/opening_book_standard.binz",
+        expert: "./data/opening_book_full.binz",
     };
 
     constructor() {
@@ -59,21 +59,6 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
             this.reader = new OpeningBookReaderWasm();
             this.initialized = true;
             console.log("[WasmOpeningBookLoader] Reader created successfully");
-
-            // For backward compatibility
-            const legacyDbPath = "/user_book_100T.db";
-            if (this.fileExists(legacyDbPath)) {
-                const data = this.loadFileSync(legacyDbPath);
-                if (data && data.length > 0) {
-                    const success = this.reader.load_data(data);
-                    console.log(
-                        `[WasmOpeningBookLoader] Legacy database loaded: ${success}, positions: ${this.reader.position_count}`,
-                    );
-                    if (success) {
-                        this.loadedFiles.add(legacyDbPath);
-                    }
-                }
-            }
         } catch (error) {
             console.error("[WasmOpeningBookLoader] Failed to create reader:", error);
             this.initialized = false;
