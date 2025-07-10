@@ -12,12 +12,12 @@ export default defineConfig({
         topLevelAwait(),
         react(),
         tailwindcss(),
-        // .gzファイルの自動解凍を無効化するプラグイン
+        // .gz/.binzファイルの自動解凍を無効化するプラグイン
         {
             name: "disable-gz-decompression",
             configureServer(server) {
                 server.middlewares.use((req, res, next) => {
-                    if (req.url?.endsWith(".bin.gz")) {
+                    if (req.url?.endsWith(".bin.gz") || req.url?.endsWith(".binz")) {
                         const originalSetHeader = res.setHeader;
                         res.setHeader = function (name, value) {
                             if (name.toLowerCase() === "content-encoding") {
@@ -25,6 +25,8 @@ export default defineConfig({
                             }
                             return originalSetHeader.call(this, name, value);
                         };
+                        // MIMEタイプを明示的に設定
+                        res.setHeader("Content-Type", "application/octet-stream");
                     }
                     next();
                 });
