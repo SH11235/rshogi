@@ -42,7 +42,7 @@ async function loadBook(level: BookLevel = "early", onProgress?: ProgressCallbac
 
     if (state.currentLevel === level) return;
 
-    const url = `/data/opening_book_${level}.binz`;
+    const url = `./data/opening_book_${level}.binz`;
     const response = await fetch(url);
     const contentLength = Number(response.headers.get("content-length") || 0);
 
