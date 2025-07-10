@@ -42,7 +42,7 @@ class WasmInitializer {
     private async performInit(): Promise<void> {
         try {
             const wasmPath = getWasmPath();
-            await init(wasmPath);
+            await init({ module_or_path: wasmPath });
             this.initialized = true;
             console.log("[WasmInitializer] WASM module initialized successfully");
         } catch (error) {
@@ -69,6 +69,11 @@ class WasmInitializer {
  * WebWorkerとメインスレッドの両方で使用可能
  */
 export function getWasmPath(): string {
+    if (import.meta.env.DEV) {
+        // 開発環境では/src/wasm/配下のファイルを直接参照
+        return new URL("../wasm/shogi_core_bg.wasm", import.meta.url).href;
+    }
+    // 本番環境（ビルド後）では/wasm/配下
     return `${import.meta.env.BASE_URL}wasm/shogi_core_bg.wasm`;
 }
 

@@ -34,9 +34,8 @@ async function initializeWasm(): Promise<void> {
 
     try {
         console.log("[Worker Debug] Initializing WASM module in Worker");
-        // 一元管理されたパスを使用
         const wasmPath = getWasmPath();
-        await init(wasmPath); // WASMモジュールを初期化
+        await init({ module_or_path: wasmPath }); // WASMモジュールを初期化
         wasmInitialized = true;
         console.log("[Worker Debug] WASM module initialized successfully");
     } catch (error) {
