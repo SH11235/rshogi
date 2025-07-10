@@ -1,6 +1,7 @@
 import type { Board, Move, OpeningMove } from "shogi-core";
 import { type Mock, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+    type WasmManager,
     convertWasmMoveToOpeningMove,
     createWasmOpeningBookLoader,
     fetchOpeningBookData,
@@ -10,11 +11,8 @@ import {
     squareToKey,
 } from "./wasmOpeningBookLoader";
 
-// Import WasmManager class for typing - create a minimal type that satisfies the interface
-type MockWasmManagerType = { initialize(): Promise<void> };
-
 // Helper to create a mock WasmManager instance
-const createMockWasmManager = (): MockWasmManagerType => ({
+const createMockWasmManager = (): WasmManager => ({
     initialize: vi.fn().mockResolvedValue(undefined),
 });
 
@@ -346,7 +344,7 @@ describe("wasmOpeningBookLoader", () => {
         it("should create loader and load file", async () => {
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: mockWasmManager as unknown as MockWasmManagerType,
+                wasmManager: mockWasmManager,
             });
 
             const openingBook = await loader.load("/test/opening.binz");
@@ -363,7 +361,7 @@ describe("wasmOpeningBookLoader", () => {
         it("should not reload already loaded files", async () => {
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: mockWasmManager as unknown as MockWasmManagerType,
+                wasmManager: mockWasmManager,
             });
 
             await loader.load("/test/opening.binz");
@@ -376,7 +374,7 @@ describe("wasmOpeningBookLoader", () => {
         it("should load correct file for difficulty", async () => {
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: mockWasmManager as unknown as MockWasmManagerType,
+                wasmManager: mockWasmManager,
             });
 
             await loader.loadForDifficulty("intermediate");
@@ -391,7 +389,7 @@ describe("wasmOpeningBookLoader", () => {
 
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: mockWasmManager as unknown as MockWasmManagerType,
+                wasmManager: mockWasmManager,
             });
 
             await expect(loader.load("/test/fail.binz")).rejects.toThrow(
@@ -443,7 +441,7 @@ describe("wasmOpeningBookLoader", () => {
 
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: createMockWasmManager() as unknown as MockWasmManagerType,
+                wasmManager: createMockWasmManager(),
             });
 
             const openingBook = await loader.load("/test/opening.binz");
@@ -481,7 +479,7 @@ describe("wasmOpeningBookLoader", () => {
 
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: createMockWasmManager() as unknown as MockWasmManagerType,
+                wasmManager: createMockWasmManager(),
             });
 
             const openingBook = await loader.load("/test/opening.binz");
@@ -513,7 +511,7 @@ describe("wasmOpeningBookLoader", () => {
 
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: createMockWasmManager() as unknown as MockWasmManagerType,
+                wasmManager: createMockWasmManager(),
             });
 
             const openingBook = await loader.load("/test/opening.binz");
@@ -524,7 +522,7 @@ describe("wasmOpeningBookLoader", () => {
                 currentPlayer: "black" as const,
             };
 
-            const moves = openingBook.findMoves(position);
+            const moves = openingBook.findMoves(position, {});
 
             expect(moves).toEqual([]);
         });
@@ -536,7 +534,7 @@ describe("wasmOpeningBookLoader", () => {
 
             const loader = createWasmOpeningBookLoader({
                 logger: mockLogger,
-                wasmManager: createMockWasmManager() as unknown as MockWasmManagerType,
+                wasmManager: createMockWasmManager(),
             });
 
             const openingBook = await loader.load("/test/opening.binz");

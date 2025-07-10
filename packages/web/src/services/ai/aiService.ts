@@ -16,49 +16,142 @@ import {
     isPositionEvaluatedResponse,
 } from "../../types/ai";
 
-export class AIService {
-    private worker: Worker | null = null;
-    private requestId = 0;
-    private pendingRequests = new Map<
+// ===========================================
+// 型定義
+// ===========================================
+
+export interface AIService {
+    initialize(): Promise<void>;
+    calculateMove(
+        board: Board,
+        hands: Hands,
+        currentPlayer: Player,
+        moveHistory: Move[],
+    ): Promise<{ move: Move; evaluation: PositionEvaluation }>;
+    evaluatePosition(
+        board: Board,
+        hands: Hands,
+        currentPlayer: Player,
+    ): Promise<PositionEvaluation>;
+    setDifficulty(difficulty: AIDifficulty): Promise<void>;
+    stop(): void;
+    cleanup(): void;
+    dispose(): void;
+    getAIPlayer(): AIPlayer;
+    getPlayer(): AIPlayer;
+    isThinking(): boolean;
+}
+
+// ===========================================
+// ユーティリティ関数
+// ===========================================
+
+const getDefaultName = (difficulty: AIDifficulty): string => {
+    const names: Record<AIDifficulty, string> = {
+        beginner: "AI初心者",
+        intermediate: "AI中級者",
+        advanced: "AI上級者",
+        expert: "AIエキスパート",
+    };
+    return names[difficulty];
+};
+
+// AI Player ID生成関数（各インスタンスで独立したIDを生成）
+const generateAIPlayerId = (() => {
+    let counter = 0;
+    return () => `ai-${Date.now()}-${++counter}`;
+})();
+
+const createAIPlayer = (difficulty: AIDifficulty, name?: string): AIPlayer => ({
+    id: generateAIPlayerId(),
+    name: name || getDefaultName(difficulty),
+    difficulty,
+    isThinking: false,
+});
+
+// ===========================================
+// AIサービスファクトリー
+// ===========================================
+
+/**
+ * AIサービスインスタンスを作成する
+ * クロージャーを使用して状態を管理
+ */
+export const createAIService = (
+    difficulty: AIDifficulty = "intermediate",
+    name?: string,
+): AIService => {
+    // インスタンス固有の状態
+    let worker: Worker | null = null;
+    let requestId = 0;
+    const pendingRequests = new Map<
         string,
         {
             resolve: (value: unknown) => void;
             reject: (error: unknown) => void;
         }
     >();
-    private initialized = false;
-    private aiPlayer: AIPlayer;
+    let initialized = false;
+    let aiPlayer = createAIPlayer(difficulty, name);
 
-    constructor(difficulty: AIDifficulty = "intermediate", name?: string) {
-        this.aiPlayer = {
-            id: `ai-${Date.now()}`,
-            name: name || this.getDefaultName(difficulty),
-            difficulty,
-            isThinking: false,
-        };
-    }
+    // Worker メッセージハンドラー
+    const handleWorkerMessage = (event: MessageEvent<AIResponse>): void => {
+        const response = event.data;
 
-    private getDefaultName(difficulty: AIDifficulty): string {
-        const names: Record<AIDifficulty, string> = {
-            beginner: "AI初心者",
-            intermediate: "AI中級者",
-            advanced: "AI上級者",
-            expert: "AIエキスパート",
-        };
-        return names[difficulty];
-    }
+        if (!response.requestId) return;
 
-    async initialize(): Promise<void> {
-        if (this.initialized) return;
+        const pending = pendingRequests.get(response.requestId);
+        if (!pending) return;
+
+        pendingRequests.delete(response.requestId);
+
+        if (isErrorResponse(response)) {
+            pending.reject(new Error(response.error));
+        } else {
+            pending.resolve(response);
+        }
+    };
+
+    // リクエスト送信ヘルパー
+    const sendRequest = async <T extends AIWorkerMessage>(
+        message: Omit<T, "requestId">,
+    ): Promise<AIResponse> => {
+        if (!worker) {
+            throw new Error("Worker not initialized");
+        }
+
+        const reqId = `req-${requestId++}`;
+        const fullMessage = { ...message, requestId: reqId } as T;
+
+        return new Promise((resolve, reject) => {
+            pendingRequests.set(reqId, {
+                resolve: resolve as (value: unknown) => void,
+                reject,
+            });
+            worker?.postMessage(fullMessage);
+
+            // Timeout - increased for complex positions
+            setTimeout(() => {
+                if (pendingRequests.has(reqId)) {
+                    pendingRequests.delete(reqId);
+                    reject(new Error("Request timeout"));
+                }
+            }, 60000); // 60 seconds timeout for complex positions
+        });
+    };
+
+    // 初期化関数
+    const initialize = async (): Promise<void> => {
+        if (initialized) return;
 
         try {
             // Create worker
-            this.worker = new Worker(new URL("../../workers/aiWorker.ts", import.meta.url), {
+            worker = new Worker(new URL("../../workers/aiWorker.ts", import.meta.url), {
                 type: "module",
             });
 
             // Set up message handler
-            this.worker.addEventListener("message", this.handleWorkerMessage.bind(this));
+            worker.addEventListener("message", handleWorkerMessage);
 
             // Wait for worker ready
             await new Promise<void>((resolve, reject) => {
@@ -69,89 +162,51 @@ export class AIService {
                 const readyHandler = (event: MessageEvent<AIResponse>) => {
                     if (event.data.type === "ready") {
                         clearTimeout(timeout);
-                        this.worker?.removeEventListener("message", readyHandler);
+                        worker?.removeEventListener("message", readyHandler);
                         resolve();
                     }
                 };
 
-                this.worker?.addEventListener("message", readyHandler);
+                if (worker) {
+                    worker.addEventListener("message", readyHandler);
+                } else {
+                    reject(new Error("Worker not created"));
+                }
             });
 
             // Initialize AI engine
-            await this.sendRequest<InitializeRequest>({
+            await sendRequest<InitializeRequest>({
                 type: "initialize",
-                difficulty: this.aiPlayer.difficulty,
+                difficulty: aiPlayer.difficulty,
             });
 
-            this.initialized = true;
+            initialized = true;
         } catch (error) {
-            this.cleanup();
+            cleanup();
             throw error;
         }
-    }
+    };
 
-    private handleWorkerMessage(event: MessageEvent<AIResponse>): void {
-        const response = event.data;
-
-        if (!response.requestId) return;
-
-        const pending = this.pendingRequests.get(response.requestId);
-        if (!pending) return;
-
-        this.pendingRequests.delete(response.requestId);
-
-        if (isErrorResponse(response)) {
-            pending.reject(new Error(response.error));
-        } else {
-            pending.resolve(response);
-        }
-    }
-
-    private async sendRequest<T extends AIWorkerMessage>(
-        message: Omit<T, "requestId">,
-    ): Promise<AIResponse> {
-        if (!this.worker) {
-            throw new Error("Worker not initialized");
-        }
-
-        const requestId = `req-${this.requestId++}`;
-        const fullMessage = { ...message, requestId } as T;
-
-        return new Promise((resolve, reject) => {
-            this.pendingRequests.set(requestId, {
-                resolve: resolve as (value: unknown) => void,
-                reject,
-            });
-            this.worker?.postMessage(fullMessage);
-
-            // Timeout - increased for complex positions
-            setTimeout(() => {
-                if (this.pendingRequests.has(requestId)) {
-                    this.pendingRequests.delete(requestId);
-                    reject(new Error("Request timeout"));
-                }
-            }, 60000); // 60 seconds timeout for complex positions
-        });
-    }
-
-    async calculateMove(
+    // 手を計算
+    const calculateMove = async (
         board: Board,
         hands: Hands,
         currentPlayer: Player,
         moveHistory: Move[],
-    ): Promise<{ move: Move; evaluation: PositionEvaluation }> {
-        if (!this.initialized) {
-            await this.initialize();
+    ): Promise<{ move: Move; evaluation: PositionEvaluation }> => {
+        if (!initialized) {
+            await initialize();
         }
 
-        this.aiPlayer.isThinking = true;
+        // 思考状態を更新（イミュータブルに）
+        aiPlayer = { ...aiPlayer, isThinking: true };
 
         try {
             console.log(
                 "[AIService] Sending calculate_move with moveHistory:",
                 moveHistory?.length || 0,
             );
-            const response = await this.sendRequest<CalculateMoveRequest>({
+            const response = await sendRequest<CalculateMoveRequest>({
                 type: "calculate_move",
                 board,
                 hands,
@@ -165,20 +220,21 @@ export class AIService {
 
             return { move: response.move, evaluation: response.evaluation };
         } finally {
-            this.aiPlayer.isThinking = false;
+            aiPlayer = { ...aiPlayer, isThinking: false };
         }
-    }
+    };
 
-    async evaluatePosition(
+    // 局面評価
+    const evaluatePosition = async (
         board: Board,
         hands: Hands,
         currentPlayer: Player,
-    ): Promise<PositionEvaluation> {
-        if (!this.initialized) {
-            await this.initialize();
+    ): Promise<PositionEvaluation> => {
+        if (!initialized) {
+            await initialize();
         }
 
-        const response = await this.sendRequest<EvaluatePositionRequest>({
+        const response = await sendRequest<EvaluatePositionRequest>({
             type: "evaluate_position",
             board,
             hands,
@@ -190,52 +246,70 @@ export class AIService {
         }
 
         return response.evaluation;
-    }
+    };
 
-    async setDifficulty(difficulty: AIDifficulty): Promise<void> {
-        if (!this.initialized) {
-            await this.initialize();
+    // 難易度設定
+    const setDifficulty = async (difficulty: AIDifficulty): Promise<void> => {
+        if (!initialized) {
+            await initialize();
         }
 
-        await this.sendRequest<SetDifficultyRequest>({
+        await sendRequest<SetDifficultyRequest>({
             type: "set_difficulty",
             difficulty,
         });
 
-        this.aiPlayer.difficulty = difficulty;
-        this.aiPlayer.name = this.getDefaultName(difficulty);
-    }
+        aiPlayer = {
+            ...aiPlayer,
+            difficulty,
+            name: getDefaultName(difficulty),
+        };
+    };
 
-    stop(): void {
-        if (this.worker) {
-            this.worker.postMessage({ type: "stop", requestId: `stop-${this.requestId++}` });
+    // 停止
+    const stop = (): void => {
+        if (worker) {
+            worker.postMessage({ type: "stop", requestId: `stop-${requestId++}` });
         }
-        this.aiPlayer.isThinking = false;
-    }
+        aiPlayer = { ...aiPlayer, isThinking: false };
+    };
 
-    cleanup(): void {
-        this.stop();
-        if (this.worker) {
-            this.worker.terminate();
-            this.worker = null;
+    // クリーンアップ
+    const cleanup = (): void => {
+        stop();
+        if (worker) {
+            worker.terminate();
+            worker = null;
         }
-        this.initialized = false;
-        this.pendingRequests.clear();
-    }
+        initialized = false;
+        pendingRequests.clear();
+    };
 
-    dispose(): void {
-        this.cleanup();
-    }
+    // 破棄
+    const dispose = (): void => {
+        cleanup();
+    };
 
-    getAIPlayer(): AIPlayer {
-        return { ...this.aiPlayer };
-    }
+    // AIプレイヤー取得
+    const getAIPlayer = (): AIPlayer => ({ ...aiPlayer });
 
-    getPlayer(): AIPlayer {
-        return this.getAIPlayer();
-    }
+    // プレイヤー取得（エイリアス）
+    const getPlayer = (): AIPlayer => getAIPlayer();
 
-    isThinking(): boolean {
-        return this.aiPlayer.isThinking;
-    }
-}
+    // 思考中かどうか
+    const isThinking = (): boolean => aiPlayer.isThinking;
+
+    // Public API
+    return {
+        initialize,
+        calculateMove,
+        evaluatePosition,
+        setDifficulty,
+        stop,
+        cleanup,
+        dispose,
+        getAIPlayer,
+        getPlayer,
+        isThinking,
+    };
+};

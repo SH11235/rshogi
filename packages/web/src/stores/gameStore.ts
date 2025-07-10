@@ -1,9 +1,10 @@
-import { AIService } from "@/services/ai/aiService";
+import { type AIService, createAIService } from "@/services/ai/aiService";
 import { audioManager } from "@/services/audioManager";
 import {
     type ConnectionProgress,
     type ConnectionQuality,
-    WebRTCConnection,
+    type WebRTCConnection,
+    createWebRTCConnection,
 } from "@/services/webrtc";
 import type { AIDifficulty, AIPlayer } from "@/types/ai";
 import type { SoundType } from "@/types/audio";
@@ -1873,7 +1874,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
 
         // 新しいAIプレイヤーを作成
-        const aiPlayer = new AIService(difficulty);
+        const aiPlayer = createAIService(difficulty);
         await aiPlayer.initialize();
 
         set({
@@ -2044,7 +2045,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     // 通信対戦機能の実装
     startOnlineGame: async (isHost: boolean, playerName?: string) => {
-        const connection = new WebRTCConnection();
+        const connection = createWebRTCConnection();
 
         // メッセージハンドラーを設定
         connection.onMessage((message) => {
@@ -2113,7 +2114,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     },
 
     joinOnlineGame: async (offer: string, playerName?: string) => {
-        const connection = new WebRTCConnection();
+        const connection = createWebRTCConnection();
 
         // メッセージハンドラーを設定
         connection.onMessage((message) => {
@@ -2607,7 +2608,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         }
 
         // 新しいAIプレイヤーを作成
-        const aiPlayer = new AIService(difficulty);
+        const aiPlayer = createAIService(difficulty);
         await aiPlayer.initialize();
 
         set({

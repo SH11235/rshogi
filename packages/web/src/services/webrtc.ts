@@ -1,5 +1,9 @@
 import type { GameMessage } from "@/types/online";
 
+// ===========================================
+// 型定義
+// ===========================================
+
 // WASMモジュールの型定義
 interface SimpleWebRTCPeer {
     get_peer_id(): string;
@@ -100,396 +104,235 @@ export type ConnectionProgress =
     | "connected"
     | "failed";
 
-// WebRTC接続を管理するクラス
-export class WebRTCConnection {
-    private peer: SimpleWebRTCPeer | null = null;
-    private wasmModule: WasmModule | null = null;
-    private isHost = false;
-    private isConnected = false;
-    private peerId = "";
-    private messageHandlers: Array<(message: GameMessage) => void> = [];
-    private connectionStateHandlers: Array<(state: RTCPeerConnectionState) => void> = [];
-    private errorHandlers: Array<(error: WebRTCError) => void> = [];
-    private qualityHandlers: Array<(quality: ConnectionQuality) => void> = [];
-    private progressHandlers: Array<(progress: ConnectionProgress) => void> = [];
+// WebRTC接続インターフェース
+export interface WebRTCConnection {
+    createHost(): Promise<string>;
+    joinAsGuest(offer: string): Promise<string>;
+    acceptAnswer(answer: string): Promise<void>;
+    sendMessage(message: GameMessage): void;
+    onMessage(handler: (message: GameMessage) => void): void;
+    onConnectionStateChange(handler: (state: RTCPeerConnectionState) => void): void;
+    onError(handler: (error: WebRTCError) => void): void;
+    onQualityChange(handler: (quality: ConnectionQuality) => void): void;
+    onProgressChange(handler: (progress: ConnectionProgress) => void): void;
+    disconnect(): void;
+    reconnect(): Promise<void>;
+    getConnectionInfo(): {
+        isConnected: boolean;
+        isHost: boolean;
+        peerId: string;
+        reconnectAttempts: number;
+        canReconnect: boolean;
+    };
+    getConnectionQuality(): ConnectionQuality;
+}
+
+// ===========================================
+// ユーティリティ関数
+// ===========================================
+
+// WASMモジュールのロード
+const loadWasmModule = async (): Promise<WasmModule> => {
+    try {
+        // グローバルスコープからWASMモジュールにアクセス
+        const wasmModule = (window as Window & { wasmModule?: unknown }).wasmModule;
+        if (!wasmModule) {
+            throw new Error("WASM module not found in global scope");
+        }
+        return wasmModule as WasmModule;
+    } catch (error) {
+        console.error("Failed to load WASM module:", error);
+        throw new Error("WASM module loading failed");
+    }
+};
+
+// ===========================================
+// WebRTC接続ファクトリー
+// ===========================================
+
+/**
+ * WebRTC接続インスタンスを作成する
+ * クロージャーを使用して状態を管理
+ */
+export const createWebRTCConnection = (): WebRTCConnection => {
+    // インスタンス固有の状態
+    let peer: SimpleWebRTCPeer | null = null;
+    let wasmModule: WasmModule | null = null;
+    let isHost = false;
+    let isConnected = false;
+    let peerId = "";
+    const messageHandlers: Array<(message: GameMessage) => void> = [];
+    const connectionStateHandlers: Array<(state: RTCPeerConnectionState) => void> = [];
+    const errorHandlers: Array<(error: WebRTCError) => void> = [];
+    const qualityHandlers: Array<(quality: ConnectionQuality) => void> = [];
+    const progressHandlers: Array<(progress: ConnectionProgress) => void> = [];
 
     // 接続品質の追跡
-    private connectionQuality: ConnectionQuality = {
+    let connectionQuality: ConnectionQuality = {
         latency: 0,
         packetsLost: 0,
         jitter: 0,
         lastUpdate: Date.now(),
     };
-    private lastPingTime = 0; // ping/pongのタイムアウト検出に使用
-    private pingInterval: number | null = null;
-    private statsInterval: number | null = null;
+    let lastPingTime = 0;
+    let pingInterval: number | null = null;
+    let statsInterval: number | null = null;
 
     // 再接続用の状態
-    private reconnectAttempts = 0;
-    private reconnectTimer: number | null = null;
-    private lastOffer = "";
-    private reconnectConfig: ReconnectConfig = {
+    let reconnectAttempts = 0;
+    let reconnectTimer: number | null = null;
+    let lastOffer = "";
+    const reconnectConfig: ReconnectConfig = {
         maxAttempts: 5,
         retryDelay: 2000,
         backoffMultiplier: 1.5,
     };
 
-    constructor() {
-        this.setupEventListeners();
-    }
+    // イベントリスナーの保持（クリーンアップ用）
+    const eventListeners: Array<{ event: string; handler: EventListener }> = [];
 
-    private setupEventListeners(): void {
-        // WebRTCイベントのリスナー設定
-        window.addEventListener("webrtc-channel-open", () => {
-            console.log("WebRTC channel opened");
-            this.isConnected = true;
-            this.notifyConnectionState("connected");
-            this.notifyProgress("connected");
-            this.startQualityMonitoring();
-        });
-
-        window.addEventListener("webrtc-message", (event: Event) => {
-            const customEvent = event as CustomEvent;
-            const messageStr = customEvent.detail;
-            try {
-                const message: GameMessage = JSON.parse(messageStr);
-                // Pingメッセージの処理
-                if (message.type === ("ping" as never)) {
-                    this.handlePing(message);
-                } else if (message.type === ("pong" as never)) {
-                    this.handlePong(message);
-                } else {
-                    this.handleMessage(message);
-                }
-            } catch (error) {
-                console.error("Failed to parse message:", error);
-            }
-        });
-
-        window.addEventListener("webrtc-connection-state", (event: Event) => {
-            const customEvent = event as CustomEvent;
-            const state = customEvent.detail;
-            console.log("Connection state:", state);
-
-            if (state === "Disconnected" || state === "Failed" || state === "Closed") {
-                this.isConnected = false;
-                this.notifyConnectionState("disconnected");
-                this.stopQualityMonitoring();
-                this.notifyProgress("failed");
-
-                // 自動再接続を試行
-                if (this.reconnectAttempts < this.reconnectConfig.maxAttempts) {
-                    this.scheduleReconnect();
-                } else {
-                    this.notifyError(new WebRTCError("CONNECTION_LOST", "接続が失われました"));
-                }
-            } else if (state === "Checking") {
-                this.notifyProgress("ice_checking");
-            } else if (state === "Connected") {
-                this.notifyProgress("connected");
-                // 再接続後の状態同期をリクエスト
-                if (this.reconnectAttempts > 0) {
-                    this.requestStateSync();
-                }
-            }
-        });
-
-        // エラーイベントの監視
-        window.addEventListener("webrtc-error", (event: Event) => {
-            const customEvent = event as CustomEvent;
-            const errorMessage = customEvent.detail;
-            console.error("WebRTC error:", errorMessage);
-            this.notifyError(new WebRTCError("WEBRTC_ERROR", errorMessage));
-        });
-    }
-
-    private startQualityMonitoring(): void {
-        // Pingメッセージを定期的に送信
-        this.pingInterval = window.setInterval(() => {
-            if (this.isConnected && this.peer) {
-                const pingMessage = {
-                    type: "ping" as never,
-                    timestamp: Date.now(),
-                    data: null,
-                    playerId: this.peerId,
-                };
-                try {
-                    this.peer.send_message(JSON.stringify(pingMessage));
-                    this.lastPingTime = Date.now(); // ping送信時刻を記録
-                } catch (error) {
-                    console.error("Failed to send ping:", error);
-                }
-            }
-        }, 5000); // 5秒ごとにping
-
-        // WebRTC統計情報の取得
-        this.statsInterval = window.setInterval(async () => {
-            if (this.isConnected && this.peer) {
-                await this.updateConnectionStats();
-            }
-        }, 2000); // 2秒ごとに統計更新
-    }
-
-    private stopQualityMonitoring(): void {
-        if (this.pingInterval) {
-            clearInterval(this.pingInterval);
-            this.pingInterval = null;
+    // 通知関数
+    const notifyConnectionState = (state: RTCPeerConnectionState): void => {
+        for (const handler of connectionStateHandlers) {
+            handler(state);
         }
-        if (this.statsInterval) {
-            clearInterval(this.statsInterval);
-            this.statsInterval = null;
-        }
-    }
+    };
 
-    private handlePing(message: GameMessage): void {
-        // Pingを受信したらPongを返す
+    const notifyError = (error: WebRTCError): void => {
+        for (const handler of errorHandlers) {
+            handler(error);
+        }
+    };
+
+    const notifyQuality = (quality: ConnectionQuality): void => {
+        for (const handler of qualityHandlers) {
+            handler(quality);
+        }
+    };
+
+    const notifyProgress = (progress: ConnectionProgress): void => {
+        for (const handler of progressHandlers) {
+            handler(progress);
+        }
+    };
+
+    const handleMessage = (message: GameMessage): void => {
+        for (const handler of messageHandlers) {
+            handler(message);
+        }
+    };
+
+    // Ping/Pong処理
+    const handlePing = (message: GameMessage): void => {
         const pongMessage = {
             type: "pong" as never,
             timestamp: message.timestamp,
             data: null,
-            playerId: this.peerId,
+            playerId: peerId,
         };
         try {
-            if (this.peer) {
-                this.peer.send_message(JSON.stringify(pongMessage));
+            if (peer) {
+                peer.send_message(JSON.stringify(pongMessage));
             }
         } catch (error) {
             console.error("Failed to send pong:", error);
         }
-    }
+    };
 
-    private handlePong(message: GameMessage): void {
-        // Pongを受信したらレイテンシを計算
+    const handlePong = (message: GameMessage): void => {
         const latency = Date.now() - message.timestamp;
-        this.connectionQuality.latency = latency;
-        this.connectionQuality.lastUpdate = Date.now();
-        this.notifyQuality(this.connectionQuality);
-    }
+        connectionQuality = {
+            ...connectionQuality,
+            latency,
+            lastUpdate: Date.now(),
+        };
+        notifyQuality(connectionQuality);
+    };
 
-    private async updateConnectionStats(): Promise<void> {
-        // 将来的にWebRTC統計APIを使用して詳細な統計を取得
-        // 現在は基本的な情報のみ
+    // 品質監視
+    const startQualityMonitoring = (): void => {
+        // Pingメッセージを定期的に送信
+        pingInterval = window.setInterval(() => {
+            if (isConnected && peer) {
+                const pingMessage = {
+                    type: "ping" as never,
+                    timestamp: Date.now(),
+                    data: null,
+                    playerId: peerId,
+                };
+                try {
+                    peer.send_message(JSON.stringify(pingMessage));
+                    lastPingTime = Date.now();
+                } catch (error) {
+                    console.error("Failed to send ping:", error);
+                }
+            }
+        }, 5000);
 
-        // pingタイムアウトのチェック（20秒以上応答がない場合）
-        if (this.lastPingTime > 0 && Date.now() - this.lastPingTime > 20000) {
+        // WebRTC統計情報の取得
+        statsInterval = window.setInterval(async () => {
+            if (isConnected && peer) {
+                await updateConnectionStats();
+            }
+        }, 2000);
+    };
+
+    const stopQualityMonitoring = (): void => {
+        if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+        }
+        if (statsInterval) {
+            clearInterval(statsInterval);
+            statsInterval = null;
+        }
+    };
+
+    const updateConnectionStats = async (): Promise<void> => {
+        // pingタイムアウトのチェック
+        if (lastPingTime > 0 && Date.now() - lastPingTime > 20000) {
             console.warn("Ping timeout detected");
-            this.connectionQuality.latency = 999; // 高レイテンシとして表示
+            connectionQuality = {
+                ...connectionQuality,
+                latency: 999,
+            };
         }
+        notifyQuality(connectionQuality);
+    };
 
-        this.notifyQuality(this.connectionQuality);
-    }
-
-    async loadWasmModule(): Promise<void> {
-        if (this.wasmModule) return;
-
-        try {
-            // グローバルスコープからWASMモジュールにアクセス
-            // WebRTCデモと同じ方法を使用
-            const wasmModule = (window as Window & { wasmModule?: unknown }).wasmModule;
-            if (!wasmModule) {
-                throw new Error("WASM module not found in global scope");
-            }
-            this.wasmModule = wasmModule as WasmModule;
-        } catch (error) {
-            console.error("Failed to load WASM module:", error);
-            throw new Error("WASM module loading failed");
-        }
-    }
-
-    async createHost(): Promise<string> {
-        try {
-            await this.loadWasmModule();
-            if (!this.wasmModule)
-                throw new WebRTCError("WASM_NOT_LOADED", "WASMモジュールの読み込みに失敗しました");
-
-            this.notifyProgress("creating_offer");
-            this.isHost = true;
-            this.peer = await this.wasmModule.create_webrtc_peer(true);
-            this.peerId = this.peer.get_peer_id();
-
-            this.notifyProgress("ice_gathering");
-            const offer = await this.peer.create_offer();
-            this.lastOffer = offer; // 再接続用に保存
-            this.reconnectAttempts = 0; // リセット
-            this.notifyProgress("waiting_answer");
-            return offer;
-        } catch (error) {
-            const webrtcError =
-                error instanceof WebRTCError
-                    ? error
-                    : new WebRTCError("CREATE_HOST_FAILED", `ホストの作成に失敗しました: ${error}`);
-            this.notifyError(webrtcError);
-            throw webrtcError;
-        }
-    }
-
-    async joinAsGuest(offer: string): Promise<string> {
-        try {
-            await this.loadWasmModule();
-            if (!this.wasmModule)
-                throw new WebRTCError("WASM_NOT_LOADED", "WASMモジュールの読み込みに失敗しました");
-
-            this.notifyProgress("establishing");
-            this.isHost = false;
-            this.peer = await this.wasmModule.create_webrtc_peer(false);
-            this.peerId = this.peer.get_peer_id();
-
-            this.notifyProgress("ice_gathering");
-            const answer = await this.peer.handle_offer(offer);
-            this.lastOffer = offer; // 再接続用に保存
-            this.reconnectAttempts = 0; // リセット
-            this.notifyProgress("ice_checking");
-            return answer;
-        } catch (error) {
-            const webrtcError =
-                error instanceof WebRTCError
-                    ? error
-                    : new WebRTCError("JOIN_FAILED", `参加に失敗しました: ${error}`);
-            this.notifyError(webrtcError);
-            throw webrtcError;
-        }
-    }
-
-    async acceptAnswer(answer: string): Promise<void> {
-        try {
-            if (!this.peer) throw new WebRTCError("NO_PEER", "ピア接続が存在しません");
-            this.notifyProgress("establishing");
-            await this.peer.handle_answer(answer);
-            this.notifyProgress("ice_checking");
-        } catch (error) {
-            const webrtcError =
-                error instanceof WebRTCError
-                    ? error
-                    : new WebRTCError(
-                          "ACCEPT_ANSWER_FAILED",
-                          `アンサーの受け入れに失敗しました: ${error}`,
-                      );
-            this.notifyError(webrtcError);
-            throw webrtcError;
-        }
-    }
-
-    sendMessage(message: GameMessage): void {
-        try {
-            if (!this.peer || !this.isConnected) {
-                throw new WebRTCError("NOT_CONNECTED", "接続されていません");
-            }
-
-            const messageStr = JSON.stringify(message);
-            this.peer.send_message(messageStr);
-        } catch (error) {
-            const webrtcError =
-                error instanceof WebRTCError
-                    ? error
-                    : new WebRTCError("SEND_FAILED", `メッセージ送信に失敗しました: ${error}`);
-            this.notifyError(webrtcError);
-            console.error("Send message error:", webrtcError);
-        }
-    }
-
-    onMessage(handler: (message: GameMessage) => void): void {
-        this.messageHandlers.push(handler);
-    }
-
-    onConnectionStateChange(handler: (state: RTCPeerConnectionState) => void): void {
-        this.connectionStateHandlers.push(handler);
-    }
-
-    onError(handler: (error: WebRTCError) => void): void {
-        this.errorHandlers.push(handler);
-    }
-
-    onQualityChange(handler: (quality: ConnectionQuality) => void): void {
-        this.qualityHandlers.push(handler);
-    }
-
-    onProgressChange(handler: (progress: ConnectionProgress) => void): void {
-        this.progressHandlers.push(handler);
-    }
-
-    private handleMessage(message: GameMessage): void {
-        for (const handler of this.messageHandlers) {
-            handler(message);
-        }
-    }
-
-    private notifyConnectionState(state: RTCPeerConnectionState): void {
-        for (const handler of this.connectionStateHandlers) {
-            handler(state);
-        }
-    }
-
-    private notifyError(error: WebRTCError): void {
-        for (const handler of this.errorHandlers) {
-            handler(error);
-        }
-    }
-
-    private notifyQuality(quality: ConnectionQuality): void {
-        for (const handler of this.qualityHandlers) {
-            handler(quality);
-        }
-    }
-
-    private notifyProgress(progress: ConnectionProgress): void {
-        for (const handler of this.progressHandlers) {
-            handler(progress);
-        }
-    }
-
-    disconnect(): void {
-        // 再接続タイマーをクリア
-        if (this.reconnectTimer) {
-            clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = null;
-        }
-
-        this.stopQualityMonitoring();
-        this.peer = null;
-        this.isConnected = false;
-        this.peerId = "";
-        this.reconnectAttempts = 0;
-        this.notifyConnectionState("closed");
-        this.notifyProgress("idle");
-    }
-
-    // 再接続のスケジューリング
-    private scheduleReconnect(): void {
-        if (this.reconnectTimer) return;
-
-        this.reconnectAttempts++;
-        const delay =
-            this.reconnectConfig.retryDelay *
-            this.reconnectConfig.backoffMultiplier ** (this.reconnectAttempts - 1);
-
-        console.log(`Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`);
-
-        this.reconnectTimer = window.setTimeout(() => {
-            this.reconnectTimer = null;
-            this.attemptReconnect();
-        }, delay);
-    }
+    // 状態同期のリクエスト
+    const requestStateSync = (): void => {
+        const syncRequest: GameMessage = {
+            type: "state_sync_request",
+            data: null,
+            timestamp: Date.now(),
+            playerId: peerId,
+        };
+        sendMessage(syncRequest);
+        console.log("Requesting state sync after reconnection");
+    };
 
     // 再接続の実行
-    private async attemptReconnect(): Promise<void> {
+    const attemptReconnect = async (): Promise<void> => {
         try {
-            console.log(`Attempting reconnect (attempt ${this.reconnectAttempts})`);
+            console.log(`Attempting reconnect (attempt ${reconnectAttempts})`);
 
-            if (!this.wasmModule) {
-                await this.loadWasmModule();
+            if (!wasmModule) {
+                wasmModule = await loadWasmModule();
             }
 
-            if (this.isHost && this.lastOffer) {
+            if (isHost && lastOffer) {
                 // ホストの場合は新しいオファーを生成
-                if (!this.wasmModule)
+                if (!wasmModule) {
                     throw new WebRTCError(
                         "WASM_NOT_LOADED",
                         "WASMモジュールがロードされていません",
                     );
-                this.peer = await this.wasmModule.create_webrtc_peer(true);
-                this.peerId = this.peer.get_peer_id();
-                const newOffer = await this.peer.create_offer();
-                this.lastOffer = newOffer;
+                }
+                peer = await wasmModule.create_webrtc_peer(true);
+                peerId = peer.get_peer_id();
+                const newOffer = await peer.create_offer();
+                lastOffer = newOffer;
 
                 // 再接続のためのイベントを発火
                 window.dispatchEvent(
@@ -497,16 +340,17 @@ export class WebRTCConnection {
                         detail: newOffer,
                     }),
                 );
-            } else if (!this.isHost && this.lastOffer) {
+            } else if (!isHost && lastOffer) {
                 // ゲストの場合は保存されたオファーで再接続
-                if (!this.wasmModule)
+                if (!wasmModule) {
                     throw new WebRTCError(
                         "WASM_NOT_LOADED",
                         "WASMモジュールがロードされていません",
                     );
-                this.peer = await this.wasmModule.create_webrtc_peer(false);
-                this.peerId = this.peer.get_peer_id();
-                const newAnswer = await this.peer.handle_offer(this.lastOffer);
+                }
+                peer = await wasmModule.create_webrtc_peer(false);
+                peerId = peer.get_peer_id();
+                const newAnswer = await peer.handle_offer(lastOffer);
 
                 // 再接続のためのイベントを発火
                 window.dispatchEvent(
@@ -520,43 +364,265 @@ export class WebRTCConnection {
         } catch (error) {
             console.error("Reconnect attempt failed:", error);
 
-            if (this.reconnectAttempts < this.reconnectConfig.maxAttempts) {
-                this.scheduleReconnect();
+            if (reconnectAttempts < reconnectConfig.maxAttempts) {
+                scheduleReconnect();
             } else {
-                this.notifyError(new WebRTCError("RECONNECT_FAILED", "再接続に失敗しました"));
+                notifyError(new WebRTCError("RECONNECT_FAILED", "再接続に失敗しました"));
             }
         }
-    }
+    };
 
-    // 手動での再接続
-    async reconnect(): Promise<void> {
-        this.reconnectAttempts = 0;
-        await this.attemptReconnect();
-    }
+    // 再接続のスケジューリング
+    const scheduleReconnect = (): void => {
+        if (reconnectTimer) return;
 
-    getConnectionInfo() {
-        return {
-            isConnected: this.isConnected,
-            isHost: this.isHost,
-            peerId: this.peerId,
-            reconnectAttempts: this.reconnectAttempts,
-            canReconnect: this.reconnectAttempts < this.reconnectConfig.maxAttempts,
+        reconnectAttempts++;
+        const delay =
+            reconnectConfig.retryDelay *
+            reconnectConfig.backoffMultiplier ** (reconnectAttempts - 1);
+
+        console.log(`Scheduling reconnect attempt ${reconnectAttempts} in ${delay}ms`);
+
+        reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            attemptReconnect();
+        }, delay);
+    };
+
+    // イベントリスナーの設定
+    const setupEventListeners = (): void => {
+        // WebRTCチャンネル開通
+        const channelOpenHandler = () => {
+            console.log("WebRTC channel opened");
+            isConnected = true;
+            notifyConnectionState("connected");
+            notifyProgress("connected");
+            startQualityMonitoring();
         };
-    }
+        window.addEventListener("webrtc-channel-open", channelOpenHandler);
+        eventListeners.push({ event: "webrtc-channel-open", handler: channelOpenHandler });
 
-    getConnectionQuality(): ConnectionQuality {
-        return { ...this.connectionQuality };
-    }
-
-    // 状態同期のリクエスト
-    private requestStateSync(): void {
-        const syncRequest: GameMessage = {
-            type: "state_sync_request",
-            data: null,
-            timestamp: Date.now(),
-            playerId: this.peerId,
+        // メッセージ受信
+        const messageHandler = (event: Event) => {
+            const customEvent = event as CustomEvent;
+            const messageStr = customEvent.detail;
+            try {
+                const message: GameMessage = JSON.parse(messageStr);
+                if (message.type === ("ping" as never)) {
+                    handlePing(message);
+                } else if (message.type === ("pong" as never)) {
+                    handlePong(message);
+                } else {
+                    handleMessage(message);
+                }
+            } catch (error) {
+                console.error("Failed to parse message:", error);
+            }
         };
-        this.sendMessage(syncRequest);
-        console.log("Requesting state sync after reconnection");
-    }
-}
+        window.addEventListener("webrtc-message", messageHandler);
+        eventListeners.push({ event: "webrtc-message", handler: messageHandler });
+
+        // 接続状態変更
+        const connectionStateHandler = (event: Event) => {
+            const customEvent = event as CustomEvent;
+            const state = customEvent.detail;
+            console.log("Connection state:", state);
+
+            if (state === "Disconnected" || state === "Failed" || state === "Closed") {
+                isConnected = false;
+                notifyConnectionState("disconnected");
+                stopQualityMonitoring();
+                notifyProgress("failed");
+
+                // 自動再接続を試行
+                if (reconnectAttempts < reconnectConfig.maxAttempts) {
+                    scheduleReconnect();
+                } else {
+                    notifyError(new WebRTCError("CONNECTION_LOST", "接続が失われました"));
+                }
+            } else if (state === "Checking") {
+                notifyProgress("ice_checking");
+            } else if (state === "Connected") {
+                notifyProgress("connected");
+                // 再接続後の状態同期をリクエスト
+                if (reconnectAttempts > 0) {
+                    requestStateSync();
+                }
+            }
+        };
+        window.addEventListener("webrtc-connection-state", connectionStateHandler);
+        eventListeners.push({ event: "webrtc-connection-state", handler: connectionStateHandler });
+
+        // エラーイベント
+        const errorHandler = (event: Event) => {
+            const customEvent = event as CustomEvent;
+            const errorMessage = customEvent.detail;
+            console.error("WebRTC error:", errorMessage);
+            notifyError(new WebRTCError("WEBRTC_ERROR", errorMessage));
+        };
+        window.addEventListener("webrtc-error", errorHandler);
+        eventListeners.push({ event: "webrtc-error", handler: errorHandler });
+    };
+
+    // Public API実装
+    const createHost = async (): Promise<string> => {
+        try {
+            wasmModule = await loadWasmModule();
+            if (!wasmModule) {
+                throw new WebRTCError("WASM_NOT_LOADED", "WASMモジュールの読み込みに失敗しました");
+            }
+
+            notifyProgress("creating_offer");
+            isHost = true;
+            peer = await wasmModule.create_webrtc_peer(true);
+            peerId = peer.get_peer_id();
+
+            notifyProgress("ice_gathering");
+            const offer = await peer.create_offer();
+            lastOffer = offer;
+            reconnectAttempts = 0;
+            notifyProgress("waiting_answer");
+            return offer;
+        } catch (error) {
+            const webrtcError =
+                error instanceof WebRTCError
+                    ? error
+                    : new WebRTCError("CREATE_HOST_FAILED", `ホストの作成に失敗しました: ${error}`);
+            notifyError(webrtcError);
+            throw webrtcError;
+        }
+    };
+
+    const joinAsGuest = async (offer: string): Promise<string> => {
+        try {
+            wasmModule = await loadWasmModule();
+            if (!wasmModule) {
+                throw new WebRTCError("WASM_NOT_LOADED", "WASMモジュールの読み込みに失敗しました");
+            }
+
+            notifyProgress("establishing");
+            isHost = false;
+            peer = await wasmModule.create_webrtc_peer(false);
+            peerId = peer.get_peer_id();
+
+            notifyProgress("ice_gathering");
+            const answer = await peer.handle_offer(offer);
+            lastOffer = offer;
+            reconnectAttempts = 0;
+            notifyProgress("ice_checking");
+            return answer;
+        } catch (error) {
+            const webrtcError =
+                error instanceof WebRTCError
+                    ? error
+                    : new WebRTCError("JOIN_FAILED", `参加に失敗しました: ${error}`);
+            notifyError(webrtcError);
+            throw webrtcError;
+        }
+    };
+
+    const acceptAnswer = async (answer: string): Promise<void> => {
+        try {
+            if (!peer) throw new WebRTCError("NO_PEER", "ピア接続が存在しません");
+            notifyProgress("establishing");
+            await peer.handle_answer(answer);
+            notifyProgress("ice_checking");
+        } catch (error) {
+            const webrtcError =
+                error instanceof WebRTCError
+                    ? error
+                    : new WebRTCError(
+                          "ACCEPT_ANSWER_FAILED",
+                          `アンサーの受け入れに失敗しました: ${error}`,
+                      );
+            notifyError(webrtcError);
+            throw webrtcError;
+        }
+    };
+
+    const sendMessage = (message: GameMessage): void => {
+        try {
+            if (!peer || !isConnected) {
+                throw new WebRTCError("NOT_CONNECTED", "接続されていません");
+            }
+
+            const messageStr = JSON.stringify(message);
+            peer.send_message(messageStr);
+        } catch (error) {
+            const webrtcError =
+                error instanceof WebRTCError
+                    ? error
+                    : new WebRTCError("SEND_FAILED", `メッセージ送信に失敗しました: ${error}`);
+            notifyError(webrtcError);
+            console.error("Send message error:", webrtcError);
+        }
+    };
+
+    const disconnect = (): void => {
+        // 再接続タイマーをクリア
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+
+        stopQualityMonitoring();
+
+        // イベントリスナーの削除
+        for (const { event, handler } of eventListeners) {
+            window.removeEventListener(event, handler);
+        }
+        eventListeners.length = 0;
+
+        peer = null;
+        isConnected = false;
+        peerId = "";
+        reconnectAttempts = 0;
+        notifyConnectionState("closed");
+        notifyProgress("idle");
+    };
+
+    const reconnect = async (): Promise<void> => {
+        reconnectAttempts = 0;
+        await attemptReconnect();
+    };
+
+    const getConnectionInfo = () => ({
+        isConnected,
+        isHost,
+        peerId,
+        reconnectAttempts,
+        canReconnect: reconnectAttempts < reconnectConfig.maxAttempts,
+    });
+
+    const getConnectionQuality = (): ConnectionQuality => ({ ...connectionQuality });
+
+    // イベントリスナーの初期設定
+    setupEventListeners();
+
+    // Public API
+    return {
+        createHost,
+        joinAsGuest,
+        acceptAnswer,
+        sendMessage,
+        onMessage: (handler: (message: GameMessage) => void) => {
+            messageHandlers.push(handler);
+        },
+        onConnectionStateChange: (handler: (state: RTCPeerConnectionState) => void) => {
+            connectionStateHandlers.push(handler);
+        },
+        onError: (handler: (error: WebRTCError) => void) => {
+            errorHandlers.push(handler);
+        },
+        onQualityChange: (handler: (quality: ConnectionQuality) => void) => {
+            qualityHandlers.push(handler);
+        },
+        onProgressChange: (handler: (progress: ConnectionProgress) => void) => {
+            progressHandlers.push(handler);
+        },
+        disconnect,
+        reconnect,
+        getConnectionInfo,
+        getConnectionQuality,
+    };
+};

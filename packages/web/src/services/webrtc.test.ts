@@ -1,6 +1,6 @@
 import type { GameMessage } from "@/types/online";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WebRTCConnection, WebRTCError } from "./webrtc";
+import { type WebRTCConnection, WebRTCError, createWebRTCConnection } from "./webrtc";
 
 // モックWASMモジュール
 const mockWasmModule = {
@@ -16,16 +16,36 @@ const mockPeer = {
     send_message: vi.fn(),
 };
 
+// イベントリスナーを保持するためのマップ
+const eventListeners = new Map<string, Set<EventListener>>();
+
 // グローバルwindowオブジェクトにモックを設定
 const mockWindow = {
     wasmModule: mockWasmModule,
-    addEventListener: vi.fn(),
+    addEventListener: vi.fn((event: string, handler: EventListener) => {
+        if (!eventListeners.has(event)) {
+            eventListeners.set(event, new Set());
+        }
+        eventListeners.get(event)?.add(handler);
+    }),
+    removeEventListener: vi.fn((event: string, handler: EventListener) => {
+        eventListeners.get(event)?.delete(handler);
+    }),
     setTimeout: vi.fn((callback: () => void) => {
         callback();
         return 1;
     }),
     clearTimeout: vi.fn(),
-    dispatchEvent: vi.fn(),
+    setInterval: vi.fn(() => 1),
+    clearInterval: vi.fn(),
+    dispatchEvent: vi.fn((event: Event) => {
+        const handlers = eventListeners.get(event.type);
+        if (handlers) {
+            for (const handler of handlers) {
+                handler(event);
+            }
+        }
+    }),
 };
 
 // @ts-expect-error グローバルwindowモックのためanyを使用
@@ -36,10 +56,11 @@ describe("WebRTCConnection", () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        eventListeners.clear();
         mockWasmModule.create_webrtc_peer.mockResolvedValue(mockPeer);
         // WASMモジュールを確実に設定
         mockWindow.wasmModule = mockWasmModule;
-        connection = new WebRTCConnection();
+        connection = createWebRTCConnection();
     });
 
     afterEach(() => {
@@ -57,6 +78,7 @@ describe("WebRTCConnection", () => {
         });
 
         it("WASMモジュールが読み込まれていない場合エラーを投げる", async () => {
+            // @ts-expect-error 意図的にnullを設定してエラーケースをテスト
             mockWindow.wasmModule = null;
 
             await expect(connection.createHost()).rejects.toThrow(WebRTCError);
@@ -90,9 +112,10 @@ describe("WebRTCConnection", () => {
     describe("sendMessage", () => {
         it("接続中にメッセージを送信できる", async () => {
             await connection.createHost();
-            // 接続状態を手動で設定
-            // @ts-expect-error プライベートプロパティへのアクセス
-            connection.isConnected = true;
+
+            // 接続完了イベントを発火して接続状態にする
+            const channelOpenEvent = new Event("webrtc-channel-open");
+            window.dispatchEvent(channelOpenEvent);
 
             const message: GameMessage = {
                 type: "move",
@@ -133,7 +156,7 @@ describe("WebRTCConnection", () => {
             connection.onMessage(messageHandler);
 
             // イベントリスナーを取得
-            const addEventListenerMock = window.addEventListener as jest.Mock;
+            const addEventListenerMock = window.addEventListener as ReturnType<typeof vi.fn>;
             const eventListeners = addEventListenerMock.mock.calls;
             const messageListener = eventListeners.find(
                 (call: unknown[]) => call[0] === "webrtc-message",
@@ -147,9 +170,10 @@ describe("WebRTCConnection", () => {
             };
 
             // イベントをシミュレート
-            messageListener?.({
+            const event = new CustomEvent("webrtc-message", {
                 detail: JSON.stringify(testMessage),
             });
+            messageListener?.(event);
 
             expect(messageHandler).toHaveBeenCalledWith(testMessage);
         });
@@ -159,16 +183,17 @@ describe("WebRTCConnection", () => {
             connection.onConnectionStateChange(stateHandler);
 
             // イベントリスナーを取得
-            const addEventListenerMock = window.addEventListener as jest.Mock;
+            const addEventListenerMock = window.addEventListener as ReturnType<typeof vi.fn>;
             const eventListeners = addEventListenerMock.mock.calls;
             const stateListener = eventListeners.find(
                 (call: unknown[]) => call[0] === "webrtc-connection-state",
             )?.[1] as ((event: Event) => void) | undefined;
 
             // 切断イベントをシミュレート
-            stateListener?.({
+            const event = new CustomEvent("webrtc-connection-state", {
                 detail: "Disconnected",
             });
+            stateListener?.(event);
 
             expect(stateHandler).toHaveBeenCalledWith("disconnected");
         });
@@ -179,16 +204,17 @@ describe("WebRTCConnection", () => {
             await connection.createHost();
 
             // イベントリスナーを取得
-            const addEventListenerMock = window.addEventListener as jest.Mock;
+            const addEventListenerMock = window.addEventListener as ReturnType<typeof vi.fn>;
             const eventListeners = addEventListenerMock.mock.calls;
             const stateListener = eventListeners.find(
                 (call: unknown[]) => call[0] === "webrtc-connection-state",
             )?.[1] as ((event: Event) => void) | undefined;
 
             // 切断イベントをシミュレート
-            stateListener?.({
+            const event = new CustomEvent("webrtc-connection-state", {
                 detail: "Disconnected",
             });
+            stateListener?.(event);
 
             // setTimeoutがコールバックを即座に実行するので、再接続が試行される
             expect(mockWasmModule.create_webrtc_peer).toHaveBeenCalledTimes(2);
@@ -206,28 +232,34 @@ describe("WebRTCConnection", () => {
         it("最大試行回数を超えるとエラーハンドラーが呼ばれる", async () => {
             const errorHandler = vi.fn();
             connection.onError(errorHandler);
+            await connection.createHost();
 
-            // 再接続試行回数を最大値に設定
-            // @ts-expect-error プライベートプロパティへのアクセス
-            connection.reconnectAttempts = 5;
+            // setTimeoutモックを実際のタイマー動作に変更
+            mockWindow.setTimeout = vi.fn((callback: () => void, _delay?: number) => {
+                // 遅延実行を無視して即座に実行
+                setTimeout(callback, 0);
+                return 1;
+            }) as unknown as typeof mockWindow.setTimeout;
 
-            // イベントリスナーを取得
-            const addEventListenerMock = window.addEventListener as jest.Mock;
-            const eventListeners = addEventListenerMock.mock.calls;
-            const stateListener = eventListeners.find(
-                (call: unknown[]) => call[0] === "webrtc-connection-state",
-            )?.[1] as ((event: Event) => void) | undefined;
+            // 再接続を失敗させる
+            mockWasmModule.create_webrtc_peer.mockRejectedValue(new Error("Connection failed"));
 
-            // 切断イベントをシミュレート
-            stateListener?.({
-                detail: "Disconnected",
+            // 6回の切断イベントをシミュレート（最大試行回数+1）
+            for (let i = 0; i < 6; i++) {
+                const event = new CustomEvent("webrtc-connection-state", {
+                    detail: "Disconnected",
+                });
+                window.dispatchEvent(event);
+                // 非同期処理を待つ
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+
+            // エラーハンドラーが呼ばれることを確認
+            expect(errorHandler).toHaveBeenCalled();
+            const lastCall = errorHandler.mock.calls[errorHandler.mock.calls.length - 1];
+            expect(lastCall[0]).toMatchObject({
+                code: "CONNECTION_LOST",
             });
-
-            expect(errorHandler).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    code: "CONNECTION_LOST",
-                }),
-            );
         });
     });
 

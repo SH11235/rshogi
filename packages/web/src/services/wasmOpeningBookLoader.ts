@@ -120,33 +120,58 @@ export const parseNotation = (
 // WASM管理
 // ===========================================
 
-// WASM初期化を管理するシングルトン
-class WasmManager {
-    private static instance: WasmManager;
-    private initialized = false;
-    private initPromise: Promise<void> | null = null;
+// WASM管理のインターフェース
+export interface WasmManager {
+    initialize(): Promise<void>;
+}
 
-    static getInstance(): WasmManager {
-        if (!WasmManager.instance) {
-            WasmManager.instance = new WasmManager();
+/**
+ * WASM初期化マネージャーを作成する
+ * 各インスタンスは独立した初期化状態を持つ
+ */
+export const createWasmManager = (): WasmManager => {
+    // インスタンスごとの状態をクロージャーで管理
+    let initialized = false;
+    let initPromise: Promise<void> | null = null;
+
+    const initialize = async (): Promise<void> => {
+        if (initialized) return;
+
+        if (initPromise) {
+            return initPromise;
         }
-        return WasmManager.instance;
-    }
 
-    async initialize(): Promise<void> {
-        if (this.initialized) return;
-
-        if (this.initPromise) {
-            return this.initPromise;
-        }
-
-        this.initPromise = init().then(() => {
-            this.initialized = true;
+        initPromise = init().then(() => {
+            initialized = true;
         });
 
-        return this.initPromise;
-    }
-}
+        return initPromise;
+    };
+
+    return { initialize };
+};
+
+/**
+ * 共有WASMマネージャーのファクトリー
+ * アプリケーション全体で単一のWASMインスタンスを共有する場合に使用
+ */
+export const createSharedWasmManager = (() => {
+    // このクロージャー内でのみ共有される状態
+    let sharedManager: WasmManager | null = null;
+
+    return (): WasmManager => {
+        if (!sharedManager) {
+            sharedManager = createWasmManager();
+        }
+        return sharedManager;
+    };
+})();
+
+/**
+ * デフォルトのWasmManagerインスタンスを取得
+ * 後方互換性のため維持
+ */
+export const getDefaultWasmManager = createSharedWasmManager;
 
 // ===========================================
 // データ読み込み
@@ -321,7 +346,7 @@ export function createWasmOpeningBookLoader(options?: {
 }): OpeningBookLoaderInterface {
     // インスタンスごとの状態
     const logger = options?.logger ?? createLogger("WasmOpeningBookLoader");
-    const wasmManager = options?.wasmManager ?? WasmManager.getInstance();
+    const wasmManager = options?.wasmManager ?? getDefaultWasmManager();
     let reader: OpeningBookReaderWasm | null = null;
     const loadedFiles = new Set<string>();
 
