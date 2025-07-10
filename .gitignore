@@ -56,4 +56,5 @@ packages/core/benchmark-results.md
 packages/core/ai-benchmark-*.json
 
 # Opening book data (copied from core during build)
-packages/web/public/data/openings/
+packages/web/public/data/*.binz
+packages/web/public/data/*.bin.binz
