@@ -66,9 +66,8 @@ export class AIEngine {
         try {
             this.openingBook = await this.openingBookLoader.loadForDifficulty(this.difficulty);
         } catch (error) {
-            console.warn("Failed to load opening book:", error);
-            // フォールバックを使用
-            this.openingBook = this.openingBookLoader.loadFromFallback();
+            console.error("Failed to load opening book:", error);
+            this.openingBook = null;
         }
     }
 

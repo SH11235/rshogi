@@ -12,7 +12,6 @@ import {
     type PositionState,
     type Row,
     exportToSfen,
-    generateMainOpenings,
 } from "shogi-core";
 
 /**
@@ -128,17 +127,17 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
         return this.load(filePath);
     }
 
-    loadFromFallback(): OpeningBookInterface {
-        // generateMainOpeningsを使ってフォールバックデータを生成
-        const book = new FallbackOpeningBook();
-        const entries = generateMainOpenings();
+    // loadFromFallback(): OpeningBookInterface {
+    //     // generateMainOpeningsを使ってフォールバックデータを生成
+    //     const book = new FallbackOpeningBook();
+    //     const entries = generateMainOpenings();
 
-        for (const entry of entries) {
-            book.addEntry(entry);
-        }
+    //     for (const entry of entries) {
+    //         book.addEntry(entry);
+    //     }
 
-        return book;
-    }
+    //     return book;
+    // }
 
     private createOpeningBookFromWasm(): OpeningBookInterface {
         if (!this.reader) {
@@ -149,110 +148,8 @@ export class WasmOpeningBookLoader implements OpeningBookLoaderInterface {
     }
 }
 
-/**
- * フォールバック用のOpeningBook実装
- */
-class FallbackOpeningBook implements OpeningBookInterface {
-    private positions: Map<string, OpeningMove[]> = new Map();
-    private memoryUsage = 0;
-    private readonly maxMemory: number;
-
-    constructor(maxMemory: number = 200 * 1024 * 1024) {
-        // 200MB default
-        this.maxMemory = maxMemory;
-    }
-
-    addEntry(entry: OpeningEntry): boolean {
-        const entrySize = this.estimateEntrySize(entry);
-
-        if (this.memoryUsage + entrySize > this.maxMemory) {
-            return false; // メモリ制限超過
-        }
-
-        this.positions.set(entry.position, entry.moves);
-        this.memoryUsage += entrySize;
-
-        return true;
-    }
-
-    findMoves(position: PositionState, options: FindMovesOptions = {}): OpeningMove[] {
-        const key = this.generatePositionKey(position);
-        const moves = this.positions.get(key);
-
-        if (!moves || moves.length === 0) {
-            return [];
-        }
-
-        if (options.randomize) {
-            return [this.selectWeightedRandom(moves)];
-        }
-
-        // デフォルトは重み順でソート
-        return [...moves].sort((a, b) => b.weight - a.weight);
-    }
-
-    getMemoryUsage(): number {
-        return this.memoryUsage;
-    }
-
-    size(): number {
-        return this.positions.size;
-    }
-
-    clear(): void {
-        this.positions.clear();
-        this.memoryUsage = 0;
-    }
-
-    private estimateEntrySize(entry: OpeningEntry): number {
-        // 概算でメモリ使用量を計算
-        let size = 0;
-
-        // position文字列
-        size += entry.position.length * 2; // UTF-16
-
-        // moves配列
-        for (const move of entry.moves) {
-            size += 50; // Moveオブジェクトの概算サイズ（より現実的に）
-            size += move.notation.length * 2;
-            size += 8; // weight (number)
-            size += move.depth ? 8 : 0;
-            size += move.name ? move.name.length * 2 : 0;
-            size += move.comment ? move.comment.length * 2 : 0;
-        }
-
-        size += 8; // depth
-        size += 20; // オーバーヘッド
-
-        return size;
-    }
-
-    private selectWeightedRandom(moves: OpeningMove[]): OpeningMove {
-        const totalWeight = moves.reduce((sum, move) => sum + move.weight, 0);
-        const random = Math.random() * totalWeight;
-
-        let accumulatedWeight = 0;
-        for (const move of moves) {
-            accumulatedWeight += move.weight;
-            if (random < accumulatedWeight) {
-                return move;
-            }
-        }
-
-        // fallback（通常は到達しない）
-        return moves[0];
-    }
-
-    private generatePositionKey(_position: PositionState): string {
-        // TODO: Implement proper position key generation
-        // For now, return a placeholder to avoid build errors
-        return "placeholder";
-    }
-}
-
 // 棋譜記法を座標に変換
 function convertNotationToMove(
-    _sfen: string,
     moveNotation: string,
 ): { from: { row: Row; column: Column }; to: { row: Row; column: Column } } | null {
     try {
@@ -286,32 +183,14 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
     }
 
     findMoves(positionOrSfen: PositionState, options?: FindMovesOptions): OpeningMove[] {
-        console.log("[Opening Book Debug] findMoves called");
-        console.log("[Opening Book Debug] positionOrSfen type:", typeof positionOrSfen);
-        console.log("[Opening Book Debug] positionOrSfen value:", positionOrSfen);
-
-        console.log("[Opening Book Debug] positionOrSfen:", positionOrSfen);
-        console.log("[Opening Book Debug] options:", options);
-
         // 文字列（SFEN）が渡された場合とPositionStateが渡された場合の処理
         let sfen: string;
         if (typeof positionOrSfen === "string") {
             sfen = positionOrSfen;
         } else if (positionOrSfen?.board && positionOrSfen.hands && positionOrSfen.currentPlayer) {
-            // PositionState から SFEN を生成
-            console.log("[Opening Book Debug] Converting PositionState to SFEN");
             try {
-                // デバッグ情報の追加
-                console.log("[Opening Book Debug] options:", options);
-                console.log(
-                    "[Opening Book Debug] moveHistory length:",
-                    options?.moveHistory?.length || 0,
-                );
-                console.log("[Opening Book Debug] currentPlayer:", positionOrSfen.currentPlayer);
-
                 // 手数を計算（moveHistoryがあればその長さ+1、なければ1）
                 const moveNumber = options?.moveHistory ? options.moveHistory.length + 1 : 1;
-                console.log("[Opening Book Debug] Calculated move number:", moveNumber);
 
                 sfen = exportToSfen(
                     positionOrSfen.board,
@@ -320,7 +199,6 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
                     moveNumber,
                 );
                 console.log("[Opening Book Debug] Generated SFEN:", sfen);
-                console.log("[Opening Book Debug] SFEN turn indicator:", sfen.split(" ")[2]); // "b" or "w"
             } catch (conversionError) {
                 console.error(
                     "[Opening Book Debug] Failed to convert PositionState to SFEN:",
@@ -336,25 +214,15 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
             return [];
         }
 
-        console.log("[Opening Book Debug] extracted sfen:", sfen);
-        console.log("[Opening Book Debug] sfen type:", typeof sfen);
-        console.log("[Opening Book Debug] sfen length:", sfen?.length);
-
         if (!sfen) {
             console.error("[Opening Book Debug] SFEN is null or undefined");
             return [];
         }
 
         try {
-            console.log("[Opening Book Debug] Calling WASM find_moves with sfen:", sfen);
-
-            // Strip "sfen" prefix if present - the Rust hasher expects just the position part
             const sfenForSearch = sfen.startsWith("sfen ") ? sfen.slice(5) : sfen;
             console.log("[Opening Book Debug] SFEN for search (without prefix):", sfenForSearch);
-
             const movesJson = this.reader.find_moves(sfenForSearch);
-            console.log("[Opening Book Debug] WASM find_moves returned:", movesJson);
-
             const moves = JSON.parse(movesJson);
             console.log("[Opening Book Debug] Parsed moves:", moves);
             console.log("[Opening Book Debug] Number of moves found:", moves?.length || 0);
@@ -372,18 +240,14 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
             }
 
             // PositionStateの場合はOpeningMove[]を返す
-            console.log("[Opening Book Debug] Converting to OpeningMove format");
             const openingMoves: OpeningMove[] = [];
 
             for (const moveData of moves) {
-                console.log("[Opening Book Debug] Processing move:", moveData);
-                const coords = convertNotationToMove(sfen, moveData.move);
+                const coords = convertNotationToMove(moveData.notation);
                 console.log("[Opening Book Debug] Converted coords:", coords);
 
                 if (coords) {
                     const board = (positionOrSfen as PositionState).board;
-                    console.log("[Opening Book Debug] Board:", board);
-
                     const piece = board[`${coords.from.column}${coords.from.row}` as keyof Board];
                     console.log(
                         "[Opening Book Debug] Piece at from position:",
@@ -397,7 +261,7 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
                             from: coords.from,
                             to: coords.to,
                             piece,
-                            promote: moveData.move.includes("+") || false,
+                            promote: moveData.notation.includes("+") || false,
                             captured:
                                 board[`${coords.to.column}${coords.to.row}` as keyof Board] || null,
                         };
@@ -406,11 +270,9 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
 
                         openingMoves.push({
                             move,
-                            notation: moveData.move,
-                            weight: moveData.weight || 1,
+                            notation: moveData.notation,
+                            weight: moveData.evaluation || 1,
                             depth: moveData.depth,
-                            name: moveData.name,
-                            comment: moveData.comment,
                         });
                     } else {
                         console.error(
@@ -420,8 +282,6 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
                     }
                 }
             }
-
-            console.log("[Opening Book Debug] Final openingMoves:", openingMoves);
             return openingMoves;
         } catch (error) {
             console.error("[Opening Book Debug] Error in findMoves:", error);
@@ -429,54 +289,8 @@ class WasmBackedOpeningBook implements OpeningBookInterface {
         }
     }
 
-    clear(): void {
-        // WASM実装では必要に応じて実装
-        console.warn("clear is not fully supported in WASM-backed implementation");
-    }
-
     size(): number {
         // 実装を読み込まれた局面数を返す
         return this.reader.position_count;
-    }
-
-    getMemoryUsage(): number {
-        // WASM側で管理されているため、正確な値は取得できない
-        return 0;
-    }
-
-    getPositionCount(): number {
-        return this.reader.position_count;
-    }
-
-    selectMove(
-        positionOrSfen: PositionState | string,
-    ): { move: OpeningMove; weight: number } | null {
-        const moves = this.findMoves(
-            positionOrSfen as PositionState,
-            typeof positionOrSfen === "string" ? undefined : { randomize: false },
-        );
-
-        if (!moves || moves.length === 0) {
-            return null;
-        }
-
-        // 重み付き確率で手を選択
-        const totalWeight = moves.reduce(
-            (sum: number, move: OpeningMove) => sum + (move.weight || 1),
-            0,
-        );
-        let random = Math.random() * totalWeight;
-
-        for (const move of moves) {
-            const weight = move.weight || 1;
-            random -= weight;
-            if (random <= 0) {
-                return { move, weight };
-            }
-        }
-
-        // フォールバック
-        const move = moves[0];
-        return { move, weight: move.weight || 1 };
     }
 }

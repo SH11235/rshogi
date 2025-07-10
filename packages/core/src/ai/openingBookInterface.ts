@@ -24,9 +24,7 @@ export interface FindMovesOptions {
 export interface OpeningBookInterface {
     addEntry(entry: OpeningEntry): boolean;
     findMoves(position: PositionState, options: FindMovesOptions): OpeningMove[];
-    getMemoryUsage(): number;
     size(): number;
-    clear(): void;
 }
 
 /**
@@ -45,9 +43,4 @@ export interface OpeningBookLoaderInterface {
     loadForDifficulty(
         difficulty: "beginner" | "intermediate" | "advanced" | "expert",
     ): Promise<OpeningBookInterface>;
-
-    /**
-     * フォールバック用の定跡を読み込む
-     */
-    loadFromFallback(): OpeningBookInterface;
 }
