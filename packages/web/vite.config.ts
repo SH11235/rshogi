@@ -2,6 +2,7 @@ import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react-swc";
 import { defineConfig } from "vite";
+import { viteStaticCopy } from "vite-plugin-static-copy";
 import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 
@@ -12,6 +13,15 @@ export default defineConfig({
         topLevelAwait(),
         react(),
         tailwindcss(),
+        // WASMファイルをdist/wasmにコピー
+        viteStaticCopy({
+            targets: [
+                {
+                    src: "src/wasm/*",
+                    dest: "wasm",
+                },
+            ],
+        }),
         // .gz/.binzファイルの自動解凍を無効化するプラグイン
         {
             name: "disable-gz-decompression",

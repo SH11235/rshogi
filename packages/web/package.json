@@ -5,9 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b tsconfig.app.json && vite build && npm run copy:demos && npm run copy:wasm",
+    "build": "tsc -b tsconfig.app.json && vite build && npm run copy:demos",
     "copy:demos": "cp webrtc-demo.html dist/",
-    "copy:wasm": "mkdir -p dist/src/wasm && cp -r src/wasm/* dist/src/wasm/",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "preview": "vite preview",
@@ -68,6 +67,7 @@
     "tailwindcss": "^4.1.5",
     "typescript": "~5.7.2",
     "vite": "^6.3.1",
+    "vite-plugin-static-copy": "^3.1.0",
     "vite-plugin-top-level-await": "^1.5.0",
     "vite-plugin-wasm": "^3.4.1",
     "vitest": "^3.1.3"
