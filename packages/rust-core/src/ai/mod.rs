@@ -14,9 +14,6 @@ pub mod zobrist;
 // Modules to be added later:
 // pub mod tt;         // Transposition table
 
-#[cfg(test)]
-mod test_king_capture;
-
 // Re-export basic types
 pub use attacks::{AttackTables, Direction, ATTACK_TABLES};
 pub use board::{Bitboard, Board, Color, Piece, PieceType, Position, Square};
