@@ -15,6 +15,9 @@ pub use opening_book::*;
 // Add opening book reader module
 pub mod opening_book_reader;
 
+// Add AI module
+pub mod ai;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
