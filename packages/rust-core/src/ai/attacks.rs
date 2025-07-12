@@ -387,6 +387,42 @@ impl AttackTables {
 
         attacks
     }
+
+    /// Get bitboard of squares between two squares (exclusive)
+    pub fn between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
+        let file1 = sq1.file() as i8;
+        let rank1 = sq1.rank() as i8;
+        let file2 = sq2.file() as i8;
+        let rank2 = sq2.rank() as i8;
+
+        let file_diff = file2 - file1;
+        let rank_diff = rank2 - rank1;
+
+        // Not on same ray
+        if file_diff != 0 && rank_diff != 0 && file_diff.abs() != rank_diff.abs() {
+            return Bitboard::EMPTY;
+        }
+
+        // Adjacent squares have nothing between
+        if file_diff.abs() <= 1 && rank_diff.abs() <= 1 {
+            return Bitboard::EMPTY;
+        }
+
+        let file_delta = file_diff.signum();
+        let rank_delta = rank_diff.signum();
+
+        let mut between = Bitboard::EMPTY;
+        let mut f = file1 + file_delta;
+        let mut r = rank1 + rank_delta;
+
+        while f != file2 || r != rank2 {
+            between.set(Square::new(f as u8, r as u8));
+            f += file_delta;
+            r += rank_delta;
+        }
+
+        between
+    }
 }
 
 // Global attack tables instance

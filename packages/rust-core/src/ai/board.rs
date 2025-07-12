@@ -41,6 +41,29 @@ impl Square {
     }
 }
 
+/// Display square in shogi notation (e.g., "5e")
+/// ● USIプロトコルとの関係式
+/// Square::new(file, rank) → USI座標
+/// - file（第一引数）: USI_file = 9 - file
+/// - file 8 → USI 1筋
+/// - file 7 → USI 2筋
+/// - file 0 → USI 9筋
+/// - rank（第二引数）: USI_rank = rank + 'a'
+/// - rank 0 → USI 'a'段（一段目）
+/// - rank 8 → USI 'i'段（九段目）
+///
+/// ## Examples:
+/// Square::new(8, 7)
+/// → USI: "1h" (1八)
+///
+/// Square::new(8, 0)
+/// → USI: "1a" (1一)
+///
+/// Square::new(0, 0)
+/// → USI: "9a" (9一)
+///
+/// Square::new(4, 4)
+/// → USI: "5e" (5五)
 impl fmt::Display for Square {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let file = b'9' - self.file();
@@ -241,6 +264,17 @@ impl Bitboard {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
+
+    /// Get a bitboard with all squares in a file set
+    #[inline]
+    pub fn file_mask(file: u8) -> Self {
+        debug_assert!(file < 9);
+        let mut mask = 0u128;
+        for rank in 0..9 {
+            mask |= 1u128 << (rank * 9 + file);
+        }
+        Bitboard(mask)
+    }
 }
 
 impl std::ops::BitOr for Bitboard {
@@ -304,13 +338,33 @@ impl std::ops::BitXorAssign for Bitboard {
 #[derive(Clone, Debug)]
 pub struct Board {
     /// Bitboards by color and piece type [color][piece_type]
+    /// - 目的: 駒種別・手番別の配置を管理
+    /// - [手番(先手/後手)][駒種(8種類)]の2次元配列
+    /// - 例: piece_bb[BLACK][PAWN] = 先手の歩の位置すべて
+    /// - 用途: 特定の駒種の移動生成、駒の価値計算
     pub piece_bb: [[Bitboard; 8]; 2], // 8 piece types
 
     /// All pieces by color (cache)
+    /// - 目的: 各手番の全駒位置をキャッシュ
+    /// - occupied_bb[BLACK] = 先手の全駒のOR演算結果
+    /// - 用途: 自分の駒への移動を除外、王手判定の高速化
+    /// - 利点: 毎回piece_bbをOR演算する必要がない
     pub occupied_bb: [Bitboard; 2], // [color]
+    /// - 目的: 盤上の全駒位置（両手番）をキャッシュ
+    /// - occupied_bb[BLACK] | occupied_bb[WHITE]の結果
+    /// - 用途: 空きマス判定、飛び駒の移動範囲計算
+    /// - 利点: 最も頻繁に使用されるため事前計算
+    /// - 更新タイミング:
+    ///   1. 手を指した時 (make_moveメソッド)
+    ///   2. 手を戻した時 (unmake_moveメソッド)
+    ///   3. 局面を設定した時 (set_positionなど)
     pub all_bb: Bitboard,
 
     /// Promoted pieces bitboard
+    /// - 目的: 成り駒の位置を記録
+    /// - 成り駒かどうかの判定を高速化
+    /// - 用途: 駒の動き生成時の成り判定、駒の表示
+    /// - 利点: 駒種と成り状態を別管理することで効率化
     pub promoted_bb: Bitboard,
 
     /// Piece on each square (fast access)
@@ -395,10 +449,10 @@ pub struct Position {
     /// Pieces in hand [color][piece_type] (excluding King)
     pub hands: [[u8; 7]; 2],
 
-    /// Side to move
+    /// 手番 (Black or White)
     pub side_to_move: Color,
 
-    /// Ply count
+    /// 手数
     pub ply: u16,
 
     /// Zobrist hash (full 64 bits)
