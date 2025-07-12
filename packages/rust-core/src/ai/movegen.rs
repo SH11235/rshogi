@@ -1599,4 +1599,38 @@ mod tests {
             "Pawn drop should be allowed when support is invalid due to pin"
         );
     }
+
+    #[test]
+    fn test_no_king_capture() {
+        // 将棋では玉を取る手は禁止されているため、手生成時に除外される必要がある
+        // このテストは、玉を取れる位置関係でも、そのような手が生成されないことを検証する
+        let mut pos = Position::empty();
+
+        // テスト局面の設定：
+        // - 先手の銀(5b)が後手の玉(6c)を取れる位置関係
+        // - 正しい実装では、この銀→玉の手は生成されないはず
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black)); // 先手玉: 5a
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::Silver, Color::Black)); // 先手銀: 5b
+        pos.board
+            .put_piece(Square::new(3, 2), Piece::new(PieceType::King, Color::White)); // 後手玉: 6c
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 生成された全ての手をチェックし、玉を取る手が含まれていないことを確認
+        for m in moves.as_slice() {
+            if !m.is_drop() {
+                if let Some(from) = m.from() {
+                    let to = m.to();
+                    if from == Square::new(4, 1) && to == Square::new(3, 2) {
+                        panic!("Generated illegal move: silver captures king!");
+                    }
+                }
+            }
+        }
+
+        println!("OK: No king capture moves generated");
+    }
 }
