@@ -9,7 +9,7 @@ use std::io::Read;
 // 初期盤面のSFEN（手数0）
 const INITIAL_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 0";
 // 2六歩の後の盤面
-const AFTER_26_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/LNSGKGSNL b - 1";
+// const AFTER_26_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/7P1/PPPPPPP1P/1B5R1/LNSGKGSNL b - 1";
 // 7六歩の後の盤面
 const AFTER_76_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 2";
 

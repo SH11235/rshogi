@@ -601,46 +601,164 @@ impl<'a> MoveGen<'a> {
             return false; // Not even a check
         }
 
-        // Now simulate the position after the pawn drop
-        // This requires checking if king has any safe escape moves
+        // Check if the pawn has support (if not, king can capture it)
+        let pawn_supporters = self.attackers_to(to, us);
+        if pawn_supporters.is_empty() {
+            return false; // No support - king can capture the pawn
+        }
 
-        // First, check all possible king escape squares
+        // Check if any piece (except king, pawn, lance) can capture the dropped pawn
+        let defenders = self.attackers_to_except_king_pawn_lance(to, them);
+
+        // Check if any unpinned piece can capture
+        if defenders.count_ones() > 0 {
+            // Calculate pinned pieces for the defending side
+            let pinned = self.calculate_pinned_pieces(them);
+
+            // Check each defender individually
+            let mut def_bb = defenders;
+            while let Some(def_sq) = def_bb.pop_lsb() {
+                // If not pinned, can capture
+                if !pinned.test(def_sq) {
+                    return false; // Can capture the pawn
+                }
+
+                // If pinned, the piece cannot capture the pawn
+                // In drop pawn mate, pinned pieces are considered unable to defend
+            }
+        }
+
+        // Check if king has any escape squares
         let king_attacks = ATTACK_TABLES.king_attacks(their_king_sq);
         let their_pieces = self.pos.board.occupied_bb[them as usize];
-        let escape_squares = king_attacks & !their_pieces;
+        let mut escape_squares = king_attacks & !their_pieces;
 
-        let mut has_escape = false;
+        // Remove the pawn square from escape squares (can't escape by capturing the pawn)
+        escape_squares &= !Bitboard::from_square(to);
+
+        // Simulate position after pawn drop
+        let occupied_after_drop = self.pos.board.all_bb | Bitboard::from_square(to);
+
         let mut escapes = escape_squares;
         while let Some(escape_sq) = escapes.pop_lsb() {
-            // Skip if attacked by the dropped pawn
-            if pawn_attacks.test(escape_sq) {
-                continue;
-            }
-
-            // Now check if this escape square would be safe from all enemy pieces
-            // First, temporarily place the pawn
-            let occupied_after_drop = self.pos.board.all_bb | Bitboard::from_square(to);
-
             // Check if escape square is attacked by any enemy piece
             let attackers = self.attackers_to_with_occupancy(escape_sq, us, occupied_after_drop);
             if attackers.is_empty() {
-                has_escape = true;
-                break;
+                return false; // King can escape
             }
-        }
-
-        if has_escape {
-            return false; // King can escape
-        }
-
-        // Check if any piece can capture the dropped pawn
-        let defenders = self.attackers_to(to, them);
-        if defenders.count_ones() > 0 {
-            return false; // Can capture the pawn
         }
 
         // No escapes, no captures - it's mate
         true
+    }
+
+    /// Get all pieces (except king, pawn, lance) of given color that can attack a square
+    fn attackers_to_except_king_pawn_lance(&self, sq: Square, color: Color) -> Bitboard {
+        let occupied = self.pos.board.all_bb;
+        let mut attackers = Bitboard::EMPTY;
+
+        // Knights
+        let knights = self.pos.board.piece_bb[color as usize][PieceType::Knight as usize];
+        let promoted_knights = self.pos.board.promoted_bb & knights;
+        let unpromoted_knights = knights & !self.pos.board.promoted_bb;
+
+        attackers |= unpromoted_knights & ATTACK_TABLES.knight_attacks(sq, color.opposite());
+        attackers |= promoted_knights & ATTACK_TABLES.gold_attacks(sq, color.opposite()); // Promoted knight moves like gold
+
+        // Silvers
+        let silvers = self.pos.board.piece_bb[color as usize][PieceType::Silver as usize];
+        let promoted_silvers = self.pos.board.promoted_bb & silvers;
+        let unpromoted_silvers = silvers & !self.pos.board.promoted_bb;
+
+        attackers |= unpromoted_silvers & ATTACK_TABLES.silver_attacks(sq, color.opposite());
+        attackers |= promoted_silvers & ATTACK_TABLES.gold_attacks(sq, color.opposite()); // Promoted silver moves like gold
+
+        // Golds
+        let golds = self.pos.board.piece_bb[color as usize][PieceType::Gold as usize];
+        attackers |= golds & ATTACK_TABLES.gold_attacks(sq, color.opposite());
+
+        // Bishops
+        let bishops = self.pos.board.piece_bb[color as usize][PieceType::Bishop as usize];
+        let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+        attackers |= bishops & bishop_attacks;
+
+        // Rooks
+        let rooks = self.pos.board.piece_bb[color as usize][PieceType::Rook as usize];
+        let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        attackers |= rooks & rook_attacks;
+
+        attackers
+    }
+
+    /// Calculate pinned pieces for a given color
+    fn calculate_pinned_pieces(&self, color: Color) -> Bitboard {
+        let king_sq = match self.pos.board.king_square(color) {
+            Some(sq) => sq,
+            None => return Bitboard::EMPTY,
+        };
+
+        let them = color.opposite();
+        let mut pinned = Bitboard::EMPTY;
+
+        // Check for pins by rooks
+        let rooks = self.pos.board.piece_bb[them as usize][PieceType::Rook as usize];
+        let mut rook_bb = rooks;
+
+        while let Some(rook_sq) = rook_bb.pop_lsb() {
+            // Check if rook is on same rank or file as king
+            let rank_diff = rook_sq.rank() as i8 - king_sq.rank() as i8;
+            let file_diff = rook_sq.file() as i8 - king_sq.file() as i8;
+
+            if rank_diff != 0 && file_diff != 0 {
+                continue; // Not on same ray
+            }
+
+            // Get the ray between rook and king
+            let between = ATTACK_TABLES.between_bb(rook_sq, king_sq);
+            let blockers = between & self.pos.board.all_bb;
+
+            // Exactly one blocker means it's pinned
+            if blockers.count_ones() == 1 {
+                let blocker_sq = blockers.lsb().unwrap();
+                let blocker_bb = Bitboard::from_square(blocker_sq);
+
+                // Blocker must be our piece
+                if (self.pos.board.occupied_bb[color as usize] & blocker_bb).count_ones() > 0 {
+                    pinned |= blocker_bb;
+                }
+            }
+        }
+
+        // Check for pins by bishops
+        let bishops = self.pos.board.piece_bb[them as usize][PieceType::Bishop as usize];
+        let mut bishop_bb = bishops;
+
+        while let Some(bishop_sq) = bishop_bb.pop_lsb() {
+            // Check if bishop is on same diagonal as king
+            let rank_diff = bishop_sq.rank() as i8 - king_sq.rank() as i8;
+            let file_diff = bishop_sq.file() as i8 - king_sq.file() as i8;
+
+            if rank_diff.abs() != file_diff.abs() {
+                continue; // Not on same diagonal
+            }
+
+            // Get the ray between bishop and king
+            let between = ATTACK_TABLES.between_bb(bishop_sq, king_sq);
+            let blockers = between & self.pos.board.all_bb;
+
+            // Exactly one blocker means it's pinned
+            if blockers.count_ones() == 1 {
+                let blocker_sq = blockers.lsb().unwrap();
+                let blocker_bb = Bitboard::from_square(blocker_sq);
+
+                // Blocker must be our piece
+                if (self.pos.board.occupied_bb[color as usize] & blocker_bb).count_ones() > 0 {
+                    pinned |= blocker_bb;
+                }
+            }
+        }
+
+        pinned
     }
 
     /// Get all pieces of given color that can attack a square with custom occupancy
@@ -1093,7 +1211,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Fix drop pawn mate detection
     fn test_movegen_drop_pawn_mate() {
         let mut pos = Position::empty();
         // White king with no escape squares
@@ -1124,19 +1241,362 @@ mod tests {
             }
         }
 
-        // Debug: check if 5g would be checkmate
+        // Debug: check if 5h would be checkmate
         let gen2 = MoveGen::new(&pos);
-        let sq_5g = Square::new(4, 6); // 5g = file 5 (index 4), rank g (index 6)
-        let would_be_mate = gen2.is_drop_pawn_mate(sq_5g, Color::White);
+        let sq_5h = Square::new(4, 7); // 5h = file 5 (index 4), rank h (index 7)
+        let would_be_mate = gen2.is_drop_pawn_mate(sq_5h, Color::White);
         println!(
-            "Is pawn drop at 5g (file={}, rank={}) checkmate? {}",
-            sq_5g.file(),
-            sq_5g.rank(),
+            "Is pawn drop at 5h (file={}, rank={}) checkmate? {}",
+            sq_5h.file(),
+            sq_5h.rank(),
             would_be_mate
         );
 
-        // Pawn drop at 5g would be checkmate - should not be allowed
-        let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
+        // Pawn drop at 5h would be checkmate - should not be allowed
+        let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5h);
         assert!(illegal_drop.is_none(), "Drop pawn mate should not be allowed");
+    }
+
+    #[test]
+    fn test_drop_pawn_mate_with_escape() {
+        let mut pos = Position::empty();
+        // White king with escape square
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::Black));
+        // No piece at (5, 8) - king can escape there
+
+        // Black has a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1; // Pawn
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        let sq_4g = Square::new(4, 7);
+        // Pawn drop at 4g gives check but king can escape - should be allowed
+        let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_4g);
+        assert!(legal_drop.is_some(), "Non-mate pawn drop should be allowed");
+    }
+
+    #[test]
+    fn test_drop_pawn_mate_with_capture() {
+        let mut pos = Position::empty();
+        // White king trapped
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::Black));
+        pos.board
+            .put_piece(Square::new(5, 8), Piece::new(PieceType::Gold, Color::Black));
+        // White gold that can capture the pawn
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Gold, Color::White));
+
+        // Black has a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1; // Pawn
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        let sq_4g = Square::new(4, 7);
+        // Pawn drop at 4g can be captured - should be allowed
+        let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_4g);
+        assert!(legal_drop.is_some(), "Capturable pawn drop should be allowed");
+    }
+
+    #[test]
+    fn test_drop_pawn_mate_without_support() {
+        let mut pos = Position::empty();
+        // Black king far away - pawn has no support
+        pos.board
+            .put_piece(Square::new(8, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+
+        // Black has a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1; // Pawn
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        let sq_4g = Square::new(4, 7);
+        // Pawn drop at 4g has no support - king can capture it - should be allowed
+        let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_4g);
+        assert!(legal_drop.is_some(), "Unsupported pawn drop should be allowed");
+    }
+
+    #[test]
+    fn test_drop_pawn_mate_pinned_defender() {
+        let mut pos = Position::empty();
+
+        // Black to move - testing Black's pawn drop
+        pos.side_to_move = Color::Black;
+
+        // Create a scenario where:
+        // - White king is trapped with no escape squares
+        // - A pawn drop would give check
+        // - The only defender (silver) is pinned
+
+        // White pieces
+        pos.board
+            .put_piece(Square::new(8, 7), Piece::new(PieceType::King, Color::White)); // 1h
+        pos.board
+            .put_piece(Square::new(7, 7), Piece::new(PieceType::Silver, Color::White)); // 2h - will be pinned
+
+        // Black pieces
+        pos.board
+            .put_piece(Square::new(4, 7), Piece::new(PieceType::Rook, Color::Black)); // 5h - pins silver
+        pos.board
+            .put_piece(Square::new(8, 5), Piece::new(PieceType::Gold, Color::Black)); // 1f - supports pawn
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a - far away
+
+        // Block escape squares for White king
+        pos.board
+            .put_piece(Square::new(7, 8), Piece::new(PieceType::Gold, Color::Black)); // 2i
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::Gold, Color::Black)); // 1i
+
+        // Black has a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1; // Pawn
+
+        let mut gen = MoveGen::new(&pos);
+
+        // Try to drop pawn at 1g (would give check to king at 1h)
+        let sq_1g = Square::new(8, 6); // 1g = file 1 (index 8), rank g (index 6)
+
+        // Verify that drop pawn mate is detected
+        assert!(gen.is_drop_pawn_mate(sq_1g, Color::White), "Drop pawn mate should be detected");
+
+        let moves = gen.generate_all();
+
+        // Pawn drop at 1g - silver is pinned and cannot capture - should not be allowed
+        let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_1g);
+        assert!(
+            illegal_drop.is_none(),
+            "Drop pawn mate with pinned defender should not be allowed"
+        );
+    }
+
+    #[test]
+    fn test_drop_pawn_not_mate_with_escape() {
+        let mut pos = Position::empty();
+
+        // 玉に逃げ道があるケース（打ち歩詰めではない）
+        pos.side_to_move = Color::Black;
+
+        // 後手の配置
+        pos.board
+            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
+        pos.board
+            .put_piece(Square::new(3, 7), Piece::new(PieceType::Silver, Color::White)); // 6h
+
+        // 先手の配置
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a
+                                                                                      // 逃げ場の一部をブロック（でも完全ではない）
+        pos.board
+            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::Black)); // 6i
+
+        // 先手が歩を持っている
+        pos.hands[Color::Black as usize][6] = 1;
+
+        let mut gen = MoveGen::new(&pos);
+
+        // 5gに歩を打つ
+        let sq_5g = Square::new(4, 6);
+
+        // 打ち歩詰めではないことを確認（5iに逃げられる）
+        assert!(
+            !gen.is_drop_pawn_mate(sq_5g, Color::White),
+            "Should not be drop pawn mate when king has escape squares"
+        );
+
+        let moves = gen.generate_all();
+        let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
+        assert!(legal_drop.is_some(), "Pawn drop should be allowed when king can escape");
+    }
+
+    #[test]
+    fn test_drop_pawn_not_mate_can_capture_with_promoted() {
+        let mut pos = Position::empty();
+
+        // 成り駒が歩を取れるケース
+        pos.side_to_move = Color::Black;
+
+        // 後手の配置
+        pos.board
+            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
+        pos.board
+            .put_piece(Square::new(3, 6), Piece::promoted(PieceType::Silver, Color::White)); // 6g - 成銀
+
+        // 先手の配置
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a
+
+        // 玉の逃げ場をブロック
+        pos.board
+            .put_piece(Square::new(3, 7), Piece::new(PieceType::Gold, Color::Black)); // 6h
+        pos.board
+            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::Black)); // 6i
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::Gold, Color::Black)); // 5i
+        pos.board
+            .put_piece(Square::new(5, 8), Piece::new(PieceType::Gold, Color::Black)); // 4i
+        pos.board
+            .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::Black)); // 4h
+
+        // 先手が歩を持っている
+        pos.hands[Color::Black as usize][6] = 1;
+
+        let mut gen = MoveGen::new(&pos);
+
+        // 5gに歩を打つ
+        let sq_5g = Square::new(4, 6);
+
+        // 打ち歩詰めではないことを確認（成銀が取れる）
+        assert!(
+            !gen.is_drop_pawn_mate(sq_5g, Color::White),
+            "Should not be drop pawn mate when promoted piece can capture"
+        );
+
+        let moves = gen.generate_all();
+        let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
+        assert!(
+            legal_drop.is_some(),
+            "Pawn drop should be allowed when promoted piece can capture"
+        );
+    }
+
+    #[test]
+    fn test_drop_pawn_not_mate_long_range_defender() {
+        let mut pos = Position::empty();
+
+        // 遠距離からの守りのケース（飛車）
+        pos.side_to_move = Color::Black;
+
+        // 後手の配置
+        pos.board
+            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
+        pos.board
+            .put_piece(Square::new(4, 3), Piece::new(PieceType::Rook, Color::White)); // 5d - 遠くから守る
+
+        // 先手の配置
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a
+
+        // 先手が歩を持っている
+        pos.hands[Color::Black as usize][6] = 1;
+
+        let mut gen = MoveGen::new(&pos);
+
+        // 5gに歩を打つ
+        let sq_5g = Square::new(4, 6);
+
+        // 打ち歩詰めではないことを確認（飛車が取れる）
+        assert!(
+            !gen.is_drop_pawn_mate(sq_5g, Color::White),
+            "Should not be drop pawn mate when rook can capture from distance"
+        );
+
+        let moves = gen.generate_all();
+        let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
+        assert!(legal_drop.is_some(), "Pawn drop should be allowed when rook can capture");
+    }
+
+    #[test]
+    fn test_drop_pawn_mate_at_edge() {
+        let mut pos = Position::empty();
+
+        // エッジケース：盤端（1筋）での打ち歩詰め
+        pos.side_to_move = Color::Black;
+
+        // 後手の配置（1筋の端）
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::White)); // 1i
+        pos.board
+            .put_piece(Square::new(7, 8), Piece::new(PieceType::Silver, Color::White)); // 2i - ピンされる
+
+        // 先手の配置
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::Rook, Color::Black)); // 5i - 銀をピン
+        pos.board
+            .put_piece(Square::new(8, 6), Piece::new(PieceType::Gold, Color::Black)); // 1g - 歩を支える
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a
+
+        // 玉の逃げ場をブロック（盤端なので元々限定的）
+        pos.board
+            .put_piece(Square::new(7, 7), Piece::new(PieceType::Gold, Color::Black)); // 2h
+
+        // 先手が歩を持っている
+        pos.hands[Color::Black as usize][6] = 1;
+
+        let mut gen = MoveGen::new(&pos);
+
+        // 1hに歩を打つ
+        let sq_1h = Square::new(8, 7);
+
+        // 打ち歩詰めが検出されることを確認
+        assert!(
+            gen.is_drop_pawn_mate(sq_1h, Color::White),
+            "Drop pawn mate at board edge should be detected"
+        );
+
+        let moves = gen.generate_all();
+        let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_1h);
+        assert!(illegal_drop.is_none(), "Drop pawn mate at board edge should not be allowed");
+    }
+
+    #[test]
+    fn test_drop_pawn_false_positive_cases() {
+        let mut pos = Position::empty();
+
+        // 偽陽性防止：歩を支える駒がピンされている
+        pos.side_to_move = Color::Black;
+
+        // 後手の配置
+        pos.board
+            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
+        pos.board
+            .put_piece(Square::new(1, 7), Piece::new(PieceType::Rook, Color::White)); // 8h
+
+        // 先手の配置
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支えるが...
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black)); // 5a - 金がピンされている！
+
+        // 先手が歩を持っている
+        pos.hands[Color::Black as usize][6] = 1;
+
+        let mut gen = MoveGen::new(&pos);
+
+        // 5gに歩を打つ
+        let sq_5g = Square::new(4, 6);
+
+        // 打ち歩詰めではないことを確認（歩に紐がついていない - 金がピンされているため）
+        assert!(
+            !gen.is_drop_pawn_mate(sq_5g, Color::White),
+            "Should not be drop pawn mate when supporting piece is pinned"
+        );
+
+        let moves = gen.generate_all();
+        let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
+        assert!(
+            legal_drop.is_some(),
+            "Pawn drop should be allowed when support is invalid due to pin"
+        );
     }
 }

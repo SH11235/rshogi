@@ -46,9 +46,15 @@
 
 ### Known Issues
 
-1. Drop pawn mate (打ち歩詰め) detection is incomplete
-2. No transposition table yet
-3. Basic evaluation function needs improvement
+1. No transposition table yet
+2. Basic evaluation function needs improvement
+
+### Recently Fixed
+
+1. Drop pawn mate (打ち歩詰め) detection is now complete with comprehensive test coverage including:
+   - Basic drop pawn mate detection
+   - Pinned defender scenarios
+   - Multiple edge cases and false positive prevention
 
 ### Next Steps (Phase 2-4)
 
