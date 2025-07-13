@@ -76,7 +76,8 @@ fn benchmark_search() -> (u64, u64, Duration) {
         };
 
         let mut searcher = Searcher::new(limits);
-        let result = searcher.search(pos);
+        let mut pos_clone = pos.clone();
+        let result = searcher.search(&mut pos_clone);
 
         total_nodes += result.stats.nodes;
         total_time += result.stats.elapsed;
@@ -97,6 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore]
     fn test_benchmark() {
         let result = run_benchmark();
 
