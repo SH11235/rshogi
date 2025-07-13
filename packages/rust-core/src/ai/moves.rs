@@ -19,6 +19,24 @@ impl Move {
     /// Null move constant
     pub const NULL: Self = Move { data: 0 };
 
+    /// Create null move (for compatibility)
+    #[inline]
+    pub const fn null() -> Self {
+        Self::NULL
+    }
+
+    /// Create normal move (convenience method)
+    #[inline]
+    pub fn make_normal(from: Square, to: Square) -> Self {
+        Self::normal(from, to, false)
+    }
+
+    /// Create drop move (convenience method)
+    #[inline]
+    pub fn make_drop(piece_type: PieceType, to: Square) -> Self {
+        Self::drop(piece_type, to)
+    }
+
     /// Create a normal move (piece moving on board)
     #[inline]
     pub fn normal(from: Square, to: Square, promote: bool) -> Self {
@@ -478,7 +496,7 @@ mod tests {
         }
 
         // 参照イテレータ
-        let collected: Vec<_> = list.as_slice().iter().cloned().collect();
+        let collected: Vec<_> = list.as_slice().to_vec();
         assert_eq!(collected, moves_data);
 
         // into_iterイテレータ

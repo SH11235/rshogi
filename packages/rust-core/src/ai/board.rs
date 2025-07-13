@@ -162,6 +162,30 @@ impl Piece {
         }
     }
 
+    /// Check if piece is promoted
+    #[inline]
+    pub const fn is_promoted(self) -> bool {
+        self.promoted
+    }
+
+    /// Promote this piece
+    #[inline]
+    pub fn promote(self) -> Self {
+        Piece {
+            promoted: true,
+            ..self
+        }
+    }
+
+    /// Flip piece color
+    #[inline]
+    pub fn flip_color(self) -> Self {
+        Piece {
+            color: self.color.flip(),
+            ..self
+        }
+    }
+
     /// Convert to index (0-13)
     #[inline]
     pub fn to_index(self) -> usize {
@@ -190,6 +214,12 @@ impl Color {
             Color::Black => Color::White,
             Color::White => Color::Black,
         }
+    }
+
+    /// Flip color (same as opposite)
+    #[inline]
+    pub const fn flip(self) -> Self {
+        self.opposite()
     }
 }
 
@@ -593,6 +623,16 @@ impl Position {
         false
     }
 
+    /// Get king square for color
+    pub fn king_square(&self, color: Color) -> Option<Square> {
+        self.board.king_square(color)
+    }
+
+    /// Get piece at square
+    pub fn piece_at(&self, sq: Square) -> Option<Piece> {
+        self.board.piece_on(sq)
+    }
+
     /// Make a move on the position
     pub fn do_move(&mut self, mv: super::moves::Move) -> UndoInfo {
         // Save current hash to history
@@ -967,7 +1007,7 @@ mod tests {
         // 成った駒になっていることを確認
         let piece = board.piece_on(Square::new(2, 7)).unwrap();
         assert_eq!(piece.piece_type, PieceType::Pawn);
-        assert_eq!(piece.promoted, true);
+        assert!(piece.promoted);
         assert_eq!(piece.color, Color::Black);
     }
 
@@ -1351,7 +1391,7 @@ mod tests {
             // その筋の全ての升がセットされているか確認
             for rank in 0..9 {
                 let sq = Square::new(file, rank);
-                assert!(mask.test(sq), "file {} rank {} should be set", file, rank);
+                assert!(mask.test(sq), "file {file} rank {rank} should be set");
             }
 
             // 他の筋の升はセットされていないか確認
@@ -1359,12 +1399,7 @@ mod tests {
                 if other_file != file {
                     for rank in 0..9 {
                         let sq = Square::new(other_file, rank);
-                        assert!(
-                            !mask.test(sq),
-                            "file {} rank {} should not be set",
-                            other_file,
-                            rank
-                        );
+                        assert!(!mask.test(sq), "file {other_file} rank {rank} should not be set");
                     }
                 }
             }

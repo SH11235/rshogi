@@ -4,6 +4,12 @@
 
 use super::board::{Color, PieceType, Position};
 
+/// Trait for position evaluation
+pub trait Evaluator {
+    /// Evaluate position from side to move perspective
+    fn evaluate(&self, pos: &Position) -> i32;
+}
+
 /// Piece values in centipawns
 const PIECE_VALUES: [i32; 8] = [
     0,    // King (infinite value, but we use 0 here)
@@ -128,6 +134,15 @@ fn evaluate_position(pos: &Position) -> i32 {
     score
 }
 
+/// Simple material evaluator implementing Evaluator trait
+pub struct MaterialEvaluator;
+
+impl Evaluator for MaterialEvaluator {
+    fn evaluate(&self, pos: &Position) -> i32 {
+        evaluate(pos)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,7 +151,8 @@ mod tests {
     #[test]
     fn test_evaluate_startpos() {
         let pos = Position::startpos();
-        let score = evaluate(&pos);
+        let evaluator = MaterialEvaluator;
+        let score = evaluator.evaluate(&pos);
 
         // Starting position should be roughly equal
         assert!(score.abs() < 100);
@@ -157,7 +173,8 @@ mod tests {
         pos.board
             .put_piece(Square::new(8, 8), Piece::new(PieceType::Bishop, Color::White));
 
-        let score = evaluate(&pos);
+        let evaluator = MaterialEvaluator;
+        let score = evaluator.evaluate(&pos);
 
         // Black (to move) should be ahead by 200 (rook=1000 - bishop=800)
         assert_eq!(score, 200);
@@ -182,7 +199,8 @@ mod tests {
         tokin_white.promoted = true;
         pos.board.put_piece(Square::new(8, 8), tokin_white);
 
-        let score = evaluate(&pos);
+        let evaluator = MaterialEvaluator;
+        let score = evaluator.evaluate(&pos);
 
         // Should be equal (both have tokin worth 100+300=400)
         assert_eq!(score, 0);
