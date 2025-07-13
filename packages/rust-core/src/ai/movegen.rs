@@ -89,10 +89,9 @@ impl<'a> MoveGen<'a> {
             }
         }
 
-        // Generate drop moves if not in check
-        if self.checkers.is_empty() {
-            self.generate_drop_moves();
-        }
+        // Generate drop moves
+        // When in check, drops can still be legal if they block the check
+        self.generate_drop_moves();
 
         // Note: promoted pieces are already handled in the piece-specific methods
 
@@ -445,6 +444,27 @@ impl<'a> MoveGen<'a> {
         let us = self.pos.side_to_move;
         let empty_squares = !self.pos.board.all_bb;
 
+        // If in check, only consider drops that block the check
+        let drop_targets = if self.checkers.count_ones() == 1 {
+            // Single check - can block
+            let checker_sq = self.checkers.lsb().unwrap();
+            let king_sq = self.king_sq;
+
+            // For sliding pieces, we can drop on squares between checker and king
+            if self.is_sliding_piece(checker_sq) {
+                self.between_bb(checker_sq, king_sq) & empty_squares
+            } else {
+                // Non-sliding pieces can't be blocked
+                Bitboard::EMPTY
+            }
+        } else if self.checkers.count_ones() > 1 {
+            // Double check - no drops can help
+            Bitboard::EMPTY
+        } else {
+            // Not in check - can drop anywhere valid
+            empty_squares
+        };
+
         // Check each piece type in hand
         for piece_idx in 0..7 {
             let piece_type = match piece_idx {
@@ -464,7 +484,7 @@ impl<'a> MoveGen<'a> {
             }
 
             // Get valid drop squares for this piece type
-            let valid_drops = self.get_valid_drop_squares(piece_type, empty_squares);
+            let valid_drops = self.get_valid_drop_squares(piece_type, empty_squares) & drop_targets;
 
             let mut drops = valid_drops;
             while let Some(to) = drops.pop_lsb() {
@@ -971,8 +991,9 @@ impl<'a> MoveGen<'a> {
         test_occupied.clear(from);
         test_occupied.set(to);
 
-        // Check if any enemy piece attacks king square
-        let king_sq = self.king_sq;
+        // Check if any enemy piece attacks the destination square
+        // (This assumes the move is a king move)
+        let king_sq = to;
 
         // Check sliding attacks with updated occupancy
         let enemy_rooks = self.pos.board.piece_bb[them as usize][PieceType::Rook as usize];
@@ -1011,6 +1032,17 @@ impl<'a> MoveGen<'a> {
 
         // Same file, rank, or diagonal
         file_diff == 0 || rank_diff == 0 || file_diff == rank_diff
+    }
+
+    /// Check if a piece at given square is a sliding piece
+    fn is_sliding_piece(&self, sq: Square) -> bool {
+        if let Some(piece) = self.pos.board.piece_on(sq) {
+            matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop | PieceType::Lance)
+                || (piece.promoted
+                    && matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop))
+        } else {
+            false
+        }
     }
 
     /// Check if two squares are aligned for rook movement
@@ -1632,5 +1664,264 @@ mod tests {
         }
 
         println!("OK: No king capture moves generated");
+    }
+
+    #[test]
+    fn test_check_evasion_king_moves() {
+        // 王手回避：玉の移動で逃げる
+        let mut pos = Position::empty();
+
+        // 先手玉が5五、後手飛車が5八で王手
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 王手されているので、玉が移動するか、飛車の利きを遮るしかない
+        // 玉は飛車の利きから逃げる必要がある
+        let king_moves: Vec<_> = moves
+            .as_slice()
+            .iter()
+            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(4, 4)))
+            .collect();
+
+        // 玉の逃げ場所を確認（5筋以外）
+        for m in &king_moves {
+            assert_ne!(m.to().file(), 4, "King should not move on the same file as the rook");
+        }
+    }
+
+    #[test]
+    fn test_check_evasion_block() {
+        // 王手回避：合駒で防ぐ
+        let mut pos = Position::empty();
+
+        // 先手玉が5一、後手飛車が5八で王手、先手は金を持っている
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+        pos.hands[Color::Black as usize][2] = 1; // 金を持っている
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 5筋に金を打って飛車の利きを遮る手があるはず
+        let block_drops: Vec<_> =
+            moves.as_slice().iter().filter(|m| m.is_drop() && m.to().file() == 4).collect();
+
+        assert!(!block_drops.is_empty(), "Should be able to block with a drop");
+    }
+
+    #[test]
+    fn test_check_evasion_capture() {
+        // 王手回避：王手している駒を取る
+        let mut pos = Position::empty();
+
+        // 先手玉が5五、後手金が4四で王手、先手銀が3三
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(5, 5), Piece::new(PieceType::Gold, Color::White));
+        pos.board
+            .put_piece(Square::new(6, 6), Piece::new(PieceType::Silver, Color::Black));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 銀で金を取る手があるはず
+        let capture_move = moves.as_slice().iter().find(|m| {
+            !m.is_drop() && m.from() == Some(Square::new(6, 6)) && m.to() == Square::new(5, 5)
+        });
+
+        assert!(capture_move.is_some(), "Should be able to capture the checking piece");
+    }
+
+    #[test]
+    fn test_double_check_only_king_moves() {
+        // 両王手の場合は玉が逃げるしかない
+        let mut pos = Position::empty();
+
+        // 先手玉が5五、後手飛車が5八と角が1九で両王手
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+        pos.board
+            .put_piece(Square::new(8, 0), Piece::new(PieceType::Bishop, Color::White));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 全ての手が玉の移動であることを確認
+        for m in moves.as_slice() {
+            if !m.is_drop() {
+                assert_eq!(
+                    m.from(),
+                    Some(Square::new(4, 4)),
+                    "Only king moves allowed in double check"
+                );
+            } else {
+                panic!("No drops allowed in double check");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pin_restriction() {
+        // ピンされた駒の移動制限
+        let mut pos = Position::empty();
+
+        // 先手玉5一、先手金5五、後手飛車5九でピン
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::White));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 金の動きは5筋のみ（ピンの方向）
+        let gold_moves: Vec<_> = moves
+            .as_slice()
+            .iter()
+            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(4, 4)))
+            .collect();
+
+        for m in &gold_moves {
+            assert_eq!(m.to().file(), 4, "Pinned piece can only move along pin ray");
+        }
+    }
+
+    #[test]
+    fn test_board_edge_knight_moves() {
+        // 盤端での桂馬の動き
+        let mut pos = Position::empty();
+
+        // 桂馬を1筋と9筋に配置
+        pos.board
+            .put_piece(Square::new(8, 0), Piece::new(PieceType::Knight, Color::Black)); // 1九
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::Knight, Color::Black)); // 9九
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 1九の桂馬は2七にしか行けない
+        let knight1_moves: Vec<_> = moves
+            .as_slice()
+            .iter()
+            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(8, 0)))
+            .collect();
+
+        assert_eq!(knight1_moves.len(), 1);
+        assert_eq!(knight1_moves[0].to(), Square::new(7, 2));
+
+        // 9九の桂馬は8七にしか行けない
+        let knight9_moves: Vec<_> = moves
+            .as_slice()
+            .iter()
+            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(0, 0)))
+            .collect();
+
+        assert_eq!(knight9_moves.len(), 1);
+        assert_eq!(knight9_moves[0].to(), Square::new(1, 2));
+    }
+
+    #[test]
+    fn test_forced_promotion_pawn() {
+        // 歩の1段目成り強制
+        let mut pos = Position::empty();
+
+        // 先手歩を2段目に配置
+        pos.board
+            .put_piece(Square::new(4, 7), Piece::new(PieceType::Pawn, Color::Black)); // 5二
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::King, Color::White));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 歩が1段目に進む手は必ず成り
+        let pawn_moves: Vec<_> = moves
+            .as_slice()
+            .iter()
+            .filter(|m| {
+                !m.is_drop() && m.from() == Some(Square::new(4, 7)) && m.to() == Square::new(4, 8)
+            })
+            .collect();
+
+        assert_eq!(pawn_moves.len(), 1);
+        assert!(pawn_moves[0].is_promote(), "Pawn must promote on rank 1");
+    }
+
+    #[test]
+    fn test_forced_promotion_lance() {
+        // 香車の1段目成り強制
+        let mut pos = Position::empty();
+
+        // 先手香を2段目に配置
+        pos.board
+            .put_piece(Square::new(0, 7), Piece::new(PieceType::Lance, Color::Black)); // 9二
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::King, Color::White));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 香が1段目に進む手は必ず成り
+        let lance_moves: Vec<_> = moves
+            .as_slice()
+            .iter()
+            .filter(|m| {
+                !m.is_drop() && m.from() == Some(Square::new(0, 7)) && m.to() == Square::new(0, 8)
+            })
+            .collect();
+
+        assert_eq!(lance_moves.len(), 1);
+        assert!(lance_moves[0].is_promote(), "Lance must promote on rank 1");
+    }
+
+    #[test]
+    fn test_forced_promotion_knight() {
+        // 桂馬の2段目成り強制
+        let mut pos = Position::empty();
+
+        // 先手桂を4段目に配置
+        pos.board
+            .put_piece(Square::new(1, 5), Piece::new(PieceType::Knight, Color::Black)); // 8四
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::King, Color::White));
+
+        let mut gen = MoveGen::new(&pos);
+        let moves = gen.generate_all();
+
+        // 桂が2段目に進む手は必ず成り
+        let knight_moves: Vec<_> = moves
+            .as_slice()
+            .iter()
+            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(1, 5)))
+            .collect();
+
+        // 7二と9二への移動が可能で、両方とも成り
+        for m in &knight_moves {
+            if m.to().rank() == 7 {
+                // 2段目
+                assert!(m.is_promote(), "Knight must promote on rank 2");
+            }
+        }
     }
 }
