@@ -8,6 +8,9 @@ use super::movegen::MoveGen;
 use super::moves::Move;
 use std::time::{Duration, Instant};
 
+/// Infinity score for search bounds
+const INFINITY_SCORE: i32 = 30000;
+
 /// Search limits
 #[derive(Clone, Debug)]
 pub struct SearchLimits {
@@ -80,11 +83,11 @@ impl Searcher {
         self.nodes = 0;
 
         let mut best_move = None;
-        let mut best_score = -30000; // Negative infinity
+        let mut best_score = -INFINITY_SCORE;
 
         // Iterative deepening
         for depth in 1..=self.limits.depth {
-            let score = self.alpha_beta(pos, depth, -30000, 30000);
+            let score = self.alpha_beta(pos, depth, -INFINITY_SCORE, INFINITY_SCORE);
 
             // Check time limit
             if self.should_stop() {
@@ -134,14 +137,14 @@ impl Searcher {
         if moves.is_empty() {
             if gen.checkers.count_ones() > 0 {
                 // Checkmate - return negative score
-                return -30000 + ply as i32;
+                return -INFINITY_SCORE + ply as i32;
             } else {
                 // Stalemate (shouldn't happen in shogi)
                 return 0;
             }
         }
 
-        let mut best_score = -30000;
+        let mut best_score = -INFINITY_SCORE;
 
         // Search all moves
         for &mv in moves.as_slice() {
