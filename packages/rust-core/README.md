@@ -86,8 +86,13 @@ make test       # Standard tests
 make test-wasm  # Browser tests
 
 # Generate code coverage report (requires cargo-tarpaulin)
-cargo tarpaulin --html  # Generates tarpaulin-report.html
+cargo tarpaulin --out html --lib  # Generates tarpaulin-report.html
 cargo tarpaulin --out Xml  # Generates cobertura.xml for CI
+
+# Benchmark tests (ignored by default due to execution time)
+cargo test -- --ignored              # Run only ignored tests (benchmarks)
+cargo test -- --include-ignored      # Run all tests including benchmarks
+cargo test test_benchmark -- --ignored  # Run specific benchmark test
 ```
 
 ## Code Quality
