@@ -7,6 +7,9 @@ use lazy_static::lazy_static;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
+/// Maximum number of pieces that can be held in hand (18 pieces max)
+const MAX_HAND_COUNT: usize = 18;
+
 /// Zobrist hash tables
 pub struct ZobristTable {
     /// Hash values for pieces on squares [color][piece_kind][square]
@@ -14,8 +17,8 @@ pub struct ZobristTable {
     pub piece_square: [[[u64; 81]; 14]; 2],
 
     /// Hash values for pieces in hand [color][piece_type][count]
-    /// piece_type is 0-6 (no King), count is 0-18 (max possible)
-    pub hand: [[[u64; 19]; 7]; 2],
+    /// piece_type is 0-6 (no King), count is 0-MAX_HAND_COUNT (max possible)
+    pub hand: [[[u64; MAX_HAND_COUNT + 1]; 7]; 2],
 
     /// Hash value for side to move (White)
     pub side_to_move: u64,
@@ -35,7 +38,7 @@ impl ZobristTable {
 
         let mut table = ZobristTable {
             piece_square: [[[0; 81]; 14]; 2],
-            hand: [[[0; 19]; 7]; 2],
+            hand: [[[0; MAX_HAND_COUNT + 1]; 7]; 2],
             side_to_move: rng.gen(),
         };
 
@@ -51,7 +54,7 @@ impl ZobristTable {
         // Generate random values for pieces in hand
         for color in 0..2 {
             for piece_type in 0..7 {
-                for count in 0..19 {
+                for count in 0..=MAX_HAND_COUNT {
                     table.hand[color][piece_type][count] = rng.gen();
                 }
             }
@@ -76,7 +79,7 @@ impl ZobristTable {
         }
         let color_idx = color as usize;
         let piece_idx = piece_type as usize - 1; // Skip King (0)
-        let count_idx = (count as usize).min(18);
+        let count_idx = (count as usize).min(MAX_HAND_COUNT);
         self.hand[color_idx][piece_idx][count_idx]
     }
 
@@ -299,7 +302,7 @@ mod tests {
         // Test hand values
         for color in 0..2 {
             for piece in 0..7 {
-                for count in 0..19 {
+                for count in 0..=MAX_HAND_COUNT {
                     let hash = table.hand[color][piece][count];
                     assert!(values.insert(hash), "Duplicate hash found");
                 }
