@@ -1,0 +1,79 @@
+name: Code Coverage
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/coverage.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/coverage.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/rust-core
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        components: llvm-tools-preview
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libssl-dev
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Cache cargo index
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Cache cargo build
+      uses: actions/cache@v3
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Install cargo-tarpaulin
+      run: |
+        cargo install cargo-tarpaulin || true
+    
+    - name: Run tests with coverage
+      run: |
+        cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./packages/rust-core/cobertura.xml
+        flags: rust-core
+        name: rust-core-coverage
+        fail_ci_if_error: false
+    
+    - name: Archive code coverage results
+      uses: actions/upload-artifact@v3
+      with:
+        name: code-coverage-report
+        path: packages/rust-core/cobertura.xml

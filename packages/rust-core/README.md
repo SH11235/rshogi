@@ -1,5 +1,7 @@
 # Rust Core for Shogi
 
+[![codecov](https://codecov.io/gh/SH11235/shogi/branch/main/graph/badge.svg?flag=rust-core)](https://codecov.io/gh/SH11235/shogi)
+
 This package contains the WebAssembly (WASM) implementation for advanced Shogi features including WebRTC communication, mate search, and opening book functionality.
 
 ## Features
@@ -14,6 +16,7 @@ This package contains the WebAssembly (WASM) implementation for advanced Shogi f
 - Rust toolchain (install from https://rustup.rs/)
 - wasm-pack (`cargo install wasm-pack`)
 - Make (optional, for convenience commands)
+- cargo-tarpaulin (optional, for coverage reports): `cargo install cargo-tarpaulin`
 
 ## Project Structure
 
@@ -81,6 +84,15 @@ wasm-pack test --chrome --headless
 # Or use Make commands
 make test       # Standard tests
 make test-wasm  # Browser tests
+
+# Generate code coverage report (requires cargo-tarpaulin)
+cargo tarpaulin --out html --lib  # Generates tarpaulin-report.html
+cargo tarpaulin --out Xml  # Generates cobertura.xml for CI
+
+# Benchmark tests (ignored by default due to execution time)
+cargo test -- --ignored              # Run only ignored tests (benchmarks)
+cargo test -- --include-ignored      # Run all tests including benchmarks
+cargo test test_benchmark -- --ignored  # Run specific benchmark test
 ```
 
 ## Code Quality
