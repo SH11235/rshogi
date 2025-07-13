@@ -440,6 +440,19 @@ impl Board {
     }
 }
 
+/// Information needed to undo a move
+#[derive(Clone, Debug)]
+pub struct UndoInfo {
+    /// Captured piece (if any)
+    pub captured: Option<Piece>,
+    /// Whether the moving piece was promoted before the move
+    pub moved_piece_was_promoted: bool,
+    /// Previous hash value
+    pub previous_hash: u64,
+    /// Previous ply count
+    pub previous_ply: u16,
+}
+
 /// Position structure
 #[derive(Clone, Debug)]
 pub struct Position {
@@ -581,9 +594,17 @@ impl Position {
     }
 
     /// Make a move on the position
-    pub fn do_move(&mut self, mv: super::moves::Move) {
+    pub fn do_move(&mut self, mv: super::moves::Move) -> UndoInfo {
         // Save current hash to history
         self.history.push(self.hash);
+
+        // Initialize undo info
+        let mut undo_info = UndoInfo {
+            captured: None,
+            moved_piece_was_promoted: false,
+            previous_hash: self.hash,
+            previous_ply: self.ply,
+        };
 
         if mv.is_drop() {
             // Handle drop move
@@ -627,12 +648,17 @@ impl Position {
             // Get moving piece
             let mut piece = self.board.piece_on(from).unwrap();
 
+            // Save promoted status for undo
+            undo_info.moved_piece_was_promoted = piece.promoted;
+
             // Remove piece from source
             self.board.remove_piece(from);
             self.hash ^= self.piece_square_zobrist(piece, from);
 
             // Handle capture
             if let Some(captured) = self.board.piece_on(to) {
+                // Save captured piece for undo
+                undo_info.captured = Some(captured);
                 // Debug check - should never capture king
                 if captured.piece_type == PieceType::King {
                     println!("Move details: from={from}, to={to}, piece={piece:?}");
@@ -681,16 +707,93 @@ impl Position {
 
         // Switch side to move
         self.side_to_move = self.side_to_move.opposite();
-        self.hash ^= self.side_to_move_zobrist();
+        // Always XOR with the White side hash to toggle between Black/White
+        use crate::ai::zobrist::ZOBRIST;
+        self.hash ^= ZOBRIST.side_to_move;
 
         // Increment ply
         self.ply += 1;
+
+        undo_info
+    }
+
+    /// Undo a move on the position
+    pub fn undo_move(&mut self, mv: super::moves::Move, undo_info: UndoInfo) {
+        // Remove last hash from history
+        self.history.pop();
+
+        // Restore hash value
+        self.hash = undo_info.previous_hash;
+
+        // Restore side to move and ply
+        self.side_to_move = self.side_to_move.opposite();
+        self.ply = undo_info.previous_ply;
+
+        if mv.is_drop() {
+            // Undo drop move
+            let to = mv.to();
+            let piece_type = mv.drop_piece_type();
+
+            // Remove piece from board
+            self.board.remove_piece(to);
+
+            // Add back to hand
+            let hand_idx = match piece_type {
+                PieceType::Rook => 0,
+                PieceType::Bishop => 1,
+                PieceType::Gold => 2,
+                PieceType::Silver => 3,
+                PieceType::Knight => 4,
+                PieceType::Lance => 5,
+                PieceType::Pawn => 6,
+                _ => unreachable!(),
+            };
+            self.hands[self.side_to_move as usize][hand_idx] += 1;
+        } else {
+            // Undo normal move
+            let from = mv.from().unwrap();
+            let to = mv.to();
+
+            // Get piece from destination
+            let mut piece = self.board.piece_on(to).unwrap();
+
+            // Remove piece from destination
+            self.board.remove_piece(to);
+
+            // Restore promotion status
+            if mv.is_promote() {
+                piece.promoted = undo_info.moved_piece_was_promoted;
+            }
+
+            // Place piece back at source
+            self.board.put_piece(from, piece);
+
+            // Restore captured piece if any
+            if let Some(captured) = undo_info.captured {
+                self.board.put_piece(to, captured);
+
+                // Remove from hand
+                let captured_type = captured.piece_type;
+                let hand_idx = match captured_type {
+                    PieceType::Rook => 0,
+                    PieceType::Bishop => 1,
+                    PieceType::Gold => 2,
+                    PieceType::Silver => 3,
+                    PieceType::Knight => 4,
+                    PieceType::Lance => 5,
+                    PieceType::Pawn => 6,
+                    PieceType::King => 0, // Should never reach here
+                };
+                self.hands[self.side_to_move as usize][hand_idx] -= 1;
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::moves::Move;
 
     #[test]
     fn test_square_operations() {
@@ -772,6 +875,664 @@ mod tests {
             for piece_type in 0..7 {
                 assert_eq!(pos.hands[color][piece_type], 0);
             }
+        }
+    }
+
+    #[test]
+    fn test_do_move_normal_move() {
+        let mut pos = Position::startpos();
+        let from = Square::new(6, 2); // 3g
+        let to = Square::new(6, 3); // 3f
+        let mv = Move::normal(from, to, false);
+
+        // 初期ハッシュを記録
+        let initial_hash = pos.hash;
+
+        // 手を実行
+        let _undo_info = pos.do_move(mv);
+
+        // 駒が移動していることを確認
+        assert_eq!(pos.board.piece_on(from), None);
+        assert_eq!(pos.board.piece_on(to), Some(Piece::new(PieceType::Pawn, Color::Black)));
+
+        // 手番が切り替わっていることを確認
+        assert_eq!(pos.side_to_move, Color::White);
+
+        // 手数が増えていることを確認
+        assert_eq!(pos.ply, 1);
+
+        // ハッシュが変わっていることを確認
+        assert_ne!(pos.hash, initial_hash);
+
+        // 履歴に追加されていることを確認
+        assert_eq!(pos.history.len(), 1);
+        assert_eq!(pos.history[0], initial_hash);
+    }
+
+    #[test]
+    fn test_do_move_capture() {
+        // 駒を取る手のテスト
+        let mut pos = Position::startpos();
+
+        // 歩を前進させる
+        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        let _undo1 = pos.do_move(mv1);
+
+        // 相手の歩を前進させる
+        let mv2 = Move::normal(Square::new(4, 6), Square::new(4, 5), false); // 5c-5d
+        let _undo2 = pos.do_move(mv2);
+
+        // さらに歩を前進
+        let mv3 = Move::normal(Square::new(6, 3), Square::new(6, 4), false); // 3f-3e
+        let _undo3 = pos.do_move(mv3);
+
+        // 相手の歩をさらに前進
+        let mv4 = Move::normal(Square::new(4, 5), Square::new(4, 4), false); // 5d-5e
+        let _undo4 = pos.do_move(mv4);
+
+        // 歩で相手の歩を取る
+        let from = Square::new(6, 4); // 3e
+        let to = Square::new(4, 4); // 5e
+        let mv = Move::normal(from, to, false);
+
+        let captured_piece = pos.board.piece_on(to).unwrap();
+        assert_eq!(captured_piece.piece_type, PieceType::Pawn);
+        assert_eq!(captured_piece.color, Color::White);
+
+        let _undo5 = pos.do_move(mv);
+
+        // 駒が取られていることを確認
+        assert_eq!(pos.board.piece_on(from), None);
+        assert_eq!(pos.board.piece_on(to), Some(Piece::new(PieceType::Pawn, Color::Black)));
+
+        // 持ち駒が増えていることを確認
+        assert_eq!(pos.hands[Color::Black as usize][6], 1); // 歩のインデックスは6
+    }
+
+    #[test]
+    fn test_do_move_promotion() {
+        // 成りのテスト - 成り動作だけをチェック
+        let _pos = Position::startpos();
+
+        // 手動で駒を配置して成りをテスト
+        let mut board = Board::empty();
+        let mut pawn = Piece::new(PieceType::Pawn, Color::Black);
+        board.put_piece(Square::new(2, 6), pawn);
+
+        // do_moveを使わずに直接成りをテスト
+        pawn.promoted = true;
+        board.remove_piece(Square::new(2, 6));
+        board.put_piece(Square::new(2, 7), pawn);
+
+        // 成った駒になっていることを確認
+        let piece = board.piece_on(Square::new(2, 7)).unwrap();
+        assert_eq!(piece.piece_type, PieceType::Pawn);
+        assert_eq!(piece.promoted, true);
+        assert_eq!(piece.color, Color::Black);
+    }
+
+    #[test]
+    fn test_do_move_drop() {
+        // 持ち駒を打つテスト
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+
+        // 最小限の駒を配置
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+
+        // 持ち駒を設定
+        pos.hands[Color::Black as usize][6] = 1;
+
+        // 歩を打つ
+        let to = Square::new(4, 4); // 5e
+        let mv = Move::drop(PieceType::Pawn, to);
+
+        let _undo_info = pos.do_move(mv);
+
+        // 駒が置かれていることを確認
+        assert_eq!(pos.board.piece_on(to), Some(Piece::new(PieceType::Pawn, Color::Black)));
+
+        // 持ち駒が減っていることを確認
+        assert_eq!(pos.hands[Color::Black as usize][6], 0);
+
+        // 手番が切り替わっていることを確認
+        assert_eq!(pos.side_to_move, Color::White);
+    }
+
+    #[test]
+    fn test_do_move_all_piece_types() {
+        // 各駒種の移動をテスト
+        let test_cases = vec![
+            // (from, to, piece_type)
+            (
+                Square::new(6, 2), // 3g
+                Square::new(6, 3), // 3f
+                PieceType::Pawn,
+            ),
+            (
+                Square::new(4, 0), // 5i
+                Square::new(5, 1), // 4h
+                PieceType::King,
+            ),
+            (
+                Square::new(5, 0), // 4i
+                Square::new(5, 1), // 4h
+                PieceType::Gold,
+            ),
+            (
+                Square::new(6, 0), // 3i
+                Square::new(6, 1), // 3h
+                PieceType::Silver,
+            ),
+            (
+                Square::new(7, 0), // 2i
+                Square::new(6, 2), // 3g
+                PieceType::Knight,
+            ),
+            (
+                Square::new(8, 0), // 1i
+                Square::new(8, 1), // 1h
+                PieceType::Lance,
+            ),
+            (
+                Square::new(7, 1), // 2h
+                Square::new(7, 3), // 2f
+                PieceType::Rook,
+            ),
+            (
+                Square::new(1, 1), // 8h
+                Square::new(2, 2), // 7g
+                PieceType::Bishop,
+            ),
+        ];
+
+        for (from, to, expected_piece_type) in test_cases {
+            let mut pos = Position::startpos();
+            let piece = pos.board.piece_on(from);
+
+            // デバッグ: 初期配置の確認
+            if piece.is_none() {
+                println!("No piece at {:?}", from);
+                println!("Expected: {:?}", expected_piece_type);
+                // 周辺の駒を確認
+                for file in 0..9 {
+                    if let Some(p) = pos.board.piece_on(Square::new(file, 1)) {
+                        if p.piece_type == expected_piece_type && p.color == Color::Black {
+                            println!("Found {:?} at Square::new({}, 1)", expected_piece_type, file);
+                        }
+                    }
+                }
+                panic!("Piece not found at expected position");
+            }
+
+            let piece = piece.unwrap();
+            assert_eq!(piece.piece_type, expected_piece_type);
+
+            let mv = Move::normal(from, to, false);
+            let _undo_info = pos.do_move(mv);
+
+            // 駒が移動していることを確認
+            assert_eq!(pos.board.piece_on(from), None);
+            let moved_piece = pos.board.piece_on(to).unwrap();
+            assert_eq!(moved_piece.piece_type, expected_piece_type);
+        }
+    }
+
+    #[test]
+    fn test_do_move_drop_all_piece_types() {
+        // 各駒種の持ち駒打ちをテスト
+        let test_cases = vec![
+            (PieceType::Pawn, 6),
+            (PieceType::Lance, 5),
+            (PieceType::Knight, 4),
+            (PieceType::Silver, 3),
+            (PieceType::Gold, 2),
+            (PieceType::Bishop, 1),
+            (PieceType::Rook, 0),
+        ];
+
+        for (piece_type, hand_idx) in test_cases {
+            let mut pos = Position::empty();
+            pos.side_to_move = Color::Black;
+
+            // 最小限の駒を配置
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+
+            // 各種持ち駒を設定
+            pos.hands[Color::Black as usize][hand_idx] = 1;
+
+            // 持ち駒があることを確認
+            assert!(pos.hands[Color::Black as usize][hand_idx] > 0);
+
+            let to = Square::new(4, 4); // 5e
+            let mv = Move::drop(piece_type, to);
+
+            let _undo_info = pos.do_move(mv);
+
+            // 駒が置かれていることを確認
+            let placed_piece = pos.board.piece_on(to).unwrap();
+            assert_eq!(placed_piece.piece_type, piece_type);
+            assert_eq!(placed_piece.color, Color::Black);
+            assert!(!placed_piece.promoted);
+
+            // 持ち駒が減っていることを確認
+            assert_eq!(pos.hands[Color::Black as usize][hand_idx], 0);
+        }
+    }
+
+    #[test]
+    fn test_do_move_special_promotion_cases() {
+        // 特殊な成りのケース（1段目での成り強制など）
+        // startposを使って基本的な成りの動作をテスト
+        let mut pos = Position::startpos();
+
+        // 歩を前進させて成る
+        // 7七歩
+        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        pos.do_move(mv1);
+
+        // 相手の歩を前進
+        let mv2 = Move::normal(Square::new(6, 6), Square::new(6, 5), false); // 3c-3d
+        pos.do_move(mv2);
+
+        // さらに前進
+        let mv3 = Move::normal(Square::new(6, 3), Square::new(6, 4), false); // 3f-3e
+        pos.do_move(mv3);
+
+        // 相手の歩をさらに前進
+        let mv4 = Move::normal(Square::new(6, 5), Square::new(6, 4), false); // 3d-3e
+        pos.do_move(mv4);
+
+        // 銀を前進させる（成りのテスト用）
+        let mv5 = Move::normal(Square::new(6, 0), Square::new(6, 1), false); // 3i-3h
+        pos.do_move(mv5);
+
+        // パスのような手
+        let mv6 = Move::normal(Square::new(4, 6), Square::new(4, 5), false);
+        pos.do_move(mv6);
+
+        // 銀を敵陣に進めて成る
+        let mv7 = Move::normal(Square::new(6, 1), Square::new(6, 2), false); // 3h-3g
+        pos.do_move(mv7);
+
+        // パスのような手
+        let mv8 = Move::normal(Square::new(4, 5), Square::new(4, 4), false);
+        pos.do_move(mv8);
+
+        // 銀をさらに前進
+        let mv9 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        let _undo9 = pos.do_move(mv9);
+
+        // パスのような手
+        let mv10 = Move::normal(Square::new(4, 4), Square::new(4, 3), false);
+        let _undo10 = pos.do_move(mv10);
+
+        // 銀を敵陣三段目に進めて成る
+        let mv11 = Move::normal(Square::new(6, 3), Square::new(6, 4), true); // 3f-3e+
+        let _undo11 = pos.do_move(mv11);
+
+        let piece = pos.board.piece_on(Square::new(6, 4)).unwrap();
+        assert_eq!(piece.piece_type, PieceType::Silver);
+        assert!(piece.promoted);
+    }
+
+    #[test]
+    fn test_is_repetition() {
+        // 簡単な繰り返しのテスト
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+
+        // 最小限の駒を配置
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::Rook, Color::Black));
+
+        // 初期ハッシュを計算
+        pos.hash = pos.compute_hash();
+        let initial_hash = pos.hash;
+
+        // 飛車を動かす
+        let mv1 = Move::normal(Square::new(0, 0), Square::new(0, 1), false);
+        let _undo1 = pos.do_move(mv1);
+
+        // 飛車を戻す
+        let mv2 = Move::normal(Square::new(0, 1), Square::new(0, 0), false);
+        let _undo2 = pos.do_move(mv2);
+
+        // この時点で初期局面に戻った（1回目）
+        assert_eq!(pos.hash, initial_hash);
+        assert!(!pos.is_repetition()); // まだ繰り返しではない
+
+        // 2回目の往復
+        let _undo3 = pos.do_move(mv1);
+        let _undo4 = pos.do_move(mv2);
+
+        // この時点で初期局面に戻った（2回目）
+        assert_eq!(pos.hash, initial_hash);
+        assert!(!pos.is_repetition()); // まだ3回ではない
+
+        // 3回目の往復
+        let _undo5 = pos.do_move(mv1);
+        let _undo6 = pos.do_move(mv2);
+
+        // この時点で初期局面に戻った（3回目）
+        assert_eq!(pos.hash, initial_hash);
+        assert!(pos.is_repetition()); // 3回繰り返しで千日手
+    }
+
+    #[test]
+    fn test_is_repetition_with_different_hands() {
+        // 持ち駒が異なる場合は同一局面ではない
+        let mut pos1 = Position::startpos();
+        let mut pos2 = Position::startpos();
+
+        // 同じ動きだが、pos2では歩を取る
+        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false);
+        pos1.do_move(mv1);
+        pos2.do_move(mv1);
+
+        // pos2では相手の歩を前進させて取る
+        let mv2 = Move::normal(Square::new(6, 6), Square::new(6, 5), false);
+        pos2.do_move(mv2);
+        let mv3 = Move::normal(Square::new(6, 3), Square::new(6, 5), false);
+        pos2.do_move(mv3);
+
+        // 異なるハッシュ値になるはず
+        assert_ne!(pos1.hash, pos2.hash);
+    }
+
+    #[test]
+    fn test_is_repetition_edge_cases() {
+        let mut pos = Position::startpos();
+
+        // 履歴が4未満の場合
+        assert!(!pos.is_repetition());
+
+        let _undo1 = pos.do_move(Move::normal(Square::new(6, 2), Square::new(6, 3), false));
+        assert!(!pos.is_repetition());
+
+        let _undo2 = pos.do_move(Move::normal(Square::new(6, 6), Square::new(6, 5), false));
+        assert!(!pos.is_repetition());
+
+        let _undo3 = pos.do_move(Move::normal(Square::new(6, 3), Square::new(6, 4), false));
+        assert!(!pos.is_repetition());
+    }
+
+    #[test]
+    fn test_king_square_edge_cases() {
+        // 空の盤面（玉がない）
+        let mut board = Board::empty();
+        assert_eq!(board.king_square(Color::Black), None);
+        assert_eq!(board.king_square(Color::White), None);
+
+        // 玉を配置
+        let black_king = Piece::new(PieceType::King, Color::Black);
+        let white_king = Piece::new(PieceType::King, Color::White);
+
+        board.put_piece(Square::new(4, 0), black_king);
+        board.put_piece(Square::new(4, 8), white_king);
+
+        assert_eq!(board.king_square(Color::Black), Some(Square::new(4, 0)));
+        assert_eq!(board.king_square(Color::White), Some(Square::new(4, 8)));
+
+        // 玉を移動
+        board.remove_piece(Square::new(4, 0));
+        board.put_piece(Square::new(5, 1), black_king);
+
+        assert_eq!(board.king_square(Color::Black), Some(Square::new(5, 1)));
+        assert_eq!(board.king_square(Color::White), Some(Square::new(4, 8)));
+    }
+
+    #[test]
+    fn test_square_flip() {
+        // flip()メソッドのテスト
+        let sq = Square::new(2, 3); // インデックス: 2 + 3*9 = 29
+        let flipped = sq.flip(); // 80 - 29 = 51
+
+        // 反転後の座標を計算: 51 = file + rank*9
+        // 51 / 9 = 5 余り 6
+        assert_eq!(flipped.file(), 6); // 51 % 9 = 6
+        assert_eq!(flipped.rank(), 5); // 51 / 9 = 5
+    }
+
+    #[test]
+    fn test_piece_to_index() {
+        // 各駒種のインデックス変換テスト
+        assert_eq!(Piece::new(PieceType::King, Color::Black).to_index(), 0);
+        assert_eq!(Piece::new(PieceType::Rook, Color::Black).to_index(), 1);
+        assert_eq!(Piece::new(PieceType::Bishop, Color::Black).to_index(), 2);
+        assert_eq!(Piece::new(PieceType::Gold, Color::Black).to_index(), 3);
+        assert_eq!(Piece::new(PieceType::Silver, Color::Black).to_index(), 4);
+        assert_eq!(Piece::new(PieceType::Knight, Color::Black).to_index(), 5);
+        assert_eq!(Piece::new(PieceType::Lance, Color::Black).to_index(), 6);
+        assert_eq!(Piece::new(PieceType::Pawn, Color::Black).to_index(), 7);
+
+        // 成り駒
+        let mut promoted_rook = Piece::new(PieceType::Rook, Color::Black);
+        promoted_rook.promoted = true;
+        assert_eq!(promoted_rook.to_index(), 9); // 1 + 8
+
+        let mut promoted_bishop = Piece::new(PieceType::Bishop, Color::Black);
+        promoted_bishop.promoted = true;
+        assert_eq!(promoted_bishop.to_index(), 10); // 2 + 8
+
+        let mut promoted_silver = Piece::new(PieceType::Silver, Color::Black);
+        promoted_silver.promoted = true;
+        assert_eq!(promoted_silver.to_index(), 12); // 4 + 8
+
+        let mut promoted_knight = Piece::new(PieceType::Knight, Color::Black);
+        promoted_knight.promoted = true;
+        assert_eq!(promoted_knight.to_index(), 13); // 5 + 8
+
+        let mut promoted_lance = Piece::new(PieceType::Lance, Color::Black);
+        promoted_lance.promoted = true;
+        assert_eq!(promoted_lance.to_index(), 14); // 6 + 8
+
+        let mut promoted_pawn = Piece::new(PieceType::Pawn, Color::Black);
+        promoted_pawn.promoted = true;
+        assert_eq!(promoted_pawn.to_index(), 15); // 7 + 8
+    }
+
+    #[test]
+    fn test_bitboard_file_mask() {
+        // 各筋のマスクをテスト
+        for file in 0..9 {
+            let mask = Bitboard::file_mask(file);
+
+            // その筋の全ての升がセットされているか確認
+            for rank in 0..9 {
+                let sq = Square::new(file, rank);
+                assert!(mask.test(sq), "file {} rank {} should be set", file, rank);
+            }
+
+            // 他の筋の升はセットされていないか確認
+            for other_file in 0..9 {
+                if other_file != file {
+                    for rank in 0..9 {
+                        let sq = Square::new(other_file, rank);
+                        assert!(
+                            !mask.test(sq),
+                            "file {} rank {} should not be set",
+                            other_file,
+                            rank
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_do_move_undo_move_reversibility() {
+        // do_move/undo_moveの可逆性をテスト
+        let mut pos = Position::startpos();
+        let original_pos = pos.clone();
+
+        // テストケース1: 通常の移動
+        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        let undo_info1 = pos.do_move(mv1);
+
+        // 手を実行後の状態を確認
+        assert_ne!(pos.hash, original_pos.hash);
+        assert_eq!(pos.side_to_move, Color::White);
+        assert_eq!(pos.ply, 1);
+
+        // 手を戻す
+        pos.undo_move(mv1, undo_info1);
+
+        // 完全に元に戻ったことを確認
+        assert_eq!(pos.hash, original_pos.hash);
+        assert_eq!(pos.side_to_move, original_pos.side_to_move);
+        assert_eq!(pos.ply, original_pos.ply);
+        assert_eq!(pos.history.len(), original_pos.history.len());
+
+        // 盤面も元に戻ったことを確認
+        for sq in 0..81 {
+            let square = Square(sq);
+            assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
+        }
+    }
+
+    #[test]
+    fn test_do_move_undo_move_capture() {
+        // 駒を取る手の可逆性をテスト
+        let mut pos = Position::startpos();
+
+        // 準備: 駒を取れる位置まで進める
+        let _u1 = pos.do_move(Move::normal(Square::new(6, 2), Square::new(6, 3), false));
+        let _u2 = pos.do_move(Move::normal(Square::new(4, 6), Square::new(4, 5), false));
+        let _u3 = pos.do_move(Move::normal(Square::new(6, 3), Square::new(6, 4), false));
+        let _u4 = pos.do_move(Move::normal(Square::new(4, 5), Square::new(4, 4), false));
+
+        // この時点の状態を保存
+        let before_capture = pos.clone();
+
+        // 駒を取る
+        let capture_move = Move::normal(Square::new(6, 4), Square::new(4, 4), false);
+        let undo_info = pos.do_move(capture_move);
+
+        // 駒が取れたことを確認
+        assert_eq!(pos.hands[Color::Black as usize][6], 1); // 歩を1枚持っている
+
+        // 手を戻す
+        pos.undo_move(capture_move, undo_info);
+
+        // 完全に元に戻ったことを確認
+        assert_eq!(pos.hash, before_capture.hash);
+        assert_eq!(pos.hands[Color::Black as usize][6], 0); // 持ち駒なし
+        for sq in 0..81 {
+            let square = Square(sq);
+            assert_eq!(pos.board.piece_on(square), before_capture.board.piece_on(square));
+        }
+    }
+
+    #[test]
+    fn test_do_move_undo_move_promotion() {
+        // 成りの可逆性をテスト
+        let mut pos = Position::empty();
+
+        // 銀を敵陣三段目に配置
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Silver, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.hash = pos.compute_hash();
+
+        let before_promotion = pos.clone();
+
+        // 成る
+        let promote_move = Move::normal(Square::new(4, 6), Square::new(4, 7), true);
+        let undo_info = pos.do_move(promote_move);
+
+        // 成ったことを確認
+        let promoted_piece = pos.board.piece_on(Square::new(4, 7)).unwrap();
+        assert!(promoted_piece.promoted);
+
+        // 手を戻す
+        pos.undo_move(promote_move, undo_info);
+
+        // 完全に元に戻ったことを確認
+        assert_eq!(pos.hash, before_promotion.hash);
+        let original_piece = pos.board.piece_on(Square::new(4, 6)).unwrap();
+        assert!(!original_piece.promoted);
+    }
+
+    #[test]
+    fn test_do_move_undo_move_drop() {
+        // 駒打ちの可逆性をテスト
+        let mut pos = Position::empty();
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+
+        // 持ち駒を設定
+        pos.hands[Color::Black as usize][6] = 1; // 歩を1枚
+        pos.hash = pos.compute_hash();
+
+        let before_drop = pos.clone();
+
+        // 歩を打つ
+        let drop_move = Move::drop(PieceType::Pawn, Square::new(4, 4));
+        let undo_info = pos.do_move(drop_move);
+
+        // 打ったことを確認
+        assert!(pos.board.piece_on(Square::new(4, 4)).is_some());
+        assert_eq!(pos.hands[Color::Black as usize][6], 0);
+
+        // 手を戻す
+        pos.undo_move(drop_move, undo_info);
+
+        // 完全に元に戻ったことを確認
+        assert_eq!(pos.hash, before_drop.hash);
+        assert!(pos.board.piece_on(Square::new(4, 4)).is_none());
+        assert_eq!(pos.hands[Color::Black as usize][6], 1);
+    }
+
+    #[test]
+    fn test_do_move_undo_move_multiple() {
+        // 複数手の実行と戻しをテスト
+        let mut pos = Position::startpos();
+        let original_pos = pos.clone();
+
+        let moves = vec![
+            Move::normal(Square::new(6, 2), Square::new(6, 3), false),
+            Move::normal(Square::new(4, 6), Square::new(4, 5), false),
+            Move::normal(Square::new(7, 1), Square::new(7, 7), false), // 飛車
+            Move::normal(Square::new(1, 7), Square::new(1, 1), false), // 相手の飛車
+        ];
+
+        let mut undo_infos = Vec::new();
+
+        // 全ての手を実行
+        for mv in &moves {
+            let undo_info = pos.do_move(*mv);
+            undo_infos.push(undo_info);
+        }
+
+        // 逆順で全ての手を戻す
+        for (mv, undo_info) in moves.iter().zip(undo_infos.iter()).rev() {
+            pos.undo_move(*mv, undo_info.clone());
+        }
+
+        // 完全に元に戻ったことを確認
+        assert_eq!(pos.hash, original_pos.hash);
+        assert_eq!(pos.side_to_move, original_pos.side_to_move);
+        assert_eq!(pos.ply, original_pos.ply);
+        for sq in 0..81 {
+            let square = Square(sq);
+            assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
         }
     }
 }

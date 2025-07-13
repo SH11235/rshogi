@@ -75,7 +75,7 @@ impl Searcher {
     }
 
     /// Search position for best move
-    pub fn search(&mut self, pos: &Position) -> SearchResult {
+    pub fn search(&mut self, pos: &mut Position) -> SearchResult {
         self.start_time = Instant::now();
         self.nodes = 0;
 
@@ -109,7 +109,7 @@ impl Searcher {
     }
 
     /// Alpha-beta search
-    fn alpha_beta(&mut self, pos: &Position, depth: u8, mut alpha: i32, beta: i32) -> i32 {
+    fn alpha_beta(&mut self, pos: &mut Position, depth: u8, mut alpha: i32, beta: i32) -> i32 {
         self.nodes += 1;
 
         // Check limits
@@ -146,11 +146,13 @@ impl Searcher {
         // Search all moves
         for &mv in moves.as_slice() {
             // Make move
-            let mut new_pos = pos.clone();
-            new_pos.do_move(mv);
+            let undo_info = pos.do_move(mv);
 
             // Recursive search
-            let score = -self.alpha_beta(&new_pos, depth - 1, -beta, -alpha);
+            let score = -self.alpha_beta(pos, depth - 1, -beta, -alpha);
+
+            // Unmake move
+            pos.undo_move(mv, undo_info);
 
             // Update best score
             if score > best_score {
@@ -208,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_search_startpos() {
-        let pos = Position::startpos();
+        let mut pos = Position::startpos();
         let limits = SearchLimits {
             depth: 3,
             time: Some(Duration::from_secs(1)),
@@ -216,7 +218,7 @@ mod tests {
         };
 
         let mut searcher = Searcher::new(limits);
-        let result = searcher.search(&pos);
+        let result = searcher.search(&mut pos);
 
         // Should find a move
         assert!(result.best_move.is_some());
