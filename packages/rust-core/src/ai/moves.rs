@@ -292,4 +292,225 @@ mod tests {
         let moves: Vec<Move> = list.into_iter().collect();
         assert_eq!(moves.len(), 2);
     }
+
+    #[test]
+    fn test_move_encoding() {
+        // 16ビットエンコーディングの全パターンテスト
+
+        // 通常の移動（成りなし）
+        let m1 = Move::normal(Square::new(0, 0), Square::new(8, 8), false);
+        assert_eq!(m1.from(), Some(Square::new(0, 0)));
+        assert_eq!(m1.to(), Square::new(8, 8));
+        assert!(!m1.is_promote());
+        assert!(!m1.is_drop());
+
+        // 通常の移動（成りあり）
+        let m2 = Move::normal(Square::new(4, 2), Square::new(4, 6), true);
+        assert_eq!(m2.from(), Some(Square::new(4, 2)));
+        assert_eq!(m2.to(), Square::new(4, 6));
+        assert!(m2.is_promote());
+        assert!(!m2.is_drop());
+
+        // 持ち駒を打つ（各駒種）
+        let piece_types = [
+            PieceType::Rook,
+            PieceType::Bishop,
+            PieceType::Gold,
+            PieceType::Silver,
+            PieceType::Knight,
+            PieceType::Lance,
+            PieceType::Pawn,
+        ];
+
+        for pt in &piece_types {
+            let m = Move::drop(*pt, Square::new(4, 4));
+            assert_eq!(m.from(), None);
+            assert_eq!(m.to(), Square::new(4, 4));
+            assert!(m.is_drop());
+            assert!(!m.is_promote());
+            assert_eq!(m.drop_piece_type(), *pt);
+        }
+    }
+
+    #[test]
+    fn test_move_to_u16_from_u16() {
+        // to_u16() → from_u16() のラウンドトリップテスト
+
+        // 全ての升目の組み合わせをテスト（サンプリング）
+        for from_file in 0..9 {
+            for from_rank in 0..9 {
+                for to_file in 0..9 {
+                    for to_rank in 0..9 {
+                        let from = Square::new(from_file, from_rank);
+                        let to = Square::new(to_file, to_rank);
+
+                        // 成りなし
+                        let m1 = Move::normal(from, to, false);
+                        let encoded1 = m1.to_u16();
+                        let decoded1 = Move::from_u16(encoded1);
+                        assert_eq!(m1, decoded1);
+
+                        // 成りあり
+                        let m2 = Move::normal(from, to, true);
+                        let encoded2 = m2.to_u16();
+                        let decoded2 = Move::from_u16(encoded2);
+                        assert_eq!(m2, decoded2);
+                    }
+                }
+            }
+        }
+
+        // 持ち駒打ちのテスト
+        for pt in &[
+            PieceType::Rook,
+            PieceType::Bishop,
+            PieceType::Gold,
+            PieceType::Silver,
+            PieceType::Knight,
+            PieceType::Lance,
+            PieceType::Pawn,
+        ] {
+            for file in 0..9 {
+                for rank in 0..9 {
+                    let to = Square::new(file, rank);
+                    let m = Move::drop(*pt, to);
+                    let encoded = m.to_u16();
+                    let decoded = Move::from_u16(encoded);
+                    assert_eq!(m, decoded);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_move_null() {
+        // NULL moveのテスト
+        assert!(Move::NULL.is_null());
+        assert_eq!(Move::NULL.to_u16(), 0);
+
+        let normal_move = Move::normal(Square::new(0, 0), Square::new(0, 1), false);
+        assert!(!normal_move.is_null());
+    }
+
+    #[test]
+    fn test_move_is_capture_hint() {
+        // キャプチャヒントのテスト
+        let m1 = Move::normal(Square::new(0, 0), Square::new(0, 1), false);
+        assert!(!m1.is_capture_hint());
+
+        // キャプチャヒントを設定（実装がある場合）
+        // 注: 現在の実装にis_capture_hintメソッドがない場合はこのテストはスキップ
+    }
+
+    #[test]
+    fn test_move_list_operations() {
+        // MoveListの各種操作テスト
+        let mut list = MoveList::new();
+
+        // 初期状態
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+
+        // 要素の追加
+        for i in 0..10 {
+            list.push(Move::normal(
+                Square::new((i % 9) as u8, 0),
+                Square::new((i % 9) as u8, 1),
+                false,
+            ));
+        }
+
+        assert!(!list.is_empty());
+        assert_eq!(list.len(), 10);
+
+        // スライスへのアクセス
+        let slice = list.as_slice();
+        assert_eq!(slice.len(), 10);
+
+        // インデックスアクセス
+        for i in 0..10 {
+            let m = list[i];
+            assert_eq!(m.from(), Some(Square::new((i % 9) as u8, 0)));
+        }
+
+        // clear操作
+        list.clear();
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_move_list_capacity() {
+        // MoveListの容量テスト（256手まで）
+        let mut list = MoveList::new();
+
+        // 最大容量までの追加をテスト
+        for i in 0..256 {
+            list.push(Move::normal(
+                Square::new((i % 9) as u8, (i / 9 % 9) as u8),
+                Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8),
+                false,
+            ));
+        }
+
+        assert_eq!(list.len(), 256);
+
+        // 全ての要素が正しく保存されているか確認
+        for i in 0..256 {
+            let m = list[i];
+            assert_eq!(m.from(), Some(Square::new((i % 9) as u8, (i / 9 % 9) as u8)));
+            assert_eq!(m.to(), Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8));
+        }
+    }
+
+    #[test]
+    fn test_move_list_iterator() {
+        // イテレータの正確性テスト
+        let mut list = MoveList::new();
+        let moves_data = vec![
+            Move::normal(Square::new(0, 0), Square::new(0, 1), false),
+            Move::normal(Square::new(1, 1), Square::new(1, 2), true),
+            Move::drop(PieceType::Pawn, Square::new(4, 4)),
+        ];
+
+        for m in &moves_data {
+            list.push(*m);
+        }
+
+        // 参照イテレータ
+        let collected: Vec<_> = list.as_slice().iter().cloned().collect();
+        assert_eq!(collected, moves_data);
+
+        // into_iterイテレータ
+        let collected2: Vec<_> = list.into_iter().collect();
+        assert_eq!(collected2, moves_data);
+    }
+
+    #[test]
+    fn test_move_boundary_cases() {
+        // 境界値のテスト
+
+        // 角の升目
+        let corners = [
+            Square::new(0, 0), // 9九
+            Square::new(8, 0), // 1九
+            Square::new(0, 8), // 9一
+            Square::new(8, 8), // 1一
+        ];
+
+        for &from in &corners {
+            for &to in &corners {
+                if from.index() != to.index() {
+                    let m = Move::normal(from, to, false);
+                    assert_eq!(m.from(), Some(from));
+                    assert_eq!(m.to(), to);
+
+                    // エンコード/デコードのテスト
+                    let encoded = m.to_u16();
+                    let decoded = Move::from_u16(encoded);
+                    assert_eq!(m, decoded);
+                }
+            }
+        }
+    }
 }
