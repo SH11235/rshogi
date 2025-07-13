@@ -247,9 +247,12 @@ mod tests {
         data
     }
 
+    type TestMove = (u16, i16, u8);
+    type TestPosition = (u64, Vec<TestMove>);
+
     /// テスト用の完全なバイナリデータを作成
     fn create_test_binary_data(
-        positions: Vec<(u64, Vec<(u16, i16, u8)>)>, // (hash, moves)
+        positions: Vec<TestPosition>, // (hash, moves)
         with_file_header: bool,
     ) -> Vec<u8> {
         let mut data = Vec::new();

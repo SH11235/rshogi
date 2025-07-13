@@ -3,9 +3,10 @@
 //! Implements alpha-beta search with basic enhancements
 
 use super::board::Position;
-use super::evaluate::evaluate;
+use super::evaluate::Evaluator;
 use super::movegen::MoveGen;
 use super::moves::Move;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Infinity score for search bounds
@@ -55,7 +56,7 @@ pub struct SearchResult {
 }
 
 /// Search engine
-pub struct Searcher {
+pub struct Searcher<E: Evaluator> {
     /// Search limits
     limits: SearchLimits,
     /// Start time
@@ -64,16 +65,19 @@ pub struct Searcher {
     nodes: u64,
     /// Principal variation
     pv: Vec<Vec<Move>>,
+    /// Evaluation function
+    evaluator: Arc<E>,
 }
 
-impl Searcher {
-    /// Create new searcher with limits
-    pub fn new(limits: SearchLimits) -> Self {
+impl<E: Evaluator> Searcher<E> {
+    /// Create new searcher with limits and evaluator
+    pub fn new(limits: SearchLimits, evaluator: Arc<E>) -> Self {
         Searcher {
             limits,
             start_time: Instant::now(),
             nodes: 0,
             pv: vec![vec![]; 128], // Max depth 128
+            evaluator,
         }
     }
 
@@ -122,7 +126,7 @@ impl Searcher {
 
         // Leaf node - return static evaluation
         if depth == 0 {
-            return evaluate(pos);
+            return self.evaluator.evaluate(pos);
         }
 
         // Clear PV for this ply
@@ -210,6 +214,7 @@ impl Searcher {
 mod tests {
     use super::*;
     use crate::ai::board::Position;
+    use crate::ai::evaluate::MaterialEvaluator;
 
     #[test]
     fn test_search_startpos() {
@@ -220,7 +225,8 @@ mod tests {
             nodes: None,
         };
 
-        let mut searcher = Searcher::new(limits);
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
         let result = searcher.search(&mut pos);
 
         // Should find a move

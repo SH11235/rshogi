@@ -1,8 +1,10 @@
 //! Benchmark for AI performance testing
 
 use super::board::Position;
+use super::evaluate::MaterialEvaluator;
 use super::movegen::MoveGen;
 use super::search::{SearchLimits, Searcher};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Performance test results
@@ -75,7 +77,8 @@ fn benchmark_search() -> (u64, u64, Duration) {
             nodes: None,
         };
 
-        let mut searcher = Searcher::new(limits);
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
         let mut pos_clone = pos.clone();
         let result = searcher.search(&mut pos_clone);
 

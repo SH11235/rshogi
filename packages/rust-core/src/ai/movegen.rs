@@ -1199,7 +1199,7 @@ mod tests {
             .iter()
             .filter(|m| m.from() == Some(Square::new(4, 0)))
             .collect();
-        assert!(king_moves.len() > 0);
+        assert!(!king_moves.is_empty());
 
         // Gold can block the check
         let gold_moves: Vec<_> = moves
