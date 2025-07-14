@@ -139,6 +139,12 @@ pub struct ActiveFeatures {
     count: usize,
 }
 
+impl Default for ActiveFeatures {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActiveFeatures {
     /// Create new empty feature set
     pub fn new() -> Self {
@@ -164,6 +170,11 @@ impl ActiveFeatures {
     /// Get number of active features
     pub fn len(&self) -> usize {
         self.count
+    }
+
+    /// Check if there are no active features
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
     }
 }
 
