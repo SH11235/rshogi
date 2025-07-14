@@ -39,14 +39,14 @@ impl ZobristTable {
         let mut table = ZobristTable {
             piece_square: [[[0; BOARD_SQUARES]; MAX_PIECE_INDEX]; 2],
             hand: [[[0; MAX_HAND_COUNT + 1]; 7]; 2],
-            side_to_move: rng.gen(),
+            side_to_move: rng.random(),
         };
 
         // Generate random values for pieces on squares
         for color in 0..2 {
             for piece_kind in 0..MAX_PIECE_INDEX {
                 for sq in 0..BOARD_SQUARES {
-                    table.piece_square[color][piece_kind][sq] = rng.gen();
+                    table.piece_square[color][piece_kind][sq] = rng.random();
                 }
             }
         }
@@ -55,7 +55,7 @@ impl ZobristTable {
         for color in 0..2 {
             for piece_type in 0..7 {
                 for count in 0..=MAX_HAND_COUNT {
-                    table.hand[color][piece_type][count] = rng.gen();
+                    table.hand[color][piece_type][count] = rng.random();
                 }
             }
         }
