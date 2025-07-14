@@ -7,11 +7,11 @@
 //! - History Heuristics
 //! - Transposition Table
 
-use super::board::{Color, PieceType, Position};
+use super::board::{Color, Position};
 use super::evaluate::Evaluator;
 use super::history::History;
-use super::movegen::MoveGen;
-use super::moves::{Move, MoveList};
+use super::move_picker::MovePicker;
+use super::moves::Move;
 use super::tt::{NodeType, TranspositionTable};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -274,46 +274,28 @@ impl EnhancedSearcher {
             }
         }
 
-        // Generate moves
-        let mut moves = MoveList::new();
-        let mut gen = MoveGen::new();
-        gen.generate_all(pos, &mut moves);
-
-        if moves.is_empty() {
-            return if stack[ply].in_check {
-                -MATE_SCORE + ply as i32
-            } else {
-                DRAW_SCORE
-            };
-        }
-
-        // Convert to vector for sorting
-        let mut move_list: Vec<(Move, i32)> = moves
-            .as_slice()
-            .iter()
-            .map(|&mv| (mv, self.score_move(pos, mv, tt_move, &stack[ply])))
-            .collect();
-
-        // Sort by score
-        move_list.sort_by_key(|&(_, score)| -score);
+        // Use MovePicker for efficient move ordering
+        let history_arc = Arc::new(self.history.clone());
+        let mut move_picker = MovePicker::new(pos, tt_move, &history_arc, &stack[ply]);
 
         let mut best_score = -INFINITY;
         let mut best_move = None;
         let mut moves_searched = 0;
+        let mut quiets_tried = Vec::new();
 
         // Search moves
-        for (mv, _) in move_list.iter() {
+        while let Some(mv) = move_picker.next_move() {
             // Late move pruning
             if !stack[ply].in_check
                 && moves_searched >= (self.params.late_move_count)(depth)
-                && !self.is_capture(pos, *mv)
+                && !self.is_capture(pos, mv)
                 && !mv.is_promote()
             {
                 continue;
             }
 
             // Make move
-            let undo = pos.do_move(*mv);
+            let undo = pos.do_move(mv);
             moves_searched += 1;
 
             // Prefetch TT
@@ -331,7 +313,7 @@ impl EnhancedSearcher {
             if depth >= 3
                 && moves_searched > 1
                 && !stack[ply].in_check
-                && !self.is_capture(pos, *mv)
+                && !self.is_capture(pos, mv)
                 && !mv.is_promote()
             {
                 let r = self.params.lmr_reductions[depth.min(63) as usize]
@@ -359,35 +341,60 @@ impl EnhancedSearcher {
             }
 
             // Undo move
-            pos.undo_move(*mv, undo);
+            pos.undo_move(mv, undo);
 
             if self.stop.load(Ordering::Relaxed) {
                 return best_score;
             }
 
+            // Track quiet moves for history update
+            if !self.is_capture(pos, mv) {
+                quiets_tried.push(mv);
+            }
+
             if score > best_score {
                 best_score = score;
-                best_move = Some(*mv);
+                best_move = Some(mv);
 
                 if score > alpha {
                     alpha = score;
 
-                    // Update history and killers
-                    if !self.is_capture(pos, *mv) {
-                        self.history.update_cutoff(pos.side_to_move, *mv, depth, None);
-
-                        // Update killers
-                        if stack[ply].killers[0] != Some(*mv) {
-                            stack[ply].killers[1] = stack[ply].killers[0];
-                            stack[ply].killers[0] = Some(*mv);
-                        }
-                    }
-
                     if score >= beta {
+                        // Update history for good quiet move
+                        if !self.is_capture(pos, mv) {
+                            self.history.update_cutoff(pos.side_to_move, mv, depth, None);
+
+                            // Update killers
+                            if stack[ply].killers[0] != Some(mv) {
+                                stack[ply].killers[1] = stack[ply].killers[0];
+                                stack[ply].killers[0] = Some(mv);
+                            }
+
+                            // Penalize other quiet moves that were tried
+                            for &quiet_mv in &quiets_tried {
+                                if quiet_mv != mv {
+                                    self.history.update_quiet(
+                                        pos.side_to_move,
+                                        quiet_mv,
+                                        depth,
+                                        None,
+                                    );
+                                }
+                            }
+                        }
                         break; // Beta cutoff
                     }
                 }
             }
+        }
+
+        // Check for no legal moves
+        if moves_searched == 0 {
+            return if stack[ply].in_check {
+                -MATE_SCORE + ply as i32
+            } else {
+                DRAW_SCORE
+            };
         }
 
         // Store in transposition table
@@ -440,19 +447,16 @@ impl EnhancedSearcher {
 
         alpha = alpha.max(stand_pat);
 
-        // Generate captures only
-        let mut moves = MoveList::new();
-        let mut gen = MoveGen::new();
-        gen.generate_captures(pos, &mut moves);
+        // Use MovePicker for captures only
+        let tt_hit = self.tt.probe(pos.hash);
+        let tt_move = tt_hit.as_ref().and_then(|e| e.get_move());
+        let history_arc = Arc::new(self.history.clone());
+        let mut move_picker = MovePicker::new_quiescence(pos, tt_move, &history_arc, &stack[ply]);
 
-        // Simple ordering by material gain
-        let mut move_list: Vec<Move> = moves.as_slice().to_vec();
-        move_list.sort_by_key(|&mv| -self.material_gain(pos, mv));
-
-        for mv in move_list.iter() {
-            let undo = pos.do_move(*mv);
+        while let Some(mv) = move_picker.next_move() {
+            let undo = pos.do_move(mv);
             let score = -self.quiescence(pos, -beta, -alpha, ply + 1, stack);
-            pos.undo_move(*mv, undo);
+            pos.undo_move(mv, undo);
 
             if score > alpha {
                 alpha = score;
@@ -465,36 +469,6 @@ impl EnhancedSearcher {
         alpha
     }
 
-    /// Score move for ordering
-    fn score_move(
-        &self,
-        pos: &Position,
-        mv: Move,
-        tt_move: Option<Move>,
-        stack: &SearchStack,
-    ) -> i32 {
-        // TT move gets highest priority
-        if Some(mv) == tt_move {
-            return 1_000_000;
-        }
-
-        // Good captures
-        if self.is_capture(pos, mv) {
-            return 900_000 + self.material_gain(pos, mv);
-        }
-
-        // Killers
-        if Some(mv) == stack.killers[0] {
-            return 800_000;
-        }
-        if Some(mv) == stack.killers[1] {
-            return 799_000;
-        }
-
-        // History score
-        self.history.get_score(pos.side_to_move, mv, None)
-    }
-
     /// Check if move is capture
     fn is_capture(&self, pos: &Position, mv: Move) -> bool {
         if mv.is_drop() {
@@ -502,29 +476,6 @@ impl EnhancedSearcher {
         }
         let to = mv.to();
         pos.board.piece_on(to).is_some()
-    }
-
-    /// Calculate material gain
-    fn material_gain(&self, pos: &Position, mv: Move) -> i32 {
-        if mv.is_drop() {
-            return 0;
-        }
-
-        let to = mv.to();
-        if let Some(captured) = pos.board.piece_on(to) {
-            match captured.piece_type {
-                PieceType::King => 10000,
-                PieceType::Rook => 900,
-                PieceType::Bishop => 700,
-                PieceType::Gold => 600,
-                PieceType::Silver => 500,
-                PieceType::Knight => 400,
-                PieceType::Lance => 300,
-                PieceType::Pawn => 100,
-            }
-        } else {
-            0
-        }
     }
 
     /// Check if position has non-pawn material

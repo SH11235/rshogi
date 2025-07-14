@@ -2,7 +2,6 @@
 //!
 //! Lock-free implementation suitable for parallel search
 
-use super::board::{PieceType, Square};
 use super::moves::Move;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,19 +48,7 @@ impl TTEntry {
 
         // Pack move into 16 bits
         let move_data = match mv {
-            Some(m) => {
-                if m.is_drop() {
-                    let piece_type = m.drop_piece_type();
-                    0x8000 | ((piece_type as u16) << 7) | (m.to().index() as u16)
-                } else {
-                    let from = m.from().unwrap();
-                    let to = m.to();
-                    let promote = m.is_promote();
-                    ((from.index() as u16) << 10)
-                        | ((to.index() as u16) << 3)
-                        | (if promote { 1 } else { 0 })
-                }
-            }
+            Some(m) => m.to_u16(),
             None => 0,
         };
 
@@ -96,28 +83,7 @@ impl TTEntry {
             return None;
         }
 
-        if move_data & 0x8000 != 0 {
-            // Drop move
-            let piece_type = ((move_data >> 7) & 0x7) as u8;
-            let piece_type_enum = match piece_type {
-                0 => PieceType::Rook,
-                1 => PieceType::Bishop,
-                2 => PieceType::Gold,
-                3 => PieceType::Silver,
-                4 => PieceType::Knight,
-                5 => PieceType::Lance,
-                6 => PieceType::Pawn,
-                _ => return None,
-            };
-            let to = Square((move_data & 0x7F) as u8);
-            Some(Move::drop(piece_type_enum, to))
-        } else {
-            // Normal move
-            let from = Square(((move_data >> 10) & 0x7F) as u8);
-            let to = Square(((move_data >> 3) & 0x7F) as u8);
-            let promote = (move_data & 1) != 0;
-            Some(Move::normal(from, to, promote))
-        }
+        Some(Move::from_u16(move_data))
     }
 
     /// Get score from entry
