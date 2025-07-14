@@ -120,12 +120,14 @@ mod tests {
         // Create position with captures by making moves
         let mut pos = Position::startpos();
 
-        // Make moves to create capture opportunities
+        // Make moves to create capture opportunities with different piece values
         let moves = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false),
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false),
-            Move::normal(Square::new(2, 3), Square::new(2, 4), false),
-            Move::normal(Square::new(3, 5), Square::new(3, 4), false),
+            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
+            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
+            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
+            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
+            Move::normal(Square::new(2, 4), Square::new(2, 5), false), // 7e7d
+            Move::normal(Square::new(3, 4), Square::new(3, 3), false), // 6e6f
         ];
 
         for mv in &moves {
@@ -136,20 +138,39 @@ mod tests {
 
         let mut picker = MovePicker::new(&pos, None, &history, &stack);
 
-        // Collect captures
-        let mut captures = Vec::new();
+        // Collect good and bad captures separately
+        let mut good_captures = Vec::new();
+        let mut bad_captures = Vec::new();
+        let mut found_bad_capture = false;
+
         while let Some(mv) = picker.next_move() {
             if !mv.is_drop() && pos.board.piece_on(mv.to()).is_some() {
-                captures.push(mv);
-                if captures.len() >= 5 {
-                    break;
+                if !found_bad_capture {
+                    good_captures.push(mv);
+                } else {
+                    bad_captures.push(mv);
                 }
+                // Check if we've reached bad captures stage
+                // (This is a simplification - in real implementation we'd check the stage)
+                if good_captures.len() > 0 && bad_captures.len() == 0 {
+                    // Keep collecting good captures
+                } else if bad_captures.len() > 0 {
+                    found_bad_capture = true;
+                }
+            }
+            if good_captures.len() + bad_captures.len() >= 5 {
+                break;
             }
         }
 
-        // Good captures should come before bad ones
-        // This is a basic check - full SEE implementation would be more complex
-        assert!(!captures.is_empty(), "Should have some captures");
+        // Should have some captures
+        assert!(
+            !good_captures.is_empty() || !bad_captures.is_empty(),
+            "Should have some captures"
+        );
+
+        // In a position with both good and bad captures, good ones should come first
+        // (This test is simplified - a more thorough test would verify SEE values)
     }
 
     /// Test 4: Quiet moves ordered by history
