@@ -13,8 +13,8 @@ const MAX_HAND_COUNT: usize = 18;
 /// Zobrist hash tables
 pub struct ZobristTable {
     /// Hash values for pieces on squares [color][piece_kind][square]
-    /// piece_kind includes promoted pieces (0-13)
-    pub piece_square: [[[u64; 81]; 14]; 2],
+    /// piece_kind includes promoted pieces (0-15)
+    pub piece_square: [[[u64; 81]; 16]; 2],
 
     /// Hash values for pieces in hand [color][piece_type][count]
     /// piece_type is 0-6 (no King), count is 0-MAX_HAND_COUNT (max possible)
@@ -37,14 +37,14 @@ impl ZobristTable {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1234567890ABCDEF);
 
         let mut table = ZobristTable {
-            piece_square: [[[0; 81]; 14]; 2],
+            piece_square: [[[0; 81]; 16]; 2],
             hand: [[[0; MAX_HAND_COUNT + 1]; 7]; 2],
             side_to_move: rng.gen(),
         };
 
         // Generate random values for pieces on squares
         for color in 0..2 {
-            for piece_kind in 0..14 {
+            for piece_kind in 0..16 {
                 for sq in 0..81 {
                     table.piece_square[color][piece_kind][sq] = rng.gen();
                 }

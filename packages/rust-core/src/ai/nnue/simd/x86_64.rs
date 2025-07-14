@@ -332,8 +332,6 @@ pub unsafe fn update_accumulator_avx2(
 
 /// Apply an affine transformation **(SSE4.1)** to a tile of `input`.
 ///
-/// Currently uses scalar fallback. TODO: Implement SSE4.1 version.
-///
 /// * `input`  : 1-D vector of length **`input_dim`** (i8)
 /// * `weights`: row-major matrix `output_dim × input_dim` (i8)
 /// * `biases` : length `output_dim` (i32)
@@ -359,9 +357,100 @@ pub unsafe fn affine_transform_sse41(
     input_dim: usize,
     output_dim: usize,
 ) {
-    // For now, use scalar implementation
-    // TODO: Implement SSE4.1 version
-    super::scalar::affine_transform_scalar(input, weights, biases, output, input_dim, output_dim);
+    const TILE_HEIGHT: usize = 4; // Process 4 outputs at a time
+    const TILE_WIDTH: usize = 16; // Process 16 inputs at a time
+
+    // Initialize output with biases
+    output[..output_dim].copy_from_slice(&biases[..output_dim]);
+
+    // Process 4 outputs at a time
+    let mut out_idx = 0;
+    while out_idx + TILE_HEIGHT <= output_dim {
+        // Initialize accumulators to zero (biases already in output)
+        let mut acc = [_mm_setzero_si128(); TILE_HEIGHT];
+
+        // Process input in chunks of 16
+        let mut in_idx = 0;
+        while in_idx + TILE_WIDTH <= input_dim {
+            // Load 16 input values
+            let input_vec = _mm_loadu_si128(input.as_ptr().add(in_idx) as *const __m128i);
+
+            // Process each output row
+            for (i, acc_cell) in acc.iter_mut().take(TILE_HEIGHT).enumerate() {
+                let weight_offset = (out_idx + i) * input_dim + in_idx;
+                let weight_vec =
+                    _mm_loadu_si128(weights.as_ptr().add(weight_offset) as *const __m128i);
+
+                // Convert i8 to i16 for multiplication
+                let input_lo = _mm_cvtepi8_epi16(input_vec);
+                let input_hi = _mm_cvtepi8_epi16(_mm_srli_si128(input_vec, 8));
+
+                let weight_lo = _mm_cvtepi8_epi16(weight_vec);
+                let weight_hi = _mm_cvtepi8_epi16(_mm_srli_si128(weight_vec, 8));
+
+                // Multiply and accumulate
+                let prod_lo = _mm_mullo_epi16(input_lo, weight_lo);
+                let prod_hi = _mm_mullo_epi16(input_hi, weight_hi);
+
+                // Convert to i32 and accumulate
+                let ones = _mm_set1_epi16(1);
+                let sum_lo = _mm_madd_epi16(prod_lo, ones);
+                let sum_hi = _mm_madd_epi16(prod_hi, ones);
+
+                *acc_cell = _mm_add_epi32(*acc_cell, sum_lo);
+                *acc_cell = _mm_add_epi32(*acc_cell, sum_hi);
+            }
+
+            in_idx += TILE_WIDTH;
+        }
+
+        // Handle remaining input elements
+        while in_idx < input_dim {
+            for i in 0..TILE_HEIGHT {
+                if out_idx + i < output_dim {
+                    let weight_offset = (out_idx + i) * input_dim + in_idx;
+                    output[out_idx + i] += input[in_idx] as i32 * weights[weight_offset] as i32;
+                }
+            }
+            in_idx += 1;
+        }
+
+        // Store results (horizontal sum)
+        for i in 0..TILE_HEIGHT {
+            if out_idx + i < output_dim {
+                // Sum all elements in the vector
+                let sum = hsum_epi32_sse41(acc[i]);
+                output[out_idx + i] += sum;
+            }
+        }
+
+        out_idx += TILE_HEIGHT;
+    }
+
+    // Handle remaining outputs with scalar code
+    while out_idx < output_dim {
+        for (in_idx, &x) in input.iter().take(input_dim).enumerate() {
+            let weight_offset = out_idx * input_dim + in_idx;
+            output[out_idx] += x as i32 * weights[weight_offset] as i32;
+        }
+        out_idx += 1;
+    }
+}
+
+/// Horizontal sum of 4 i32 values in a __m128i vector **(SSE4.1)**
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **SSE4.1**
+/// * **Valid input**: The input must be a valid __m128i vector
+#[inline]
+#[target_feature(enable = "sse4.1")]
+unsafe fn hsum_epi32_sse41(v: __m128i) -> i32 {
+    // Horizontal add pairs
+    let sum64 = _mm_hadd_epi32(v, v);
+    let sum32 = _mm_hadd_epi32(sum64, sum64);
+
+    _mm_extract_epi32(sum32, 0)
 }
 
 /// Apply ClippedReLU activation function **(SSE4.1)**: `output[i] = clamp(input[i], 0, 127)`.
@@ -389,19 +478,27 @@ pub unsafe fn clipped_relu_sse41(input: &[i32], output: &mut [i8], size: usize) 
 
     let mut i = 0;
     while i + CHUNK_SIZE <= size {
-        // Process 16 values (4 per register)
-        for j in 0..4 {
-            let v = _mm_loadu_si128(input.as_ptr().add(i + j * 4) as *const __m128i);
+        // Load 16 i32 values (4 per register)
+        let v0 = _mm_loadu_si128(input.as_ptr().add(i) as *const __m128i);
+        let v1 = _mm_loadu_si128(input.as_ptr().add(i + 4) as *const __m128i);
+        let v2 = _mm_loadu_si128(input.as_ptr().add(i + 8) as *const __m128i);
+        let v3 = _mm_loadu_si128(input.as_ptr().add(i + 12) as *const __m128i);
 
-            // Clamp to [0, 127]
-            let clamped = _mm_min_epi32(_mm_max_epi32(v, zero), max_val);
+        // Clamp to [0, 127]
+        let c0 = _mm_min_epi32(_mm_max_epi32(v0, zero), max_val);
+        let c1 = _mm_min_epi32(_mm_max_epi32(v1, zero), max_val);
+        let c2 = _mm_min_epi32(_mm_max_epi32(v2, zero), max_val);
+        let c3 = _mm_min_epi32(_mm_max_epi32(v3, zero), max_val);
 
-            // Store as i8 (manual packing for now)
-            output[i + j * 4] = _mm_extract_epi32(clamped, 0) as i8;
-            output[i + j * 4 + 1] = _mm_extract_epi32(clamped, 1) as i8;
-            output[i + j * 4 + 2] = _mm_extract_epi32(clamped, 2) as i8;
-            output[i + j * 4 + 3] = _mm_extract_epi32(clamped, 3) as i8;
-        }
+        // Pack i32 to i16
+        let p0 = _mm_packs_epi32(c0, c1); // 8 x i16
+        let p1 = _mm_packs_epi32(c2, c3); // 8 x i16
+
+        // Pack i16 to i8
+        let result = _mm_packs_epi16(p0, p1); // 16 x i8
+
+        // Store 16 i8 values
+        _mm_storeu_si128(output.as_mut_ptr().add(i) as *mut __m128i, result);
 
         i += CHUNK_SIZE;
     }
@@ -414,8 +511,6 @@ pub unsafe fn clipped_relu_sse41(input: &[i32], output: &mut [i8], size: usize) 
 }
 
 /// Transform 16-bit features to 8-bit with quantization **(SSE4.1)**.
-///
-/// Currently uses scalar fallback. TODO: Implement SSE4.1 version.
 ///
 /// * `us`    : perspective features for side-to-move (i16)
 /// * `them`  : perspective features for opponent (i16)
@@ -437,9 +532,44 @@ pub unsafe fn clipped_relu_sse41(input: &[i32], output: &mut [i8], size: usize) 
 #[target_feature(enable = "sse4.1")]
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 pub unsafe fn transform_features_sse41(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
-    // For now, use scalar implementation
-    // TODO: Implement SSE4.1 version
-    super::scalar::transform_features_scalar(us, them, output, size);
+    const CHUNK_SIZE: usize = 8;
+    const SHIFT: i32 = 6;
+
+    let min_val = _mm_set1_epi16(-127);
+    let max_val = _mm_set1_epi16(127);
+
+    let mut i = 0;
+    while i + CHUNK_SIZE <= size {
+        // Load 8 i16 values
+        let us_vec = _mm_loadu_si128(us.as_ptr().add(i) as *const __m128i);
+        let them_vec = _mm_loadu_si128(them.as_ptr().add(i) as *const __m128i);
+
+        // Shift right by 6
+        let us_shifted = _mm_srai_epi16(us_vec, SHIFT);
+        let them_shifted = _mm_srai_epi16(them_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let us_clamped = _mm_min_epi16(_mm_max_epi16(us_shifted, min_val), max_val);
+        let them_clamped = _mm_min_epi16(_mm_max_epi16(them_shifted, min_val), max_val);
+
+        // Pack to i8
+        let zero = _mm_setzero_si128();
+        let us_packed = _mm_packs_epi16(us_clamped, zero);
+        let them_packed = _mm_packs_epi16(them_clamped, zero);
+
+        // Store 8 bytes for each perspective
+        _mm_storel_epi64(output.as_mut_ptr().add(i) as *mut __m128i, us_packed);
+        _mm_storel_epi64(output.as_mut_ptr().add(i + size) as *mut __m128i, them_packed);
+
+        i += CHUNK_SIZE;
+    }
+
+    // Handle remaining elements
+    while i < size {
+        output[i] = ((us[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        output[i + size] = ((them[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        i += 1;
+    }
 }
 
 /// Update accumulator by adding or subtracting feature weights **(SSE4.1)**.
@@ -471,14 +601,57 @@ pub unsafe fn update_accumulator_sse41(
     indices: &[usize],
     add: bool,
 ) {
-    const CHUNK_SIZE: usize = 8;
+    const CHUNK_SIZE: usize = 32; // Process 32 elements per iteration (4 x 128-bit)
 
     for &idx in indices {
         let weight_offset = idx * 256;
         let weight_ptr = weights.as_ptr().add(weight_offset);
 
         let mut i = 0;
+        // Process 32 elements at a time using 4 SSE registers
         while i + CHUNK_SIZE <= 256 {
+            // Load 32 elements (4 x 8 i16)
+            let acc0 = _mm_loadu_si128(accumulator.as_ptr().add(i) as *const __m128i);
+            let acc1 = _mm_loadu_si128(accumulator.as_ptr().add(i + 8) as *const __m128i);
+            let acc2 = _mm_loadu_si128(accumulator.as_ptr().add(i + 16) as *const __m128i);
+            let acc3 = _mm_loadu_si128(accumulator.as_ptr().add(i + 24) as *const __m128i);
+
+            let weight0 = _mm_loadu_si128(weight_ptr.add(i) as *const __m128i);
+            let weight1 = _mm_loadu_si128(weight_ptr.add(i + 8) as *const __m128i);
+            let weight2 = _mm_loadu_si128(weight_ptr.add(i + 16) as *const __m128i);
+            let weight3 = _mm_loadu_si128(weight_ptr.add(i + 24) as *const __m128i);
+
+            let result0 = if add {
+                _mm_adds_epi16(acc0, weight0)
+            } else {
+                _mm_subs_epi16(acc0, weight0)
+            };
+            let result1 = if add {
+                _mm_adds_epi16(acc1, weight1)
+            } else {
+                _mm_subs_epi16(acc1, weight1)
+            };
+            let result2 = if add {
+                _mm_adds_epi16(acc2, weight2)
+            } else {
+                _mm_subs_epi16(acc2, weight2)
+            };
+            let result3 = if add {
+                _mm_adds_epi16(acc3, weight3)
+            } else {
+                _mm_subs_epi16(acc3, weight3)
+            };
+
+            _mm_storeu_si128(accumulator.as_mut_ptr().add(i) as *mut __m128i, result0);
+            _mm_storeu_si128(accumulator.as_mut_ptr().add(i + 8) as *mut __m128i, result1);
+            _mm_storeu_si128(accumulator.as_mut_ptr().add(i + 16) as *mut __m128i, result2);
+            _mm_storeu_si128(accumulator.as_mut_ptr().add(i + 24) as *mut __m128i, result3);
+
+            i += CHUNK_SIZE;
+        }
+
+        // Handle remaining elements with SSE
+        while i + 8 <= 256 {
             let acc_vec = _mm_loadu_si128(accumulator.as_ptr().add(i) as *const __m128i);
             let weight_vec = _mm_loadu_si128(weight_ptr.add(i) as *const __m128i);
 
@@ -489,11 +662,10 @@ pub unsafe fn update_accumulator_sse41(
             };
 
             _mm_storeu_si128(accumulator.as_mut_ptr().add(i) as *mut __m128i, result);
-
-            i += CHUNK_SIZE;
+            i += 8;
         }
 
-        // Handle remaining elements
+        // Handle remaining elements (should not happen with 256 elements)
         while i < 256 {
             if add {
                 accumulator[i] = accumulator[i].saturating_add(weights[weight_offset + i]);
