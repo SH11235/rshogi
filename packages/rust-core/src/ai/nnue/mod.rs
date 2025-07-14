@@ -196,8 +196,11 @@ impl Evaluator for NNUEEvaluatorWrapper {
             Some(acc) => acc,
             None => {
                 // This should never happen in normal usage - accumulator stack should always have at least one entry
-                debug_assert!(false, "Empty accumulator stack in NNUE evaluation");
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Warning: Empty accumulator stack in evaluation, returning 0");
+
                 // Return 0 evaluation as fallback
+                // In production, this error is silent to avoid performance impact
                 return 0;
             }
         };

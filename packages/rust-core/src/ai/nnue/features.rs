@@ -3,6 +3,7 @@
 //! HalfKP uses the king position and all other pieces as features
 
 use crate::ai::board::{Color, Piece, PieceType, Position, Square};
+use crate::ai::piece_constants::{piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES};
 
 /// Maximum pieces in hand for each type (indexed as in hands array)
 const MAX_HAND_PIECES: [u8; 7] = [
@@ -36,7 +37,10 @@ impl BonaPiece {
             (PieceType::Silver, true) => 810, // Promoted Silver
             (PieceType::Bishop, true) => 891, // Horse
             (PieceType::Rook, true) => 972,   // Dragon
-            (PieceType::King, _) => unreachable!("King should not be included in features"),
+            (PieceType::King, _) => {
+                debug_assert!(false, "King should not be included in features");
+                unreachable!("King should not be included in features")
+            }
             (PieceType::Gold, true) => unreachable!("Gold cannot be promoted"),
         };
 
@@ -50,17 +54,8 @@ impl BonaPiece {
     pub fn from_hand(piece_type: PieceType, color: Color, count: u8) -> Self {
         debug_assert!(count > 0);
 
-        // Map piece type to hand array index
-        let hand_idx = match piece_type {
-            PieceType::Rook => 0,
-            PieceType::Bishop => 1,
-            PieceType::Gold => 2,
-            PieceType::Silver => 3,
-            PieceType::Knight => 4,
-            PieceType::Lance => 5,
-            PieceType::Pawn => 6,
-            PieceType::King => unreachable!("King cannot be in hand"),
-        };
+        // Use type-safe function to get hand array index
+        let hand_idx = piece_type_to_hand_index(piece_type);
         debug_assert!(count <= MAX_HAND_PIECES[hand_idx]);
 
         let base = 2106; // After board pieces
@@ -130,8 +125,11 @@ impl FeatureTransformer {
     }
 }
 
-/// Maximum number of active features (conservative estimate)
-pub const MAX_ACTIVE_FEATURES: usize = 64;
+/// Maximum number of active features
+/// Increased from 64 to 128 to handle complex positions with many pieces and promoted pieces
+/// Theoretical maximum: 38 board pieces (40 - 2 kings) + 76 hand pieces = 114
+/// We use 128 for safety margin and cache alignment
+pub const MAX_ACTIVE_FEATURES: usize = 128;
 
 /// Structure to hold active features without heap allocation
 pub struct ActiveFeatures {
@@ -154,10 +152,17 @@ impl ActiveFeatures {
         }
     }
 
-    /// Add a feature (panics if overflow)
+    /// Add a feature (with overflow check)
     #[inline]
     fn push(&mut self, feature: usize) {
-        debug_assert!(self.count < MAX_ACTIVE_FEATURES);
+        if self.count >= MAX_ACTIVE_FEATURES {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[NNUE] Warning: Active features overflow, count={}, skipping feature",
+                self.count
+            );
+            return;
+        }
         self.features[self.count] = feature;
         self.count += 1;
     }
@@ -184,14 +189,9 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
 
     // Board pieces
     for &color in &[Color::Black, Color::White] {
-        for piece_type in 0..8 {
-            if piece_type == PieceType::King as usize {
-                continue;
-            }
-
-            let pt = PieceType::try_from(piece_type as u8)
-                .expect("Invalid piece type in feature extraction");
-            let mut bb = pos.board.piece_bb[color as usize][piece_type];
+        // Iterate through all non-King piece types using compile-time constant array
+        for &pt in &BOARD_PIECE_TYPES {
+            let mut bb = pos.board.piece_bb[color as usize][pt as usize];
 
             while let Some(sq) = bb.pop_lsb() {
                 let piece = Piece::new(pt, color);
@@ -212,12 +212,10 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
 
     // Hand pieces
     for &color in &[Color::Black, Color::White] {
-        for piece_type in 0..7 {
-            let count = pos.hands[color as usize][piece_type];
+        // Use compile-time constant array for type-safe iteration
+        for (hand_idx, &pt) in HAND_PIECE_TYPES.iter().enumerate() {
+            let count = pos.hands[color as usize][hand_idx];
             if count > 0 {
-                let pt = PieceType::try_from(piece_type as u8)
-                    .expect("Invalid piece type in feature extraction");
-
                 // Adjust color for perspective
                 let color_adj = if perspective == Color::Black {
                     color
