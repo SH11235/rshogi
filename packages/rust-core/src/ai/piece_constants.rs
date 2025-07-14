@@ -64,18 +64,18 @@ pub const fn index_to_piece_type(index: usize) -> Option<PieceType> {
 }
 
 /// Get hand array index for a piece type
-/// This function provides compile-time guarantee that only valid piece types are used
+/// Returns an error if King is passed, as King cannot be in hand
 #[inline]
-pub const fn piece_type_to_hand_index(pt: PieceType) -> usize {
+pub fn piece_type_to_hand_index(pt: PieceType) -> Result<usize, &'static str> {
     match pt {
-        PieceType::Rook => 0,
-        PieceType::Bishop => 1,
-        PieceType::Gold => 2,
-        PieceType::Silver => 3,
-        PieceType::Knight => 4,
-        PieceType::Lance => 5,
-        PieceType::Pawn => 6,
-        PieceType::King => panic!("King cannot be in hand"),
+        PieceType::Rook => Ok(0),
+        PieceType::Bishop => Ok(1),
+        PieceType::Gold => Ok(2),
+        PieceType::Silver => Ok(3),
+        PieceType::Knight => Ok(4),
+        PieceType::Lance => Ok(5),
+        PieceType::Pawn => Ok(6),
+        PieceType::King => Err("King cannot be in hand"),
     }
 }
 
@@ -119,8 +119,9 @@ mod tests {
 
     #[test]
     fn test_piece_type_to_hand_index() {
-        assert_eq!(piece_type_to_hand_index(PieceType::Rook), 0);
-        assert_eq!(piece_type_to_hand_index(PieceType::Pawn), 6);
+        assert_eq!(piece_type_to_hand_index(PieceType::Rook), Ok(0));
+        assert_eq!(piece_type_to_hand_index(PieceType::Pawn), Ok(6));
+        assert_eq!(piece_type_to_hand_index(PieceType::King), Err("King cannot be in hand"));
     }
 
     #[test]

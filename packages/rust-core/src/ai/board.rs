@@ -711,7 +711,8 @@ impl Position {
             self.board.put_piece(to, piece);
 
             // Remove from hand
-            let hand_idx = piece_type_to_hand_index(piece_type);
+            let hand_idx = piece_type_to_hand_index(piece_type)
+                .expect("Drop piece type must be valid hand piece");
             self.hands[self.side_to_move as usize][hand_idx] -= 1;
 
             // Update hash
@@ -757,12 +758,8 @@ impl Position {
                 // Add to hand (unpromoted)
                 let captured_type = captured.piece_type;
 
-                let hand_idx = if captured_type == PieceType::King {
-                    // Should never reach here due to check above
-                    0
-                } else {
-                    piece_type_to_hand_index(captured_type)
-                };
+                let hand_idx =
+                    piece_type_to_hand_index(captured_type).expect("Captured piece cannot be King");
 
                 self.hash ^= self.hand_zobrist(
                     self.side_to_move,
@@ -820,7 +817,8 @@ impl Position {
             self.board.remove_piece(to);
 
             // Add back to hand
-            let hand_idx = piece_type_to_hand_index(piece_type);
+            let hand_idx = piece_type_to_hand_index(piece_type)
+                .expect("Drop piece type must be valid hand piece");
             self.hands[self.side_to_move as usize][hand_idx] += 1;
         } else {
             // Undo normal move
@@ -847,12 +845,8 @@ impl Position {
 
                 // Remove from hand
                 let captured_type = captured.piece_type;
-                let hand_idx = if captured_type == PieceType::King {
-                    // Should never reach here
-                    0
-                } else {
-                    piece_type_to_hand_index(captured_type)
-                };
+                let hand_idx =
+                    piece_type_to_hand_index(captured_type).expect("Captured piece cannot be King");
                 self.hands[self.side_to_move as usize][hand_idx] -= 1;
             }
         }
