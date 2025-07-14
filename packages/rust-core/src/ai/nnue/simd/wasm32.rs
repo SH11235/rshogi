@@ -5,9 +5,6 @@
 // Note: WASM SIMD support is still experimental and requires specific flags
 // For now, we'll provide stubs that fall back to scalar implementations
 
-#[cfg(target_arch = "wasm32")]
-use std::arch::wasm32::*;
-
 // Placeholder implementations that use scalar fallbacks
 // In the future, these can be replaced with actual WASM SIMD implementations
 

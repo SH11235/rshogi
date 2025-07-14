@@ -7,6 +7,7 @@ use super::features::{extract_features, halfkp_index, BonaPiece, FeatureTransfor
 use super::simd::SimdDispatcher;
 use crate::ai::board::{Color, Piece, PieceType, Position, Square};
 use crate::ai::moves::Move;
+use crate::ai::piece_constants::piece_type_to_hand_index;
 
 /// Accumulator for storing transformed features
 #[derive(Clone)]
@@ -80,7 +81,7 @@ impl Accumulator {
         let features = extract_features(pos, king_sq, perspective);
 
         // Apply features
-        Self::apply_features(accumulator, &features, transformer);
+        Self::apply_features(accumulator, features.as_slice(), transformer);
     }
 
     /// Apply feature weights to accumulator
@@ -154,44 +155,62 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
 
         // Add new piece for both perspectives
         // Black perspective
-        let bona_black = BonaPiece::from_board(piece, to);
-        added.push(halfkp_index(black_king, bona_black));
+        if let Some(bona_black) = BonaPiece::from_board(piece, to) {
+            added.push(halfkp_index(black_king, bona_black));
+        }
 
         // White perspective
         let piece_white = piece.flip_color();
         let to_white = to.flip();
-        let bona_white = BonaPiece::from_board(piece_white, to_white);
-        added.push(halfkp_index(white_king_flipped, bona_white));
+        if let Some(bona_white) = BonaPiece::from_board(piece_white, to_white) {
+            added.push(halfkp_index(white_king_flipped, bona_white));
+        }
 
         // Remove from hand
         let color = pos.side_to_move;
-        let hand_idx = match piece_type {
-            PieceType::Rook => 0,
-            PieceType::Bishop => 1,
-            PieceType::Gold => 2,
-            PieceType::Silver => 3,
-            PieceType::Knight => 4,
-            PieceType::Lance => 5,
-            PieceType::Pawn => 6,
-            _ => unreachable!(),
-        };
+        let hand_idx =
+            piece_type_to_hand_index(piece_type).expect("Drop piece type must be valid hand piece");
         let count = pos.hands[color as usize][hand_idx];
 
         // Remove old hand count
-        let bona_hand_black = BonaPiece::from_hand(piece_type, color, count);
-        removed.push(halfkp_index(black_king, bona_hand_black));
+        match BonaPiece::from_hand(piece_type, color, count) {
+            Ok(bona_hand_black) => removed.push(halfkp_index(black_king, bona_hand_black)),
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+            }
+        }
 
         let color_white = color.flip();
-        let bona_hand_white = BonaPiece::from_hand(piece_type, color_white, count);
-        removed.push(halfkp_index(white_king_flipped, bona_hand_white));
+        match BonaPiece::from_hand(piece_type, color_white, count) {
+            Ok(bona_hand_white) => removed.push(halfkp_index(white_king_flipped, bona_hand_white)),
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+            }
+        }
 
         // Add new hand count (if not zero)
         if count > 1 {
-            let bona_hand_black_new = BonaPiece::from_hand(piece_type, color, count - 1);
-            added.push(halfkp_index(black_king, bona_hand_black_new));
+            match BonaPiece::from_hand(piece_type, color, count - 1) {
+                Ok(bona_hand_black_new) => {
+                    added.push(halfkp_index(black_king, bona_hand_black_new))
+                }
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                }
+            }
 
-            let bona_hand_white_new = BonaPiece::from_hand(piece_type, color_white, count - 1);
-            added.push(halfkp_index(white_king_flipped, bona_hand_white_new));
+            match BonaPiece::from_hand(piece_type, color_white, count - 1) {
+                Ok(bona_hand_white_new) => {
+                    added.push(halfkp_index(white_king_flipped, bona_hand_white_new))
+                }
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                }
+            }
         }
     } else {
         // Normal move
@@ -204,13 +223,15 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
         let moving_piece = pos.piece_at(from).ok_or(NNUEError::InvalidPiece(from))?;
 
         // Remove piece from source
-        let bona_from_black = BonaPiece::from_board(moving_piece, from);
-        removed.push(halfkp_index(black_king, bona_from_black));
+        if let Some(bona_from_black) = BonaPiece::from_board(moving_piece, from) {
+            removed.push(halfkp_index(black_king, bona_from_black));
+        }
 
         let moving_piece_white = moving_piece.flip_color();
         let from_white = from.flip();
-        let bona_from_white = BonaPiece::from_board(moving_piece_white, from_white);
-        removed.push(halfkp_index(white_king_flipped, bona_from_white));
+        if let Some(bona_from_white) = BonaPiece::from_board(moving_piece_white, from_white) {
+            removed.push(halfkp_index(white_king_flipped, bona_from_white));
+        }
 
         // Add piece to destination (possibly promoted)
         let dest_piece = if mv.is_promote() {
@@ -219,57 +240,77 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
             moving_piece
         };
 
-        let bona_to_black = BonaPiece::from_board(dest_piece, to);
-        added.push(halfkp_index(black_king, bona_to_black));
+        if let Some(bona_to_black) = BonaPiece::from_board(dest_piece, to) {
+            added.push(halfkp_index(black_king, bona_to_black));
+        }
 
         let dest_piece_white = dest_piece.flip_color();
         let to_white = to.flip();
-        let bona_to_white = BonaPiece::from_board(dest_piece_white, to_white);
-        added.push(halfkp_index(white_king_flipped, bona_to_white));
+        if let Some(bona_to_white) = BonaPiece::from_board(dest_piece_white, to_white) {
+            added.push(halfkp_index(white_king_flipped, bona_to_white));
+        }
 
         // Handle capture
         if let Some(captured) = pos.piece_at(to) {
             // Remove captured piece
-            let bona_cap_black = BonaPiece::from_board(captured, to);
-            removed.push(halfkp_index(black_king, bona_cap_black));
+            if let Some(bona_cap_black) = BonaPiece::from_board(captured, to) {
+                removed.push(halfkp_index(black_king, bona_cap_black));
+            }
 
             let captured_white = captured.flip_color();
-            let bona_cap_white = BonaPiece::from_board(captured_white, to_white);
-            removed.push(halfkp_index(white_king_flipped, bona_cap_white));
+            if let Some(bona_cap_white) = BonaPiece::from_board(captured_white, to_white) {
+                removed.push(halfkp_index(white_king_flipped, bona_cap_white));
+            }
 
             // Add to hand
             let hand_type = captured.piece_type; // Already unpromoted by board logic
 
-            let hand_idx = match hand_type {
-                PieceType::Rook => 0,
-                PieceType::Bishop => 1,
-                PieceType::Gold => 2,
-                PieceType::Silver => 3,
-                PieceType::Knight => 4,
-                PieceType::Lance => 5,
-                PieceType::Pawn => 6,
-                _ => unreachable!(),
-            };
+            let hand_idx = piece_type_to_hand_index(hand_type)
+                .expect("Captured piece type must be valid hand piece");
 
             let hand_color = pos.side_to_move;
             let new_count = pos.hands[hand_color as usize][hand_idx] + 1;
 
-            let bona_hand_black = BonaPiece::from_hand(hand_type, hand_color, new_count);
-            added.push(halfkp_index(black_king, bona_hand_black));
+            match BonaPiece::from_hand(hand_type, hand_color, new_count) {
+                Ok(bona_hand_black) => added.push(halfkp_index(black_king, bona_hand_black)),
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                }
+            }
 
             let hand_color_white = hand_color.flip();
-            let bona_hand_white = BonaPiece::from_hand(hand_type, hand_color_white, new_count);
-            added.push(halfkp_index(white_king_flipped, bona_hand_white));
+            match BonaPiece::from_hand(hand_type, hand_color_white, new_count) {
+                Ok(bona_hand_white) => {
+                    added.push(halfkp_index(white_king_flipped, bona_hand_white))
+                }
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                }
+            }
 
             // Remove old hand count if it existed
             if new_count > 1 {
-                let bona_hand_old_black =
-                    BonaPiece::from_hand(hand_type, hand_color, new_count - 1);
-                removed.push(halfkp_index(black_king, bona_hand_old_black));
+                match BonaPiece::from_hand(hand_type, hand_color, new_count - 1) {
+                    Ok(bona_hand_old_black) => {
+                        removed.push(halfkp_index(black_king, bona_hand_old_black))
+                    }
+                    Err(e) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    }
+                }
 
-                let bona_hand_old_white =
-                    BonaPiece::from_hand(hand_type, hand_color_white, new_count - 1);
-                removed.push(halfkp_index(white_king_flipped, bona_hand_old_white));
+                match BonaPiece::from_hand(hand_type, hand_color_white, new_count - 1) {
+                    Ok(bona_hand_old_white) => {
+                        removed.push(halfkp_index(white_king_flipped, bona_hand_old_white))
+                    }
+                    Err(e) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    }
+                }
             }
         }
 

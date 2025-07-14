@@ -12,12 +12,12 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-    
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'external-contributor' &&
+      github.event.pull_request.user.login != 'new-developer' &&
+      github.event.pull_request.author_association != 'FIRST_TIME_CONTRIBUTOR'
+
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,14 +42,14 @@ jobs:
           
           # Direct prompt for automated review (no @claude mention needed)
           direct_prompt: |
-            Please review this pull request and provide feedback on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage
-            
-            Be constructive and helpful in your feedback.
+            このプルリクエストをレビューし、以下の観点で**日本語で**フィードバックを提供してください：
+            - コードの品質とベストプラクティス
+            - 潜在的なバグや問題点
+            - パフォーマンスの考慮事項
+            - セキュリティ上の懸念点
+            - テストカバレッジ
+
+            フィードバックは建設的かつ有益なものとし、丁寧でわかりやすい日本語で記述してください。
 
           # Optional: Use sticky comments to make Claude reuse the same comment on subsequent pushes to the same PR
           # use_sticky_comment: true
@@ -71,8 +71,8 @@ jobs:
           # Optional: Add specific tools for running tests or linting
           # allowed_tools: "Bash(npm run test),Bash(npm run lint),Bash(npm run typecheck)"
           
-          # Optional: Skip review for certain conditions
-          # if: |
-          #   !contains(github.event.pull_request.title, '[skip-review]') &&
-          #   !contains(github.event.pull_request.title, '[WIP]')
+          Optional: Skip review for certain conditions
+          if: |
+            !contains(github.event.pull_request.title, '[skip-review]') &&
+            !contains(github.event.pull_request.title, '[WIP]')
 

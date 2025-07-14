@@ -11,6 +11,7 @@ pub mod history;
 pub mod movegen;
 pub mod moves;
 pub mod nnue;
+pub mod piece_constants;
 pub mod search;
 pub mod search_enhanced;
 pub mod tt;

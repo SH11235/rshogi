@@ -8,3 +8,8 @@ cobertura.xml
 coverage/
 *.profraw
 *.profdata
+
+# Test data - ignore uncompressed files but keep compressed ones
+test_data/nn.bin
+test_data/mock_nn.bin
+# Keep: test_data/mock_nn.bin.gz

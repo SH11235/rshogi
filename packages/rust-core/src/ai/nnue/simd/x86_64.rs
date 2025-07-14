@@ -35,6 +35,12 @@ pub unsafe fn affine_transform_avx2(
     input_dim: usize,
     output_dim: usize,
 ) {
+    // Debug assertions for boundary checks
+    debug_assert!(input.len() >= input_dim, "Input buffer too small");
+    debug_assert!(weights.len() >= input_dim * output_dim, "Weights buffer too small");
+    debug_assert!(biases.len() >= output_dim, "Biases buffer too small");
+    debug_assert!(output.len() >= output_dim, "Output buffer too small");
+
     const TILE_HEIGHT: usize = 8;
     const TILE_WIDTH: usize = 32;
 
@@ -155,6 +161,9 @@ unsafe fn hsum_epi32_avx2(v: __m256i) -> i32 {
 #[target_feature(enable = "avx2")]
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 pub unsafe fn clipped_relu_avx2(input: &[i32], output: &mut [i8], size: usize) {
+    // Debug assertions for boundary checks
+    debug_assert!(input.len() >= size, "Input buffer too small");
+    debug_assert!(output.len() >= size, "Output buffer too small");
     const CHUNK_SIZE: usize = 32;
 
     let zero = _mm256_setzero_si256();
@@ -221,43 +230,71 @@ pub unsafe fn clipped_relu_avx2(input: &[i32], output: &mut [i8], size: usize) {
 #[target_feature(enable = "avx2")]
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 pub unsafe fn transform_features_avx2(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
-    const CHUNK_SIZE: usize = 16;
-    const SHIFT: i32 = 6;
+    // Debug assertions for boundary checks
+    debug_assert!(us.len() >= size, "'us' buffer too small");
+    debug_assert!(them.len() >= size, "'them' buffer too small");
+    debug_assert!(output.len() >= size * 2, "Output buffer too small");
 
-    let _shift_vec = _mm_set1_epi32(SHIFT);
+    const SHIFT: i32 = 6;
+    const LANES: usize = 16; // 256 bits / 16 bits per i16 = 16 lanes
+
+    // Create constants for SIMD operations
     let min_val = _mm256_set1_epi16(-127);
     let max_val = _mm256_set1_epi16(127);
 
     let mut i = 0;
-    while i + CHUNK_SIZE <= size {
-        // Load 16 i16 values
+
+    // Process 16 elements at a time
+    while i + LANES <= size {
+        // Load 16 x i16 from 'us' perspective
         let us_vec = _mm256_loadu_si256(us.as_ptr().add(i) as *const __m256i);
+
+        // Arithmetic right shift by 6
+        let us_shifted = _mm256_srai_epi16(us_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let us_clamped = _mm256_max_epi16(_mm256_min_epi16(us_shifted, max_val), min_val);
+
+        // Load 16 x i16 from 'them' perspective
         let them_vec = _mm256_loadu_si256(them.as_ptr().add(i) as *const __m256i);
 
-        // Shift right by 6
-        let us_shifted = _mm256_srai_epi16(us_vec, SHIFT);
+        // Arithmetic right shift by 6
         let them_shifted = _mm256_srai_epi16(them_vec, SHIFT);
 
         // Clamp to [-127, 127]
-        let us_clamped = _mm256_min_epi16(_mm256_max_epi16(us_shifted, min_val), max_val);
-        let them_clamped = _mm256_min_epi16(_mm256_max_epi16(them_shifted, min_val), max_val);
+        let them_clamped = _mm256_max_epi16(_mm256_min_epi16(them_shifted, max_val), min_val);
 
-        // Pack each separately to avoid interleaving
-        let zero = _mm256_setzero_si256();
-        let us_packed = _mm256_packs_epi16(us_clamped, zero);
-        let them_packed = _mm256_packs_epi16(them_clamped, zero);
+        // Pack i16 to i8 (us_clamped and them_clamped)
+        // Note: _mm256_packs_epi16 packs with saturation, but we already clamped
+        let packed = _mm256_packs_epi16(us_clamped, them_clamped);
 
-        // Extract lower 128 bits which contain our 16 bytes
-        let us_bytes = _mm256_extracti128_si256(us_packed, 0);
-        let them_bytes = _mm256_extracti128_si256(them_packed, 0);
+        // The result has a specific lane ordering due to AVX2's 128-bit lanes
+        // We need to permute to get the correct order
+        let indices = _mm256_setr_epi8(
+            0, 1, 2, 3, 4, 5, 6, 7, // First 8 from us (low 128)
+            16, 17, 18, 19, 20, 21, 22, 23, // First 8 from us (high 128)
+            8, 9, 10, 11, 12, 13, 14, 15, // First 8 from them (low 128)
+            24, 25, 26, 27, 28, 29, 30, 31, // First 8 from them (high 128)
+        );
+        let permuted = _mm256_shuffle_epi8(packed, indices);
 
-        _mm_storeu_si128(output.as_mut_ptr().add(i) as *mut __m128i, us_bytes);
-        _mm_storeu_si128(output.as_mut_ptr().add(i + size) as *mut __m128i, them_bytes);
+        // Extract and store
+        let result = std::mem::transmute::<__m256i, [i8; 32]>(permuted);
 
-        i += CHUNK_SIZE;
+        // Store 'us' part
+        std::ptr::copy_nonoverlapping(result.as_ptr(), output.as_mut_ptr().add(i), 16);
+
+        // Store 'them' part
+        std::ptr::copy_nonoverlapping(
+            result.as_ptr().add(16),
+            output.as_mut_ptr().add(size + i),
+            16,
+        );
+
+        i += LANES;
     }
 
-    // Handle remaining elements
+    // Handle remaining elements with scalar code
     while i < size {
         output[i] = ((us[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
         output[i + size] = ((them[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
@@ -294,6 +331,11 @@ pub unsafe fn update_accumulator_avx2(
     indices: &[usize],
     add: bool,
 ) {
+    // Debug assertions for boundary checks
+    debug_assert!(accumulator.len() >= 256, "Accumulator must have at least 256 elements");
+    for &idx in indices {
+        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {idx} out of bounds");
+    }
     const CHUNK_SIZE: usize = 16;
 
     for &idx in indices {
@@ -357,6 +399,11 @@ pub unsafe fn affine_transform_sse41(
     input_dim: usize,
     output_dim: usize,
 ) {
+    // Debug assertions for boundary checks
+    debug_assert!(input.len() >= input_dim, "Input buffer too small");
+    debug_assert!(weights.len() >= input_dim * output_dim, "Weights buffer too small");
+    debug_assert!(biases.len() >= output_dim, "Biases buffer too small");
+    debug_assert!(output.len() >= output_dim, "Output buffer too small");
     const TILE_HEIGHT: usize = 4; // Process 4 outputs at a time
     const TILE_WIDTH: usize = 16; // Process 16 inputs at a time
 
@@ -471,6 +518,9 @@ unsafe fn hsum_epi32_sse41(v: __m128i) -> i32 {
 #[target_feature(enable = "sse4.1")]
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 pub unsafe fn clipped_relu_sse41(input: &[i32], output: &mut [i8], size: usize) {
+    // Debug assertions for boundary checks
+    debug_assert!(input.len() >= size, "Input buffer too small");
+    debug_assert!(output.len() >= size, "Output buffer too small");
     const CHUNK_SIZE: usize = 16;
 
     let zero = _mm_setzero_si128();
@@ -532,39 +582,56 @@ pub unsafe fn clipped_relu_sse41(input: &[i32], output: &mut [i8], size: usize) 
 #[target_feature(enable = "sse4.1")]
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 pub unsafe fn transform_features_sse41(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
-    const CHUNK_SIZE: usize = 8;
-    const SHIFT: i32 = 6;
+    // Debug assertions for boundary checks
+    debug_assert!(us.len() >= size, "'us' buffer too small");
+    debug_assert!(them.len() >= size, "'them' buffer too small");
+    debug_assert!(output.len() >= size * 2, "Output buffer too small");
 
+    const SHIFT: i32 = 6;
+    const LANES: usize = 8; // 128 bits / 16 bits per i16 = 8 lanes
+
+    // Create constants for SIMD operations
     let min_val = _mm_set1_epi16(-127);
     let max_val = _mm_set1_epi16(127);
 
     let mut i = 0;
-    while i + CHUNK_SIZE <= size {
-        // Load 8 i16 values
+
+    // Process 8 elements at a time
+    while i + LANES <= size {
+        // Load 8 x i16 from 'us' perspective
         let us_vec = _mm_loadu_si128(us.as_ptr().add(i) as *const __m128i);
+
+        // Arithmetic right shift by 6
+        let us_shifted = _mm_srai_epi16(us_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let us_clamped = _mm_max_epi16(_mm_min_epi16(us_shifted, max_val), min_val);
+
+        // Load 8 x i16 from 'them' perspective
         let them_vec = _mm_loadu_si128(them.as_ptr().add(i) as *const __m128i);
 
-        // Shift right by 6
-        let us_shifted = _mm_srai_epi16(us_vec, SHIFT);
+        // Arithmetic right shift by 6
         let them_shifted = _mm_srai_epi16(them_vec, SHIFT);
 
         // Clamp to [-127, 127]
-        let us_clamped = _mm_min_epi16(_mm_max_epi16(us_shifted, min_val), max_val);
-        let them_clamped = _mm_min_epi16(_mm_max_epi16(them_shifted, min_val), max_val);
+        let them_clamped = _mm_max_epi16(_mm_min_epi16(them_shifted, max_val), min_val);
 
-        // Pack to i8
-        let zero = _mm_setzero_si128();
-        let us_packed = _mm_packs_epi16(us_clamped, zero);
-        let them_packed = _mm_packs_epi16(them_clamped, zero);
+        // Pack i16 to i8
+        let packed = _mm_packs_epi16(us_clamped, them_clamped);
 
-        // Store 8 bytes for each perspective
-        _mm_storel_epi64(output.as_mut_ptr().add(i) as *mut __m128i, us_packed);
-        _mm_storel_epi64(output.as_mut_ptr().add(i + size) as *mut __m128i, them_packed);
+        // Extract and store
+        let result = std::mem::transmute::<__m128i, [i8; 16]>(packed);
 
-        i += CHUNK_SIZE;
+        // Store 'us' part (first 8 bytes)
+        std::ptr::copy_nonoverlapping(result.as_ptr(), output.as_mut_ptr().add(i), 8);
+
+        // Store 'them' part (last 8 bytes)
+        std::ptr::copy_nonoverlapping(result.as_ptr().add(8), output.as_mut_ptr().add(size + i), 8);
+
+        i += LANES;
     }
 
-    // Handle remaining elements
+    // Handle remaining elements with scalar code
     while i < size {
         output[i] = ((us[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
         output[i + size] = ((them[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
@@ -601,6 +668,11 @@ pub unsafe fn update_accumulator_sse41(
     indices: &[usize],
     add: bool,
 ) {
+    // Debug assertions for boundary checks
+    debug_assert!(accumulator.len() >= 256, "Accumulator must have at least 256 elements");
+    for &idx in indices {
+        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {idx} out of bounds");
+    }
     const CHUNK_SIZE: usize = 32; // Process 32 elements per iteration (4 x 128-bit)
 
     for &idx in indices {
@@ -679,6 +751,7 @@ pub unsafe fn update_accumulator_sse41(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn test_simd_correctness() {
@@ -712,5 +785,277 @@ mod tests {
 
         // Results should match
         assert_eq!(output_scalar, output_simd);
+    }
+
+    #[test]
+    fn test_avx2_affine_transform() {
+        if !is_x86_feature_detected!("avx2") {
+            eprintln!("AVX2 not available, skipping test");
+            return;
+        }
+
+        let input = vec![5i8; 512];
+        let weights = vec![2i8; 512 * 32]; // 32x512 matrix
+        let biases = vec![1000i32; 32];
+        let mut output = vec![0i32; 32];
+
+        unsafe {
+            affine_transform_avx2(&input, &weights, &biases, &mut output, 512, 32);
+        }
+
+        // Expected: 1000 + 5 * 2 * 512 = 1000 + 5120 = 6120
+        for &val in &output {
+            assert_eq!(val, 6120);
+        }
+    }
+
+    #[test]
+    fn test_sse41_affine_transform() {
+        if !is_x86_feature_detected!("sse4.1") {
+            eprintln!("SSE4.1 not available, skipping test");
+            return;
+        }
+
+        let input = vec![3i8; 256];
+        let weights = vec![4i8; 256 * 16]; // 16x256 matrix
+        let biases = vec![500i32; 16];
+        let mut output = vec![0i32; 16];
+
+        unsafe {
+            affine_transform_sse41(&input, &weights, &biases, &mut output, 256, 16);
+        }
+
+        // Expected: 500 + 3 * 4 * 256 = 500 + 3072 = 3572
+        for &val in &output {
+            assert_eq!(val, 3572);
+        }
+    }
+
+    #[test]
+    fn test_avx2_clipped_relu() {
+        if !is_x86_feature_detected!("avx2") {
+            eprintln!("AVX2 not available, skipping test");
+            return;
+        }
+
+        let input = vec![-150i32, -50, 0, 50, 100, 150, 200];
+        let mut output = vec![0i8; 7];
+
+        unsafe {
+            clipped_relu_avx2(&input, &mut output, 7);
+        }
+
+        assert_eq!(output, vec![0, 0, 0, 50, 100, 127, 127]);
+    }
+
+    #[test]
+    fn test_sse41_clipped_relu() {
+        if !is_x86_feature_detected!("sse4.1") {
+            eprintln!("SSE4.1 not available, skipping test");
+            return;
+        }
+
+        let input = vec![-100i32, -25, 0, 25, 50, 75, 100, 125, 150];
+        let mut output = vec![0i8; 9];
+
+        unsafe {
+            clipped_relu_sse41(&input, &mut output, 9);
+        }
+
+        assert_eq!(output, vec![0, 0, 0, 25, 50, 75, 100, 125, 127]);
+    }
+
+    #[test]
+    fn test_avx2_update_accumulator() {
+        if !is_x86_feature_detected!("avx2") {
+            eprintln!("AVX2 not available, skipping test");
+            return;
+        }
+
+        let mut accumulator = vec![100i16; 256];
+        let weights = vec![10i16; 512]; // Two features worth of weights
+        let indices = vec![0, 1];
+
+        // Test addition
+        unsafe {
+            update_accumulator_avx2(&mut accumulator, &weights, &indices, true);
+        }
+
+        // Each element should be 100 + 10 + 10 = 120
+        for &val in &accumulator {
+            assert_eq!(val, 120);
+        }
+
+        // Test subtraction
+        unsafe {
+            update_accumulator_avx2(&mut accumulator, &weights, &indices, false);
+        }
+
+        // Each element should be 120 - 10 - 10 = 100
+        for &val in &accumulator {
+            assert_eq!(val, 100);
+        }
+    }
+
+    #[test]
+    fn test_sse41_update_accumulator() {
+        if !is_x86_feature_detected!("sse4.1") {
+            eprintln!("SSE4.1 not available, skipping test");
+            return;
+        }
+
+        let mut accumulator = vec![50i16; 256];
+        let weights = vec![5i16; 256];
+        let indices = vec![0];
+
+        // Test addition
+        unsafe {
+            update_accumulator_sse41(&mut accumulator, &weights, &indices, true);
+        }
+
+        // Each element should be 50 + 5 = 55
+        for &val in &accumulator {
+            assert_eq!(val, 55);
+        }
+    }
+
+    #[test]
+    fn test_transform_features_alignment() {
+        if !is_x86_feature_detected!("avx2") {
+            eprintln!("AVX2 not available, skipping test");
+            return;
+        }
+
+        // Test with various sizes to ensure alignment handling works
+        for size in [256, 257, 300, 512].iter() {
+            let us = vec![100i16; *size];
+            let them = vec![200i16; *size];
+            let mut output = vec![0i8; *size * 2];
+
+            unsafe {
+                transform_features_avx2(&us, &them, &mut output, *size);
+            }
+
+            // Verify the transformation
+            for i in 0..*size {
+                // Check that values are quantized correctly
+                // 100 >> 6 = 1, 200 >> 6 = 3
+                let expected_us = 1i8;
+                let expected_them = 3i8;
+                assert_eq!(output[i], expected_us, "Failed at index {i} for us");
+                assert_eq!(output[i + size], expected_them, "Failed at index {i} for them");
+            }
+        }
+    }
+
+    #[test]
+    fn test_transform_features_sse41() {
+        if !is_x86_feature_detected!("sse4.1") {
+            eprintln!("SSE4.1 not available, skipping test");
+            return;
+        }
+
+        // Test transform_features with edge cases
+        let test_cases = vec![
+            // (us, them, expected_us, expected_them)
+            (4096i16, -4096i16, 64i8, -64i8),   // Normal range
+            (8192i16, -8192i16, 127i8, -127i8), // Clamped to max
+            (100i16, -100i16, 1i8, -2i8),       // Small values (100>>6=1, -100>>6=-2)
+            (0i16, 0i16, 0i8, 0i8),             // Zero
+        ];
+
+        for (us_val, them_val, expected_us, expected_them) in test_cases {
+            let us = vec![us_val; 128];
+            let them = vec![them_val; 128];
+            let mut output = vec![0i8; 256];
+
+            unsafe {
+                transform_features_sse41(&us, &them, &mut output, 128);
+            }
+
+            // Check first element of each perspective
+            assert_eq!(
+                output[0], expected_us,
+                "Failed for us={}, expected {}, got {}",
+                us_val, expected_us, output[0]
+            );
+            assert_eq!(
+                output[128], expected_them,
+                "Failed for them={}, expected {}, got {}",
+                them_val, expected_them, output[128]
+            );
+        }
+    }
+
+    #[test]
+    fn test_transform_features_consistency() {
+        // Test that all SIMD implementations produce the same result
+        let sizes = vec![64, 128, 256];
+
+        for size in sizes {
+            let us = vec![2500i16; size];
+            let them = vec![-3000i16; size];
+
+            let mut output_scalar = vec![0i8; size * 2];
+            let mut output_avx2 = vec![0i8; size * 2];
+            let mut output_sse41 = vec![0i8; size * 2];
+
+            // Scalar version
+            super::super::scalar::transform_features_scalar(&us, &them, &mut output_scalar, size);
+
+            // AVX2 version if available
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    transform_features_avx2(&us, &them, &mut output_avx2, size);
+                }
+                assert_eq!(output_scalar, output_avx2, "AVX2 mismatch at size {}", size);
+            }
+
+            // SSE4.1 version if available
+            if is_x86_feature_detected!("sse4.1") {
+                unsafe {
+                    transform_features_sse41(&us, &them, &mut output_sse41, size);
+                }
+                assert_eq!(output_scalar, output_sse41, "SSE4.1 mismatch at size {}", size);
+            }
+        }
+    }
+
+    #[test]
+    fn test_boundary_conditions() {
+        // Test extreme values and edge cases
+        if !is_x86_feature_detected!("avx2") {
+            eprintln!("AVX2 not available, skipping test");
+            return;
+        }
+
+        // Test with i16 boundary values
+        let test_values = vec![
+            i16::MIN,
+            i16::MIN / 2,
+            -1000,
+            -1,
+            0,
+            1,
+            1000,
+            i16::MAX / 2,
+            i16::MAX,
+        ];
+
+        for &val in &test_values {
+            let us = vec![val; 32];
+            // Use saturating_neg to avoid overflow when val == i16::MIN
+            let them = vec![val.saturating_neg(); 32];
+            let mut output = vec![0i8; 64];
+
+            unsafe {
+                transform_features_avx2(&us, &them, &mut output, 32);
+            }
+
+            // Verify no crashes and values are within bounds
+            for i in 0..64 {
+                assert!(output[i] >= -127, "Output out of bounds: {} at index {}", output[i], i);
+            }
+        }
     }
 }
