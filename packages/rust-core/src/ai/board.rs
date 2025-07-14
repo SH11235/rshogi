@@ -186,17 +186,31 @@ impl Piece {
         }
     }
 
-    /// Convert to index (0-13)
+    /// Convert to index (0-15)
+    /// Note: Promoted King (8) and promoted Gold (11) are never used
     #[inline]
     pub fn to_index(self) -> usize {
         let base = self.piece_type as usize;
         if self.promoted && self.piece_type.can_promote() {
-            base + 8
+            base + PROMOTED_OFFSET
         } else {
             base
         }
     }
 }
+
+/// Number of piece types (King to Pawn)
+pub const NUM_PIECE_TYPES: usize = 8;
+
+/// Offset for promoted pieces in indexing
+pub const PROMOTED_OFFSET: usize = 8;
+
+/// Maximum piece index (including promoted pieces)
+/// This includes unused indices for promoted King and Gold
+pub const MAX_PIECE_INDEX: usize = NUM_PIECE_TYPES + PROMOTED_OFFSET; // 16
+
+/// Number of squares on the board
+pub const BOARD_SQUARES: usize = 81;
 
 /// Side to move
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
