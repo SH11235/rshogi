@@ -141,7 +141,8 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                 continue;
             }
 
-            let pt = unsafe { std::mem::transmute::<u8, PieceType>(piece_type as u8) };
+            let pt = PieceType::try_from(piece_type as u8)
+                .expect("Invalid piece type in feature extraction");
             let mut bb = pos.board.piece_bb[color as usize][piece_type];
 
             while let Some(sq) = bb.pop_lsb() {
@@ -166,7 +167,8 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
         for piece_type in 0..7 {
             let count = pos.hands[color as usize][piece_type];
             if count > 0 {
-                let pt = unsafe { std::mem::transmute::<u8, PieceType>(piece_type as u8) };
+                let pt = PieceType::try_from(piece_type as u8)
+                    .expect("Invalid piece type in feature extraction");
 
                 // Adjust color for perspective
                 let color_adj = if perspective == Color::Black {
