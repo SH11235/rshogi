@@ -10,7 +10,6 @@ use std::io::Read;
 use std::mem;
 
 /// NNUE file header
-#[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct NNUEHeader {
     magic: [u8; 4],    // "NNUE"
@@ -36,15 +35,27 @@ impl WeightReader {
 
     /// Read header and validate
     pub fn read_header(&mut self) -> Result<NNUEHeader, Box<dyn Error>> {
-        let mut header_bytes = [0u8; mem::size_of::<NNUEHeader>()];
-        self.file.read_exact(&mut header_bytes)?;
+        let mut magic = [0u8; 4];
+        let mut version = [0u8; 4];
+        let mut architecture = [0u8; 4];
+        let mut size = [0u8; 4];
 
-        let header: NNUEHeader = unsafe { mem::transmute_copy(&header_bytes) };
+        self.file.read_exact(&mut magic)?;
+        self.file.read_exact(&mut version)?;
+        self.file.read_exact(&mut architecture)?;
+        self.file.read_exact(&mut size)?;
 
         // Validate magic
-        if &header.magic != b"NNUE" {
+        if &magic != b"NNUE" {
             return Err("Invalid NNUE file magic".into());
         }
+
+        let header = NNUEHeader {
+            magic,
+            version: u32::from_le_bytes(version),
+            architecture: u32::from_le_bytes(architecture),
+            size: u32::from_le_bytes(size),
+        };
 
         // Validate architecture
         let arch = header.architecture; // Copy to avoid unaligned access

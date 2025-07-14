@@ -86,6 +86,24 @@ pub enum PieceType {
     Pawn = 7,   // P
 }
 
+impl TryFrom<u8> for PieceType {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(PieceType::King),
+            1 => Ok(PieceType::Rook),
+            2 => Ok(PieceType::Bishop),
+            3 => Ok(PieceType::Gold),
+            4 => Ok(PieceType::Silver),
+            5 => Ok(PieceType::Knight),
+            6 => Ok(PieceType::Lance),
+            7 => Ok(PieceType::Pawn),
+            _ => Err("Invalid piece type value"),
+        }
+    }
+}
+
 impl PieceType {
     /// Check if piece can promote
     #[inline]
