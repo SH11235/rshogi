@@ -7,7 +7,7 @@ use super::board::{Bitboard, Color, PieceType, Position, Square};
 use super::moves::{Move, MoveList};
 
 /// Move generator
-pub struct MoveGen<'a> {
+pub struct MoveGenImpl<'a> {
     pos: &'a Position,
     moves: MoveList,
     king_sq: Square,
@@ -16,13 +16,16 @@ pub struct MoveGen<'a> {
     pin_rays: [Bitboard; 81],
 }
 
-impl<'a> MoveGen<'a> {
+/// Simple move generator (for compatibility)
+pub struct MoveGen;
+
+impl<'a> MoveGenImpl<'a> {
     /// Create new move generator for position
     pub fn new(pos: &'a Position) -> Self {
         let us = pos.side_to_move;
         let king_sq = pos.board.king_square(us).expect("King must exist");
 
-        let mut gen = MoveGen {
+        let mut gen = MoveGenImpl {
             pos,
             moves: MoveList::new(),
             king_sq,
@@ -1094,6 +1097,53 @@ impl<'a> MoveGen<'a> {
     }
 }
 
+// Simple API for enhanced search
+impl Default for MoveGen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MoveGen {
+    /// Create new move generator
+    pub fn new() -> Self {
+        MoveGen
+    }
+
+    /// Generate all legal moves
+    pub fn generate_all(&mut self, pos: &Position, moves: &mut MoveList) {
+        let mut gen = MoveGenImpl::new(pos);
+        let all_moves = gen.generate_all();
+        moves.clear();
+        for mv in all_moves.as_slice() {
+            moves.push(*mv);
+        }
+    }
+
+    /// Generate only capture moves
+    pub fn generate_captures(&mut self, pos: &Position, moves: &mut MoveList) {
+        let mut gen = MoveGenImpl::new(pos);
+        let all_moves = gen.generate_all();
+        moves.clear();
+
+        // Filter captures
+        for mv in all_moves.as_slice() {
+            if !mv.is_drop() {
+                let to = mv.to();
+                if pos.board.piece_on(to).is_some() {
+                    moves.push(*mv);
+                }
+            }
+        }
+    }
+
+    /// Generate evasion moves (when in check)
+    pub fn generate_evasions(&mut self, pos: &Position, moves: &mut MoveList) {
+        // For now, just generate all moves
+        self.generate_all(pos, moves);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::board::Piece;
@@ -1103,7 +1153,7 @@ mod tests {
     fn test_movegen_startpos() {
         let pos = Position::startpos();
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // Starting position has 30 legal moves
@@ -1116,7 +1166,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // King in center has 8 moves
@@ -1133,7 +1183,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 3), Piece::new(PieceType::Pawn, Color::Black));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // Should include only one pawn move (not in promotion zone)
@@ -1156,7 +1206,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 6), Piece::new(PieceType::Pawn, Color::Black));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // Should include pawn moves (both promoted and unpromoted since it's in promotion zone)
@@ -1187,7 +1237,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::Black));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // In check, only king moves and blocking moves are legal
@@ -1226,7 +1276,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 5), Piece::new(PieceType::Rook, Color::White));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // Pinned gold can only move along the pin ray (file 4)
@@ -1262,7 +1312,7 @@ mod tests {
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // Debug: print all pawn drops
@@ -1274,7 +1324,7 @@ mod tests {
         }
 
         // Debug: check if 5h would be checkmate
-        let gen2 = MoveGen::new(&pos);
+        let gen2 = MoveGenImpl::new(&pos);
         let sq_5h = Square::new(4, 7); // 5h = file 5 (index 4), rank h (index 7)
         let would_be_mate = gen2.is_drop_pawn_mate(sq_5h, Color::White);
         println!(
@@ -1304,7 +1354,7 @@ mod tests {
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         let sq_4g = Square::new(4, 7);
@@ -1332,7 +1382,7 @@ mod tests {
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         let sq_4g = Square::new(4, 7);
@@ -1353,7 +1403,7 @@ mod tests {
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         let sq_4g = Square::new(4, 7);
@@ -1397,7 +1447,7 @@ mod tests {
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
 
         // Try to drop pawn at 1g (would give check to king at 1h)
         let sq_1g = Square::new(8, 6); // 1g = file 1 (index 8), rank g (index 6)
@@ -1440,7 +1490,7 @@ mod tests {
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
         let sq_5g = Square::new(4, 6);
@@ -1490,7 +1540,7 @@ mod tests {
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
         let sq_5g = Square::new(4, 6);
@@ -1531,7 +1581,7 @@ mod tests {
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
         let sq_5g = Square::new(4, 6);
@@ -1575,7 +1625,7 @@ mod tests {
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
 
         // 1hに歩を打つ
         let sq_1h = Square::new(8, 7);
@@ -1613,7 +1663,7 @@ mod tests {
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
         let sq_5g = Square::new(4, 6);
@@ -1648,7 +1698,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(3, 2), Piece::new(PieceType::King, Color::White)); // 後手玉: 6c
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 生成された全ての手をチェックし、玉を取る手が含まれていないことを確認
@@ -1677,7 +1727,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 王手されているので、玉が移動するか、飛車の利きを遮るしかない
@@ -1706,7 +1756,7 @@ mod tests {
             .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
         pos.hands[Color::Black as usize][2] = 1; // 金を持っている
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 5筋に金を打って飛車の利きを遮る手があるはず
@@ -1729,7 +1779,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(6, 6), Piece::new(PieceType::Silver, Color::Black));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 銀で金を取る手があるはず
@@ -1753,7 +1803,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(8, 0), Piece::new(PieceType::Bishop, Color::White));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 全ての手が玉の移動であることを確認
@@ -1783,7 +1833,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::White));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 金の動きは5筋のみ（ピンの方向）
@@ -1811,7 +1861,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 1九の桂馬は2七にしか行けない
@@ -1848,7 +1898,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 1), Piece::new(PieceType::King, Color::White));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 歩が1段目に進む手は必ず成り
@@ -1877,7 +1927,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 1), Piece::new(PieceType::King, Color::White));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 香が1段目に進む手は必ず成り
@@ -1906,7 +1956,7 @@ mod tests {
         pos.board
             .put_piece(Square::new(4, 1), Piece::new(PieceType::King, Color::White));
 
-        let mut gen = MoveGen::new(&pos);
+        let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 桂が2段目に進む手は必ず成り

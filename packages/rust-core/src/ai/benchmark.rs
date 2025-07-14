@@ -3,6 +3,7 @@
 use super::board::Position;
 use super::evaluate::MaterialEvaluator;
 use super::movegen::MoveGen;
+use super::moves::MoveList;
 use super::search::{SearchLimits, Searcher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,8 +48,9 @@ fn benchmark_movegen() -> u64 {
     let start = Instant::now();
 
     for _ in 0..iterations {
-        let mut gen = MoveGen::new(&pos);
-        let moves = gen.generate_all();
+        let mut gen = MoveGen::new();
+        let mut moves = MoveList::new();
+        gen.generate_all(&pos, &mut moves);
         // Force evaluation to prevent optimization
         std::hint::black_box(moves.len());
     }
