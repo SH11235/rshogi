@@ -7,7 +7,7 @@
 //! 4. Bad captures
 //! 5. Quiet moves (history ordered)
 
-use super::board::{Color, PieceType, Position, Square};
+use super::board::{Bitboard, Color, PieceType, Position, Square};
 use super::history::History;
 use super::movegen::MoveGen;
 use super::moves::{Move, MoveList};
@@ -634,6 +634,100 @@ impl Position {
         false
     }
 
+    /// Check if dropping a pawn would result in checkmate
+    fn is_checkmate_by_pawn_drop(&self, pawn_drop: Move) -> bool {
+        // The pawn must give check to the opponent's king
+        let defense_color = self.side_to_move.opposite();
+        let king_sq = match self.board.king_square(defense_color) {
+            Some(sq) => sq,
+            None => return false, // No king
+        };
+
+        // Check if pawn would give check (pawn attacks one square forward)
+        let pawn_sq = pawn_drop.to();
+        // Black pawn attacks upward (toward rank 0), white pawn attacks downward (toward rank 8)
+        let expected_king_sq = if self.side_to_move == Color::Black {
+            // Black pawn at rank N attacks rank N-1
+            if pawn_sq.rank() == 0 {
+                return false; // Can't drop pawn on rank 1
+            }
+            Square::new(pawn_sq.file(), pawn_sq.rank() - 1)
+        } else {
+            // White pawn at rank N attacks rank N+1
+            if pawn_sq.rank() == 8 {
+                return false; // Can't drop pawn on rank 9
+            }
+            Square::new(pawn_sq.file(), pawn_sq.rank() + 1)
+        };
+
+        if king_sq != expected_king_sq {
+            return false; // Pawn doesn't give check
+        }
+
+        // Step 1: Check if the pawn has support (can't be captured by king)
+        if !self.is_attacked(pawn_sq, self.side_to_move) {
+            return false; // The pawn has no followers, king can capture it
+        }
+
+        // Step 2: Check if opponent's pieces (except king/lance/pawn) can capture the pawn
+        let capture_candidates = self.get_attackers_to(pawn_sq, defense_color);
+
+        // Exclude king, lance, and pawn from capture candidates
+        let king_bb = self.board.piece_bb[defense_color as usize][PieceType::King as usize];
+        let lance_bb = self.board.piece_bb[defense_color as usize][PieceType::Lance as usize];
+        let pawn_bb = self.board.piece_bb[defense_color as usize][PieceType::Pawn as usize];
+        let excluded = king_bb | lance_bb | pawn_bb;
+
+        let valid_capture_candidates = capture_candidates & !excluded;
+
+        // Check for pinned pieces
+        let pinned = self.get_blockers_for_king(defense_color);
+        let pawn_file_mask = Bitboard::file_mask(pawn_sq.file());
+        let not_pinned_for_capture = !pinned | pawn_file_mask;
+
+        let can_capture = valid_capture_candidates & not_pinned_for_capture;
+        if !can_capture.is_empty() {
+            return false; // Some piece can capture the pawn
+        }
+
+        // Step 3: Check if king can escape
+        use crate::ai::attacks::ATTACK_TABLES;
+        let king_moves = ATTACK_TABLES.king_attacks(king_sq);
+        let mut king_escape_candidates =
+            king_moves & !self.board.occupied_bb[defense_color as usize];
+
+        // Remove the pawn square (king can't capture it due to support)
+        let mut pawn_sq_bb = Bitboard::EMPTY;
+        pawn_sq_bb.set(pawn_sq);
+        king_escape_candidates &= !pawn_sq_bb;
+
+        // Simulate pawn drop for checking escapes
+        let mut test_pos = self.clone();
+        test_pos.do_move(pawn_drop);
+
+        // Check each escape square
+        let mut candidates = king_escape_candidates;
+        while let Some(escape_sq) = candidates.pop_lsb() {
+            // Simulate king moving to escape square
+            let king_move = Move::normal(king_sq, escape_sq, false);
+            let mut escape_test_pos = test_pos.clone();
+
+            // Try to make the king move
+            // If there's a piece to capture, it will be handled by do_move
+            escape_test_pos.do_move(king_move);
+
+            // Check if king is safe after moving
+            let is_safe = !escape_test_pos.is_check(defense_color);
+
+            if is_safe {
+                return false; // King has a safe escape
+            }
+        }
+
+        // All conditions met - it's checkmate by pawn drop
+        true
+    }
+
     /// Check if a move is legal
     ///
     /// This optimized version uses do_move/undo_move to check legality.
@@ -671,9 +765,10 @@ impl Position {
                     return false;
                 }
 
-                // TODO: Check uchifuzume (checkmate by pawn drop)
-                // This is a complex check that requires full move generation
-                // and is not critical for basic engine functionality
+                // Check uchifuzume (checkmate by pawn drop)
+                if self.is_checkmate_by_pawn_drop(mv) {
+                    return false;
+                }
             }
         } else {
             // Normal move
@@ -880,9 +975,115 @@ mod tests {
 
     #[test]
     fn test_uchifuzume_restriction() {
-        // For now, skip this test as uchifuzume detection requires
-        // complex checkmate verification which is not critical for Phase 3
-        // TODO: Implement proper uchifuzume detection in a later phase
-        println!("Uchifuzume test skipped - will be implemented in a later phase");
+        use crate::ai::board::Piece;
+
+        // Create a position where a pawn drop would be checkmate
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+
+        // Place white king at 5a (file 4, rank 0)
+        let white_king_sq = Square::new(4, 0);
+        pos.board.put_piece(
+            white_king_sq,
+            Piece {
+                piece_type: PieceType::King,
+                color: Color::White,
+                promoted: false,
+            },
+        );
+        pos.board.piece_bb[Color::White as usize][PieceType::King as usize].set(white_king_sq);
+
+        // Place black gold at 6a (file 3, rank 0) to prevent king escape
+        let gold_sq = Square::new(3, 0);
+        pos.board.put_piece(
+            gold_sq,
+            Piece {
+                piece_type: PieceType::Gold,
+                color: Color::Black,
+                promoted: false,
+            },
+        );
+        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq);
+
+        // Place black gold at 4a (file 5, rank 0) to prevent king escape
+        let gold_sq2 = Square::new(5, 0);
+        pos.board.put_piece(
+            gold_sq2,
+            Piece {
+                piece_type: PieceType::Gold,
+                color: Color::Black,
+                promoted: false,
+            },
+        );
+        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq2);
+
+        // Also place a gold at 6b to protect the gold at 6a
+        let gold_sq3 = Square::new(3, 1);
+        pos.board.put_piece(
+            gold_sq3,
+            Piece {
+                piece_type: PieceType::Gold,
+                color: Color::Black,
+                promoted: false,
+            },
+        );
+        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq3);
+
+        // Place another gold at 4b to protect the gold at 4a
+        let gold_sq4 = Square::new(5, 1);
+        pos.board.put_piece(
+            gold_sq4,
+            Piece {
+                piece_type: PieceType::Gold,
+                color: Color::Black,
+                promoted: false,
+            },
+        );
+        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq4);
+
+        // Place black lance at 5c (file 4, rank 2) to support pawn
+        let lance_sq = Square::new(4, 2);
+        pos.board.put_piece(
+            lance_sq,
+            Piece {
+                piece_type: PieceType::Lance,
+                color: Color::Black,
+                promoted: false,
+            },
+        );
+        pos.board.piece_bb[Color::Black as usize][PieceType::Lance as usize].set(lance_sq);
+
+        // Give black a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1;
+
+        // Update all_bb and occupied_bb
+        pos.board.all_bb = Bitboard::EMPTY;
+        pos.board.occupied_bb[0] = Bitboard::EMPTY;
+        pos.board.occupied_bb[1] = Bitboard::EMPTY;
+
+        for color in 0..2 {
+            for piece in 0..8 {
+                pos.board.occupied_bb[color] |= pos.board.piece_bb[color][piece];
+            }
+            pos.board.all_bb |= pos.board.occupied_bb[color];
+        }
+
+        // Try to drop pawn at 5b (file 4, rank 1) - this would be checkmate
+        let checkmate_drop = Move::drop(PieceType::Pawn, Square::new(4, 1));
+
+        // This should be illegal (uchifuzume)
+        let is_legal = pos.is_legal_move(checkmate_drop);
+
+        assert!(!is_legal, "Should not allow checkmate by pawn drop");
+
+        // Test case where king can escape
+        // Remove one gold to create escape route
+        pos.board.remove_piece(gold_sq);
+        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].clear(gold_sq);
+        pos.board.all_bb.clear(gold_sq);
+        pos.board.occupied_bb[Color::Black as usize].clear(gold_sq);
+
+        // Now the king can escape to 6a, so it's not checkmate
+        assert!(pos.is_legal_move(checkmate_drop), "Should allow pawn drop when king can escape");
     }
 }

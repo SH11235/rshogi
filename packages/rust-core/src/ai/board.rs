@@ -895,6 +895,246 @@ impl Position {
         false
     }
 
+    /// Get all pieces of a given color attacking a square
+    /// Returns a bitboard with all attacking pieces
+    pub fn get_attackers_to(&self, sq: Square, by_color: Color) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+        let mut attackers = Bitboard::EMPTY;
+
+        // Check pawn attacks (pawns attack differently than they are attacked)
+        let pawn_bb = self.board.piece_bb[by_color as usize][PieceType::Pawn as usize];
+        let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
+        attackers |= pawn_bb & pawn_attacks;
+
+        // Check knight attacks
+        let knight_bb = self.board.piece_bb[by_color as usize][PieceType::Knight as usize];
+        let knight_attacks = ATTACK_TABLES.knight_attacks(sq, by_color.opposite());
+        attackers |= knight_bb & knight_attacks;
+
+        // Check king attacks
+        let king_bb = self.board.piece_bb[by_color as usize][PieceType::King as usize];
+        let king_attacks = ATTACK_TABLES.king_attacks(sq);
+        attackers |= king_bb & king_attacks;
+
+        // Check gold attacks (including promoted pieces that move like gold)
+        let gold_bb = self.board.piece_bb[by_color as usize][PieceType::Gold as usize];
+        let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
+        attackers |= gold_bb & gold_attacks;
+
+        // Check promoted pawns, lances, knights, and silvers (they move like gold)
+        let promoted_bb = self.board.promoted_bb;
+        let tokin_bb = pawn_bb & promoted_bb;
+        let promoted_lance_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Lance as usize] & promoted_bb;
+        let promoted_knight_bb = knight_bb & promoted_bb;
+        let promoted_silver_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Silver as usize] & promoted_bb;
+        attackers |=
+            (tokin_bb | promoted_lance_bb | promoted_knight_bb | promoted_silver_bb) & gold_attacks;
+
+        // Check silver attacks (unpromoted only)
+        let silver_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Silver as usize] & !promoted_bb;
+        let silver_attacks = ATTACK_TABLES.silver_attacks(sq, by_color.opposite());
+        attackers |= silver_bb & silver_attacks;
+
+        // Check sliding pieces (rook, bishop, lance)
+        let occupied = self.board.all_bb;
+
+        // Rook attacks (including dragon)
+        let rook_bb = self.board.piece_bb[by_color as usize][PieceType::Rook as usize];
+        let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        attackers |= rook_bb & rook_attacks;
+
+        // Dragon (promoted rook) also has king moves
+        let dragon_bb = rook_bb & promoted_bb;
+        attackers |= dragon_bb & king_attacks;
+
+        // Bishop attacks (including horse)
+        let bishop_bb = self.board.piece_bb[by_color as usize][PieceType::Bishop as usize];
+        let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+        attackers |= bishop_bb & bishop_attacks;
+
+        // Horse (promoted bishop) also has king moves
+        let horse_bb = bishop_bb & promoted_bb;
+        attackers |= horse_bb & king_attacks;
+
+        // Lance attacks (only unpromoted, as promoted lance moves like gold)
+        let lance_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Lance as usize] & !promoted_bb;
+        // For lance, we need to check if it can attack from behind (for the given color)
+        // This is a simplified version - proper lance attack generation would consider direction
+        if by_color == Color::Black {
+            // Black lance attacks from below
+            for rank in (sq.rank() + 1)..9 {
+                let from = Square::new(sq.file(), rank);
+                if lance_bb.test(from) {
+                    // Check if path is clear
+                    let mut path_clear = true;
+                    for r in (sq.rank() + 1)..rank {
+                        if occupied.test(Square::new(sq.file(), r)) {
+                            path_clear = false;
+                            break;
+                        }
+                    }
+                    if path_clear {
+                        attackers.set(from);
+                    }
+                    break; // Only one lance per file
+                }
+            }
+        } else {
+            // White lance attacks from above
+            for rank in (0..sq.rank()).rev() {
+                let from = Square::new(sq.file(), rank);
+                if lance_bb.test(from) {
+                    // Check if path is clear
+                    let mut path_clear = true;
+                    for r in (rank + 1)..sq.rank() {
+                        if occupied.test(Square::new(sq.file(), r)) {
+                            path_clear = false;
+                            break;
+                        }
+                    }
+                    if path_clear {
+                        attackers.set(from);
+                    }
+                    break; // Only one lance per file
+                }
+            }
+        }
+
+        attackers
+    }
+
+    /// Get blockers for king (simplified version)
+    /// Returns a bitboard of pieces that are pinned to the king
+    pub fn get_blockers_for_king(&self, king_color: Color) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        let king_bb = self.board.piece_bb[king_color as usize][PieceType::King as usize];
+        let king_sq = match king_bb.lsb() {
+            Some(sq) => sq,
+            None => return Bitboard::EMPTY, // No king
+        };
+
+        let enemy_color = king_color.opposite();
+        let occupied = self.board.all_bb;
+        let mut blockers = Bitboard::EMPTY;
+
+        // Check for pins by sliding pieces (rook, bishop, lance)
+
+        // Rook and Dragon pins (horizontal and vertical)
+        let enemy_rooks = self.board.piece_bb[enemy_color as usize][PieceType::Rook as usize];
+        let _rook_attacks = ATTACK_TABLES.sliding_attacks(king_sq, occupied, PieceType::Rook);
+        let rook_xray = ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Rook);
+
+        // Find pieces between king and enemy rooks
+        let potential_rook_pinners = enemy_rooks & rook_xray;
+        let mut pinners_bb = potential_rook_pinners;
+        while let Some(pinner_sq) = pinners_bb.pop_lsb() {
+            // Check if there's exactly one piece between king and pinner
+            let between = self.get_between_bb(king_sq, pinner_sq) & occupied;
+            if between.count_ones() == 1 {
+                blockers |= between;
+            }
+        }
+
+        // Bishop and Horse pins (diagonal)
+        let enemy_bishops = self.board.piece_bb[enemy_color as usize][PieceType::Bishop as usize];
+        let _bishop_attacks = ATTACK_TABLES.sliding_attacks(king_sq, occupied, PieceType::Bishop);
+        let bishop_xray =
+            ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Bishop);
+
+        // Find pieces between king and enemy bishops
+        let potential_bishop_pinners = enemy_bishops & bishop_xray;
+        let mut pinners_bb = potential_bishop_pinners;
+        while let Some(pinner_sq) = pinners_bb.pop_lsb() {
+            // Check if there's exactly one piece between king and pinner
+            let between = self.get_between_bb(king_sq, pinner_sq) & occupied;
+            if between.count_ones() == 1 {
+                blockers |= between;
+            }
+        }
+
+        // Lance pins (vertical only)
+        let enemy_lances = self.board.piece_bb[enemy_color as usize][PieceType::Lance as usize]
+            & !self.board.promoted_bb;
+
+        // Check for lance pins in the same file
+        if enemy_color == Color::Black {
+            // Black lance can pin from below
+            for rank in (king_sq.rank() + 1)..9 {
+                let lance_sq = Square::new(king_sq.file(), rank);
+                if enemy_lances.test(lance_sq) {
+                    // Check pieces between king and lance
+                    let mut between = Bitboard::EMPTY;
+                    for r in (king_sq.rank() + 1)..rank {
+                        let sq = Square::new(king_sq.file(), r);
+                        if occupied.test(sq) {
+                            between.set(sq);
+                        }
+                    }
+                    if between.count_ones() == 1 {
+                        blockers |= between;
+                    }
+                    break;
+                }
+            }
+        } else {
+            // White lance can pin from above
+            for rank in (0..king_sq.rank()).rev() {
+                let lance_sq = Square::new(king_sq.file(), rank);
+                if enemy_lances.test(lance_sq) {
+                    // Check pieces between king and lance
+                    let mut between = Bitboard::EMPTY;
+                    for r in (rank + 1)..king_sq.rank() {
+                        let sq = Square::new(king_sq.file(), r);
+                        if occupied.test(sq) {
+                            between.set(sq);
+                        }
+                    }
+                    if between.count_ones() == 1 {
+                        blockers |= between;
+                    }
+                    break;
+                }
+            }
+        }
+
+        blockers
+    }
+
+    /// Get bitboard of squares between two squares (exclusive)
+    fn get_between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
+        let mut between = Bitboard::EMPTY;
+
+        let file1 = sq1.file() as i8;
+        let rank1 = sq1.rank() as i8;
+        let file2 = sq2.file() as i8;
+        let rank2 = sq2.rank() as i8;
+
+        let file_diff = file2 - file1;
+        let rank_diff = rank2 - rank1;
+
+        // Check if squares are aligned
+        if file_diff == 0 || rank_diff == 0 || file_diff.abs() == rank_diff.abs() {
+            let file_step = file_diff.signum();
+            let rank_step = rank_diff.signum();
+
+            let mut file = file1 + file_step;
+            let mut rank = rank1 + rank_step;
+
+            while file != file2 || rank != rank2 {
+                between.set(Square::new(file as u8, rank as u8));
+                file += file_step;
+                rank += rank_step;
+            }
+        }
+
+        between
+    }
+
     /// Undo a move on the position
     pub fn undo_move(&mut self, mv: super::moves::Move, undo_info: UndoInfo) {
         // Remove last hash from history
