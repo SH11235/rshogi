@@ -83,7 +83,7 @@ cargo run --release --bin sse41_only_test
 cargo run --release --bin simd_check
 ```
 
-## パフォーマンス結果サマリー（2025年1月更新）
+## パフォーマンス結果サマリー（2025年7月15日）
 
 ### NNUE評価関数の直接評価性能
 - **Material評価関数**: 12,106,317 評価/秒

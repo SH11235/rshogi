@@ -5,6 +5,7 @@
 use super::attacks::ATTACK_TABLES;
 use super::board::{Bitboard, Color, PieceType, Position, Square};
 use super::moves::{Move, MoveList};
+use super::piece_constants::ALL_PIECE_TYPES;
 
 /// Move generator
 pub struct MoveGen<'a> {
@@ -54,19 +55,8 @@ impl<'a> MoveGen<'a> {
         }
 
         // Generate moves for each piece type
-        for piece_type in 0..8 {
-            let piece_type_enum = match piece_type {
-                0 => PieceType::King,
-                1 => PieceType::Rook,
-                2 => PieceType::Bishop,
-                3 => PieceType::Gold,
-                4 => PieceType::Silver,
-                5 => PieceType::Knight,
-                6 => PieceType::Lance,
-                7 => PieceType::Pawn,
-                _ => unreachable!(),
-            };
-
+        for &piece_type_enum in &ALL_PIECE_TYPES {
+            let piece_type = piece_type_enum as usize;
             let mut pieces = self.pos.board.piece_bb[us as usize][piece_type];
 
             while let Some(from) = pieces.pop_lsb() {
