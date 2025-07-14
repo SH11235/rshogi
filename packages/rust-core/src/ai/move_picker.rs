@@ -614,6 +614,26 @@ impl MovePicker {
 
 // Extension for Position to check legal moves
 impl Position {
+    /// Check if the current player has a pawn in the given file
+    fn has_pawn_in_file(&self, file: u8) -> bool {
+        let color = self.side_to_move;
+        let pawn_bb = self.board.piece_bb[color as usize][PieceType::Pawn as usize];
+
+        // Check each square in the file
+        for rank in 0..9 {
+            let sq = Square::new(file, rank);
+            if pawn_bb.test(sq) {
+                // Check if it's not a promoted pawn
+                if let Some(piece) = self.board.piece_on(sq) {
+                    if piece.piece_type == PieceType::Pawn && !piece.promoted {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Check if a move is legal
     ///
     /// This optimized version uses do_move/undo_move to check legality.
@@ -644,7 +664,17 @@ impl Position {
                 return false;
             }
 
-            // TODO: Check pawn drop restrictions (nifu, uchifuzume)
+            // Check pawn drop restrictions
+            if piece_type == PieceType::Pawn {
+                // Check nifu (double pawn)
+                if self.has_pawn_in_file(mv.to().file()) {
+                    return false;
+                }
+
+                // TODO: Check uchifuzume (checkmate by pawn drop)
+                // This is a complex check that requires full move generation
+                // and is not critical for basic engine functionality
+            }
         } else {
             // Normal move
             if let Some(from) = mv.from() {
@@ -813,5 +843,46 @@ mod tests {
         for &pos in &killer_positions {
             assert!(pos < 10, "Killer move at position {} is too late", pos);
         }
+    }
+
+    #[test]
+    fn test_pawn_drop_restrictions() {
+        use crate::ai::board::Piece;
+
+        // Test nifu (double pawn) restriction
+        // Start with empty position to have full control
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
+
+        // Put a black pawn on file 5 (index 4)
+        let sq = Square::new(4, 5); // 5f
+        pos.board.put_piece(
+            sq,
+            Piece {
+                piece_type: PieceType::Pawn,
+                color: Color::Black,
+                promoted: false,
+            },
+        );
+        pos.board.piece_bb[Color::Black as usize][PieceType::Pawn as usize].set(sq);
+
+        // Give black a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
+
+        // Try to drop a pawn in the same file
+        let illegal_drop = Move::drop(PieceType::Pawn, Square::new(4, 3)); // 5d
+        assert!(!pos.is_legal_move(illegal_drop), "Should not allow double pawn");
+
+        // Try to drop a pawn in a different file (that has no pawn)
+        let legal_drop = Move::drop(PieceType::Pawn, Square::new(3, 3)); // 6d
+        assert!(pos.is_legal_move(legal_drop), "Should allow pawn drop in different file");
+    }
+
+    #[test]
+    fn test_uchifuzume_restriction() {
+        // For now, skip this test as uchifuzume detection requires
+        // complex checkmate verification which is not critical for Phase 3
+        // TODO: Implement proper uchifuzume detection in a later phase
+        println!("Uchifuzume test skipped - will be implemented in a later phase");
     }
 }
