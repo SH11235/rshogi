@@ -70,7 +70,7 @@ fn main() {
 
         println!("SSE4.1 affine_transform:");
         println!("  Time: {:.3} ms", elapsed.as_millis());
-        println!("  Operations/sec: {:.0}", ops_per_sec);
+        println!("  Operations/sec: {ops_per_sec:.0}");
         println!("  Nanoseconds/op: {:.1}", elapsed.as_nanos() as f64 / iterations as f64);
     }
 
@@ -95,7 +95,7 @@ fn main() {
 
         println!("\nDispatcher (AVX2 if available):");
         println!("  Time: {:.3} ms", elapsed.as_millis());
-        println!("  Operations/sec: {:.0}", ops_per_sec);
+        println!("  Operations/sec: {ops_per_sec:.0}");
         println!("  Nanoseconds/op: {:.1}", elapsed.as_nanos() as f64 / iterations as f64);
     }
 

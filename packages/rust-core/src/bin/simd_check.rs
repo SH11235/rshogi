@@ -39,9 +39,8 @@ fn main() {
         let result = engine.search(&mut pos, limits);
         println!("  Nodes: {}", result.stats.nodes);
         println!("  Time: {:?}", result.stats.elapsed);
-        let nps =
-            result.stats.nodes as u64 * 1_000_000_000 / result.stats.elapsed.as_nanos() as u64;
-        println!("  NPS: {}", nps);
+        let nps = result.stats.nodes * 1_000_000_000 / result.stats.elapsed.as_nanos() as u64;
+        println!("  NPS: {nps}");
     }
 
     // Test 2: Multiple runs to check consistency
@@ -59,8 +58,7 @@ fn main() {
             };
 
             let result = engine.search(&mut pos, limits);
-            let nps =
-                result.stats.nodes as u64 * 1_000_000_000 / result.stats.elapsed.as_nanos() as u64;
+            let nps = result.stats.nodes * 1_000_000_000 / result.stats.elapsed.as_nanos() as u64;
             nps_values.push(nps);
             println!("  Run {}: {} NPS", i + 1, nps);
         }
@@ -69,9 +67,9 @@ fn main() {
         let min_nps = *nps_values.iter().min().unwrap();
         let max_nps = *nps_values.iter().max().unwrap();
 
-        println!("\n  Average NPS: {}", avg_nps);
-        println!("  Min NPS: {}", min_nps);
-        println!("  Max NPS: {}", max_nps);
+        println!("\n  Average NPS: {avg_nps}");
+        println!("  Min NPS: {min_nps}");
+        println!("  Max NPS: {max_nps}");
         println!("  Variance: {:.2}%", ((max_nps - min_nps) as f64 / avg_nps as f64) * 100.0);
     }
 
