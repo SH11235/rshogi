@@ -274,6 +274,7 @@ impl TranspositionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::board::{PieceType, Square};
 
     #[test]
     fn test_tt_entry_packing() {

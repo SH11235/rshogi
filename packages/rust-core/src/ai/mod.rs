@@ -19,6 +19,8 @@ pub mod tt;
 pub mod zobrist;
 
 #[cfg(test)]
+mod test_move_picker_comprehensive;
+#[cfg(test)]
 mod test_move_picker_integration;
 
 // Re-export basic types
