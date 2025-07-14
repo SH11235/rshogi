@@ -10,7 +10,6 @@ use std::io::Read;
 use std::mem;
 
 /// NNUE file header
-#[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct NNUEHeader {
     magic: [u8; 4],    // "NNUE"
@@ -21,6 +20,23 @@ pub struct NNUEHeader {
 
 /// Architecture ID for HalfKP 256x2-32-32
 const HALFKP_256X2_32_32: u32 = 0x7AF32F16;
+
+/// Supported NNUE format versions
+const MIN_SUPPORTED_VERSION: u32 = 1;
+const MAX_SUPPORTED_VERSION: u32 = 1;
+
+/// Maximum reasonable file size (200MB)
+const MAX_FILE_SIZE: u32 = 200 * 1024 * 1024;
+
+/// Expected weight sizes for validation
+const EXPECTED_FT_WEIGHTS: usize = 81 * FE_END * 256; // Feature transformer weights
+const EXPECTED_FT_BIASES: usize = 256; // Feature transformer biases
+const EXPECTED_H1_WEIGHTS: usize = 512 * 32; // Hidden layer 1 weights
+const EXPECTED_H1_BIASES: usize = 32; // Hidden layer 1 biases
+const EXPECTED_H2_WEIGHTS: usize = 32 * 32; // Hidden layer 2 weights
+const EXPECTED_H2_BIASES: usize = 32; // Hidden layer 2 biases
+const EXPECTED_OUT_WEIGHTS: usize = 32; // Output layer weights
+const EXPECTED_OUT_BIASES: usize = 1; // Output layer bias
 
 /// Weight file reader
 pub struct WeightReader {
@@ -36,14 +52,53 @@ impl WeightReader {
 
     /// Read header and validate
     pub fn read_header(&mut self) -> Result<NNUEHeader, Box<dyn Error>> {
-        let mut header_bytes = [0u8; mem::size_of::<NNUEHeader>()];
-        self.file.read_exact(&mut header_bytes)?;
+        let mut magic = [0u8; 4];
+        let mut version = [0u8; 4];
+        let mut architecture = [0u8; 4];
+        let mut size = [0u8; 4];
 
-        let header: NNUEHeader = unsafe { mem::transmute_copy(&header_bytes) };
+        self.file.read_exact(&mut magic)?;
+        self.file.read_exact(&mut version)?;
+        self.file.read_exact(&mut architecture)?;
+        self.file.read_exact(&mut size)?;
 
         // Validate magic
-        if &header.magic != b"NNUE" {
+        if &magic != b"NNUE" {
             return Err("Invalid NNUE file magic".into());
+        }
+
+        let header = NNUEHeader {
+            magic,
+            version: u32::from_le_bytes(version),
+            architecture: u32::from_le_bytes(architecture),
+            size: u32::from_le_bytes(size),
+        };
+
+        // Debug output for header information
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "NNUE Header: magic={:?}, version={}, size={} bytes",
+            std::str::from_utf8(&header.magic).unwrap_or("???"),
+            header.version,
+            header.size
+        );
+
+        // Validate version
+        if header.version < MIN_SUPPORTED_VERSION || header.version > MAX_SUPPORTED_VERSION {
+            return Err(format!(
+                "Unsupported NNUE version: {}, supported range: {}-{}",
+                header.version, MIN_SUPPORTED_VERSION, MAX_SUPPORTED_VERSION
+            )
+            .into());
+        }
+
+        // Validate file size
+        if header.size > MAX_FILE_SIZE {
+            return Err(format!(
+                "NNUE file too large: {} bytes, maximum: {} bytes",
+                header.size, MAX_FILE_SIZE
+            )
+            .into());
         }
 
         // Validate architecture
@@ -82,20 +137,88 @@ pub fn load_weights(path: &str) -> Result<(FeatureTransformer, Network), Box<dyn
     let _header = reader.read_header()?;
 
     // Read feature transformer weights
-    let ft_weights = reader.read_weights::<i16>(81 * FE_END * 256)?;
-    let ft_biases = reader.read_weights::<i32>(256)?;
+    let ft_weights = reader.read_weights::<i16>(EXPECTED_FT_WEIGHTS)?;
+    if ft_weights.len() != EXPECTED_FT_WEIGHTS {
+        return Err(format!(
+            "Feature transformer weights dimension mismatch: expected {}, got {}",
+            EXPECTED_FT_WEIGHTS,
+            ft_weights.len()
+        )
+        .into());
+    }
+
+    let ft_biases = reader.read_weights::<i32>(EXPECTED_FT_BIASES)?;
+    if ft_biases.len() != EXPECTED_FT_BIASES {
+        return Err(format!(
+            "Feature transformer biases dimension mismatch: expected {}, got {}",
+            EXPECTED_FT_BIASES,
+            ft_biases.len()
+        )
+        .into());
+    }
 
     // Read hidden layer 1
-    let hidden1_weights = reader.read_weights::<i8>(512 * 32)?;
-    let hidden1_biases = reader.read_weights::<i32>(32)?;
+    let hidden1_weights = reader.read_weights::<i8>(EXPECTED_H1_WEIGHTS)?;
+    if hidden1_weights.len() != EXPECTED_H1_WEIGHTS {
+        return Err(format!(
+            "Hidden layer 1 weights dimension mismatch: expected {}, got {}",
+            EXPECTED_H1_WEIGHTS,
+            hidden1_weights.len()
+        )
+        .into());
+    }
+
+    let hidden1_biases = reader.read_weights::<i32>(EXPECTED_H1_BIASES)?;
+    if hidden1_biases.len() != EXPECTED_H1_BIASES {
+        return Err(format!(
+            "Hidden layer 1 biases dimension mismatch: expected {}, got {}",
+            EXPECTED_H1_BIASES,
+            hidden1_biases.len()
+        )
+        .into());
+    }
 
     // Read hidden layer 2
-    let hidden2_weights = reader.read_weights::<i8>(32 * 32)?;
-    let hidden2_biases = reader.read_weights::<i32>(32)?;
+    let hidden2_weights = reader.read_weights::<i8>(EXPECTED_H2_WEIGHTS)?;
+    if hidden2_weights.len() != EXPECTED_H2_WEIGHTS {
+        return Err(format!(
+            "Hidden layer 2 weights dimension mismatch: expected {}, got {}",
+            EXPECTED_H2_WEIGHTS,
+            hidden2_weights.len()
+        )
+        .into());
+    }
+
+    let hidden2_biases = reader.read_weights::<i32>(EXPECTED_H2_BIASES)?;
+    if hidden2_biases.len() != EXPECTED_H2_BIASES {
+        return Err(format!(
+            "Hidden layer 2 biases dimension mismatch: expected {}, got {}",
+            EXPECTED_H2_BIASES,
+            hidden2_biases.len()
+        )
+        .into());
+    }
 
     // Read output layer
-    let output_weights = reader.read_weights::<i8>(32)?;
-    let output_bias_vec = reader.read_weights::<i32>(1)?;
+    let output_weights = reader.read_weights::<i8>(EXPECTED_OUT_WEIGHTS)?;
+    if output_weights.len() != EXPECTED_OUT_WEIGHTS {
+        return Err(format!(
+            "Output layer weights dimension mismatch: expected {}, got {}",
+            EXPECTED_OUT_WEIGHTS,
+            output_weights.len()
+        )
+        .into());
+    }
+
+    let output_bias_vec = reader.read_weights::<i32>(EXPECTED_OUT_BIASES)?;
+    if output_bias_vec.len() != EXPECTED_OUT_BIASES {
+        return Err(format!(
+            "Output layer bias dimension mismatch: expected {}, got {}",
+            EXPECTED_OUT_BIASES,
+            output_bias_vec.len()
+        )
+        .into());
+    }
     let output_bias = output_bias_vec[0];
 
     // Create structures

@@ -16,8 +16,6 @@ path = "src/bin/verify_opening_book.rs"
 
 [dependencies]
 wasm-bindgen = "0.2"
-matchbox_socket = { version = "0.12.0", features = ["ggrs"] }
-ggrs = "0.11.1"
 wasm-bindgen-futures = "0.4"
 futures = "0.3"
 log = "0.4"
@@ -41,8 +39,8 @@ rayon = "1.7"
 clap = { version = "4.0", features = ["derive"] }
 anyhow = "1.0"
 lazy_static = "1.4"
-rand = "0.8"
-rand_xoshiro = "0.6"
+rand = "0.9"
+rand_xoshiro = "0.7"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

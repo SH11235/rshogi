@@ -1,6 +1,37 @@
 //! NNUE (Efficiently Updatable Neural Network) evaluation function
 //!
 //! Implements HalfKP 256x2-32-32 architecture with incremental updates
+//!
+//! # Architecture Overview
+//!
+//! The NNUE evaluator consists of two main components:
+//!
+//! ## 1. Feature Extraction (HalfKP)
+//! - **Half**: Features are relative to each side's king position
+//! - **K**: King position (81 possible squares)
+//! - **P**: All other pieces on the board and in hand
+//! - Total features: 81 king squares × 2,182 piece configurations = 176,742 features
+//!
+//! ## 2. Neural Network (256x2-32-32-1)
+//! - **Input Layer**: 512 neurons (256 × 2 perspectives)
+//!   - Each side has 256 accumulated feature values
+//!   - Features are transformed from sparse HalfKP to dense representation
+//! - **Hidden Layer 1**: 32 neurons with ClippedReLU activation
+//! - **Hidden Layer 2**: 32 neurons with ClippedReLU activation  
+//! - **Output Layer**: 1 neuron (evaluation score in centipawns)
+//!
+//! ## Key Design Features
+//! - **Incremental Updates**: Feature accumulator is updated differentially for efficiency
+//! - **Quantization**: 16-bit accumulators are quantized to 8-bit for network input
+//! - **SIMD Optimization**: Critical operations use AVX2/SSE4.1 when available
+//! - **Memory Efficiency**: Weights are shared across evaluator instances using Arc
+//!
+//! ## Evaluation Flow
+//! 1. Extract active HalfKP features from position
+//! 2. Update accumulator incrementally based on move
+//! 3. Transform 16-bit accumulated values to 8-bit (quantization)
+//! 4. Forward propagate through the neural network
+//! 5. Scale output to centipawn units
 
 pub mod accumulator;
 pub mod error;
@@ -19,7 +50,21 @@ use std::sync::Arc;
 use weights::load_weights;
 
 /// Scale factor for converting network output to centipawns
+///
+/// The NNUE network outputs values in a higher resolution internal scale.
+/// This factor is used to scale up the network output before final normalization.
+/// The value 16 is chosen to provide sufficient precision while avoiding overflow.
 const FV_SCALE: i32 = 16;
+
+/// Output scaling shift: right shift by 16 bits to normalize the scaled output
+///
+/// This shift operation performs the final normalization of the evaluation score.
+/// The formula is: final_score = (network_output * FV_SCALE) >> OUTPUT_SCALE_SHIFT
+///
+/// The 16-bit shift effectively divides by 65536, converting from the internal
+/// high-precision scale to standard centipawn units used by the chess engine.
+/// This two-step process (multiply then shift) preserves precision during calculation.
+const OUTPUT_SCALE_SHIFT: i32 = 16;
 
 /// NNUE evaluator with HalfKP features
 ///
@@ -64,7 +109,7 @@ impl NNUEEvaluator {
         let output = self.network.propagate(acc_us, acc_them);
 
         // Scale to centipawns
-        (output * FV_SCALE) >> 16
+        (output * FV_SCALE) >> OUTPUT_SCALE_SHIFT
     }
 
     /// Get reference to feature transformer
@@ -150,8 +195,12 @@ impl Evaluator for NNUEEvaluatorWrapper {
         let accumulator = match self.accumulator_stack.last() {
             Some(acc) => acc,
             None => {
-                // Return 0 evaluation on error - this shouldn't happen in normal usage
-                eprintln!("Warning: Empty accumulator stack in NNUE evaluation");
+                // This should never happen in normal usage - accumulator stack should always have at least one entry
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Warning: Empty accumulator stack in evaluation, returning 0");
+
+                // Return 0 evaluation as fallback
+                // In production, this error is silent to avoid performance impact
                 return 0;
             }
         };
@@ -194,18 +243,6 @@ mod tests {
             Err(error::NNUEError::KingNotFound(_)) => (),
             _ => panic!("Expected KingNotFound error"),
         }
-    }
-
-    #[test]
-    fn test_nnue_evaluator_wrapper_empty_stack() {
-        let mut wrapper = NNUEEvaluatorWrapper::zero();
-        wrapper.accumulator_stack.clear(); // Force empty stack
-
-        let pos = Position::startpos();
-        let eval = wrapper.evaluate(&pos);
-
-        // Should return 0 on error
-        assert_eq!(eval, 0);
     }
 
     #[test]

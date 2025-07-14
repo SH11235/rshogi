@@ -3,6 +3,7 @@
 //! Simple material-based evaluation
 
 use super::board::{Color, PieceType, Position};
+use super::piece_constants::ALL_PIECE_TYPES;
 
 /// Trait for position evaluation
 pub trait Evaluator {
@@ -42,18 +43,8 @@ pub fn evaluate(pos: &Position) -> i32 {
     let mut score = 0;
 
     // Material on board
-    for piece_type in 0..8 {
-        let pt = match piece_type {
-            0 => PieceType::King,
-            1 => PieceType::Rook,
-            2 => PieceType::Bishop,
-            3 => PieceType::Gold,
-            4 => PieceType::Silver,
-            5 => PieceType::Knight,
-            6 => PieceType::Lance,
-            7 => PieceType::Pawn,
-            _ => unreachable!(),
-        };
+    for &pt in &ALL_PIECE_TYPES {
+        let piece_type = pt as usize;
 
         // Count pieces
         let our_pieces = pos.board.piece_bb[us as usize][piece_type];
