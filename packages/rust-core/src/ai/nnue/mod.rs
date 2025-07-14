@@ -1,17 +1,17 @@
 //! NNUE (Efficiently Updatable Neural Network) evaluation function
 //!
 //! Implements HalfKP 256x2-32-32 architecture with incremental updates
-//! 
+//!
 //! # Architecture Overview
-//! 
+//!
 //! The NNUE evaluator consists of two main components:
-//! 
+//!
 //! ## 1. Feature Extraction (HalfKP)
 //! - **Half**: Features are relative to each side's king position
 //! - **K**: King position (81 possible squares)
 //! - **P**: All other pieces on the board and in hand
 //! - Total features: 81 king squares × 2,182 piece configurations = 176,742 features
-//! 
+//!
 //! ## 2. Neural Network (256x2-32-32-1)
 //! - **Input Layer**: 512 neurons (256 × 2 perspectives)
 //!   - Each side has 256 accumulated feature values
@@ -19,13 +19,13 @@
 //! - **Hidden Layer 1**: 32 neurons with ClippedReLU activation
 //! - **Hidden Layer 2**: 32 neurons with ClippedReLU activation  
 //! - **Output Layer**: 1 neuron (evaluation score in centipawns)
-//! 
+//!
 //! ## Key Design Features
 //! - **Incremental Updates**: Feature accumulator is updated differentially for efficiency
 //! - **Quantization**: 16-bit accumulators are quantized to 8-bit for network input
 //! - **SIMD Optimization**: Critical operations use AVX2/SSE4.1 when available
 //! - **Memory Efficiency**: Weights are shared across evaluator instances using Arc
-//! 
+//!
 //! ## Evaluation Flow
 //! 1. Extract active HalfKP features from position
 //! 2. Update accumulator incrementally based on move
