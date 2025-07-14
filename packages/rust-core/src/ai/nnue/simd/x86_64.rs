@@ -234,9 +234,72 @@ pub unsafe fn transform_features_avx2(us: &[i16], them: &[i16], output: &mut [i8
     debug_assert!(us.len() >= size, "'us' buffer too small");
     debug_assert!(them.len() >= size, "'them' buffer too small");
     debug_assert!(output.len() >= size * 2, "Output buffer too small");
-    // For simplicity, just call the scalar version
-    // A real AVX2 implementation would use SIMD operations
-    super::scalar::transform_features_scalar(us, them, output, size);
+
+    const SHIFT: i32 = 6;
+    const LANES: usize = 16; // 256 bits / 16 bits per i16 = 16 lanes
+
+    // Create constants for SIMD operations
+    let min_val = _mm256_set1_epi16(-127);
+    let max_val = _mm256_set1_epi16(127);
+
+    let mut i = 0;
+
+    // Process 16 elements at a time
+    while i + LANES <= size {
+        // Load 16 x i16 from 'us' perspective
+        let us_vec = _mm256_loadu_si256(us.as_ptr().add(i) as *const __m256i);
+
+        // Arithmetic right shift by 6
+        let us_shifted = _mm256_srai_epi16(us_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let us_clamped = _mm256_max_epi16(_mm256_min_epi16(us_shifted, max_val), min_val);
+
+        // Load 16 x i16 from 'them' perspective
+        let them_vec = _mm256_loadu_si256(them.as_ptr().add(i) as *const __m256i);
+
+        // Arithmetic right shift by 6
+        let them_shifted = _mm256_srai_epi16(them_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let them_clamped = _mm256_max_epi16(_mm256_min_epi16(them_shifted, max_val), min_val);
+
+        // Pack i16 to i8 (us_clamped and them_clamped)
+        // Note: _mm256_packs_epi16 packs with saturation, but we already clamped
+        let packed = _mm256_packs_epi16(us_clamped, them_clamped);
+
+        // The result has a specific lane ordering due to AVX2's 128-bit lanes
+        // We need to permute to get the correct order
+        let indices = _mm256_setr_epi8(
+            0, 1, 2, 3, 4, 5, 6, 7, // First 8 from us (low 128)
+            16, 17, 18, 19, 20, 21, 22, 23, // First 8 from us (high 128)
+            8, 9, 10, 11, 12, 13, 14, 15, // First 8 from them (low 128)
+            24, 25, 26, 27, 28, 29, 30, 31, // First 8 from them (high 128)
+        );
+        let permuted = _mm256_shuffle_epi8(packed, indices);
+
+        // Extract and store
+        let result = std::mem::transmute::<__m256i, [i8; 32]>(permuted);
+
+        // Store 'us' part
+        std::ptr::copy_nonoverlapping(result.as_ptr(), output.as_mut_ptr().add(i), 16);
+
+        // Store 'them' part
+        std::ptr::copy_nonoverlapping(
+            result.as_ptr().add(16),
+            output.as_mut_ptr().add(size + i),
+            16,
+        );
+
+        i += LANES;
+    }
+
+    // Handle remaining elements with scalar code
+    while i < size {
+        output[i] = ((us[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        output[i + size] = ((them[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        i += 1;
+    }
 }
 
 /// Update accumulator by adding or subtracting feature weights **(AVX2)**.
@@ -523,9 +586,57 @@ pub unsafe fn transform_features_sse41(us: &[i16], them: &[i16], output: &mut [i
     debug_assert!(us.len() >= size, "'us' buffer too small");
     debug_assert!(them.len() >= size, "'them' buffer too small");
     debug_assert!(output.len() >= size * 2, "Output buffer too small");
-    // For simplicity, just call the scalar version
-    // A real SSE4.1 implementation would use SIMD operations
-    super::scalar::transform_features_scalar(us, them, output, size);
+
+    const SHIFT: i32 = 6;
+    const LANES: usize = 8; // 128 bits / 16 bits per i16 = 8 lanes
+
+    // Create constants for SIMD operations
+    let min_val = _mm_set1_epi16(-127);
+    let max_val = _mm_set1_epi16(127);
+
+    let mut i = 0;
+
+    // Process 8 elements at a time
+    while i + LANES <= size {
+        // Load 8 x i16 from 'us' perspective
+        let us_vec = _mm_loadu_si128(us.as_ptr().add(i) as *const __m128i);
+
+        // Arithmetic right shift by 6
+        let us_shifted = _mm_srai_epi16(us_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let us_clamped = _mm_max_epi16(_mm_min_epi16(us_shifted, max_val), min_val);
+
+        // Load 8 x i16 from 'them' perspective
+        let them_vec = _mm_loadu_si128(them.as_ptr().add(i) as *const __m128i);
+
+        // Arithmetic right shift by 6
+        let them_shifted = _mm_srai_epi16(them_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let them_clamped = _mm_max_epi16(_mm_min_epi16(them_shifted, max_val), min_val);
+
+        // Pack i16 to i8
+        let packed = _mm_packs_epi16(us_clamped, them_clamped);
+
+        // Extract and store
+        let result = std::mem::transmute::<__m128i, [i8; 16]>(packed);
+
+        // Store 'us' part (first 8 bytes)
+        std::ptr::copy_nonoverlapping(result.as_ptr(), output.as_mut_ptr().add(i), 8);
+
+        // Store 'them' part (last 8 bytes)
+        std::ptr::copy_nonoverlapping(result.as_ptr().add(8), output.as_mut_ptr().add(size + i), 8);
+
+        i += LANES;
+    }
+
+    // Handle remaining elements with scalar code
+    while i < size {
+        output[i] = ((us[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        output[i + size] = ((them[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        i += 1;
+    }
 }
 
 /// Update accumulator by adding or subtracting feature weights **(SSE4.1)**.
@@ -833,6 +944,117 @@ mod tests {
                 let expected_them = 3i8;
                 assert_eq!(output[i], expected_us, "Failed at index {i} for us");
                 assert_eq!(output[i + size], expected_them, "Failed at index {i} for them");
+            }
+        }
+    }
+
+    #[test]
+    fn test_transform_features_sse41() {
+        if !is_x86_feature_detected!("sse4.1") {
+            eprintln!("SSE4.1 not available, skipping test");
+            return;
+        }
+
+        // Test transform_features with edge cases
+        let test_cases = vec![
+            // (us, them, expected_us, expected_them)
+            (4096i16, -4096i16, 64i8, -64i8),   // Normal range
+            (8192i16, -8192i16, 127i8, -127i8), // Clamped to max
+            (100i16, -100i16, 1i8, -2i8),       // Small values (100>>6=1, -100>>6=-2)
+            (0i16, 0i16, 0i8, 0i8),             // Zero
+        ];
+
+        for (us_val, them_val, expected_us, expected_them) in test_cases {
+            let us = vec![us_val; 128];
+            let them = vec![them_val; 128];
+            let mut output = vec![0i8; 256];
+
+            unsafe {
+                transform_features_sse41(&us, &them, &mut output, 128);
+            }
+
+            // Check first element of each perspective
+            assert_eq!(
+                output[0], expected_us,
+                "Failed for us={}, expected {}, got {}",
+                us_val, expected_us, output[0]
+            );
+            assert_eq!(
+                output[128], expected_them,
+                "Failed for them={}, expected {}, got {}",
+                them_val, expected_them, output[128]
+            );
+        }
+    }
+
+    #[test]
+    fn test_transform_features_consistency() {
+        // Test that all SIMD implementations produce the same result
+        let sizes = vec![64, 128, 256];
+
+        for size in sizes {
+            let us = vec![2500i16; size];
+            let them = vec![-3000i16; size];
+
+            let mut output_scalar = vec![0i8; size * 2];
+            let mut output_avx2 = vec![0i8; size * 2];
+            let mut output_sse41 = vec![0i8; size * 2];
+
+            // Scalar version
+            super::super::scalar::transform_features_scalar(&us, &them, &mut output_scalar, size);
+
+            // AVX2 version if available
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    transform_features_avx2(&us, &them, &mut output_avx2, size);
+                }
+                assert_eq!(output_scalar, output_avx2, "AVX2 mismatch at size {}", size);
+            }
+
+            // SSE4.1 version if available
+            if is_x86_feature_detected!("sse4.1") {
+                unsafe {
+                    transform_features_sse41(&us, &them, &mut output_sse41, size);
+                }
+                assert_eq!(output_scalar, output_sse41, "SSE4.1 mismatch at size {}", size);
+            }
+        }
+    }
+
+    #[test]
+    fn test_boundary_conditions() {
+        // Test extreme values and edge cases
+        if !is_x86_feature_detected!("avx2") {
+            eprintln!("AVX2 not available, skipping test");
+            return;
+        }
+
+        // Test with i16 boundary values
+        let test_values = vec![
+            i16::MIN,
+            i16::MIN / 2,
+            -1000,
+            -1,
+            0,
+            1,
+            1000,
+            i16::MAX / 2,
+            i16::MAX,
+        ];
+
+        for &val in &test_values {
+            let us = vec![val; 32];
+            // Use saturating_neg to avoid overflow when val == i16::MIN
+            let them = vec![val.saturating_neg(); 32];
+            let mut output = vec![0i8; 64];
+
+            unsafe {
+                transform_features_avx2(&us, &them, &mut output, 32);
+            }
+
+            // Verify no crashes and values are within bounds
+            for i in 0..64 {
+                assert!(output[i] >= -127, "Output out of bounds: {} at index {}", output[i], i);
             }
         }
     }
