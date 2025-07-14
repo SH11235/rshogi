@@ -89,6 +89,16 @@ impl<E: Evaluator> Searcher<E> {
         let mut best_move = None;
         let mut best_score = -INFINITY_SCORE;
 
+        // If no move is found during iterative deepening, we need a fallback
+        // Generate all legal moves first as a fallback
+        let mut gen = MoveGen::new(pos);
+        let legal_moves = gen.generate_all();
+
+        // If there are legal moves, use the first one as a fallback
+        if !legal_moves.is_empty() {
+            best_move = Some(legal_moves[0]);
+        }
+
         // Iterative deepening
         for depth in 1..=self.limits.depth {
             let score = self.alpha_beta(pos, depth, -INFINITY_SCORE, INFINITY_SCORE);
