@@ -2,6 +2,7 @@
 //!
 //! Represents 81-square shogi board using 128-bit integers for fast operations
 
+use super::piece_constants::piece_type_to_hand_index;
 use std::fmt;
 
 /// Square on shogi board (0-80)
@@ -105,6 +106,28 @@ impl TryFrom<u8> for PieceType {
 }
 
 impl PieceType {
+    /// Get the index of this piece type (0-7)
+    #[inline]
+    pub const fn as_index(self) -> usize {
+        self as usize
+    }
+
+    /// Create a piece type from index (0-7)
+    #[inline]
+    pub const fn from_index(index: usize) -> Option<PieceType> {
+        match index {
+            0 => Some(PieceType::King),
+            1 => Some(PieceType::Rook),
+            2 => Some(PieceType::Bishop),
+            3 => Some(PieceType::Gold),
+            4 => Some(PieceType::Silver),
+            5 => Some(PieceType::Knight),
+            6 => Some(PieceType::Lance),
+            7 => Some(PieceType::Pawn),
+            _ => None,
+        }
+    }
+
     /// Check if piece can promote
     #[inline]
     pub const fn can_promote(self) -> bool {
@@ -688,16 +711,8 @@ impl Position {
             self.board.put_piece(to, piece);
 
             // Remove from hand
-            let hand_idx = match piece_type {
-                PieceType::Rook => 0,
-                PieceType::Bishop => 1,
-                PieceType::Gold => 2,
-                PieceType::Silver => 3,
-                PieceType::Knight => 4,
-                PieceType::Lance => 5,
-                PieceType::Pawn => 6,
-                _ => unreachable!(),
-            };
+            let hand_idx = piece_type_to_hand_index(piece_type)
+                .expect("Drop piece type must be valid hand piece");
             self.hands[self.side_to_move as usize][hand_idx] -= 1;
 
             // Update hash
@@ -743,16 +758,8 @@ impl Position {
                 // Add to hand (unpromoted)
                 let captured_type = captured.piece_type;
 
-                let hand_idx = match captured_type {
-                    PieceType::Rook => 0,
-                    PieceType::Bishop => 1,
-                    PieceType::Gold => 2,
-                    PieceType::Silver => 3,
-                    PieceType::Knight => 4,
-                    PieceType::Lance => 5,
-                    PieceType::Pawn => 6,
-                    PieceType::King => 0, // Should never reach here due to check above
-                };
+                let hand_idx =
+                    piece_type_to_hand_index(captured_type).expect("Captured piece cannot be King");
 
                 self.hash ^= self.hand_zobrist(
                     self.side_to_move,
@@ -810,16 +817,8 @@ impl Position {
             self.board.remove_piece(to);
 
             // Add back to hand
-            let hand_idx = match piece_type {
-                PieceType::Rook => 0,
-                PieceType::Bishop => 1,
-                PieceType::Gold => 2,
-                PieceType::Silver => 3,
-                PieceType::Knight => 4,
-                PieceType::Lance => 5,
-                PieceType::Pawn => 6,
-                _ => unreachable!(),
-            };
+            let hand_idx = piece_type_to_hand_index(piece_type)
+                .expect("Drop piece type must be valid hand piece");
             self.hands[self.side_to_move as usize][hand_idx] += 1;
         } else {
             // Undo normal move
@@ -846,16 +845,8 @@ impl Position {
 
                 // Remove from hand
                 let captured_type = captured.piece_type;
-                let hand_idx = match captured_type {
-                    PieceType::Rook => 0,
-                    PieceType::Bishop => 1,
-                    PieceType::Gold => 2,
-                    PieceType::Silver => 3,
-                    PieceType::Knight => 4,
-                    PieceType::Lance => 5,
-                    PieceType::Pawn => 6,
-                    PieceType::King => 0, // Should never reach here
-                };
+                let hand_idx =
+                    piece_type_to_hand_index(captured_type).expect("Captured piece cannot be King");
                 self.hands[self.side_to_move as usize][hand_idx] -= 1;
             }
         }
@@ -1412,6 +1403,33 @@ mod tests {
         let mut promoted_pawn = Piece::new(PieceType::Pawn, Color::Black);
         promoted_pawn.promoted = true;
         assert_eq!(promoted_pawn.to_index(), 15); // 7 + 8
+    }
+
+    #[test]
+    fn test_piece_type_methods() {
+        // Test as_index()
+        assert_eq!(PieceType::King.as_index(), 0);
+        assert_eq!(PieceType::Rook.as_index(), 1);
+        assert_eq!(PieceType::Bishop.as_index(), 2);
+        assert_eq!(PieceType::Gold.as_index(), 3);
+        assert_eq!(PieceType::Silver.as_index(), 4);
+        assert_eq!(PieceType::Knight.as_index(), 5);
+        assert_eq!(PieceType::Lance.as_index(), 6);
+        assert_eq!(PieceType::Pawn.as_index(), 7);
+
+        // Test from_index()
+        assert_eq!(PieceType::from_index(0), Some(PieceType::King));
+        assert_eq!(PieceType::from_index(1), Some(PieceType::Rook));
+        assert_eq!(PieceType::from_index(7), Some(PieceType::Pawn));
+        assert_eq!(PieceType::from_index(8), None);
+        assert_eq!(PieceType::from_index(100), None);
+
+        // Test round-trip conversion
+        for i in 0..8 {
+            if let Some(pt) = PieceType::from_index(i) {
+                assert_eq!(pt.as_index(), i);
+            }
+        }
     }
 
     #[test]

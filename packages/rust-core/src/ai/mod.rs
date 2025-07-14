@@ -10,6 +10,7 @@ pub mod evaluate;
 pub mod movegen;
 pub mod moves;
 pub mod nnue;
+pub mod piece_constants;
 pub mod search;
 pub mod zobrist;
 
