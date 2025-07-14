@@ -247,9 +247,12 @@ mod tests {
         data
     }
 
+    type TestMove = (u16, i16, u8);
+    type TestPosition = (u64, Vec<TestMove>);
+
     /// テスト用の完全なバイナリデータを作成
     fn create_test_binary_data(
-        positions: Vec<(u64, Vec<(u16, i16, u8)>)>, // (hash, moves)
+        positions: Vec<TestPosition>, // (hash, moves)
         with_file_header: bool,
     ) -> Vec<u8> {
         let mut data = Vec::new();
@@ -584,8 +587,8 @@ mod tests {
                 let result = reader.load_data(&data);
 
                 // Assert
-                assert!(result.is_ok(), "Failed to load real opening book file: {:?}", result);
-                println!("Load result: {:?}", result);
+                assert!(result.is_ok(), "Failed to load real opening book file: {result:?}");
+                println!("Load result: {result:?}");
                 println!("Position count: {}", reader.position_count());
                 assert!(reader.position_count() > 0, "No positions loaded from file");
 

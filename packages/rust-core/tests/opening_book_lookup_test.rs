@@ -25,7 +25,7 @@ fn test_initial_position_opening_moves() {
         if file.read_to_end(&mut data).is_ok() {
             match reader.load_data(&data) {
                 Ok(result) => {
-                    println!("Opening book loaded: {}", result);
+                    println!("Opening book loaded: {result}");
 
                     // 初期盤面の手を検索
                     let moves = reader.find_moves(INITIAL_SFEN);
@@ -53,17 +53,16 @@ fn test_initial_position_opening_moves() {
 
                     assert!(
                         has_common_move,
-                        "Should contain at least one common opening move. Found: {:?}",
-                        found_moves
+                        "Should contain at least one common opening move. Found: {found_moves:?}"
                     );
                 }
                 Err(e) => {
-                    panic!("Failed to load opening book: {}", e);
+                    panic!("Failed to load opening book: {e}");
                 }
             }
         }
     } else {
-        println!("Warning: Opening book file not found at {}. Skipping test.", test_file);
+        println!("Warning: Opening book file not found at {test_file}. Skipping test.");
     }
 }
 
@@ -79,7 +78,7 @@ fn test_after_76_position_opening_moves() {
         if file.read_to_end(&mut data).is_ok() {
             match reader.load_data(&data) {
                 Ok(result) => {
-                    println!("Opening book loaded: {}", result);
+                    println!("Opening book loaded: {result}");
 
                     // 7六歩の後の盤面の手を検索
                     let moves = reader.find_moves(AFTER_76_SFEN);
@@ -105,17 +104,16 @@ fn test_after_76_position_opening_moves() {
 
                     assert!(
                         has_common_move,
-                        "Should contain at least one common opening move. Found: {:?}",
-                        found_moves
+                        "Should contain at least one common opening move. Found: {found_moves:?}"
                     );
                 }
                 Err(e) => {
-                    panic!("Failed to load opening book: {}", e);
+                    panic!("Failed to load opening book: {e}");
                 }
             }
         }
     } else {
-        println!("Warning: Opening book file not found at {}. Skipping test.", test_file);
+        println!("Warning: Opening book file not found at {test_file}. Skipping test.");
     }
 }
 
@@ -126,7 +124,7 @@ fn debug_initial_position_hash_parts() {
     let parts: Vec<&str> = INITIAL_SFEN.split_whitespace().collect();
 
     println!("=== Initial Position SFEN Parts ===");
-    println!("Full SFEN: {}", INITIAL_SFEN);
+    println!("Full SFEN: {INITIAL_SFEN}");
     println!("Board:     {}", parts[0]);
     println!("Turn:      {}", parts[1]);
     println!("Hands:     {}", parts[2]);
@@ -134,9 +132,9 @@ fn debug_initial_position_hash_parts() {
 
     // ハッシュ計算に使用される部分（最初の3要素）
     let hash_input = format!("{} {} {}", parts[0], parts[1], parts[2]);
-    println!("\nHash input (first 3 parts): {}", hash_input);
+    println!("\nHash input (first 3 parts): {hash_input}");
 
     // ハッシュを計算
-    let hash = PositionHasher::hash_position(&INITIAL_SFEN).unwrap();
-    println!("Calculated hash: {:#016x}", hash);
+    let hash = PositionHasher::hash_position(INITIAL_SFEN).unwrap();
+    println!("Calculated hash: {hash:#016x}");
 }

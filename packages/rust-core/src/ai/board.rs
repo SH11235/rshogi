@@ -86,6 +86,24 @@ pub enum PieceType {
     Pawn = 7,   // P
 }
 
+impl TryFrom<u8> for PieceType {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(PieceType::King),
+            1 => Ok(PieceType::Rook),
+            2 => Ok(PieceType::Bishop),
+            3 => Ok(PieceType::Gold),
+            4 => Ok(PieceType::Silver),
+            5 => Ok(PieceType::Knight),
+            6 => Ok(PieceType::Lance),
+            7 => Ok(PieceType::Pawn),
+            _ => Err("Invalid piece type value"),
+        }
+    }
+}
+
 impl PieceType {
     /// Check if piece can promote
     #[inline]
@@ -162,17 +180,55 @@ impl Piece {
         }
     }
 
-    /// Convert to index (0-13)
+    /// Check if piece is promoted
+    #[inline]
+    pub const fn is_promoted(self) -> bool {
+        self.promoted
+    }
+
+    /// Promote this piece
+    #[inline]
+    pub fn promote(self) -> Self {
+        Piece {
+            promoted: true,
+            ..self
+        }
+    }
+
+    /// Flip piece color
+    #[inline]
+    pub fn flip_color(self) -> Self {
+        Piece {
+            color: self.color.flip(),
+            ..self
+        }
+    }
+
+    /// Convert to index (0-15)
+    /// Note: Promoted King (8) and promoted Gold (11) are never used
     #[inline]
     pub fn to_index(self) -> usize {
         let base = self.piece_type as usize;
         if self.promoted && self.piece_type.can_promote() {
-            base + 8
+            base + PROMOTED_OFFSET
         } else {
             base
         }
     }
 }
+
+/// Number of piece types (King to Pawn)
+pub const NUM_PIECE_TYPES: usize = 8;
+
+/// Offset for promoted pieces in indexing
+pub const PROMOTED_OFFSET: usize = 8;
+
+/// Maximum piece index (including promoted pieces)
+/// This includes unused indices for promoted King and Gold
+pub const MAX_PIECE_INDEX: usize = NUM_PIECE_TYPES + PROMOTED_OFFSET; // 16
+
+/// Number of squares on the board
+pub const BOARD_SQUARES: usize = 81;
 
 /// Side to move
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -190,6 +246,12 @@ impl Color {
             Color::Black => Color::White,
             Color::White => Color::Black,
         }
+    }
+
+    /// Flip color (same as opposite)
+    #[inline]
+    pub const fn flip(self) -> Self {
+        self.opposite()
     }
 }
 
@@ -593,6 +655,16 @@ impl Position {
         false
     }
 
+    /// Get king square for color
+    pub fn king_square(&self, color: Color) -> Option<Square> {
+        self.board.king_square(color)
+    }
+
+    /// Get piece at square
+    pub fn piece_at(&self, sq: Square) -> Option<Piece> {
+        self.board.piece_on(sq)
+    }
+
     /// Make a move on the position
     pub fn do_move(&mut self, mv: super::moves::Move) -> UndoInfo {
         // Save current hash to history
@@ -967,7 +1039,7 @@ mod tests {
         // 成った駒になっていることを確認
         let piece = board.piece_on(Square::new(2, 7)).unwrap();
         assert_eq!(piece.piece_type, PieceType::Pawn);
-        assert_eq!(piece.promoted, true);
+        assert!(piece.promoted);
         assert_eq!(piece.color, Color::Black);
     }
 
@@ -1055,13 +1127,13 @@ mod tests {
 
             // デバッグ: 初期配置の確認
             if piece.is_none() {
-                println!("No piece at {:?}", from);
-                println!("Expected: {:?}", expected_piece_type);
+                println!("No piece at {from:?}");
+                println!("Expected: {expected_piece_type:?}");
                 // 周辺の駒を確認
                 for file in 0..9 {
                     if let Some(p) = pos.board.piece_on(Square::new(file, 1)) {
                         if p.piece_type == expected_piece_type && p.color == Color::Black {
-                            println!("Found {:?} at Square::new({}, 1)", expected_piece_type, file);
+                            println!("Found {expected_piece_type:?} at Square::new({file}, 1)");
                         }
                     }
                 }
@@ -1351,7 +1423,7 @@ mod tests {
             // その筋の全ての升がセットされているか確認
             for rank in 0..9 {
                 let sq = Square::new(file, rank);
-                assert!(mask.test(sq), "file {} rank {} should be set", file, rank);
+                assert!(mask.test(sq), "file {file} rank {rank} should be set");
             }
 
             // 他の筋の升はセットされていないか確認
@@ -1359,12 +1431,7 @@ mod tests {
                 if other_file != file {
                     for rank in 0..9 {
                         let sq = Square::new(other_file, rank);
-                        assert!(
-                            !mask.test(sq),
-                            "file {} rank {} should not be set",
-                            other_file,
-                            rank
-                        );
+                        assert!(!mask.test(sq), "file {other_file} rank {rank} should not be set");
                     }
                 }
             }
