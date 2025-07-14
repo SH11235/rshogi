@@ -1,0 +1,544 @@
+//! x86_64 SIMD implementations
+//!
+//! AVX2 and SSE4.1 optimized versions of NNUE operations
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+/// Apply an affine transformation **(AVX2)** to a tile of `input`.
+///
+/// * `input`  : 1-D vector of length **`input_dim`** (i8)
+/// * `weights`: row-major matrix `output_dim × input_dim` (i8)
+/// * `biases` : length `output_dim` (i32)
+/// * `output` : **mutable** slice with the same length as `biases`, will be **overwritten**
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **AVX2**  
+///   (e.g. `is_x86_feature_detected!("avx2")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `input.len()  >= input_dim`  
+///   - `weights.len() == input_dim * output_dim`  
+///   - `biases.len()  >= output_dim`  
+///   - `output.len()  >= output_dim`
+/// * **Aliasing**: `output` must not alias `weights` or `input`.
+/// * **Alignment**: Unaligned loads (`_mm256_loadu_si256`) are used,  
+///   so 32-byte alignment is **not** required, but the pointers must remain valid
+///   for the life of the call.
+#[target_feature(enable = "avx2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn affine_transform_avx2(
+    input: &[i8],
+    weights: &[i8],
+    biases: &[i32],
+    output: &mut [i32],
+    input_dim: usize,
+    output_dim: usize,
+) {
+    const TILE_HEIGHT: usize = 8;
+    const TILE_WIDTH: usize = 32;
+
+    // 256-bit 定数（16 × i16 = 1）を 1 回だけ生成
+    let ones = _mm256_set1_epi16(1);
+
+    // Initialize output with biases
+    output[..output_dim].copy_from_slice(&biases[..output_dim]);
+
+    // Process 8 outputs at a time
+    let mut out_idx = 0;
+    while out_idx + TILE_HEIGHT <= output_dim {
+        // Initialize accumulators to zero (biases already in output)
+        let mut acc = [_mm256_setzero_si256(); TILE_HEIGHT];
+
+        // Process input in chunks of 32
+        let mut in_idx = 0;
+        while in_idx + TILE_WIDTH <= input_dim {
+            // Load 32 input values
+            let input_vec = _mm256_loadu_si256(input.as_ptr().add(in_idx) as *const __m256i);
+
+            // De-interleave input 8-bit → 16-bit (1 回で済ませる)
+            let input_lo = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(input_vec, 0));
+            let input_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(input_vec, 1));
+
+            // Process each output row
+            for (i, acc_cell) in acc.iter_mut().take(TILE_HEIGHT).enumerate() {
+                let weight_offset = (out_idx + i) * input_dim + in_idx;
+                let weight_vec =
+                    _mm256_loadu_si256(weights.as_ptr().add(weight_offset) as *const __m256i);
+
+                let weight_lo = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(weight_vec, 0));
+                let weight_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(weight_vec, 1));
+
+                // Multiply
+                let prod_lo = _mm256_mullo_epi16(input_lo, weight_lo);
+                let prod_hi = _mm256_mullo_epi16(input_hi, weight_hi);
+
+                // Sum pairs and convert to i32
+                let sum_lo = _mm256_madd_epi16(prod_lo, ones);
+                let sum_hi = _mm256_madd_epi16(prod_hi, ones);
+
+                // Accumulate
+                *acc_cell = _mm256_add_epi32(*acc_cell, sum_lo);
+                *acc_cell = _mm256_add_epi32(*acc_cell, sum_hi);
+            }
+
+            in_idx += TILE_WIDTH;
+        }
+        // Handle remaining input elements
+        while in_idx < input_dim {
+            for i in 0..TILE_HEIGHT {
+                let weight_offset = (out_idx + i) * input_dim + in_idx;
+                output[out_idx + i] += input[in_idx] as i32 * weights[weight_offset] as i32;
+            }
+            in_idx += 1;
+        }
+
+        // Store results (horizontal sum)
+        for i in 0..TILE_HEIGHT {
+            // Sum all elements in the vector
+            let sum = hsum_epi32_avx2(acc[i]);
+            output[out_idx + i] += sum;
+        }
+
+        out_idx += TILE_HEIGHT;
+    }
+
+    // Handle remaining outputs with scalar code
+    while out_idx < output_dim {
+        output[out_idx] = biases[out_idx];
+        for (in_idx, &x) in input.iter().take(input_dim).enumerate() {
+            let weight_offset = out_idx * input_dim + in_idx;
+            output[out_idx] += x as i32 * weights[weight_offset] as i32;
+        }
+
+        out_idx += 1;
+    }
+}
+
+/// Horizontal sum of 8 i32 values in a __m256i vector **(AVX2)**.
+///
+/// Computes the sum of all 8 32-bit integers packed in the input vector.
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **AVX2**  
+///   (e.g. `is_x86_feature_detected!("avx2")` returns `true`) before calling.
+/// * **Valid input**: The input must be a valid __m256i vector.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn hsum_epi32_avx2(v: __m256i) -> i32 {
+    // Add upper 128 bits to lower 128 bits
+    let sum128 = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+
+    // Horizontal add
+    let sum64 = _mm_hadd_epi32(sum128, sum128);
+    let sum32 = _mm_hadd_epi32(sum64, sum64);
+
+    _mm_extract_epi32(sum32, 0)
+}
+
+/// Apply ClippedReLU activation function **(AVX2)**: `output[i] = clamp(input[i], 0, 127)`.
+///
+/// * `input` : array of i32 values to be clamped
+/// * `output`: **mutable** array where clamped i8 values will be written
+/// * `size`  : number of elements to process
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **AVX2**  
+///   (e.g. `is_x86_feature_detected!("avx2")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `input.len()  >= size`  
+///   - `output.len() >= size`
+/// * **Aliasing**: `output` must not alias `input`.
+/// * **Alignment**: Unaligned loads/stores are used, so alignment is not required.
+#[target_feature(enable = "avx2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn clipped_relu_avx2(input: &[i32], output: &mut [i8], size: usize) {
+    const CHUNK_SIZE: usize = 32;
+
+    let zero = _mm256_setzero_si256();
+    let max_val = _mm256_set1_epi32(127);
+
+    let mut i = 0;
+    while i + CHUNK_SIZE <= size {
+        // Load 32 i32 values (8 per register)
+        let v0 = _mm256_loadu_si256(input.as_ptr().add(i) as *const __m256i);
+        let v1 = _mm256_loadu_si256(input.as_ptr().add(i + 8) as *const __m256i);
+        let v2 = _mm256_loadu_si256(input.as_ptr().add(i + 16) as *const __m256i);
+        let v3 = _mm256_loadu_si256(input.as_ptr().add(i + 24) as *const __m256i);
+
+        // Clamp to [0, 127]
+        let c0 = _mm256_min_epi32(_mm256_max_epi32(v0, zero), max_val);
+        let c1 = _mm256_min_epi32(_mm256_max_epi32(v1, zero), max_val);
+        let c2 = _mm256_min_epi32(_mm256_max_epi32(v2, zero), max_val);
+        let c3 = _mm256_min_epi32(_mm256_max_epi32(v3, zero), max_val);
+
+        // Pack i32 to i16
+        let p0 = _mm256_packs_epi32(c0, c1);
+        let p1 = _mm256_packs_epi32(c2, c3);
+
+        // Pack i16 to i8
+        let result = _mm256_packs_epi16(p0, p1);
+
+        // Permute to correct order
+        let perm = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+        let result = _mm256_permutevar8x32_epi32(result, perm);
+
+        // Store 32 i8 values
+        _mm256_storeu_si256(output.as_mut_ptr().add(i) as *mut __m256i, result);
+
+        i += CHUNK_SIZE;
+    }
+
+    // Handle remaining elements
+    while i < size {
+        output[i] = input[i].clamp(0, 127) as i8;
+        i += 1;
+    }
+}
+
+/// Transform 16-bit features to 8-bit with quantization **(AVX2)**.
+///
+/// * `us`    : perspective features for side-to-move (i16)
+/// * `them`  : perspective features for opponent (i16)
+/// * `output`: **mutable** array where quantized features are written
+/// * `size`  : number of features per perspective
+///
+/// The output layout is: `[us[0..size], them[0..size]]` after shifting right by 6 bits
+/// and clamping to [-127, 127].
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **AVX2**  
+///   (e.g. `is_x86_feature_detected!("avx2")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `us.len()     >= size`  
+///   - `them.len()   >= size`  
+///   - `output.len() >= size * 2`
+/// * **Aliasing**: `output` must not alias `us` or `them`.
+/// * **Alignment**: Unaligned loads/stores are used, so alignment is not required.
+#[target_feature(enable = "avx2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn transform_features_avx2(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
+    const CHUNK_SIZE: usize = 16;
+    const SHIFT: i32 = 6;
+
+    let _shift_vec = _mm_set1_epi32(SHIFT);
+    let min_val = _mm256_set1_epi16(-127);
+    let max_val = _mm256_set1_epi16(127);
+
+    let mut i = 0;
+    while i + CHUNK_SIZE <= size {
+        // Load 16 i16 values
+        let us_vec = _mm256_loadu_si256(us.as_ptr().add(i) as *const __m256i);
+        let them_vec = _mm256_loadu_si256(them.as_ptr().add(i) as *const __m256i);
+
+        // Shift right by 6
+        let us_shifted = _mm256_srai_epi16(us_vec, SHIFT);
+        let them_shifted = _mm256_srai_epi16(them_vec, SHIFT);
+
+        // Clamp to [-127, 127]
+        let us_clamped = _mm256_min_epi16(_mm256_max_epi16(us_shifted, min_val), max_val);
+        let them_clamped = _mm256_min_epi16(_mm256_max_epi16(them_shifted, min_val), max_val);
+
+        // Pack each separately to avoid interleaving
+        let zero = _mm256_setzero_si256();
+        let us_packed = _mm256_packs_epi16(us_clamped, zero);
+        let them_packed = _mm256_packs_epi16(them_clamped, zero);
+
+        // Extract lower 128 bits which contain our 16 bytes
+        let us_bytes = _mm256_extracti128_si256(us_packed, 0);
+        let them_bytes = _mm256_extracti128_si256(them_packed, 0);
+
+        _mm_storeu_si128(output.as_mut_ptr().add(i) as *mut __m128i, us_bytes);
+        _mm_storeu_si128(output.as_mut_ptr().add(i + size) as *mut __m128i, them_bytes);
+
+        i += CHUNK_SIZE;
+    }
+
+    // Handle remaining elements
+    while i < size {
+        output[i] = ((us[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        output[i + size] = ((them[i] as i32) >> SHIFT).clamp(-127, 127) as i8;
+        i += 1;
+    }
+}
+
+/// Update accumulator by adding or subtracting feature weights **(AVX2)**.
+///
+/// * `accumulator`: **mutable** array of 256 i16 values (current accumulator state)
+/// * `weights`    : feature transformer weights array
+/// * `indices`    : list of feature indices to add/remove
+/// * `add`        : if true, add weights; if false, subtract weights
+///
+/// For each index in `indices`, the corresponding 256 weights starting at
+/// `weights[index * 256]` are added to or subtracted from the accumulator
+/// using saturating arithmetic.
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **AVX2**  
+///   (e.g. `is_x86_feature_detected!("avx2")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `accumulator.len() >= 256`  
+///   - `weights.len() >= max(indices) * 256 + 256`
+/// * **Index validity**: All values in `indices` must satisfy `index * 256 + 256 <= weights.len()`.
+/// * **Aliasing**: `accumulator` must not alias `weights`.
+/// * **Alignment**: Unaligned loads/stores are used, so alignment is not required.
+#[target_feature(enable = "avx2")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn update_accumulator_avx2(
+    accumulator: &mut [i16],
+    weights: &[i16],
+    indices: &[usize],
+    add: bool,
+) {
+    const CHUNK_SIZE: usize = 16;
+
+    for &idx in indices {
+        let weight_offset = idx * 256;
+        let weight_ptr = weights.as_ptr().add(weight_offset);
+
+        let mut i = 0;
+        while i + CHUNK_SIZE <= 256 {
+            let acc_vec = _mm256_loadu_si256(accumulator.as_ptr().add(i) as *const __m256i);
+            let weight_vec = _mm256_loadu_si256(weight_ptr.add(i) as *const __m256i);
+
+            let result = if add {
+                _mm256_adds_epi16(acc_vec, weight_vec)
+            } else {
+                _mm256_subs_epi16(acc_vec, weight_vec)
+            };
+
+            _mm256_storeu_si256(accumulator.as_mut_ptr().add(i) as *mut __m256i, result);
+
+            i += CHUNK_SIZE;
+        }
+
+        // Handle remaining elements
+        while i < 256 {
+            if add {
+                accumulator[i] = accumulator[i].saturating_add(weights[weight_offset + i]);
+            } else {
+                accumulator[i] = accumulator[i].saturating_sub(weights[weight_offset + i]);
+            }
+            i += 1;
+        }
+    }
+}
+
+// SSE4.1 implementations (fallback for older CPUs)
+
+/// Apply an affine transformation **(SSE4.1)** to a tile of `input`.
+///
+/// Currently uses scalar fallback. TODO: Implement SSE4.1 version.
+///
+/// * `input`  : 1-D vector of length **`input_dim`** (i8)
+/// * `weights`: row-major matrix `output_dim × input_dim` (i8)
+/// * `biases` : length `output_dim` (i32)
+/// * `output` : **mutable** slice with the same length as `biases`, will be **overwritten**
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **SSE4.1**  
+///   (e.g. `is_x86_feature_detected!("sse4.1")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `input.len()  >= input_dim`  
+///   - `weights.len() == input_dim * output_dim`  
+///   - `biases.len()  >= output_dim`  
+///   - `output.len()  >= output_dim`
+/// * **Aliasing**: `output` must not alias `weights` or `input`.
+#[target_feature(enable = "sse4.1")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn affine_transform_sse41(
+    input: &[i8],
+    weights: &[i8],
+    biases: &[i32],
+    output: &mut [i32],
+    input_dim: usize,
+    output_dim: usize,
+) {
+    // For now, use scalar implementation
+    // TODO: Implement SSE4.1 version
+    super::scalar::affine_transform_scalar(input, weights, biases, output, input_dim, output_dim);
+}
+
+/// Apply ClippedReLU activation function **(SSE4.1)**: `output[i] = clamp(input[i], 0, 127)`.
+///
+/// * `input` : array of i32 values to be clamped
+/// * `output`: **mutable** array where clamped i8 values will be written
+/// * `size`  : number of elements to process
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **SSE4.1**  
+///   (e.g. `is_x86_feature_detected!("sse4.1")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `input.len()  >= size`  
+///   - `output.len() >= size`
+/// * **Aliasing**: `output` must not alias `input`.
+/// * **Alignment**: Unaligned loads/stores are used, so alignment is not required.
+#[target_feature(enable = "sse4.1")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn clipped_relu_sse41(input: &[i32], output: &mut [i8], size: usize) {
+    const CHUNK_SIZE: usize = 16;
+
+    let zero = _mm_setzero_si128();
+    let max_val = _mm_set1_epi32(127);
+
+    let mut i = 0;
+    while i + CHUNK_SIZE <= size {
+        // Process 16 values (4 per register)
+        for j in 0..4 {
+            let v = _mm_loadu_si128(input.as_ptr().add(i + j * 4) as *const __m128i);
+
+            // Clamp to [0, 127]
+            let clamped = _mm_min_epi32(_mm_max_epi32(v, zero), max_val);
+
+            // Store as i8 (manual packing for now)
+            output[i + j * 4] = _mm_extract_epi32(clamped, 0) as i8;
+            output[i + j * 4 + 1] = _mm_extract_epi32(clamped, 1) as i8;
+            output[i + j * 4 + 2] = _mm_extract_epi32(clamped, 2) as i8;
+            output[i + j * 4 + 3] = _mm_extract_epi32(clamped, 3) as i8;
+        }
+
+        i += CHUNK_SIZE;
+    }
+
+    // Handle remaining elements
+    while i < size {
+        output[i] = input[i].clamp(0, 127) as i8;
+        i += 1;
+    }
+}
+
+/// Transform 16-bit features to 8-bit with quantization **(SSE4.1)**.
+///
+/// Currently uses scalar fallback. TODO: Implement SSE4.1 version.
+///
+/// * `us`    : perspective features for side-to-move (i16)
+/// * `them`  : perspective features for opponent (i16)
+/// * `output`: **mutable** array where quantized features are written
+/// * `size`  : number of features per perspective
+///
+/// The output layout is: `[us[0..size], them[0..size]]` after shifting right by 6 bits
+/// and clamping to [-127, 127].
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **SSE4.1**  
+///   (e.g. `is_x86_feature_detected!("sse4.1")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `us.len()     >= size`  
+///   - `them.len()   >= size`  
+///   - `output.len() >= size * 2`
+/// * **Aliasing**: `output` must not alias `us` or `them`.
+#[target_feature(enable = "sse4.1")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn transform_features_sse41(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
+    // For now, use scalar implementation
+    // TODO: Implement SSE4.1 version
+    super::scalar::transform_features_scalar(us, them, output, size);
+}
+
+/// Update accumulator by adding or subtracting feature weights **(SSE4.1)**.
+///
+/// * `accumulator`: **mutable** array of 256 i16 values (current accumulator state)
+/// * `weights`    : feature transformer weights array
+/// * `indices`    : list of feature indices to add/remove
+/// * `add`        : if true, add weights; if false, subtract weights
+///
+/// For each index in `indices`, the corresponding 256 weights starting at
+/// `weights[index * 256]` are added to or subtracted from the accumulator
+/// using saturating arithmetic.
+///
+/// # Safety
+///
+/// * **CPU feature**: The caller must ensure the current CPU supports **SSE4.1**  
+///   (e.g. `is_x86_feature_detected!("sse4.1")` returns `true`) before calling.
+/// * **Slice lengths**:  
+///   - `accumulator.len() >= 256`  
+///   - `weights.len() >= max(indices) * 256 + 256`
+/// * **Index validity**: All values in `indices` must satisfy `index * 256 + 256 <= weights.len()`.
+/// * **Aliasing**: `accumulator` must not alias `weights`.
+/// * **Alignment**: Unaligned loads/stores are used, so alignment is not required.
+#[target_feature(enable = "sse4.1")]
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub unsafe fn update_accumulator_sse41(
+    accumulator: &mut [i16],
+    weights: &[i16],
+    indices: &[usize],
+    add: bool,
+) {
+    const CHUNK_SIZE: usize = 8;
+
+    for &idx in indices {
+        let weight_offset = idx * 256;
+        let weight_ptr = weights.as_ptr().add(weight_offset);
+
+        let mut i = 0;
+        while i + CHUNK_SIZE <= 256 {
+            let acc_vec = _mm_loadu_si128(accumulator.as_ptr().add(i) as *const __m128i);
+            let weight_vec = _mm_loadu_si128(weight_ptr.add(i) as *const __m128i);
+
+            let result = if add {
+                _mm_adds_epi16(acc_vec, weight_vec)
+            } else {
+                _mm_subs_epi16(acc_vec, weight_vec)
+            };
+
+            _mm_storeu_si128(accumulator.as_mut_ptr().add(i) as *mut __m128i, result);
+
+            i += CHUNK_SIZE;
+        }
+
+        // Handle remaining elements
+        while i < 256 {
+            if add {
+                accumulator[i] = accumulator[i].saturating_add(weights[weight_offset + i]);
+            } else {
+                accumulator[i] = accumulator[i].saturating_sub(weights[weight_offset + i]);
+            }
+            i += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_simd_correctness() {
+        // Test that SIMD implementations produce the same results as scalar
+        let input = vec![10i8; 64];
+        let weights = vec![1i8; 64 * 8]; // 8x64 matrix
+        let biases = vec![100i32; 8];
+
+        let mut output_scalar = vec![0i32; 8];
+        let mut output_simd = vec![0i32; 8];
+
+        // Scalar version
+        super::super::scalar::affine_transform_scalar(
+            &input,
+            &weights,
+            &biases,
+            &mut output_scalar,
+            64,
+            8,
+        );
+
+        // SIMD version (if available)
+        super::super::SimdDispatcher::affine_transform(
+            &input,
+            &weights,
+            &biases,
+            &mut output_simd,
+            64,
+            8,
+        );
+
+        // Results should match
+        assert_eq!(output_scalar, output_simd);
+    }
+}

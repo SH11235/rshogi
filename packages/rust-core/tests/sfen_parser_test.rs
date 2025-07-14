@@ -46,7 +46,7 @@ mod sfen_parser_integration_tests {
         }
 
         // Verify that we parsed entries
-        assert!(entries.len() > 0, "Should have parsed at least one entry");
+        assert!(!entries.is_empty(), "Should have parsed at least one entry");
 
         // Verify basic properties of parsed entries
         for entry in &entries {
@@ -67,7 +67,7 @@ mod sfen_parser_integration_tests {
         }
 
         println!("Parsed {} entries from {} lines", entries.len(), total_lines);
-        println!("Found {} positions and {} moves", position_count, move_count);
+        println!("Found {position_count} positions and {move_count} moves");
 
         // Verify we parsed the exact number of entries
         // The file has 18 positions with multiple moves each

@@ -3,13 +3,16 @@
 //! Implements HalfKP 256x2-32-32 architecture with incremental updates
 
 pub mod accumulator;
+pub mod error;
 pub mod features;
 pub mod network;
+pub mod simd;
 pub mod weights;
 
 use super::board::{Color, Position};
 use super::evaluate::Evaluator;
 use accumulator::Accumulator;
+use error::{NNUEError, NNUEResult};
 use network::Network;
 use std::error::Error;
 use std::sync::Arc;
@@ -19,11 +22,15 @@ use weights::load_weights;
 const FV_SCALE: i32 = 16;
 
 /// NNUE evaluator with HalfKP features
+///
+/// Both feature transformer and network are wrapped in Arc for memory efficiency.
+/// This allows multiple evaluator instances to share the same weights (approximately 170MB).
+#[derive(Clone)]
 pub struct NNUEEvaluator {
     /// Feature transformer for converting HalfKP features to network input
     feature_transformer: Arc<features::FeatureTransformer>,
     /// Neural network for evaluation
-    network: Network,
+    network: Arc<Network>,
 }
 
 impl NNUEEvaluator {
@@ -32,7 +39,7 @@ impl NNUEEvaluator {
         let (feature_transformer, network) = load_weights(path)?;
         Ok(NNUEEvaluator {
             feature_transformer: Arc::new(feature_transformer),
-            network,
+            network: Arc::new(network),
         })
     }
 
@@ -40,7 +47,7 @@ impl NNUEEvaluator {
     pub fn zero() -> Self {
         NNUEEvaluator {
             feature_transformer: Arc::new(features::FeatureTransformer::zero()),
-            network: Network::zero(),
+            network: Arc::new(Network::zero()),
         }
     }
 
@@ -89,18 +96,19 @@ impl NNUEEvaluatorWrapper {
     }
 
     /// Update accumulator when making a move
-    pub fn do_move(&mut self, pos: &Position, mv: super::moves::Move) {
-        let current_acc = self.accumulator_stack.last().unwrap();
+    pub fn do_move(&mut self, pos: &Position, mv: super::moves::Move) -> NNUEResult<()> {
+        let current_acc = self.accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
         let mut new_acc = current_acc.clone();
 
         // Calculate differential update
-        let update = accumulator::calculate_update(pos, mv);
+        let update = accumulator::calculate_update(pos, mv)?;
 
         // Update both perspectives
         new_acc.update(&update, Color::Black, &self.evaluator.feature_transformer);
         new_acc.update(&update, Color::White, &self.evaluator.feature_transformer);
 
         self.accumulator_stack.push(new_acc);
+        Ok(())
     }
 
     /// Undo last move
@@ -138,7 +146,15 @@ impl NNUEEvaluatorWrapper {
 
 impl Evaluator for NNUEEvaluatorWrapper {
     fn evaluate(&self, pos: &Position) -> i32 {
-        let accumulator = self.accumulator_stack.last().unwrap();
+        // Since Evaluator trait doesn't support Result, we need to handle errors internally
+        let accumulator = match self.accumulator_stack.last() {
+            Some(acc) => acc,
+            None => {
+                // Return 0 evaluation on error - this shouldn't happen in normal usage
+                eprintln!("Warning: Empty accumulator stack in NNUE evaluation");
+                return 0;
+            }
+        };
         self.evaluator.evaluate_with_accumulator(pos, accumulator)
     }
 }
@@ -146,6 +162,8 @@ impl Evaluator for NNUEEvaluatorWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::board::{Color, Piece, PieceType, Square};
+    use crate::ai::moves::Move;
 
     #[test]
     fn test_nnue_evaluator_creation() {
@@ -156,5 +174,47 @@ mod tests {
 
         let eval = evaluator.evaluate_with_accumulator(&pos, &acc);
         assert_eq!(eval, 0); // Zero weights should give zero eval
+    }
+
+    #[test]
+    fn test_nnue_evaluator_wrapper_do_move_error() {
+        let mut wrapper = NNUEEvaluatorWrapper::zero();
+        let mut pos = Position::empty();
+
+        // Add a piece but no kings
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+
+        // Try to make a move - should fail due to missing kings
+        let mv = Move::make_normal(Square::new(4, 4), Square::new(4, 3));
+        let result = wrapper.do_move(&pos, mv);
+
+        assert!(result.is_err());
+        match result {
+            Err(error::NNUEError::KingNotFound(_)) => (),
+            _ => panic!("Expected KingNotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_nnue_evaluator_wrapper_empty_stack() {
+        let mut wrapper = NNUEEvaluatorWrapper::zero();
+        wrapper.accumulator_stack.clear(); // Force empty stack
+
+        let pos = Position::startpos();
+        let eval = wrapper.evaluate(&pos);
+
+        // Should return 0 on error
+        assert_eq!(eval, 0);
+    }
+
+    #[test]
+    fn test_nnue_evaluator_arc_sharing() {
+        let evaluator1 = NNUEEvaluator::zero();
+        let evaluator2 = evaluator1.clone();
+
+        // Both should share the same Arc pointers
+        assert!(Arc::ptr_eq(&evaluator1.feature_transformer, &evaluator2.feature_transformer));
+        assert!(Arc::ptr_eq(&evaluator1.network, &evaluator2.network));
     }
 }

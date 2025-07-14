@@ -1095,13 +1095,13 @@ mod tests {
 
             // デバッグ: 初期配置の確認
             if piece.is_none() {
-                println!("No piece at {:?}", from);
-                println!("Expected: {:?}", expected_piece_type);
+                println!("No piece at {from:?}");
+                println!("Expected: {expected_piece_type:?}");
                 // 周辺の駒を確認
                 for file in 0..9 {
                     if let Some(p) = pos.board.piece_on(Square::new(file, 1)) {
                         if p.piece_type == expected_piece_type && p.color == Color::Black {
-                            println!("Found {:?} at Square::new({}, 1)", expected_piece_type, file);
+                            println!("Found {expected_piece_type:?} at Square::new({file}, 1)");
                         }
                     }
                 }
