@@ -2,13 +2,7 @@
 //!
 //! Implements 256x2-32-32-1 architecture with ClippedReLU activation
 
-use std::cmp::{max, min};
-
-/// Clamp value to range
-#[inline]
-fn clamp(x: i32, low: i32, high: i32) -> i32 {
-    min(max(x, low), high)
-}
+use super::simd::SimdDispatcher;
 
 /// Neural network for NNUE evaluation
 pub struct Network {
@@ -85,14 +79,7 @@ impl Network {
 
     /// Transform 16-bit features to 8-bit with clamping
     fn transform_features(&self, us: &[i16], them: &[i16], output: &mut [i8]) {
-        const SHIFT: i32 = 6; // Shift for quantization
-
-        for i in 0..256 {
-            // Our perspective
-            output[i] = clamp((us[i] as i32) >> SHIFT, -127, 127) as i8;
-            // Opponent perspective
-            output[i + 256] = clamp((them[i] as i32) >> SHIFT, -127, 127) as i8;
-        }
+        SimdDispatcher::transform_features(us, them, output, 256);
     }
 
     /// Affine transformation (matrix multiply + bias)
@@ -108,17 +95,7 @@ impl Network {
         debug_assert_eq!(biases.len(), OUT);
         debug_assert_eq!(output.len(), OUT);
 
-        // Copy biases
-        output.copy_from_slice(biases);
-
-        // Matrix multiplication
-        for i in 0..OUT {
-            let mut sum = output[i];
-            for j in 0..IN {
-                sum += input[j] as i32 * weights[i * IN + j] as i32;
-            }
-            output[i] = sum;
-        }
+        SimdDispatcher::affine_transform(input, weights, biases, output, IN, OUT);
     }
 
     /// ClippedReLU activation: max(0, min(x, 127))
@@ -126,51 +103,13 @@ impl Network {
         debug_assert_eq!(input.len(), N);
         debug_assert_eq!(output.len(), N);
 
-        for i in 0..N {
-            output[i] = clamp(input[i], 0, 127) as i8;
-        }
-    }
-}
-
-/// SIMD-optimized versions (placeholder for now)
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-mod simd {
-    use super::*;
-    use std::arch::x86_64::*;
-
-    impl Network {
-        /// AVX2-optimized affine transformation
-        pub unsafe fn affine_propagate_avx2<const IN: usize, const OUT: usize>(
-            &self,
-            input: &[i8],
-            weights: &[i8],
-            biases: &[i32],
-            output: &mut [i32],
-        ) {
-            // AVX2 implementation would go here
-            // For now, fall back to scalar version
-            self.affine_propagate::<IN, OUT>(input, weights, biases, output);
-        }
-
-        /// AVX2-optimized ClippedReLU
-        pub unsafe fn clipped_relu_avx2<const N: usize>(&self, input: &[i32], output: &mut [i8]) {
-            // AVX2 implementation would go here
-            // For now, fall back to scalar version
-            self.clipped_relu::<N>(input, output);
-        }
+        SimdDispatcher::clipped_relu(input, output, N);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_clamp() {
-        assert_eq!(clamp(50, 0, 127), 50);
-        assert_eq!(clamp(-10, 0, 127), 0);
-        assert_eq!(clamp(200, 0, 127), 127);
-    }
 
     #[test]
     fn test_network_zero() {

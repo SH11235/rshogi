@@ -2,7 +2,9 @@
 //!
 //! Manages transformed features for both perspectives with differential updates
 
-use super::features::{extract_features, halfkp_index, BonaPiece, FeatureTransformer, FE_END};
+use super::error::{NNUEError, NNUEResult};
+use super::features::{extract_features, halfkp_index, BonaPiece, FeatureTransformer};
+use super::simd::SimdDispatcher;
 use crate::ai::board::{Color, Piece, PieceType, Position, Square};
 use crate::ai::moves::Move;
 
@@ -87,13 +89,7 @@ impl Accumulator {
         features: &[usize],
         transformer: &FeatureTransformer,
     ) {
-        for &feature_idx in features {
-            debug_assert!(feature_idx < FE_END * 81);
-
-            for (i, acc) in accumulator.iter_mut().enumerate().take(256) {
-                *acc += transformer.weight(feature_idx, i);
-            }
-        }
+        SimdDispatcher::update_accumulator(accumulator, &transformer.weights, features, true);
     }
 
     /// Update accumulator with differential changes
@@ -110,17 +106,23 @@ impl Accumulator {
         };
 
         // Remove features
-        for &feature_idx in &update.removed {
-            for (i, acc) in accumulator.iter_mut().enumerate().take(256) {
-                *acc -= transformer.weight(feature_idx, i);
-            }
+        if !update.removed.is_empty() {
+            SimdDispatcher::update_accumulator(
+                accumulator,
+                &transformer.weights,
+                &update.removed,
+                false,
+            );
         }
 
         // Add features
-        for &feature_idx in &update.added {
-            for (i, acc) in accumulator.iter_mut().enumerate().take(256) {
-                *acc += transformer.weight(feature_idx, i);
-            }
+        if !update.added.is_empty() {
+            SimdDispatcher::update_accumulator(
+                accumulator,
+                &transformer.weights,
+                &update.added,
+                true,
+            );
         }
     }
 }
@@ -135,13 +137,13 @@ pub struct AccumulatorUpdate {
 }
 
 /// Calculate differential update from move
-pub fn calculate_update(pos: &Position, mv: Move) -> AccumulatorUpdate {
+pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdate> {
     let mut removed = Vec::new();
     let mut added = Vec::new();
 
     // Get king positions
-    let black_king = pos.king_square(Color::Black).unwrap();
-    let white_king = pos.king_square(Color::White).unwrap();
+    let black_king = pos.king_square(Color::Black).ok_or(NNUEError::KingNotFound(Color::Black))?;
+    let white_king = pos.king_square(Color::White).ok_or(NNUEError::KingNotFound(Color::White))?;
     let white_king_flipped = white_king.flip();
 
     if mv.is_drop() {
@@ -193,11 +195,13 @@ pub fn calculate_update(pos: &Position, mv: Move) -> AccumulatorUpdate {
         }
     } else {
         // Normal move
-        let from = mv.from().unwrap(); // Safe because not a drop
+        let from = mv.from().ok_or_else(|| {
+            NNUEError::InvalidMove("Non-drop move without source square".to_string())
+        })?;
         let to = mv.to();
 
         // Get moving piece
-        let moving_piece = pos.piece_at(from).unwrap();
+        let moving_piece = pos.piece_at(from).ok_or(NNUEError::InvalidPiece(from))?;
 
         // Remove piece from source
         let bona_from_black = BonaPiece::from_board(moving_piece, from);
@@ -276,7 +280,7 @@ pub fn calculate_update(pos: &Position, mv: Move) -> AccumulatorUpdate {
         }
     }
 
-    AccumulatorUpdate { removed, added }
+    Ok(AccumulatorUpdate { removed, added })
 }
 
 #[cfg(test)]
@@ -315,7 +319,7 @@ mod tests {
         let pos = Position::startpos();
         let mv = Move::make_normal(Square::new(6, 6), Square::new(6, 5)); // 7g7f
 
-        let update = calculate_update(&pos, mv);
+        let update = calculate_update(&pos, mv).unwrap();
 
         // Should remove pawn from 7g and add to 7f
         assert_eq!(update.removed.len(), 2); // Black and white perspectives
@@ -329,10 +333,27 @@ mod tests {
 
         let mv = Move::make_drop(PieceType::Pawn, Square::new(4, 4)); // P*5e
 
-        let update = calculate_update(&pos, mv);
+        let update = calculate_update(&pos, mv).unwrap();
 
         // Should add pawn to board and update hand count
         assert!(update.added.len() >= 2); // New piece on board
         assert!(update.removed.len() >= 2); // Hand count changed
+    }
+
+    #[test]
+    fn test_calculate_update_no_king() {
+        let mut pos = Position::empty();
+        // Add some pieces but no kings
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+
+        let mv = Move::make_normal(Square::new(4, 4), Square::new(4, 3));
+
+        let result = calculate_update(&pos, mv);
+        assert!(result.is_err());
+        match result {
+            Err(NNUEError::KingNotFound(_)) => (),
+            _ => panic!("Expected KingNotFound error"),
+        }
     }
 }

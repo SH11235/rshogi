@@ -587,8 +587,8 @@ mod tests {
                 let result = reader.load_data(&data);
 
                 // Assert
-                assert!(result.is_ok(), "Failed to load real opening book file: {:?}", result);
-                println!("Load result: {:?}", result);
+                assert!(result.is_ok(), "Failed to load real opening book file: {result:?}");
+                println!("Load result: {result:?}");
                 println!("Position count: {}", reader.position_count());
                 assert!(reader.position_count() > 0, "No positions loaded from file");
 
