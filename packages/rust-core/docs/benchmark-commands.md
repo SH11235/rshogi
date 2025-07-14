@@ -7,26 +7,45 @@
 cargo run --release --bin nnue_benchmark
 ```
 
-期待される出力例：
+期待される出力例（リリースビルド、2025年7月15日測定）：
 ```
 === NNUE Performance Benchmark ===
 
+1. Direct Evaluation Function Comparison
+========================================
+Material Evaluator:
+  - Evaluations/sec: 12,106,317
+  - Avg time: 82 ns
+
+NNUE Evaluator:
+  - Evaluations/sec: 1,140,383
+  - Avg time: 876 ns
+
+Performance Comparison:
+  - NNUE is 10.6x slower than Material evaluator
+  - NNUE overhead: 961.6%
+
+2. Search Performance Comparison
+=================================
 Position 1:
   Material Engine:
-    Nodes: 27358274
-    Time: 5.000008537s
-    NPS: 5471645
+    Nodes: 26,718,665
+    Time: 5.000009636s
+    NPS: 5,343,723
     
   NNUE Engine:
-    Nodes: 2903757
-    Time: 3.161356062s
-    NPS: 918516
+    Nodes: 2,903,757
+    Time: 2.502101829s
+    NPS: 1,160,527
     
-Comparison:
-  Material NPS: 5471645
-  NNUE NPS: 918516
-  NNUE overhead: 83.2%
+Search Comparison:
+  Material NPS: 5,343,723
+  NNUE NPS: 1,160,527
+  NPS ratio: 4.60x
+  NNUE search overhead: 78.3%
 ```
+
+注: デバッグビルドでは約20倍遅くなります（NNUE評価関数: 約10,000 評価/秒）
 
 ## SIMD実装ベンチマーク
 
@@ -64,12 +83,18 @@ cargo run --release --bin sse41_only_test
 cargo run --release --bin simd_check
 ```
 
-## パフォーマンス結果サマリー
+## パフォーマンス結果サマリー（2025年7月15日）
 
-### NNUE評価関数
-- **AVX2実装**: 918,516 NPS
-- **SSE4.1実装（推定）**: 550,000-650,000 NPS
-- **スカラー実装（推定）**: 300,000 NPS
+### NNUE評価関数の直接評価性能
+- **Material評価関数**: 12,106,317 評価/秒
+- **NNUE評価関数**: 1,140,383 評価/秒
+- **速度比**: NNUE は Material の 10.6倍遅い
+
+### 探索での実効性能（NPS）
+- **Material評価関数**: 5,343,723 NPS
+- **NNUE評価関数**: 1,160,527 NPS  
+- **速度比**: NNUE は Material の 4.6倍遅い
+- **改善理由**: 探索中は評価関数の呼び出し頻度が低いため、オーバーヘッドが緩和される
 
 ### affine_transform（最重要関数）
 - **スカラー**: 285,929 ops/sec

@@ -3,6 +3,7 @@
 //! HalfKP uses the king position and all other pieces as features
 
 use crate::ai::board::{Color, Piece, PieceType, Position, Square};
+use crate::ai::piece_constants::{piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES};
 
 /// Maximum pieces in hand for each type (indexed as in hands array)
 const MAX_HAND_PIECES: [u8; 7] = [
@@ -21,7 +22,7 @@ pub struct BonaPiece(u16);
 
 impl BonaPiece {
     /// Create BonaPiece from board piece
-    pub fn from_board(piece: Piece, sq: Square) -> Self {
+    pub fn from_board(piece: Piece, sq: Square) -> Option<Self> {
         let piece_offset = match (piece.piece_type, piece.is_promoted()) {
             (PieceType::Pawn, false) => 0,
             (PieceType::Lance, false) => 81,
@@ -36,31 +37,31 @@ impl BonaPiece {
             (PieceType::Silver, true) => 810, // Promoted Silver
             (PieceType::Bishop, true) => 891, // Horse
             (PieceType::Rook, true) => 972,   // Dragon
-            (PieceType::King, _) => unreachable!("King should not be included in features"),
-            (PieceType::Gold, true) => unreachable!("Gold cannot be promoted"),
+            (PieceType::King, _) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Warning: Attempted to create BonaPiece for King");
+                return None;
+            }
+            (PieceType::Gold, true) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Warning: Attempted to create BonaPiece for promoted Gold");
+                return None;
+            }
         };
 
         let color_offset = if piece.color == Color::White { 1053 } else { 0 };
         let index = piece_offset + sq.index() as u16 + color_offset;
 
-        BonaPiece(index)
+        Some(BonaPiece(index))
     }
 
     /// Create BonaPiece from hand piece
-    pub fn from_hand(piece_type: PieceType, color: Color, count: u8) -> Self {
+    /// Returns an error if piece_type is King (which cannot be in hand)
+    pub fn from_hand(piece_type: PieceType, color: Color, count: u8) -> Result<Self, &'static str> {
         debug_assert!(count > 0);
 
-        // Map piece type to hand array index
-        let hand_idx = match piece_type {
-            PieceType::Rook => 0,
-            PieceType::Bishop => 1,
-            PieceType::Gold => 2,
-            PieceType::Silver => 3,
-            PieceType::Knight => 4,
-            PieceType::Lance => 5,
-            PieceType::Pawn => 6,
-            PieceType::King => unreachable!("King cannot be in hand"),
-        };
+        // Use type-safe function to get hand array index
+        let hand_idx = piece_type_to_hand_index(piece_type)?;
         debug_assert!(count <= MAX_HAND_PIECES[hand_idx]);
 
         let base = 2106; // After board pieces
@@ -73,13 +74,13 @@ impl BonaPiece {
             PieceType::Knight => 12,
             PieceType::Lance => 16,
             PieceType::Pawn => 20,
-            PieceType::King => unreachable!("King cannot be in hand"),
+            PieceType::King => return Err("King cannot be in hand"),
         };
 
         let color_offset = if color == Color::White { 38 } else { 0 };
         let index = base + piece_offset + (count - 1) as u16 + color_offset;
 
-        BonaPiece(index)
+        Ok(BonaPiece(index))
     }
 
     /// Get feature index
@@ -130,19 +131,73 @@ impl FeatureTransformer {
     }
 }
 
+/// Maximum number of active features
+/// Increased from 64 to 128 to handle complex positions with many pieces and promoted pieces
+/// Theoretical maximum: 38 board pieces (40 - 2 kings) + 76 hand pieces = 114
+/// We use 128 for safety margin and cache alignment
+pub const MAX_ACTIVE_FEATURES: usize = 128;
+
+/// Structure to hold active features without heap allocation
+pub struct ActiveFeatures {
+    features: [usize; MAX_ACTIVE_FEATURES],
+    count: usize,
+}
+
+impl Default for ActiveFeatures {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActiveFeatures {
+    /// Create new empty feature set
+    pub fn new() -> Self {
+        ActiveFeatures {
+            features: [0; MAX_ACTIVE_FEATURES],
+            count: 0,
+        }
+    }
+
+    /// Add a feature (with overflow check)
+    #[inline]
+    fn push(&mut self, feature: usize) {
+        if self.count >= MAX_ACTIVE_FEATURES {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[NNUE] Warning: Active features overflow, count={}, skipping feature",
+                self.count
+            );
+            return;
+        }
+        self.features[self.count] = feature;
+        self.count += 1;
+    }
+
+    /// Get active features as slice
+    pub fn as_slice(&self) -> &[usize] {
+        &self.features[..self.count]
+    }
+
+    /// Get number of active features
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Check if there are no active features
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
 /// Extract active features from position
-pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> Vec<usize> {
-    let mut features = Vec::with_capacity(32);
+pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> ActiveFeatures {
+    let mut features = ActiveFeatures::new();
 
     // Board pieces
     for &color in &[Color::Black, Color::White] {
-        for piece_type in 0..8 {
-            if piece_type == PieceType::King as usize {
-                continue;
-            }
-
-            let pt = unsafe { std::mem::transmute::<u8, PieceType>(piece_type as u8) };
-            let mut bb = pos.board.piece_bb[color as usize][piece_type];
+        // Iterate through all non-King piece types using compile-time constant array
+        for &pt in &BOARD_PIECE_TYPES {
+            let mut bb = pos.board.piece_bb[color as usize][pt as usize];
 
             while let Some(sq) = bb.pop_lsb() {
                 let piece = Piece::new(pt, color);
@@ -154,20 +209,20 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                     (piece.flip_color(), sq.flip())
                 };
 
-                let bona_piece = BonaPiece::from_board(piece_adj, sq_adj);
-                let index = halfkp_index(king_sq, bona_piece);
-                features.push(index);
+                if let Some(bona_piece) = BonaPiece::from_board(piece_adj, sq_adj) {
+                    let index = halfkp_index(king_sq, bona_piece);
+                    features.push(index);
+                }
             }
         }
     }
 
     // Hand pieces
     for &color in &[Color::Black, Color::White] {
-        for piece_type in 0..7 {
-            let count = pos.hands[color as usize][piece_type];
+        // Use compile-time constant array for type-safe iteration
+        for (hand_idx, &pt) in HAND_PIECE_TYPES.iter().enumerate() {
+            let count = pos.hands[color as usize][hand_idx];
             if count > 0 {
-                let pt = unsafe { std::mem::transmute::<u8, PieceType>(piece_type as u8) };
-
                 // Adjust color for perspective
                 let color_adj = if perspective == Color::Black {
                     color
@@ -175,9 +230,16 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                     color.flip()
                 };
 
-                let bona_piece = BonaPiece::from_hand(pt, color_adj, count);
-                let index = halfkp_index(king_sq, bona_piece);
-                features.push(index);
+                match BonaPiece::from_hand(pt, color_adj, count) {
+                    Ok(bona_piece) => {
+                        let index = halfkp_index(king_sq, bona_piece);
+                        features.push(index);
+                    }
+                    Err(e) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    }
+                }
             }
         }
     }
@@ -193,18 +255,20 @@ mod tests {
     fn test_bona_piece_from_board() {
         let piece = Piece::new(PieceType::Pawn, Color::Black);
         let sq = Square::new(4, 4); // 5e
-        let bona = BonaPiece::from_board(piece, sq);
+        let bona = BonaPiece::from_board(piece, sq).expect("Valid piece type");
 
         assert_eq!(bona.index(), 40); // Pawn at index 40
     }
 
     #[test]
     fn test_bona_piece_from_hand() {
-        let bona = BonaPiece::from_hand(PieceType::Pawn, Color::Black, 1);
+        let bona =
+            BonaPiece::from_hand(PieceType::Pawn, Color::Black, 1).expect("Valid piece type");
         // Base 2106 + pawn offset 20 + (count-1) 0 + color offset 0 = 2126
         assert_eq!(bona.index(), 2126); // First black pawn in hand
 
-        let bona = BonaPiece::from_hand(PieceType::Pawn, Color::Black, 17);
+        let bona =
+            BonaPiece::from_hand(PieceType::Pawn, Color::Black, 17).expect("Valid piece type");
         assert_eq!(bona.index(), 2126 + 16); // 17th black pawn (max is 18 but array is 0-17)
     }
 

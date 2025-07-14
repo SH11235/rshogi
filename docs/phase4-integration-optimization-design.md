@@ -808,7 +808,7 @@ impl SelfPlayManager {
                 break;
             }
             
-            let random_move = moves[rng.gen_range(0..moves.len())];
+            let random_move = moves[rng.random_range(0..moves.len())];
             pos.do_move(random_move);
             move_history.push(random_move);
         }
