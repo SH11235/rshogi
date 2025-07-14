@@ -1,5 +1,6 @@
 //! NNUE performance benchmark
 
+use shogi_core::ai::benchmark::{benchmark_evaluation, run_benchmark};
 use shogi_core::ai::engine::EngineType;
 use shogi_core::ai::{Engine, Position, SearchLimits};
 use std::time::{Duration, Instant};
@@ -7,15 +8,40 @@ use std::time::{Duration, Instant};
 fn main() {
     println!("=== NNUE Performance Benchmark ===\n");
 
-    // Test positions
+    // Run comprehensive evaluation benchmark
+    println!("1. Direct Evaluation Function Comparison");
+    println!("========================================");
+    let eval_comparison = benchmark_evaluation();
+
+    println!("\nMaterial Evaluator:");
+    println!("  - Evaluations/sec: {}", eval_comparison.material.evals_per_sec);
+    println!("  - Avg time: {} ns", eval_comparison.material.avg_eval_time_ns);
+
+    println!("\nNNUE Evaluator:");
+    println!("  - Evaluations/sec: {}", eval_comparison.nnue.evals_per_sec);
+    println!("  - Avg time: {} ns", eval_comparison.nnue.avg_eval_time_ns);
+
+    println!("\nPerformance Comparison:");
+    println!(
+        "  - NNUE is {:.1}x slower than Material evaluator",
+        eval_comparison.nnue_slowdown_factor
+    );
+    println!(
+        "  - NNUE overhead: {:.1}%",
+        (eval_comparison.nnue_slowdown_factor - 1.0) * 100.0
+    );
+
+    // Test positions for search benchmark
+    println!("\n\n2. Search Performance Comparison");
+    println!("=================================");
     let positions = vec![
         Position::startpos(),
         // Add more test positions here if needed
     ];
 
-    // Compare Material vs NNUE evaluation
+    // Compare Material vs NNUE evaluation in search
     for (i, pos) in positions.iter().enumerate() {
-        println!("Position {}:", i + 1);
+        println!("\nPosition {}:", i + 1);
 
         // Material evaluator benchmark
         let material_engine = Engine::new(EngineType::Material);
@@ -26,12 +52,27 @@ fn main() {
         let nnue_result = benchmark_engine(&nnue_engine, pos.clone(), "NNUE");
 
         // Compare results
-        println!("\nComparison:");
+        println!("\nSearch Comparison:");
         println!("  Material NPS: {:.0}", material_result.0);
         println!("  NNUE NPS: {:.0}", nnue_result.0);
-        println!("  NNUE overhead: {:.1}%", (1.0 - nnue_result.0 / material_result.0) * 100.0);
-        println!();
+        println!("  NPS ratio: {:.2}x", material_result.0 / nnue_result.0);
+        println!(
+            "  NNUE search overhead: {:.1}%",
+            (1.0 - nnue_result.0 / material_result.0) * 100.0
+        );
+
+        println!("\nEvaluation Quality:");
+        println!("  Material score: {}", material_result.1);
+        println!("  NNUE score: {}", nnue_result.1);
+        println!("  Score difference: {}", (nnue_result.1 - material_result.1).abs());
     }
+
+    // Run general benchmark
+    println!("\n\n3. General Performance Metrics");
+    println!("==============================");
+    let general_result = run_benchmark();
+    println!("Move Generation: {} moves/sec", general_result.movegen_speed);
+    println!("Search NPS (Material): {} nodes/sec", general_result.nps);
 }
 
 fn benchmark_engine(engine: &Engine, mut pos: Position, name: &str) -> (f64, i32) {
