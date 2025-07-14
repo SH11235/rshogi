@@ -111,6 +111,7 @@ pub struct JsMove {
     pub to: JsSquare,
     pub piece_type: String,
     pub promote: Option<bool>,
+    pub drop_piece_type: Option<String>,  // 駒打ち用
 }
 
 /// マスの表現
@@ -309,6 +310,34 @@ impl WasmAIEngine {
         Ok(JsValue::from_serde(&info)
             .map_err(|e| JsValue::from_str(&e.to_string()))?)
     }
+    
+    /// 探索を開始（同期版、デバッグ用）
+    #[wasm_bindgen(js_name = searchSync)]
+    pub fn search_sync(
+        &mut self,
+        time_limit: u32,
+        options: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let search_options: SearchOptions = options.into_serde()
+            .unwrap_or_default();
+        
+        // 探索制限を設定
+        let limits = SearchLimits {
+            movetime: Some(Duration::from_millis(time_limit as u64)),
+            depth: search_options.depth,
+            nodes: search_options.nodes,
+            ..Default::default()
+        };
+        
+        // 同期探索を実行
+        let result = self.engine.searcher.iterative_deepening(&self.position, limits, 0);
+        
+        // JavaScript形式に変換
+        let js_result = Self::internal_to_js_result(&result);
+        
+        Ok(JsValue::from_serde(&js_result)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?)
+    }
 }
 ```
 
@@ -495,6 +524,35 @@ impl SearchWorker {
 
 ### 3.2 SharedArrayBuffer対応
 
+#### CORSポリシー設定
+
+```javascript
+// サーバー側でのヘッダー設定
+// SharedArrayBufferを有効にするには以下のヘッダーが必要
+response.headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+response.headers.set('Cross-Origin-Embedder-Policy', 'require-corp');
+
+// Service Workerでの対応例
+self.addEventListener('fetch', (event) => {
+  if (event.request.destination === 'document') {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          const newHeaders = new Headers(response.headers);
+          newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+          newHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+          
+          return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: newHeaders
+          });
+        })
+    );
+  }
+});
+```
+
 ```rust
 /// 共有メモリを使用した高速化
 #[cfg(feature = "shared-memory")]
@@ -562,6 +620,44 @@ mod shared_memory {
 ## 4. メモリ管理とサイズ最適化
 
 ### 4.1 動的メモリ管理
+
+#### メモリ使用状況ログ
+
+```rust
+/// WASMメモリ統計情報
+#[derive(Serialize)]
+pub struct MemoryStats {
+    pub linear_memory_used: usize,
+    pub linear_memory_limit: usize,
+    pub stack_size_estimate: usize,
+    pub tt_size: usize,
+    pub nnue_size: usize,
+    pub misc_allocations: usize,
+    pub timestamp: u64,
+}
+
+impl MemoryManager {
+    /// メモリ使用状況を取得
+    pub fn get_stats(&self) -> MemoryStats {
+        MemoryStats {
+            linear_memory_used: self.allocated.load(Ordering::Relaxed),
+            linear_memory_limit: self.available_memory,
+            stack_size_estimate: self.estimate_stack_usage(),
+            tt_size: self.tt_allocation_size,
+            nnue_size: self.nnue_allocation_size,
+            misc_allocations: self.misc_allocations.load(Ordering::Relaxed),
+            timestamp: js_sys::Date::now() as u64,
+        }
+    }
+    
+    /// CLIからのメモリ統計出力
+    #[wasm_bindgen(js_name = logMemoryStats)]
+    pub fn log_memory_stats(&self) {
+        let stats = self.get_stats();
+        web_sys::console::log_1(&JsValue::from_str(&serde_json::to_string(&stats).unwrap()));
+    }
+}
+```
 
 ```rust
 /// メモリマネージャー
@@ -770,10 +866,13 @@ impl SelfPlayManager {
             let entries = self.play_one_game(&mut rng).await?;
             
             // フィルタリング
-            let filtered: Vec<_> = entries.into_iter()
+            let mut filtered: Vec<_> = entries.into_iter()
                 .filter(|e| e.eval.abs() <= self.config.eval_limit) // デフォルト: ±800
                 .filter(|e| e.ply >= 20 && e.ply <= 200)
                 .collect();
+            
+            // ゲーム結果を正確に設定
+            self.update_game_results(&mut filtered);
             
             // 書き込み
             for entry in filtered {
@@ -790,6 +889,34 @@ impl SelfPlayManager {
         
         self.output.flush()?;
         Ok(())
+    }
+    
+    /// ゲーム結果の更新
+    fn update_game_results(&self, entries: &mut Vec<TeacherEntry>) {
+        // ゲームの最終結果を取得
+        let final_result = if let Some(last) = entries.last() {
+            // 詰み判定
+            if last.eval.abs() > VALUE_KNOWN_WIN {
+                if last.eval > 0 {
+                    GameResult::Win(last.side_to_move)
+                } else {
+                    GameResult::Win(last.side_to_move.opposite())
+                }
+            } else if last.ply >= 320 {
+                // 千日手判定（320手以上）
+                GameResult::Draw
+            } else {
+                // 通常の終了
+                GameResult::Unknown
+            }
+        } else {
+            GameResult::Unknown
+        };
+        
+        // 全てのエントリにゲーム結果を設定
+        for entry in entries.iter_mut() {
+            entry.game_result = final_result;
+        }
     }
     
     /// 1ゲームをプレイ
@@ -1226,8 +1353,8 @@ mod compatibility_tests {
 
 ### 性能要件
 - [ ] 探索速度: 30-50万NPS（ブラウザ環境、WASM simd128使用時）
-- [ ] WASMサイズ: 1MB以下（gzip圧縮後）
-- [ ] 起動時間: 100ms以下
+- [ ] WASMサイズ: 1MB以下（gzip圧縮後、wee_alloc + wasm-opt -Oz使用前提）
+- [ ] 起動時間: 100ms以下（NNUE重みの事前fetchとキャッシュからの読み込みを除く）
 - [ ] メモリ使用: 128MB以下
 - [ ] WASM性能: ネイティブの70-80%
 
@@ -1251,7 +1378,55 @@ mod compatibility_tests {
    - 対策: 動的メモリ管理
    - 必要に応じた機能制限
 
-## 11. プロジェクト完了チェックリスト
+## 11. 追加推奨事項
+
+### 11.1 型定義のnpm配布
+
+```json
+// package.json
+{
+  "name": "@shogi-ai/types",
+  "version": "1.0.0",
+  "types": "index.d.ts",
+  "files": ["*.d.ts"],
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir pkg",
+    "prepublishOnly": "npm run build"
+  }
+}
+```
+
+### 11.2 WebWorker thread-affinity
+
+```typescript
+// スレッド数の適切な決定
+function getOptimalThreadCount(): number {
+  const cores = navigator.hardwareConcurrency || 4;
+  // UIスレッド用に1つ残し、1-4にクリップ
+  return Math.max(1, Math.min(cores - 1, 4));
+}
+```
+
+### 11.3 セキュリティレビュー
+
+```rust
+// エラーレポートフック
+#[wasm_bindgen]
+pub fn set_error_reporter(callback: js_sys::Function) {
+    panic::set_hook(Box::new(move |info| {
+        let msg = info.to_string();
+        let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(&msg));
+    }));
+}
+
+// Sentry等へのレポート
+// JavaScript側でフックを設定
+engine.set_error_reporter((error) => {
+  Sentry.captureException(new Error(error));
+});
+```
+
+## 12. プロジェクト完了チェックリスト
 
 ### 実装完了
 - [ ] 全フェーズの実装完了
