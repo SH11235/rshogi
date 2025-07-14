@@ -53,10 +53,20 @@ pub mod scalar {
     }
 
     /// Scalar implementation of feature transformation
+    ///
+    /// Converts 16-bit accumulated feature values to 8-bit for neural network input.
+    /// This quantization step is crucial for performance and memory efficiency.
     #[inline]
     pub fn transform_features_scalar(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
         // Quantization shift: converts 16-bit accumulated values to 8-bit by dividing by 64
-        // This preserves the most significant information while fitting in i8 range
+        //
+        // The shift value of 6 bits (division by 64) is carefully chosen to:
+        // 1. Preserve the most significant information from the accumulator
+        // 2. Map the typical accumulator range into the i8 range [-127, 127]
+        // 3. Maintain sufficient precision for the neural network
+        //
+        // Typical accumulator values range from -4096 to 4096, so dividing by 64
+        // maps this to approximately -64 to 64, which fits well within i8 range.
         const SHIFT: i32 = 6;
 
         for i in 0..size {
