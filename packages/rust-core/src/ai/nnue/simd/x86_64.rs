@@ -271,7 +271,7 @@ pub unsafe fn update_accumulator_avx2(
     // Debug assertions for boundary checks
     debug_assert!(accumulator.len() >= 256, "Accumulator must have at least 256 elements");
     for &idx in indices {
-        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {} out of bounds", idx);
+        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {idx} out of bounds");
     }
     const CHUNK_SIZE: usize = 16;
 
@@ -560,7 +560,7 @@ pub unsafe fn update_accumulator_sse41(
     // Debug assertions for boundary checks
     debug_assert!(accumulator.len() >= 256, "Accumulator must have at least 256 elements");
     for &idx in indices {
-        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {} out of bounds", idx);
+        debug_assert!(idx * 256 + 256 <= weights.len(), "Weight index {idx} out of bounds");
     }
     const CHUNK_SIZE: usize = 32; // Process 32 elements per iteration (4 x 128-bit)
 
@@ -831,8 +831,8 @@ mod tests {
                 // 100 >> 6 = 1, 200 >> 6 = 3
                 let expected_us = 1i8;
                 let expected_them = 3i8;
-                assert_eq!(output[i], expected_us, "Failed at index {} for us", i);
-                assert_eq!(output[i + size], expected_them, "Failed at index {} for them", i);
+                assert_eq!(output[i], expected_us, "Failed at index {i} for us");
+                assert_eq!(output[i + size], expected_them, "Failed at index {i} for them");
             }
         }
     }
