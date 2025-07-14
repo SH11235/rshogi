@@ -80,7 +80,7 @@ impl Accumulator {
         let features = extract_features(pos, king_sq, perspective);
 
         // Apply features
-        Self::apply_features(accumulator, &features, transformer);
+        Self::apply_features(accumulator, features.as_slice(), transformer);
     }
 
     /// Apply feature weights to accumulator

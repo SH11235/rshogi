@@ -130,9 +130,46 @@ impl FeatureTransformer {
     }
 }
 
+/// Maximum number of active features (conservative estimate)
+pub const MAX_ACTIVE_FEATURES: usize = 64;
+
+/// Structure to hold active features without heap allocation
+pub struct ActiveFeatures {
+    features: [usize; MAX_ACTIVE_FEATURES],
+    count: usize,
+}
+
+impl ActiveFeatures {
+    /// Create new empty feature set
+    pub fn new() -> Self {
+        ActiveFeatures {
+            features: [0; MAX_ACTIVE_FEATURES],
+            count: 0,
+        }
+    }
+
+    /// Add a feature (panics if overflow)
+    #[inline]
+    fn push(&mut self, feature: usize) {
+        debug_assert!(self.count < MAX_ACTIVE_FEATURES);
+        self.features[self.count] = feature;
+        self.count += 1;
+    }
+
+    /// Get active features as slice
+    pub fn as_slice(&self) -> &[usize] {
+        &self.features[..self.count]
+    }
+
+    /// Get number of active features
+    pub fn len(&self) -> usize {
+        self.count
+    }
+}
+
 /// Extract active features from position
-pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> Vec<usize> {
-    let mut features = Vec::with_capacity(32);
+pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> ActiveFeatures {
+    let mut features = ActiveFeatures::new();
 
     // Board pieces
     for &color in &[Color::Black, Color::White] {

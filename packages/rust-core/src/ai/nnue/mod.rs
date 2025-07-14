@@ -150,8 +150,9 @@ impl Evaluator for NNUEEvaluatorWrapper {
         let accumulator = match self.accumulator_stack.last() {
             Some(acc) => acc,
             None => {
-                // Return 0 evaluation on error - this shouldn't happen in normal usage
-                eprintln!("Warning: Empty accumulator stack in NNUE evaluation");
+                // This should never happen in normal usage - accumulator stack should always have at least one entry
+                debug_assert!(false, "Empty accumulator stack in NNUE evaluation");
+                // Return 0 evaluation as fallback
                 return 0;
             }
         };
