@@ -38,12 +38,12 @@ impl Network {
         debug_assert_eq!(acc_us.len(), 256);
         debug_assert_eq!(acc_them.len(), 256);
 
-        // Transform features to 8-bit (quantization)
-        let mut input = vec![0i8; 512];
+        // Transform features to 8-bit (quantization) - using stack array
+        let mut input = [0i8; 512];
         self.transform_features(acc_us, acc_them, &mut input);
 
-        // Hidden layer 1
-        let mut hidden1 = vec![0i32; 32];
+        // Hidden layer 1 - using stack array
+        let mut hidden1 = [0i32; 32];
         self.affine_propagate::<512, 32>(
             &input,
             &self.hidden1_weights,
@@ -51,12 +51,12 @@ impl Network {
             &mut hidden1,
         );
 
-        // ClippedReLU activation
-        let mut hidden1_out = vec![0i8; 32];
+        // ClippedReLU activation - using stack array
+        let mut hidden1_out = [0i8; 32];
         self.clipped_relu::<32>(&hidden1, &mut hidden1_out);
 
-        // Hidden layer 2
-        let mut hidden2 = vec![0i32; 32];
+        // Hidden layer 2 - using stack array
+        let mut hidden2 = [0i32; 32];
         self.affine_propagate::<32, 32>(
             &hidden1_out,
             &self.hidden2_weights,
@@ -64,8 +64,8 @@ impl Network {
             &mut hidden2,
         );
 
-        // ClippedReLU activation
-        let mut hidden2_out = vec![0i8; 32];
+        // ClippedReLU activation - using stack array
+        let mut hidden2_out = [0i8; 32];
         self.clipped_relu::<32>(&hidden2, &mut hidden2_out);
 
         // Output layer

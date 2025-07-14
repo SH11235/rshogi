@@ -21,6 +21,13 @@ pub struct NNUEHeader {
 /// Architecture ID for HalfKP 256x2-32-32
 const HALFKP_256X2_32_32: u32 = 0x7AF32F16;
 
+/// Supported NNUE format versions
+const MIN_SUPPORTED_VERSION: u32 = 1;
+const MAX_SUPPORTED_VERSION: u32 = 1;
+
+/// Maximum reasonable file size (200MB)
+const MAX_FILE_SIZE: u32 = 200 * 1024 * 1024;
+
 /// Weight file reader
 pub struct WeightReader {
     file: File,
@@ -56,6 +63,33 @@ impl WeightReader {
             architecture: u32::from_le_bytes(architecture),
             size: u32::from_le_bytes(size),
         };
+
+        // Debug output for header information
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "NNUE Header: magic={:?}, version={}, size={} bytes",
+            std::str::from_utf8(&header.magic).unwrap_or("???"),
+            header.version,
+            header.size
+        );
+
+        // Validate version
+        if header.version < MIN_SUPPORTED_VERSION || header.version > MAX_SUPPORTED_VERSION {
+            return Err(format!(
+                "Unsupported NNUE version: {}, supported range: {}-{}",
+                header.version, MIN_SUPPORTED_VERSION, MAX_SUPPORTED_VERSION
+            )
+            .into());
+        }
+
+        // Validate file size
+        if header.size > MAX_FILE_SIZE {
+            return Err(format!(
+                "NNUE file too large: {} bytes, maximum: {} bytes",
+                header.size, MAX_FILE_SIZE
+            )
+            .into());
+        }
 
         // Validate architecture
         let arch = header.architecture; // Copy to avoid unaligned access
