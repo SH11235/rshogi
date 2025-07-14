@@ -71,7 +71,7 @@ fn test_load_nnue_file() {
             assert_eq!(network.hidden1_biases.len(), 32);
         }
         Err(e) => {
-            println!("Failed to load NNUE file (expected if file doesn't exist): {}", e);
+            println!("Failed to load NNUE file (expected if file doesn't exist): {e}");
         }
     }
 }
