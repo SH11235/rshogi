@@ -55,6 +55,8 @@ pub mod scalar {
     /// Scalar implementation of feature transformation
     #[inline]
     pub fn transform_features_scalar(us: &[i16], them: &[i16], output: &mut [i8], size: usize) {
+        // Quantization shift: converts 16-bit accumulated values to 8-bit by dividing by 64
+        // This preserves the most significant information while fitting in i8 range
         const SHIFT: i32 = 6;
 
         for i in 0..size {

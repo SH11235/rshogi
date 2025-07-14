@@ -21,6 +21,10 @@ use weights::load_weights;
 /// Scale factor for converting network output to centipawns
 const FV_SCALE: i32 = 16;
 
+/// Output scaling shift: right shift by 16 bits to normalize the scaled output
+/// This converts from internal NNUE scale to standard centipawn units
+const OUTPUT_SCALE_SHIFT: i32 = 16;
+
 /// NNUE evaluator with HalfKP features
 ///
 /// Both feature transformer and network are wrapped in Arc for memory efficiency.
@@ -64,7 +68,7 @@ impl NNUEEvaluator {
         let output = self.network.propagate(acc_us, acc_them);
 
         // Scale to centipawns
-        (output * FV_SCALE) >> 16
+        (output * FV_SCALE) >> OUTPUT_SCALE_SHIFT
     }
 
     /// Get reference to feature transformer
