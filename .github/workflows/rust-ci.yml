@@ -61,7 +61,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: jetli/wasm-pack-action@v0.4.0
+      - name: Install wasm-pack
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/rust-core
