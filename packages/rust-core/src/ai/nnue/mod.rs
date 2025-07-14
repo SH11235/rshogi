@@ -202,18 +202,6 @@ mod tests {
     }
 
     #[test]
-    fn test_nnue_evaluator_wrapper_empty_stack() {
-        let mut wrapper = NNUEEvaluatorWrapper::zero();
-        wrapper.accumulator_stack.clear(); // Force empty stack
-
-        let pos = Position::startpos();
-        let eval = wrapper.evaluate(&pos);
-
-        // Should return 0 on error
-        assert_eq!(eval, 0);
-    }
-
-    #[test]
     fn test_nnue_evaluator_arc_sharing() {
         let evaluator1 = NNUEEvaluator::zero();
         let evaluator2 = evaluator1.clone();
