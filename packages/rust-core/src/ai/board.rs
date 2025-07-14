@@ -518,6 +518,23 @@ impl Board {
         self.squares[sq.index()]
     }
 
+    /// Rebuild occupancy bitboards from piece bitboards
+    /// This is useful after manual bitboard manipulation (e.g., in tests)
+    pub fn rebuild_occupancy_bitboards(&mut self) {
+        // Clear existing occupancy bitboards
+        self.all_bb = Bitboard::EMPTY;
+        self.occupied_bb[0] = Bitboard::EMPTY;
+        self.occupied_bb[1] = Bitboard::EMPTY;
+
+        // Rebuild from piece bitboards
+        for color in 0..2 {
+            for piece_type in 0..8 {
+                self.occupied_bb[color] |= self.piece_bb[color][piece_type];
+            }
+            self.all_bb |= self.occupied_bb[color];
+        }
+    }
+
     /// Find king square
     pub fn king_square(&self, color: Color) -> Option<Square> {
         let mut bb = self.piece_bb[color as usize][PieceType::King as usize];
@@ -962,49 +979,80 @@ impl Position {
         // Lance attacks (only unpromoted, as promoted lance moves like gold)
         let lance_bb =
             self.board.piece_bb[by_color as usize][PieceType::Lance as usize] & !promoted_bb;
-        // For lance, we need to check if it can attack from behind (for the given color)
-        // This is a simplified version - proper lance attack generation would consider direction
+
+        // Use attack tables for efficient lance detection
+        attackers |= self.get_lance_attackers_to(sq, by_color, lance_bb, occupied);
+
+        attackers
+    }
+
+    /// Get lance attackers to a square using attack tables
+    fn get_lance_attackers_to(
+        &self,
+        sq: Square,
+        by_color: Color,
+        lance_bb: Bitboard,
+        occupied: Bitboard,
+    ) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        let mut attackers = Bitboard::EMPTY;
+        let file = sq.file();
+
+        // Lance can only attack along the same file
         if by_color == Color::Black {
-            // Black lance attacks from below
+            // Black lance attacks from below (higher rank numbers)
+            // Check squares below the target square on the same file
             for rank in (sq.rank() + 1)..9 {
-                let from = Square::new(sq.file(), rank);
+                let from = Square::new(file, rank);
+
+                // Check if there's a lance at this position
                 if lance_bb.test(from) {
-                    // Check if path is clear
-                    let mut path_clear = true;
-                    for r in (sq.rank() + 1)..rank {
-                        if occupied.test(Square::new(sq.file(), r)) {
-                            path_clear = false;
-                            break;
-                        }
-                    }
-                    if path_clear {
+                    // Get lance attacks from this position and check if it reaches target
+                    let lance_attacks = ATTACK_TABLES.lance_attacks(from, by_color);
+                    let actual_attacks = lance_attacks & !self.ray_blocked(from, sq, occupied);
+
+                    if actual_attacks.test(sq) {
                         attackers.set(from);
                     }
                     break; // Only one lance per file
                 }
+
+                // If there's any piece blocking, no lance behind can attack
+                if occupied.test(from) {
+                    break;
+                }
             }
         } else {
-            // White lance attacks from above
+            // White lance attacks from above (lower rank numbers)
             for rank in (0..sq.rank()).rev() {
-                let from = Square::new(sq.file(), rank);
+                let from = Square::new(file, rank);
+
                 if lance_bb.test(from) {
-                    // Check if path is clear
-                    let mut path_clear = true;
-                    for r in (rank + 1)..sq.rank() {
-                        if occupied.test(Square::new(sq.file(), r)) {
-                            path_clear = false;
-                            break;
-                        }
-                    }
-                    if path_clear {
+                    let lance_attacks = ATTACK_TABLES.lance_attacks(from, by_color);
+                    let actual_attacks = lance_attacks & !self.ray_blocked(from, sq, occupied);
+
+                    if actual_attacks.test(sq) {
                         attackers.set(from);
                     }
-                    break; // Only one lance per file
+                    break;
+                }
+
+                if occupied.test(from) {
+                    break;
                 }
             }
         }
 
         attackers
+    }
+
+    /// Check if ray from 'from' to 'to' is blocked (excluding the target square)
+    fn ray_blocked(&self, from: Square, to: Square, occupied: Bitboard) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        let between = ATTACK_TABLES.between_bb(from, to);
+        between & occupied
     }
 
     /// Get blockers for king (simplified version)
@@ -1015,7 +1063,20 @@ impl Position {
         let king_bb = self.board.piece_bb[king_color as usize][PieceType::King as usize];
         let king_sq = match king_bb.lsb() {
             Some(sq) => sq,
-            None => return Bitboard::EMPTY, // No king
+            None => {
+                // This should never happen in a valid position
+                #[cfg(debug_assertions)]
+                panic!("King not found for color {king_color:?}");
+
+                #[cfg(not(debug_assertions))]
+                {
+                    log::warn!(
+                        "King not found for color {:?} in get_blockers_for_king",
+                        king_color
+                    );
+                    return Bitboard::EMPTY;
+                }
+            }
         };
 
         let enemy_color = king_color.opposite();

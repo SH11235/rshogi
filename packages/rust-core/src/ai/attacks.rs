@@ -67,6 +67,12 @@ pub struct AttackTables {
 
     /// Pawn attacks from each square
     pub pawn_attacks: [[Bitboard; 81]; 2], // [color][square]
+
+    /// File masks for quick file operations
+    pub file_masks: [Bitboard; 9],
+
+    /// Rank masks for quick rank operations
+    pub rank_masks: [Bitboard; 9],
 }
 
 impl Default for AttackTables {
@@ -85,7 +91,26 @@ impl AttackTables {
             knight_attacks: [[Bitboard::EMPTY; 81]; 2],
             lance_attacks: [[Bitboard::EMPTY; 81]; 2],
             pawn_attacks: [[Bitboard::EMPTY; 81]; 2],
+            file_masks: [Bitboard::EMPTY; 9],
+            rank_masks: [Bitboard::EMPTY; 9],
         };
+
+        // Generate file and rank masks
+        for file in 0..9 {
+            let mut file_mask = Bitboard::EMPTY;
+            for rank in 0..9 {
+                file_mask.set(Square::new(file, rank));
+            }
+            tables.file_masks[file as usize] = file_mask;
+        }
+
+        for rank in 0..9 {
+            let mut rank_mask = Bitboard::EMPTY;
+            for file in 0..9 {
+                rank_mask.set(Square::new(file, rank));
+            }
+            tables.rank_masks[rank as usize] = rank_mask;
+        }
 
         // Generate tables for each square
         for sq in 0..81 {
@@ -386,6 +411,18 @@ impl AttackTables {
         }
 
         attacks
+    }
+
+    /// Get file mask for a given file
+    #[inline]
+    pub fn file_mask(&self, file: u8) -> Bitboard {
+        self.file_masks[file as usize]
+    }
+
+    /// Get rank mask for a given rank
+    #[inline]
+    pub fn rank_mask(&self, rank: u8) -> Bitboard {
+        self.rank_masks[rank as usize]
     }
 
     /// Get bitboard of squares between two squares (exclusive)
