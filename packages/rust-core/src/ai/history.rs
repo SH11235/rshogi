@@ -12,6 +12,7 @@ const MAX_HISTORY_SCORE: i32 = 10000;
 const HISTORY_AGING_DIVISOR: i32 = 2;
 
 /// Counter move history - tracks which moves work well after specific moves
+#[derive(Clone)]
 pub struct CounterMoveHistory {
     /// [color][from_square][to_square] -> counter move
     table: [[[Option<Move>; 81]; 81]; 2],
@@ -61,6 +62,7 @@ impl CounterMoveHistory {
 }
 
 /// Butterfly history - tracks move success by from-to squares
+#[derive(Clone)]
 pub struct ButterflyHistory {
     /// [color][from_square][to_square] -> score
     scores: [[[i32; 81]; 81]; 2],
@@ -139,6 +141,7 @@ impl ButterflyHistory {
 }
 
 /// Continuation history - tracks move success in context of previous moves
+#[derive(Clone)]
 pub struct ContinuationHistory {
     /// [color][piece_moved_2_ply_ago][to_square_2_ply_ago][piece_to_move][to_square] -> score
     /// Using simplified indexing for memory efficiency
@@ -247,6 +250,7 @@ impl ContinuationHistory {
 }
 
 /// Combined history tables for move ordering
+#[derive(Clone)]
 pub struct History {
     /// Butterfly history (from-to)
     pub butterfly: ButterflyHistory,
