@@ -16,11 +16,37 @@ Phase 3では、基本的なαβ探索に最新の探索技術を追加し、並
 
 ### 1.2 成果物
 - `search_enhanced.rs`: 拡張探索エンジン
-- `tt_concurrent.rs`: 並列対応置換表
+- `tt.rs`: 並列対応置換表（ロックフリー実装）※実装済み
 - `thread_pool.rs`: 探索スレッド管理
 - `time_management.rs`: 時間管理システム
-- `history.rs`: 履歴ヒューリスティック
+- `history.rs`: 履歴ヒューリスティック ※実装済み
+- `move_picker.rs`: 段階的手生成と順序付け
 - 並列性能テストスイート
+
+### 1.3 実装状況（2024年7月15日時点）
+#### 実装済み
+- ✅ 基本的な履歴ヒューリスティック（`history.rs`）
+  - Butterfly History
+  - Counter Move History
+  - Continuation History
+- ✅ ロックフリー置換表（`tt.rs`）
+  - AtomicU64を使用した並列安全実装
+  - 16バイトエントリ（キャッシュ効率最適化）
+- ✅ 基本的な探索強化（`search_enhanced.rs`）
+  - Null Move Pruning
+  - Late Move Reductions (LMR)
+  - Futility Pruning
+  - 基本的な探索スタック管理
+
+#### 未実装
+- ❌ 高度な探索技術
+  - Singular Extension
+  - ProbCut
+  - Aspiration Windows
+  - Internal Iterative Deepening (IID)
+- ❌ 手の順序付け最適化（`move_picker.rs`）
+- ❌ 並列探索（`thread_pool.rs`）
+- ❌ 時間管理（`time_management.rs`）
 
 ## 2. 高度な探索技術
 
@@ -80,7 +106,8 @@ pub struct SearchParams {
     pub futility_margin: fn(Depth) -> Value,
     
     /// Aspiration Window
-    pub aspiration_window_delta: Value,
+    pub aspiration_window_initial: Value,
+    pub aspiration_window_adaptive: bool,
     
     /// その他のパラメータ
     pub iid_depth: Depth,           // Internal Iterative Deepening
@@ -96,7 +123,8 @@ impl Default for SearchParams {
             lmr_enabled: true,
             lmr_table: Self::init_lmr_table(),
             futility_margin: |depth| 75 * depth as Value,
-            aspiration_window_delta: 17,
+            aspiration_window_initial: 17,
+            aspiration_window_adaptive: true,
             iid_depth: 4,
             singular_extension_depth: 7,
             prob_cut_depth: 5,
@@ -341,6 +369,72 @@ impl EnhancedSearcher {
 
 ### 2.4 Late Move Reductions (LMR)
 
+#### LMRポリシーの抽象化（将来の自動チューニング対応）
+
+```rust
+/// LMR削減量を決定するポリシー
+pub trait LMRPolicy: Send + Sync {
+    /// 削減量を計算
+    fn reduction(&self, depth: usize, move_count: usize) -> i32;
+    
+    /// 外部ファイルから読み込み
+    fn load_from_file(&mut self, path: &str) -> Result<(), std::io::Error> {
+        Ok(()) // デフォルトは何もしない
+    }
+}
+
+/// 固定式LMRテーブル
+pub struct FixedLMRTable {
+    table: [[i32; 64]; 64],
+}
+
+impl Default for FixedLMRTable {
+    fn default() -> Self {
+        let mut table = [[0; 64]; 64];
+        for depth in 1..64 {
+            for moves in 1..64 {
+                table[depth][moves] = 
+                    (0.75 + (depth as f64).ln() * (moves as f64).ln() / 2.25) as i32;
+            }
+        }
+        FixedLMRTable { table }
+    }
+}
+
+impl LMRPolicy for FixedLMRTable {
+    fn reduction(&self, depth: usize, move_count: usize) -> i32 {
+        self.table[depth.min(63)][move_count.min(63)]
+    }
+}
+
+/// 学習済みLMRテーブル（将来実装）
+pub struct LearnedLMRTable {
+    table: [[i32; 64]; 64],
+}
+
+impl LMRPolicy for LearnedLMRTable {
+    fn reduction(&self, depth: usize, move_count: usize) -> i32 {
+        self.table[depth.min(63)][move_count.min(63)]
+    }
+    
+    fn load_from_file(&mut self, path: &str) -> Result<(), std::io::Error> {
+        // JSON/TOML/バイナリ形式からの読み込み
+        let data = std::fs::read_to_string(path)?;
+        // パース処理...
+        Ok(())
+    }
+}
+
+/// 探索パラメータ（拡張版）
+pub struct SearchParams {
+    /// LMRポリシー
+    pub lmr_policy: Box<dyn LMRPolicy>,
+    // 他のパラメータ...
+}
+```
+
+#### LMR適用ロジック
+
 ```rust
 impl EnhancedSearcher {
     fn calculate_new_depth(
@@ -373,8 +467,8 @@ impl EnhancedSearcher {
         
         // Late Move Reductions
         if depth >= 3 && move_count > 1 && !move_.is_capture() {
-            // 基本削減量
-            let mut r = self.params.lmr_table[depth.min(63) as usize][move_count.min(63) as usize];
+            // ポリシーから基本削減量を取得
+            let mut r = self.params.lmr_policy.reduction(depth as usize, move_count as usize);
             
             // 調整
             if !pv_node {
@@ -423,6 +517,45 @@ impl EnhancedSearcher {
         let tt_hit = self.tt.probe(pos.hash())?;
         if tt_hit.bound != Bound::Lower || tt_hit.depth < depth - 3 {
             return None;
+        }
+        
+        // 追加条件1: best_moveが存在すること
+        if tt_hit.best_move.is_none() {
+            return None;
+        }
+        
+        // 追加条件2: 現在局面が静的に好位置
+        let eval = self.stack.last().unwrap().static_eval;
+        if eval <= beta - 2 * depth as Value {
+            return None;
+        }
+        
+        // 追加条件3: PVノードまたはCut-nodeのみ
+        let pv_node = self.stack.last().unwrap().pv;
+        if !pv_node && !cut_node {
+            return None;
+        }
+        
+        // 追加条件4: 履歴スコアによるフィルタリング（相対評価）
+        let history_score = self.history.get(pos, tt_move);
+        
+        // 全候補手の履歴スコアを収集して相対評価
+        let mut moves = MoveList::new();
+        let mut gen = MoveGen::new();
+        gen.generate_all(pos, &mut moves);
+        
+        let max_history_score = moves.as_slice()
+            .iter()
+            .map(|&m| self.history.get(pos, m))
+            .max()
+            .unwrap_or(0);
+        
+        // 履歴スコアが上位10%に入っていない、かつ絶対値も低い場合はスキップ
+        if history_score < max_history_score * 9 / 10 && history_score < 500 {
+            // TTエントリの評価値が十分高い場合は例外とする
+            if tt_hit.value < beta + 100 {
+                return None;
+            }
         }
         
         let singular_beta = tt_hit.value - 2 * depth as Value;
@@ -662,6 +795,23 @@ impl MovePicker {
 
 ## 4. 並列探索（Lazy SMP）
 
+### 4.0 実装戦略と優先順位
+
+Lazy SMPは以下の順序で段階的に実装します：
+
+| 優先度 | 項目 | 説明 |
+|--------|------|------|
+| ✅済 | Shared TT | ロックフリー置換表（実装済み） |
+| 1️⃣ | Split Point | 並列探索の基本単位。PV以外のノードで安全に導入 |
+| 2️⃣ | Thread-local Histories | 競合回避のためのスレッドローカル履歴（マージ频度: 毎10万ノード、decay率: 0.9） |
+| 3️⃣ | Best Move First | 効率的なスレッド分配のための手順序付け |
+| 4️⃣ | PV-Splitting | 安定性確保後に最後に実装 |
+
+#### 実装方針
+- 最初は2-4スレッド限定で評価
+- Split Pointの分岐基準は「残深さ > 3」で固定
+- 段階的にスレッド数を増やしながら性能評価
+
 ### 4.1 スレッドプール
 
 ```rust
@@ -855,10 +1005,17 @@ impl SearchWorker {
         result
     }
     
-    fn aspiration_search(&mut self, pos: &Position, prev_score: Value, depth: Depth) -> (Value, Vec<Move>) {
+    fn aspiration_search(&mut self, pos: &Position, prev_score: Value, depth: Depth, fail_count: &mut u32) -> (Value, Vec<Move>) {
         let mut alpha = -VALUE_INFINITE;
         let mut beta = VALUE_INFINITE;
-        let mut delta = self.searcher.params.aspiration_window_delta;
+        let mut delta = self.searcher.params.aspiration_window_initial;
+        
+        // 適応的な初期窓幅（fail回数に基づく）
+        if self.searcher.params.aspiration_window_adaptive && *fail_count > 0 {
+            // 指数的に拡張（delta_factorによるスケール）
+            delta = (delta as f32 * self.searcher.params.aspiration_window_delta_factor.powi(*fail_count as i32)) as Value;
+            delta = delta.min(self.searcher.params.aspiration_window_delta_max);
+        }
         
         // 前回のスコアがある場合は狭い窓から開始
         if depth >= 4 && prev_score.abs() < VALUE_KNOWN_WIN {
@@ -866,21 +1023,47 @@ impl SearchWorker {
             beta = (prev_score + delta).min(VALUE_INFINITE);
         }
         
+        let mut fail_high_count = 0;
+        let mut fail_low_count = 0;
+        
         loop {
             let score = self.searcher.search_root(pos, alpha, beta, depth);
             
             // 窓の外なら再探索
             if score <= alpha {
+                fail_low_count += 1;
                 beta = (alpha + beta) / 2;
                 alpha = (score - delta).max(-VALUE_INFINITE);
+                
+                // deltaを指数的に拡張
+                delta = (delta as f32 * self.searcher.params.aspiration_window_delta_factor) as Value;
+                delta = delta.min(self.searcher.params.aspiration_window_delta_max);
+                
+                // 連続fail-lowの記録
+                if fail_low_count > 1 {
+                    *fail_count += 1;
+                }
             } else if score >= beta {
+                fail_high_count += 1;
                 alpha = (alpha + beta) / 2;
                 beta = (score + delta).min(VALUE_INFINITE);
+                
+                // 連続fail-highの記録
+                if fail_high_count > 1 {
+                    *fail_count += 1;
+                }
             } else {
+                // 成功時はfail_countをリセット
+                *fail_count = 0;
                 return (score, self.searcher.get_pv());
             }
             
-            delta += delta / 4 + 5;
+            // 適応的なdelta増加
+            if self.searcher.params.aspiration_window_adaptive {
+                delta += delta * (fail_high_count + fail_low_count) / 4 + 5;
+            } else {
+                delta += delta / 4 + 5;
+            }
             
             // 窓が広がりすぎたら通常探索
             if delta > 500 {
@@ -1075,13 +1258,16 @@ impl TranspositionTable {
 ```rust
 use std::time::{Duration, Instant};
 
-/// 時間管理
+/// 時間管理（WASM互換設計）
 pub struct TimeManager {
     start_time: Instant,
     time_limit: Duration,
     max_time: Duration,
     move_overhead: Duration,
     stability_factor: f64,
+    /// WASMブラウザ環境用のコールバック
+    #[cfg(target_arch = "wasm32")]
+    time_check_callback: Option<Box<dyn Fn() -> f64>>,
 }
 
 /// 探索制限
@@ -1347,20 +1533,47 @@ mod parallel_tests {
 
 ## 8. 実装スケジュール
 
-### Week 1: 探索強化
-- Day 1: PVS探索の実装
-- Day 2: Null Move PruningとLMR
-- Day 3: Singular ExtensionとProbCut  
-- Day 4: 履歴ヒューリスティック
-- Day 5: 手の順序付け最適化
-- Day 6-7: テストとデバッグ
+### 実装済みタスク（完了）
+- ✅ 基本的な履歴ヒューリスティック（`history.rs`）
+- ✅ ロックフリー置換表（`tt.rs`）
+- ✅ Null Move PruningとLMR（`search_enhanced.rs`）
+- ✅ Futility Pruning（`search_enhanced.rs`）
 
-### Week 2: 並列化と最適化
-- Day 1-2: ロックフリー置換表
-- Day 3-4: Lazy SMP実装
-- Day 5: 時間管理システム
-- Day 6: 性能チューニング
-- Day 7: 統合テスト
+### 残りのタスク（優先順位順）
+
+#### 高優先度タスク
+1. **MovePicker実装**（`move_picker.rs`）- 1日
+   - 段階的手生成（TT手→捕獲手→キラー手→静かな手）
+   - MVV-LVA順序付け
+   - 履歴ヒューリスティックとの統合
+
+2. **探索強化の完成**（`search_enhanced.rs`更新）- 2日
+   - Aspiration Windows実装
+   - Singular Extension実装
+   - Internal Iterative Deepening (IID)
+   - ProbCut実装
+
+3. **並列探索実装**（`thread_pool.rs`）- 3日
+   - Lazy SMPアーキテクチャ
+   - 探索スレッドワーカー
+   - スレッド間通信
+   - ワーク分配戦略
+
+#### 中優先度タスク
+4. **時間管理実装**（`time_management.rs`）- 1日
+   - 動的時間配分
+   - ゲームフェーズ認識
+   - 安定性ベースの調整
+
+5. **性能テストとベンチマーク** - 2日
+   - 各機能の効果測定
+   - 並列性能測定
+   - 統合テスト
+
+### 推定完了時間
+- 高優先度タスク: 6日
+- 中優先度タスク: 3日
+- 合計: 9日（バッファを含めて2週間）
 
 ## 9. 成功基準
 
@@ -1374,7 +1587,7 @@ mod parallel_tests {
 - [ ] 探索速度: 150-200万NPS（4スレッド）
 - [ ] 並列効率: 4スレッドで2.5倍以上
 - [ ] 探索深度: 初期局面で15手以上/秒
-- [ ] 置換表衝突率: 2^-32以下（u32キー使用）
+- [ ] 置換表再探索率: 0.01%未満（同一局面の再検出率）
 
 ### 品質要件
 - [ ] 各技術の効果測定
@@ -1386,6 +1599,7 @@ mod parallel_tests {
 ### 技術的リスク
 1. **並列化のバグ**
    - 対策: Thread Sanitizerの使用
+   - `loom`ベースのdeterministic concurrency testを重要箇所に導入
    - 徹底的な並列テスト
 
 2. **探索の不安定性**
@@ -1396,7 +1610,175 @@ mod parallel_tests {
    - 対策: 実戦的なテスト
    - 安全マージンの確保
 
-## 11. Phase 4への準備
+## 11. WASM SIMD最適化への準備
+
+### 11.1 SIMD演算パスの抽象化
+
+Phase 4でのWASM統合をスムーズにするため、Phase 3で以下の準備を行います：
+
+```rust
+/// SIMD演算の抽象化レイヤー
+#[inline(always)]
+pub fn relu_simd(input: &[i32], output: &mut [i8]) {
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    return relu_simd128(input, output);
+    
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    return relu_avx2(input, output);
+    
+    // Fallback実装
+    relu_scalar(input, output)
+}
+
+/// スカラーfallback
+fn relu_scalar(input: &[i32], output: &mut [i8]) {
+    for (i, &v) in input.iter().enumerate() {
+        output[i] = v.clamp(0, 127) as i8;
+    }
+}
+```
+
+### 11.2 アライメント制御
+
+```rust
+/// SIMD最適化のためのアライメント保証
+#[repr(align(32))]  // AVX2とWASM SIMD両対応
+pub struct AlignedBuffer<T, const N: usize> {
+    data: [T; N],
+}
+
+impl<T: Default + Copy, const N: usize> AlignedBuffer<T, N> {
+    pub fn new() -> Self {
+        Self {
+            data: [T::default(); N],
+        }
+    }
+}
+```
+
+### 11.3 ベンチマーク環境の準備
+
+```toml
+# Cargo.toml
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "simd_bench"
+harness = false
+```
+
+```rust
+// benches/simd_bench.rs
+use criterion::{criterion_group, criterion_main, Criterion};
+
+fn benchmark_relu(c: &mut Criterion) {
+    let mut group = c.benchmark_group("relu");
+    
+    // Native版
+    group.bench_function("native", |b| {
+        // ベンチマークコード
+    });
+    
+    // WASM版のテスト
+    #[cfg(target_arch = "wasm32")]
+    group.bench_function("wasm32", |b| {
+        // ベンチマークコード
+    });
+}
+```
+
+## 12. 実装の注意点と依存関係
+
+### 12.1 実装の順序と依存関係
+1. **MovePicker** → 探索強化に必要（手の順序付けが探索効率に直結）
+2. **LMR自動チューニング回路** → MovePicker完成後すぐに実装（再調整コスト削減）
+   - TexelチューニングまたはLearnedLMRベースの自動調整
+   - パラメータ学習フレームワークとCLIインターフェース
+3. **探索強化完成** → 並列探索の前に単体での動作確認が必要
+4. **並列探索** → 時間管理と独立して実装可能
+5. **時間管理** → 最後に実装（他の機能と独立）
+
+### 12.2 既存実装との統合
+- `history.rs`の履歴情報をMovePickerで活用
+- `tt.rs`の置換表は並列探索でそのまま使用可能
+- `search_enhanced.rs`は段階的に機能追加
+
+### 12.3 パフォーマンスへの影響
+- MovePickerの実装により探索効率が大幅に向上
+- 並列探索により物理的な探索速度が向上
+- 各機能は独立してテスト可能
+
+## 13. 探索ログフォーマット
+
+### 13.1 JSON Lines形式の統一ログ
+
+```rust
+/// 探索ログ出力用構造体
+#[derive(Serialize)]
+pub struct SearchLog {
+    pub timestamp: u64,
+    pub fen: String,
+    pub depth: u32,
+    pub seldepth: u32,
+    pub score: i32,
+    pub nodes: u64,
+    pub nps: u64,
+    pub hashfull: u32,
+    pub time: u64,
+    pub pv: Vec<String>,
+    pub multipv: Option<u32>,
+}
+
+impl SearchInfo {
+    /// JSON Lines形式でログ出力
+    pub fn log_to_jsonl(&self, pos: &Position) -> String {
+        let log = SearchLog {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            fen: pos.to_fen(),
+            depth: self.depth,
+            seldepth: self.selective_depth,
+            score: self.score,
+            nodes: self.nodes.load(Ordering::Relaxed),
+            nps: self.nps(),
+            hashfull: self.tt.hashfull(),
+            time: self.elapsed().as_millis() as u64,
+            pv: self.pv.iter().map(|m| m.to_string()).collect(),
+            multipv: self.multi_pv,
+        };
+        
+        serde_json::to_string(&log).unwrap()
+    }
+}
+```
+
+### 13.2 パラメータオーバーライド
+
+```rust
+/// CLIからのパラメータ上書き
+impl SearchParams {
+    pub fn override_from_cli(&mut self, args: &HashMap<String, String>) {
+        if let Some(v) = args.get("null_move_enabled") {
+            self.null_move_enabled = v.parse().unwrap_or(true);
+        }
+        if let Some(v) = args.get("lmr_enabled") {
+            self.lmr_enabled = v.parse().unwrap_or(true);
+        }
+        if let Some(v) = args.get("aspiration_window_initial") {
+            self.aspiration_window_initial = v.parse().unwrap_or(17);
+        }
+        if let Some(v) = args.get("aspiration_window_delta_factor") {
+            self.aspiration_window_delta_factor = v.parse().unwrap_or(1.5);
+        }
+        // 他のパラメータも同様に
+    }
+}
+```
+
+## 14. Phase 4への準備
 
 Phase 3完了時に、以下が準備されています：
 
@@ -1404,5 +1786,6 @@ Phase 3完了時に、以下が準備されています：
 2. **並列処理基盤**: マルチコアCPUの活用
 3. **時間管理**: 実戦での使用準備
 4. **最適化された実装**: 本番環境対応
+5. **デバッグ/分析用ログ**: JSON Lines形式での出力
 
 これらにより、Phase 4でのWASM統合と最終調整が可能になります。
