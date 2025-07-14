@@ -22,7 +22,7 @@ pub struct BonaPiece(u16);
 
 impl BonaPiece {
     /// Create BonaPiece from board piece
-    pub fn from_board(piece: Piece, sq: Square) -> Self {
+    pub fn from_board(piece: Piece, sq: Square) -> Option<Self> {
         let piece_offset = match (piece.piece_type, piece.is_promoted()) {
             (PieceType::Pawn, false) => 0,
             (PieceType::Lance, false) => 81,
@@ -38,24 +38,30 @@ impl BonaPiece {
             (PieceType::Bishop, true) => 891, // Horse
             (PieceType::Rook, true) => 972,   // Dragon
             (PieceType::King, _) => {
-                debug_assert!(false, "King should not be included in features");
-                unreachable!("King should not be included in features")
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Warning: Attempted to create BonaPiece for King");
+                return None;
             }
-            (PieceType::Gold, true) => unreachable!("Gold cannot be promoted"),
+            (PieceType::Gold, true) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[NNUE] Warning: Attempted to create BonaPiece for promoted Gold");
+                return None;
+            }
         };
 
         let color_offset = if piece.color == Color::White { 1053 } else { 0 };
         let index = piece_offset + sq.index() as u16 + color_offset;
 
-        BonaPiece(index)
+        Some(BonaPiece(index))
     }
 
     /// Create BonaPiece from hand piece
-    pub fn from_hand(piece_type: PieceType, color: Color, count: u8) -> Self {
+    /// Returns an error if piece_type is King (which cannot be in hand)
+    pub fn from_hand(piece_type: PieceType, color: Color, count: u8) -> Result<Self, &'static str> {
         debug_assert!(count > 0);
 
         // Use type-safe function to get hand array index
-        let hand_idx = piece_type_to_hand_index(piece_type);
+        let hand_idx = piece_type_to_hand_index(piece_type)?;
         debug_assert!(count <= MAX_HAND_PIECES[hand_idx]);
 
         let base = 2106; // After board pieces
@@ -68,13 +74,13 @@ impl BonaPiece {
             PieceType::Knight => 12,
             PieceType::Lance => 16,
             PieceType::Pawn => 20,
-            PieceType::King => unreachable!("King cannot be in hand"),
+            PieceType::King => return Err("King cannot be in hand"),
         };
 
         let color_offset = if color == Color::White { 38 } else { 0 };
         let index = base + piece_offset + (count - 1) as u16 + color_offset;
 
-        BonaPiece(index)
+        Ok(BonaPiece(index))
     }
 
     /// Get feature index
@@ -203,9 +209,10 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                     (piece.flip_color(), sq.flip())
                 };
 
-                let bona_piece = BonaPiece::from_board(piece_adj, sq_adj);
-                let index = halfkp_index(king_sq, bona_piece);
-                features.push(index);
+                if let Some(bona_piece) = BonaPiece::from_board(piece_adj, sq_adj) {
+                    let index = halfkp_index(king_sq, bona_piece);
+                    features.push(index);
+                }
             }
         }
     }
@@ -223,9 +230,16 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                     color.flip()
                 };
 
-                let bona_piece = BonaPiece::from_hand(pt, color_adj, count);
-                let index = halfkp_index(king_sq, bona_piece);
-                features.push(index);
+                match BonaPiece::from_hand(pt, color_adj, count) {
+                    Ok(bona_piece) => {
+                        let index = halfkp_index(king_sq, bona_piece);
+                        features.push(index);
+                    }
+                    Err(e) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    }
+                }
             }
         }
     }
@@ -241,18 +255,20 @@ mod tests {
     fn test_bona_piece_from_board() {
         let piece = Piece::new(PieceType::Pawn, Color::Black);
         let sq = Square::new(4, 4); // 5e
-        let bona = BonaPiece::from_board(piece, sq);
+        let bona = BonaPiece::from_board(piece, sq).expect("Valid piece type");
 
         assert_eq!(bona.index(), 40); // Pawn at index 40
     }
 
     #[test]
     fn test_bona_piece_from_hand() {
-        let bona = BonaPiece::from_hand(PieceType::Pawn, Color::Black, 1);
+        let bona =
+            BonaPiece::from_hand(PieceType::Pawn, Color::Black, 1).expect("Valid piece type");
         // Base 2106 + pawn offset 20 + (count-1) 0 + color offset 0 = 2126
         assert_eq!(bona.index(), 2126); // First black pawn in hand
 
-        let bona = BonaPiece::from_hand(PieceType::Pawn, Color::Black, 17);
+        let bona =
+            BonaPiece::from_hand(PieceType::Pawn, Color::Black, 17).expect("Valid piece type");
         assert_eq!(bona.index(), 2126 + 16); // 17th black pawn (max is 18 but array is 0-17)
     }
 
