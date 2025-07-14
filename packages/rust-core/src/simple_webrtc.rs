@@ -7,15 +7,8 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use web_sys::{RtcConfiguration, RtcPeerConnection, RtcPeerConnectionIceEvent};
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
-}
-
-macro_rules! console_log {
-    ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
-}
+// Use console_log macro from wasm_utils
+use crate::console_log;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SignalData {

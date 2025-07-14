@@ -3,7 +3,7 @@
 //! Pre-computed attack patterns for fast move generation
 
 use super::board::{Bitboard, Color, PieceType, Square};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 
 /// Direction offsets for piece movements
 #[derive(Clone, Copy, Debug)]
@@ -426,9 +426,7 @@ impl AttackTables {
 }
 
 // Global attack tables instance
-lazy_static! {
-    pub static ref ATTACK_TABLES: AttackTables = AttackTables::new();
-}
+pub static ATTACK_TABLES: Lazy<AttackTables> = Lazy::new(AttackTables::new);
 
 #[cfg(test)]
 mod tests {

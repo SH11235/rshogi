@@ -1,5 +1,8 @@
 use wasm_bindgen::prelude::*;
 
+// WASM utilities module (must be first for macro exports)
+pub mod wasm_utils;
+
 // Keep only WebRTC module for demo purposes
 mod simple_webrtc;
 pub use simple_webrtc::*;
@@ -17,17 +20,6 @@ pub mod opening_book_reader;
 
 // Add AI module
 pub mod ai;
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
-}
-
-#[allow(unused_macros)]
-macro_rules! console_log {
-    ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
-}
 
 // Dummy structs for now - will be replaced with actual game logic
 #[wasm_bindgen]

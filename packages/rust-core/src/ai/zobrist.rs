@@ -3,7 +3,7 @@
 //! Provides fast incremental hash computation for transposition tables and repetition detection
 
 use super::board::{Color, Piece, PieceType, Square, BOARD_SQUARES, MAX_PIECE_INDEX};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
@@ -94,9 +94,7 @@ impl ZobristTable {
 }
 
 // Global Zobrist table instance
-lazy_static! {
-    pub static ref ZOBRIST: ZobristTable = ZobristTable::new();
-}
+pub static ZOBRIST: Lazy<ZobristTable> = Lazy::new(ZobristTable::new);
 
 /// Extension trait for Position to add Zobrist hashing
 pub trait ZobristHashing {
