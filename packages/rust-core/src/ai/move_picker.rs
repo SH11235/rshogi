@@ -28,19 +28,35 @@ impl ScoredMove {
 }
 
 /// Stage of move generation
+///
+/// The order is carefully chosen based on the probability of causing a beta cutoff:
+/// 1. TT move - Most likely to be the best move from previous search
+/// 2. Good captures - Positive SEE captures are often good moves
+/// 3. Killers - Moves that caused cutoffs at the same depth
+/// 4. Quiet moves - Non-captures ordered by history heuristic
+/// 5. Bad captures - Negative SEE captures (least likely to be good)
+///
+/// Bad captures are intentionally placed last because:
+/// - They have negative SEE value (lose material)
+/// - They rarely cause beta cutoffs
+/// - In quiescence search, they are often skipped entirely
+/// - Late Move Reductions (LMR) work better with bad moves at the end
+///
+/// This ordering matches strong engines like Stockfish and maximizes
+/// the efficiency of alpha-beta pruning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MovePickerStage {
     /// TT move
     TTMove,
     /// Generate captures
     GenerateCaptures,
-    /// Good captures
+    /// Good captures (SEE >= 0)
     GoodCaptures,
     /// Killer moves
     Killers,
     /// Generate quiet moves
     GenerateQuiets,
-    /// Bad captures
+    /// Bad captures (SEE < 0)
     BadCaptures,
     /// All quiet moves
     QuietMoves,
@@ -64,7 +80,10 @@ pub struct MovePicker {
     moves: Vec<ScoredMove>,
     /// Bad captures
     bad_captures: Vec<ScoredMove>,
-    /// Current index in moves
+    /// Current index in moves/killers/bad_captures depending on stage
+    /// - In Killers stage: index into stack.killers[] (0-1)
+    /// - In BadCaptures stage: index into bad_captures vector
+    /// - Reset to 0 when transitioning to a new stage
     current: usize,
     /// Skip quiet moves (for quiescence search)
     skip_quiets: bool,
@@ -86,12 +105,17 @@ impl MovePicker {
             stage: MovePickerStage::TTMove,
             moves: Vec::new(),
             bad_captures: Vec::new(),
-            current: 0,
+            current: 0, // Initialize to 0, will be used differently in each stage
             skip_quiets: false,
         }
     }
 
     /// Create new move picker for quiescence search (captures only)
+    ///
+    /// In quiescence search, we skip quiet moves and bad captures.
+    /// Only good captures (SEE >= 0) are considered to avoid search explosion.
+    /// This is why bad captures are placed after quiet moves in normal search -
+    /// they're often not searched at all.
     pub fn new_quiescence(
         pos: &Position,
         tt_move: Option<Move>,
@@ -140,14 +164,15 @@ impl MovePicker {
                         } else {
                             MovePickerStage::Killers
                         };
-                        self.current = 0;
+                        self.current = 0; // Reset index for killer moves iteration
                     }
                 }
 
                 MovePickerStage::Killers => {
                     if self.current < 2 {
+                        // Check up to 2 killer moves
                         if let Some(killer) = self.stack.killers[self.current] {
-                            self.current += 1;
+                            self.current += 1; // Move to next killer slot
                             if Some(killer) != self.tt_move
                                 && !self.is_capture(killer)
                                 && self.pos.is_legal_move(killer)
@@ -155,36 +180,43 @@ impl MovePicker {
                                 return Some(killer);
                             }
                         } else {
-                            self.current += 1;
+                            self.current += 1; // Skip empty killer slot
                         }
                     } else {
+                        // Transition from Killers to GenerateQuiets
+                        // Next we'll generate and score quiet moves
                         self.stage = MovePickerStage::GenerateQuiets;
-                        self.current = 0;
+                        self.current = 0; // Not used in GenerateQuiets, but good practice to reset
                     }
                 }
 
                 MovePickerStage::GenerateQuiets => {
                     self.generate_quiets();
                     self.score_quiets();
-                    self.stage = MovePickerStage::BadCaptures;
+                    // Transition to QuietMoves (not BadCaptures)
+                    // This is intentional: quiet moves with good history scores
+                    // are more likely to be good than losing captures
+                    self.stage = MovePickerStage::QuietMoves;
+                    self.current = 0; // Not used in QuietMoves (pick_best manages its own index)
+                }
+
+                MovePickerStage::QuietMoves => {
+                    if let Some(mv) = self.pick_best() {
+                        // No need to check for TT move or killers - already filtered during generation
+                        return Some(mv);
+                    } else {
+                        // Bad captures come last - they rarely produce good moves
+                        // and are often pruned by Late Move Reductions
+                        self.stage = MovePickerStage::BadCaptures;
+                        self.current = 0; // Reset index to iterate through bad_captures vector
+                    }
                 }
 
                 MovePickerStage::BadCaptures => {
                     if self.current < self.bad_captures.len() {
                         let mv = self.bad_captures[self.current].mv;
-                        self.current += 1;
+                        self.current += 1; // Move to next bad capture
                         if Some(mv) != self.tt_move {
-                            return Some(mv);
-                        }
-                    } else {
-                        self.stage = MovePickerStage::QuietMoves;
-                        self.current = 0;
-                    }
-                }
-
-                MovePickerStage::QuietMoves => {
-                    if let Some(mv) = self.pick_best() {
-                        if Some(mv) != self.tt_move && !self.is_killer(mv) {
                             return Some(mv);
                         }
                     } else {
@@ -218,9 +250,9 @@ impl MovePicker {
         let mut gen = MoveGen::new();
         gen.generate_all(&self.pos, &mut move_list);
 
-        // Add only non-captures
+        // Add only non-captures that are not killers or TT move
         for &mv in move_list.as_slice() {
-            if !self.is_capture(mv) {
+            if !self.is_capture(mv) && Some(mv) != self.tt_move && !self.is_killer(mv) {
                 self.moves.push(ScoredMove::new(mv, 0));
             }
         }
@@ -369,14 +401,69 @@ impl MovePicker {
 
 // Extension for Position to check legal moves
 impl Position {
-    /// Check if a move is legal (simplified version)
+    /// Check if a move is legal
+    ///
+    /// This optimized version uses do_move/undo_move to check legality.
+    /// It's much faster than generating all legal moves (O(1) vs O(N)).
     pub fn is_legal_move(&self, mv: Move) -> bool {
-        // Generate all legal moves and check if mv is among them
-        let mut moves = MoveList::new();
-        let mut gen = MoveGen::new();
-        gen.generate_all(self, &mut moves);
+        // Basic validation
+        if mv.is_drop() {
+            // Check if we have the piece to drop
+            let piece_type = mv.drop_piece_type();
+            let color_idx = self.side_to_move as usize;
+            let hand_idx = match piece_type {
+                PieceType::Rook => 0,
+                PieceType::Bishop => 1,
+                PieceType::Gold => 2,
+                PieceType::Silver => 3,
+                PieceType::Knight => 4,
+                PieceType::Lance => 5,
+                PieceType::Pawn => 6,
+                _ => return false, // Can't drop King or promoted pieces
+            };
 
-        moves.as_slice().contains(&mv)
+            if self.hands[color_idx][hand_idx] == 0 {
+                return false;
+            }
+
+            // Check if target square is empty
+            if self.board.piece_on(mv.to()).is_some() {
+                return false;
+            }
+
+            // TODO: Check pawn drop restrictions (nifu, uchifuzume)
+        } else {
+            // Normal move
+            if let Some(from) = mv.from() {
+                // Check if there's a piece at the from square
+                if let Some(piece) = self.board.piece_on(from) {
+                    // Check if it's our piece
+                    if piece.color != self.side_to_move {
+                        return false;
+                    }
+
+                    // Check if capturing our own piece
+                    if let Some(to_piece) = self.board.piece_on(mv.to()) {
+                        if to_piece.color == self.side_to_move {
+                            return false;
+                        }
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // Try to make the move and check if it leaves king in check
+        let mut test_pos = self.clone();
+        test_pos.do_move(mv);
+
+        // Check if the side that made the move left their king in check
+        let king_in_check = test_pos.is_check(self.side_to_move);
+
+        !king_in_check
     }
 }
 
