@@ -907,7 +907,13 @@ impl Position {
             return true;
         }
 
-        // TODO: Lance attacks need special handling
+        // Lance attacks
+        let lance_bb = self.board.piece_bb[by_color as usize][PieceType::Lance as usize]
+            & !self.board.promoted_bb;
+        let lance_attackers = self.get_lance_attackers_to(sq, by_color, lance_bb, occupied);
+        if !lance_attackers.is_empty() {
+            return true;
+        }
 
         false
     }
@@ -918,7 +924,7 @@ impl Position {
         use crate::ai::attacks::ATTACK_TABLES;
         let mut attackers = Bitboard::EMPTY;
 
-        // Check pawn attacks (pawns attack differently than they are attacked)
+        // Check pawn attacks
         let pawn_bb = self.board.piece_bb[by_color as usize][PieceType::Pawn as usize];
         let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
         attackers |= pawn_bb & pawn_attacks;
@@ -987,6 +993,11 @@ impl Position {
     }
 
     /// Get lance attackers to a square using attack tables
+    ///
+    /// TODO: Performance optimization opportunities:
+    /// - Use occupied.pop_lsb() to find first lance in file
+    /// - Pre-compute rook-like attackers & lance_bb intersection
+    /// - Cache file-based lance positions for repeated queries
     fn get_lance_attackers_to(
         &self,
         sq: Square,
@@ -1001,58 +1012,41 @@ impl Position {
 
         // Lance can only attack along the same file
         if by_color == Color::Black {
-            // Black lance attacks from below (higher rank numbers)
-            // Check squares below the target square on the same file
-            for rank in (sq.rank() + 1)..9 {
+            // Black lance attacks upward (toward rank 8, from lower rank numbers)
+            // Check squares from rank 0 up to the target square
+            for rank in 0..sq.rank() {
                 let from = Square::new(file, rank);
 
                 // Check if there's a lance at this position
                 if lance_bb.test(from) {
-                    // Get lance attacks from this position and check if it reaches target
-                    let lance_attacks = ATTACK_TABLES.lance_attacks(from, by_color);
-                    let actual_attacks = lance_attacks & !self.ray_blocked(from, sq, occupied);
-
-                    if actual_attacks.test(sq) {
+                    // Check if the path is clear between lance and target
+                    let between = ATTACK_TABLES.between_bb(from, sq);
+                    if (between & occupied).is_empty() {
+                        // Path is clear, lance can attack
                         attackers.set(from);
                     }
-                    break; // Only one lance per file
-                }
-
-                // If there's any piece blocking, no lance behind can attack
-                if occupied.test(from) {
-                    break;
+                    // Don't break - there might be another lance behind
                 }
             }
         } else {
-            // White lance attacks from above (lower rank numbers)
-            for rank in (0..sq.rank()).rev() {
+            // White lance attacks downward (toward rank 0, from higher rank numbers)
+            // Check squares from rank 8 down to the target square
+            for rank in ((sq.rank() + 1)..9).rev() {
                 let from = Square::new(file, rank);
 
                 if lance_bb.test(from) {
-                    let lance_attacks = ATTACK_TABLES.lance_attacks(from, by_color);
-                    let actual_attacks = lance_attacks & !self.ray_blocked(from, sq, occupied);
-
-                    if actual_attacks.test(sq) {
+                    // Check if the path is clear between lance and target
+                    let between = ATTACK_TABLES.between_bb(from, sq);
+                    if (between & occupied).is_empty() {
+                        // Path is clear, lance can attack
                         attackers.set(from);
                     }
-                    break;
-                }
-
-                if occupied.test(from) {
-                    break;
+                    // Don't break - there might be another lance behind
                 }
             }
         }
 
         attackers
-    }
-
-    /// Check if ray from 'from' to 'to' is blocked (excluding the target square)
-    fn ray_blocked(&self, from: Square, to: Square, occupied: Bitboard) -> Bitboard {
-        use crate::ai::attacks::ATTACK_TABLES;
-
-        let between = ATTACK_TABLES.between_bb(from, to);
-        between & occupied
     }
 
     /// Get blockers for king (simplified version)
@@ -2020,5 +2014,86 @@ mod tests {
             let square = Square(sq);
             assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
         }
+    }
+
+    #[test]
+    fn test_is_attacked_with_lance() {
+        // Test is_attacked method with lance attacks
+        let mut pos = Position::empty();
+
+        // Black lance at 5i (file 4, rank 8)
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::Lance, Color::Black));
+
+        // White lance at 5a (file 4, rank 0)
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::Lance, Color::White));
+
+        // Add kings to make position valid
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Black lance at rank 8 cannot attack backward (toward rank 9)
+        // Black lance attacks are toward rank 0-7 only
+        assert!(!pos.is_attacked(Square::new(4, 7), Color::Black)); // Black lance at rank 8 cannot attack rank 7
+        assert!(!pos.is_attacked(Square::new(4, 6), Color::Black));
+        assert!(!pos.is_attacked(Square::new(3, 7), Color::Black)); // Different file
+
+        // White lance at rank 0 cannot attack backward (toward rank -1)
+        // White lance attacks are toward rank 1-8 only
+        assert!(!pos.is_attacked(Square::new(4, 1), Color::White)); // White lance at rank 0 cannot attack rank 1
+        assert!(!pos.is_attacked(Square::new(4, 2), Color::White));
+
+        // Move lances to positions where they can attack
+        pos.board.remove_piece(Square::new(4, 8));
+        pos.board.remove_piece(Square::new(4, 0));
+        pos.board
+            .put_piece(Square::new(4, 2), Piece::new(PieceType::Lance, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::White));
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Now test actual attacks
+        // Black lance at rank 2 attacks toward rank 8
+        assert!(pos.is_attacked(Square::new(4, 3), Color::Black));
+        assert!(pos.is_attacked(Square::new(4, 4), Color::Black));
+        assert!(pos.is_attacked(Square::new(4, 5), Color::Black));
+
+        // White lance at rank 6 attacks toward rank 0
+        assert!(pos.is_attacked(Square::new(4, 5), Color::White));
+        assert!(pos.is_attacked(Square::new(4, 4), Color::White));
+        assert!(pos.is_attacked(Square::new(4, 3), Color::White));
+
+        // Test with blocker
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board.rebuild_occupancy_bitboards();
+
+        // is_attacked() now correctly considers blockers for lance attacks
+        // because it uses get_lance_attackers_to() internally
+
+        // is_attacked() now correctly considers blockers for lance attacks
+        // because it uses get_lance_attackers_to() internally
+
+        // Black lance at rank 2 is blocked by pawn at rank 4
+        assert!(pos.is_attacked(Square::new(4, 3), Color::Black)); // Lance can attack rank 3
+        assert!(pos.is_attacked(Square::new(4, 4), Color::Black)); // Lance can attack blocker
+
+        // Note: Square(4, 5) is attacked by the Black pawn at rank 4, not the lance!
+        assert!(pos.is_attacked(Square::new(4, 5), Color::Black)); // Attacked by pawn at rank 4
+
+        // Lance cannot attack beyond the blocker
+        assert!(!pos.is_attacked(Square::new(4, 6), Color::Black)); // Lance blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::new(4, 7), Color::Black)); // Lance blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::new(4, 8), Color::Black)); // Lance blocked by pawn at rank 4
+
+        // White lance at rank 6 is blocked by pawn at rank 4
+        assert!(pos.is_attacked(Square::new(4, 5), Color::White)); // Can attack rank 5
+        assert!(!pos.is_attacked(Square::new(4, 3), Color::White)); // Blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::new(4, 1), Color::White)); // Blocked by pawn at rank 4
     }
 }
