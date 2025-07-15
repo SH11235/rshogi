@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::ai::board::{Color, Position, Square};
+    use crate::ai::board::{Color, PieceType, Position, Square};
     use crate::ai::evaluate::MaterialEvaluator;
     use crate::ai::history::History;
     use crate::ai::move_picker::MovePicker;
@@ -198,7 +198,14 @@ mod tests {
         let stack = SearchStack::default();
 
         // Update history for a specific move (5g5f)
-        let good_move = Move::normal(Square::new(4, 2), Square::new(4, 3), false);
+        // In the starting position, square 4,2 has a Pawn piece for Black
+        let good_move = Move::normal_with_piece(
+            Square::new(4, 2),
+            Square::new(4, 3),
+            false,
+            PieceType::Pawn,
+            None,
+        );
         history.update_cutoff(Color::Black, good_move, 10, None);
 
         let history_arc = Arc::new(history);

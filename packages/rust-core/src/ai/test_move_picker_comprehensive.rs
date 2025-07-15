@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::ai::board::{Color, Position, Square};
+    use crate::ai::board::{Color, PieceType, Position, Square};
     use crate::ai::history::History;
     use crate::ai::move_picker::MovePicker;
     use crate::ai::movegen::MoveGen;
@@ -75,9 +75,28 @@ mod tests {
 
         // Set up different move types
         // The TT move should be a legal capture in this position
-        let tt_move = Some(Move::normal(Square::new(2, 4), Square::new(2, 5), false)); // Legal move
-        let killer_move = Move::normal(Square::new(7, 2), Square::new(7, 3), false); // Quiet
-        let history_move = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // Quiet
+        // In starting position after a few moves, set up proper piece types
+        let tt_move = Some(Move::normal_with_piece(
+            Square::new(2, 4),
+            Square::new(2, 5),
+            false,
+            PieceType::Pawn,
+            None,
+        )); // Legal move
+        let killer_move = Move::normal_with_piece(
+            Square::new(7, 2),
+            Square::new(7, 3),
+            false,
+            PieceType::Pawn,
+            None,
+        ); // Quiet
+        let history_move = Move::normal_with_piece(
+            Square::new(6, 2),
+            Square::new(6, 3),
+            false,
+            PieceType::Pawn,
+            None,
+        ); // Quiet
 
         // Set killers
         stack.killers[0] = Some(killer_move);

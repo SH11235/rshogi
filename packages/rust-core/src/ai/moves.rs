@@ -7,12 +7,15 @@ use super::board::{PieceType, Square};
 /// Move representation
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Move {
-    /// Encoded move data:
+    /// Encoded move data (32-bit):
     /// - bits 0-6: destination square (0-80)
     /// - bits 7-13: source square (0-80) or piece type for drops (81-87)
     /// - bit 14: promotion flag
     /// - bit 15: drop flag
-    data: u16,
+    /// - bits 16-19: piece type (0-13)
+    /// - bits 20-23: captured piece type (0-13, 15 for no capture)
+    /// - bits 24-31: reserved for future use
+    data: u32,
 }
 
 impl Move {
@@ -38,14 +41,39 @@ impl Move {
     }
 
     /// Create a normal move (piece moving on board)
+    /// Note: This is a temporary API. Use normal_with_piece for full functionality.
     #[inline]
     pub fn normal(from: Square, to: Square, promote: bool) -> Self {
         debug_assert!(from.0 < 81 && to.0 < 81);
-        let mut data = to.0 as u16;
-        data |= (from.0 as u16) << 7;
+        let mut data = to.0 as u32;
+        data |= (from.0 as u32) << 7;
         if promote {
             data |= 1 << 14;
         }
+        // Piece type will be 0 (unknown) for backward compatibility
+        Move { data }
+    }
+
+    /// Create a normal move with piece type information
+    #[inline]
+    pub fn normal_with_piece(
+        from: Square,
+        to: Square,
+        promote: bool,
+        piece_type: PieceType,
+        captured_type: Option<PieceType>,
+    ) -> Self {
+        debug_assert!(from.0 < 81 && to.0 < 81);
+        let mut data = to.0 as u32;
+        data |= (from.0 as u32) << 7;
+        if promote {
+            data |= 1 << 14;
+        }
+        // Encode piece type (add 1 to distinguish from 0 = unknown)
+        data |= ((piece_type as u32) + 1) << 16;
+        // Encode captured piece type (15 for no capture, add 1 to distinguish from 0)
+        let captured_bits = captured_type.map(|t| (t as u32) + 1).unwrap_or(15);
+        data |= captured_bits << 20;
         Move { data }
     }
 
@@ -55,10 +83,12 @@ impl Move {
         debug_assert!(to.0 < 81);
         debug_assert!(!matches!(piece_type, PieceType::King));
 
-        let mut data = to.0 as u16;
+        let mut data = to.0 as u32;
         // Encode piece type in source field (81-87)
-        data |= (81 + piece_type as u16 - 1) << 7; // -1 to skip King
+        data |= (81 + piece_type as u32 - 1) << 7; // -1 to skip King
         data |= 1 << 15; // Set drop flag
+                         // Also store piece type in the dedicated field (add 1 to distinguish from 0 = unknown)
+        data |= ((piece_type as u32) + 1) << 16;
         Move { data }
     }
 
@@ -113,24 +143,66 @@ impl Move {
         }
     }
 
-    /// Convert to u16 for compact storage
+    /// Convert to u32 for storage
     #[inline]
-    pub fn to_u16(self) -> u16 {
+    pub fn to_u32(self) -> u32 {
         self.data
     }
 
-    /// Create from u16
+    /// Create from u32
+    #[inline]
+    pub fn from_u32(data: u32) -> Self {
+        Move { data }
+    }
+
+    /// Convert to u16 for backward compatibility (loses piece type info)
+    #[inline]
+    pub fn to_u16(self) -> u16 {
+        (self.data & 0xFFFF) as u16
+    }
+
+    /// Create from u16 (for backward compatibility)
     #[inline]
     pub fn from_u16(data: u16) -> Self {
-        Move { data }
+        Move { data: data as u32 }
+    }
+
+    /// Get the piece type being moved
+    #[inline]
+    pub fn piece_type(self) -> Option<PieceType> {
+        if self.is_null() {
+            return None;
+        }
+        if self.is_drop() {
+            return Some(self.drop_piece_type());
+        }
+        let piece_bits = ((self.data >> 16) & 0xF) as u8;
+        if piece_bits == 0 {
+            None // Unknown piece type (backward compatibility)
+        } else {
+            // PieceType enum values: King=0, Rook=1, ..., Pawn=7
+            // We stored piece_type + 1, so subtract 1 to get original value
+            Some(unsafe { std::mem::transmute::<u8, PieceType>(piece_bits - 1) })
+        }
+    }
+
+    /// Get the captured piece type
+    #[inline]
+    pub fn captured_piece_type(self) -> Option<PieceType> {
+        let captured_bits = ((self.data >> 20) & 0xF) as u8;
+        if captured_bits == 15 || captured_bits == 0 {
+            None // No capture (15) or unknown/old format (0)
+        } else {
+            // Values 1-14 represent actual piece types
+            Some(unsafe { std::mem::transmute::<u8, PieceType>(captured_bits - 1) })
+        }
     }
 
     /// Check if move is pseudo-legal capture (requires board state for accuracy)
     #[inline]
     pub fn is_capture_hint(self) -> bool {
-        // This is just a hint - actual capture detection needs board state
-        // Used for move ordering
-        false
+        // Now we can check if there's a captured piece
+        self.captured_piece_type().is_some()
     }
 }
 
@@ -313,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_move_encoding() {
-        // 16ビットエンコーディングの全パターンテスト
+        // 32ビットエンコーディングの全パターンテスト
 
         // 通常の移動（成りなし）
         let m1 = Move::normal(Square::new(0, 0), Square::new(8, 8), false);
@@ -351,8 +423,8 @@ mod tests {
     }
 
     #[test]
-    fn test_move_to_u16_from_u16() {
-        // to_u16() → from_u16() のラウンドトリップテスト
+    fn test_move_to_u32_from_u32() {
+        // to_u32() → from_u32() のラウンドトリップテスト
 
         // 全ての升目の組み合わせをテスト（サンプリング）
         for from_file in 0..9 {
@@ -364,14 +436,14 @@ mod tests {
 
                         // 成りなし
                         let m1 = Move::normal(from, to, false);
-                        let encoded1 = m1.to_u16();
-                        let decoded1 = Move::from_u16(encoded1);
+                        let encoded1 = m1.to_u32();
+                        let decoded1 = Move::from_u32(encoded1);
                         assert_eq!(m1, decoded1);
 
                         // 成りあり
                         let m2 = Move::normal(from, to, true);
-                        let encoded2 = m2.to_u16();
-                        let decoded2 = Move::from_u16(encoded2);
+                        let encoded2 = m2.to_u32();
+                        let decoded2 = Move::from_u32(encoded2);
                         assert_eq!(m2, decoded2);
                     }
                 }
@@ -392,9 +464,11 @@ mod tests {
                 for rank in 0..9 {
                     let to = Square::new(file, rank);
                     let m = Move::drop(*pt, to);
-                    let encoded = m.to_u16();
-                    let decoded = Move::from_u16(encoded);
+                    let encoded = m.to_u32();
+                    let decoded = Move::from_u32(encoded);
                     assert_eq!(m, decoded);
+                    // Drop moves should store piece type
+                    assert_eq!(m.piece_type(), Some(*pt));
                 }
             }
         }
@@ -530,5 +604,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_move_with_piece_type() {
+        // Test normal_with_piece API
+        let from = Square::new(2, 6);
+        let to = Square::new(2, 5);
+
+        // Test without capture
+        let m1 = Move::normal_with_piece(from, to, false, PieceType::Pawn, None);
+        assert_eq!(m1.from(), Some(from));
+        assert_eq!(m1.to(), to);
+        assert!(!m1.is_promote());
+        assert_eq!(m1.piece_type(), Some(PieceType::Pawn));
+        assert_eq!(m1.captured_piece_type(), None);
+        assert!(!m1.is_capture_hint());
+
+        // Test with capture
+        let m2 = Move::normal_with_piece(from, to, true, PieceType::Silver, Some(PieceType::Gold));
+        assert_eq!(m2.from(), Some(from));
+        assert_eq!(m2.to(), to);
+        assert!(m2.is_promote());
+        assert_eq!(m2.piece_type(), Some(PieceType::Silver));
+        assert_eq!(m2.captured_piece_type(), Some(PieceType::Gold));
+        assert!(m2.is_capture_hint());
+
+        // Test encoding/decoding preserves all information
+        let encoded = m2.to_u32();
+        let decoded = Move::from_u32(encoded);
+        assert_eq!(m2, decoded);
+        assert_eq!(decoded.piece_type(), Some(PieceType::Silver));
+        assert_eq!(decoded.captured_piece_type(), Some(PieceType::Gold));
+    }
+
+    #[test]
+    fn test_backward_compatibility() {
+        // Test that old Move::normal creates moves with unknown piece type
+        let m = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
+        assert_eq!(m.piece_type(), None); // Unknown piece type
+        assert_eq!(m.captured_piece_type(), None);
+
+        // Test u16 compatibility (loses piece type info)
+        let m_with_type = Move::normal_with_piece(
+            Square::new(2, 6),
+            Square::new(2, 5),
+            false,
+            PieceType::Pawn,
+            Some(PieceType::Gold),
+        );
+        let u16_encoded = m_with_type.to_u16();
+        let u16_decoded = Move::from_u16(u16_encoded);
+
+        // Basic move info preserved
+        assert_eq!(u16_decoded.from(), Some(Square::new(2, 6)));
+        assert_eq!(u16_decoded.to(), Square::new(2, 5));
+        assert!(!u16_decoded.is_promote());
+
+        // But piece type info is lost
+        assert_eq!(u16_decoded.piece_type(), None);
+        assert_eq!(u16_decoded.captured_piece_type(), None);
     }
 }
