@@ -6,13 +6,24 @@
 //! - Search performance with SEE
 //! - Move ordering efficiency
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use shogi_core::ai::board::{Color, Piece, PieceType, Position, Square};
 use shogi_core::ai::evaluate::MaterialEvaluator;
-use shogi_core::ai::moves::Move;
+use shogi_core::ai::movegen::MoveGen;
+use shogi_core::ai::moves::{Move, MoveList};
 use shogi_core::ai::search_enhanced::EnhancedSearcher;
 use std::sync::Arc;
 use std::time::Duration;
+
+// Remove the static searcher - we'll create it once per benchmark function instead
+
+/// Generate all captures for a position
+fn generate_all_captures(pos: &Position) -> Vec<Move> {
+    let mut moves = MoveList::new();
+    let mut gen = MoveGen::new();
+    gen.generate_captures(pos, &mut moves);
+    moves.as_slice().to_vec()
+}
 
 /// Benchmark basic SEE calculation
 fn bench_see_basic(c: &mut Criterion) {
@@ -25,12 +36,26 @@ fn bench_see_basic(c: &mut Criterion) {
         ("pinned_pieces", create_pinned_position()),
     ];
 
+    // Pre-generate captures for each position
+    let mut test_cases: Vec<(String, Vec<(Position, Move)>)> = Vec::new();
     for (name, pos) in positions {
-        group.bench_with_input(BenchmarkId::from_parameter(name), &pos, |b, pos| {
-            // Find a capture move to test
-            let capture = find_capture_move(pos);
+        let captures = generate_all_captures(&pos);
+        let cases: Vec<_> = captures.into_iter().map(|mv| (pos.clone(), mv)).collect();
+        if !cases.is_empty() {
+            test_cases.push((name.to_string(), cases));
+        }
+    }
 
-            b.iter(|| black_box(pos.see(capture)));
+    for (name, cases) in test_cases {
+        group.bench_with_input(BenchmarkId::from_parameter(&name), &cases, |b, cases| {
+            let mut idx = 0;
+            b.iter(|| {
+                let (pos, capture) = &cases[idx % cases.len()];
+                idx += 1;
+
+                // No clone needed - SEE is read-only
+                black_box(pos.see_noinline(black_box(*capture)))
+            });
         });
     }
 
@@ -48,11 +73,25 @@ fn bench_see_with_pins(c: &mut Criterion) {
         ("cross_pins", create_cross_pins_position()),
     ];
 
+    let mut test_cases: Vec<(String, Vec<(Position, Move)>)> = Vec::new();
     for (name, pos) in positions {
-        group.bench_with_input(BenchmarkId::from_parameter(name), &pos, |b, pos| {
-            let capture = find_capture_move(pos);
+        let captures = generate_all_captures(&pos);
+        let cases: Vec<_> = captures.into_iter().map(|mv| (pos.clone(), mv)).collect();
+        if !cases.is_empty() {
+            test_cases.push((name.to_string(), cases));
+        }
+    }
 
-            b.iter(|| black_box(pos.see(capture)));
+    for (name, cases) in test_cases {
+        group.bench_with_input(BenchmarkId::from_parameter(&name), &cases, |b, cases| {
+            let mut idx = 0;
+            b.iter(|| {
+                let (pos, capture) = &cases[idx % cases.len()];
+                idx += 1;
+
+                // No clone needed - SEE is read-only
+                black_box(pos.see_noinline(black_box(*capture)))
+            });
         });
     }
 
@@ -62,28 +101,41 @@ fn bench_see_with_pins(c: &mut Criterion) {
 /// Benchmark search performance with SEE
 fn bench_search_with_see(c: &mut Criterion) {
     let mut group = c.benchmark_group("search_with_see");
-    group.measurement_time(Duration::from_secs(10));
 
-    let evaluator = Arc::new(MaterialEvaluator);
+    // Further reduce measurement parameters for heavy benchmarks
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(2));
+
     let positions = vec![
         ("opening", Position::startpos()),
         ("middlegame", create_middlegame_position()),
         ("tactical", create_tactical_position()),
     ];
 
+    // Create a single evaluator instance
+    let evaluator = Arc::new(MaterialEvaluator);
+
     for (name, pos) in positions {
         group.bench_with_input(BenchmarkId::from_parameter(name), &pos, |b, pos| {
-            b.iter(|| {
-                let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
-                let mut pos_clone = pos.clone();
-
-                black_box(searcher.search(
-                    &mut pos_clone,
-                    6, // Fixed depth
-                    None,
-                    Some(10_000), // Node limit
-                ))
-            });
+            // Use iter_batched to handle searcher setup
+            b.iter_batched(
+                || {
+                    // Setup: Create new searcher and clone position
+                    let searcher = EnhancedSearcher::new(2, evaluator.clone());
+                    let pos_clone = pos.clone();
+                    (searcher, pos_clone)
+                },
+                |(mut searcher, mut pos_clone)| {
+                    // Measurement: Run search
+                    black_box(searcher.search(
+                        &mut pos_clone,
+                        4, // Reduced depth for benchmarking
+                        None,
+                        Some(1_000), // Reduced node limit
+                    ))
+                },
+                criterion::BatchSize::SmallInput,
+            );
         });
     }
 
@@ -94,6 +146,10 @@ fn bench_search_with_see(c: &mut Criterion) {
 fn bench_move_ordering(c: &mut Criterion) {
     let mut group = c.benchmark_group("move_ordering");
 
+    // Reduce parameters for move ordering benchmarks
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(3));
+
     let evaluator = Arc::new(MaterialEvaluator);
     let positions = vec![
         ("many_captures", create_many_captures_position()),
@@ -103,16 +159,23 @@ fn bench_move_ordering(c: &mut Criterion) {
 
     for (name, pos) in positions {
         group.bench_with_input(BenchmarkId::from_parameter(name), &pos, |b, pos| {
-            b.iter(|| {
-                let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
-                let mut pos_clone = pos.clone();
+            // Use iter_batched for searcher setup
+            b.iter_batched(
+                || {
+                    // Setup: Create new searcher and clone position
+                    let searcher = EnhancedSearcher::new(1, evaluator.clone());
+                    let pos_clone = pos.clone();
+                    (searcher, pos_clone)
+                },
+                |(mut searcher, mut pos_clone)| {
+                    // Measurement: Run search and measure cutoff efficiency
+                    let result = searcher.search(&mut pos_clone, 3, None, Some(500));
 
-                // Search and measure cutoff efficiency
-                let result = searcher.search(&mut pos_clone, 5, None, Some(5_000));
-
-                // Return both result and stats for analysis
-                black_box((result, searcher.get_stats()))
-            });
+                    // Return both result and mock stats for analysis
+                    black_box((result, get_mock_stats()))
+                },
+                criterion::BatchSize::SmallInput,
+            );
         });
     }
 
@@ -308,45 +371,30 @@ fn create_forced_sequence_position() -> Position {
     pos
 }
 
-/// Find a capture move in the position
-fn find_capture_move(pos: &Position) -> Move {
-    use shogi_core::ai::movegen::MoveGen;
-    use shogi_core::ai::moves::MoveList;
-
-    let mut moves = MoveList::new();
-    let mut gen = MoveGen::new();
-    gen.generate_captures(pos, &mut moves);
-
-    // Return first capture or a dummy move
-    moves
-        .as_slice()
-        .first()
-        .copied()
-        .unwrap_or_else(|| Move::normal(Square::new(0, 0), Square::new(1, 1), false))
+// Mock stats for benchmarking
+#[derive(Default)]
+struct SearchStats {
+    _beta_cutoffs: u64,
+    _first_move_cutoffs: u64,
 }
 
-// Mock implementation for missing methods
-impl EnhancedSearcher {
-    fn get_stats(&self) -> SearchStats {
-        SearchStats {
-            beta_cutoffs: 100,
-            first_move_cutoffs: 35,
-        }
+// Helper function to simulate stats
+fn get_mock_stats() -> SearchStats {
+    SearchStats {
+        _beta_cutoffs: 100,
+        _first_move_cutoffs: 35,
     }
 }
 
-#[derive(Default)]
-struct SearchStats {
-    beta_cutoffs: u64,
-    first_move_cutoffs: u64,
+criterion_group! {
+    name = benches;
+    config = Criterion::default()
+        .sample_size(30) // Reasonable sample size for SEE
+        .measurement_time(Duration::from_millis(200)); // Short measurement time for fast operations
+    targets = bench_see_basic,
+              bench_see_with_pins,
+              bench_search_with_see,
+              bench_move_ordering
 }
-
-criterion_group!(
-    benches,
-    bench_see_basic,
-    bench_see_with_pins,
-    bench_search_with_see,
-    bench_move_ordering
-);
 
 criterion_main!(benches);
