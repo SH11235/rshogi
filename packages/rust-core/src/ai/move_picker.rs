@@ -662,15 +662,9 @@ impl Position {
         // Black pawn attacks upward (toward rank 0), white pawn attacks downward (toward rank 8)
         let expected_king_sq = if self.side_to_move == Color::Black {
             // Black pawn at rank N attacks rank N-1
-            if pawn_sq.rank() == 0 {
-                return false; // Safety check for release builds
-            }
             Square::new(pawn_sq.file(), pawn_sq.rank() - 1)
         } else {
             // White pawn at rank N attacks rank N+1
-            if pawn_sq.rank() == 8 {
-                return false; // Safety check for release builds
-            }
             Square::new(pawn_sq.file(), pawn_sq.rank() + 1)
         };
 
@@ -774,17 +768,49 @@ impl Position {
                 return false;
             }
 
-            // Check pawn drop restrictions
-            if piece_type == PieceType::Pawn {
-                // Check nifu (double pawn)
-                if self.has_pawn_in_file(mv.to().file()) {
-                    return false;
-                }
+            // Check piece-specific drop restrictions
+            match piece_type {
+                PieceType::Pawn => {
+                    let to_rank = mv.to().rank();
 
-                // Check uchifuzume (checkmate by pawn drop)
-                if self.is_checkmate_by_pawn_drop(mv) {
-                    return false;
+                    // Check rank restrictions - pawn cannot be dropped on the last rank
+                    if (self.side_to_move == Color::Black && to_rank == 0)
+                        || (self.side_to_move == Color::White && to_rank == 8)
+                    {
+                        return false;
+                    }
+
+                    // Check nifu (double pawn)
+                    if self.has_pawn_in_file(mv.to().file()) {
+                        return false;
+                    }
+
+                    // Check uchifuzume (checkmate by pawn drop)
+                    if self.is_checkmate_by_pawn_drop(mv) {
+                        return false;
+                    }
                 }
+                PieceType::Lance => {
+                    let to_rank = mv.to().rank();
+
+                    // Check rank restrictions - lance cannot be dropped on the last rank
+                    if (self.side_to_move == Color::Black && to_rank == 0)
+                        || (self.side_to_move == Color::White && to_rank == 8)
+                    {
+                        return false;
+                    }
+                }
+                PieceType::Knight => {
+                    let to_rank = mv.to().rank();
+
+                    // Check rank restrictions - knight cannot be dropped on the last two ranks
+                    if (self.side_to_move == Color::Black && to_rank <= 1)
+                        || (self.side_to_move == Color::White && to_rank >= 7)
+                    {
+                        return false;
+                    }
+                }
+                _ => {} // Other pieces have no special drop restrictions
             }
         } else {
             // Normal move
@@ -975,7 +1001,6 @@ mod tests {
                 promoted: false,
             },
         );
-        pos.board.piece_bb[Color::Black as usize][PieceType::Pawn as usize].set(sq);
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
@@ -1007,7 +1032,6 @@ mod tests {
                 promoted: false,
             },
         );
-        pos.board.piece_bb[Color::White as usize][PieceType::King as usize].set(white_king_sq);
 
         // Place black gold at 6a (file 3, rank 0) to prevent king escape
         let gold_sq = Square::new(3, 0);
@@ -1019,7 +1043,6 @@ mod tests {
                 promoted: false,
             },
         );
-        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq);
 
         // Place black gold at 4a (file 5, rank 0) to prevent king escape
         let gold_sq2 = Square::new(5, 0);
@@ -1031,7 +1054,6 @@ mod tests {
                 promoted: false,
             },
         );
-        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq2);
 
         // Also place a gold at 6b to protect the gold at 6a
         let gold_sq3 = Square::new(3, 1);
@@ -1043,7 +1065,6 @@ mod tests {
                 promoted: false,
             },
         );
-        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq3);
 
         // Place another gold at 4b to protect the gold at 4a
         let gold_sq4 = Square::new(5, 1);
@@ -1055,7 +1076,6 @@ mod tests {
                 promoted: false,
             },
         );
-        pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].set(gold_sq4);
 
         // Place black lance at 5c (file 4, rank 2) to support pawn
         let lance_sq = Square::new(4, 2);
@@ -1067,7 +1087,6 @@ mod tests {
                 promoted: false,
             },
         );
-        pos.board.piece_bb[Color::Black as usize][PieceType::Lance as usize].set(lance_sq);
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
