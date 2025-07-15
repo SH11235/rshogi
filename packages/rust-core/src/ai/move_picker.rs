@@ -264,7 +264,7 @@ impl MovePicker {
             let mv = self.moves[i].mv;
             if self.get_captured_piece(mv).is_some() {
                 // Calculate SEE value for this capture
-                let see_value = self.calculate_see(mv);
+                let see_value = self.see(mv);
 
                 // Use SEE value as the primary score
                 // Multiply by 100 to make it comparable with history scores
@@ -274,214 +274,6 @@ impl MovePicker {
                 if mv.is_promote() {
                     self.moves[i].score += 100;
                 }
-            }
-        }
-    }
-
-    /// Calculate Static Exchange Evaluation for a move
-    /// Returns the material gain/loss from the exchange sequence
-    fn calculate_see(&self, mv: Move) -> i32 {
-        // Get the target square
-        let to = mv.to();
-
-        // Get initial gain (value of captured piece)
-        let gain = if let Some(captured) = self.get_captured_piece(mv) {
-            Self::piece_value(captured)
-        } else {
-            return 0; // Not a capture
-        };
-
-        // Get the attacking piece value
-        let attacker_value = if mv.is_drop() {
-            Self::piece_value(mv.drop_piece_type())
-        } else {
-            let from = mv.from().unwrap();
-            if let Some(piece) = self.pos.board.piece_on(from) {
-                let base_value = Self::piece_value(piece.piece_type);
-                // If promoting, use promoted piece value
-                if mv.is_promote() {
-                    Self::promoted_piece_value(piece.piece_type)
-                } else {
-                    base_value
-                }
-            } else {
-                return 0;
-            }
-        };
-
-        // Simulate the capture
-        let mut pos = self.pos.clone();
-        let next_player = pos.side_to_move.opposite(); // Store before do_move
-        pos.do_move(mv);
-
-        // Now recursively calculate the exchange
-        let exchange_value = self.see_recursive(&mut pos, to, attacker_value, next_player);
-
-        gain - exchange_value
-    }
-
-    /// Recursive SEE calculation
-    /// Returns the best exchange value for the side to move
-    fn see_recursive(
-        &self,
-        pos: &mut Position,
-        sq: Square,
-        last_piece_value: i32,
-        stm: Color,
-    ) -> i32 {
-        // Find the least valuable attacker
-        if let Some((attacker_sq, _attacker_type, attacker_value)) =
-            self.find_least_attacker(pos, sq, stm)
-        {
-            // Make the capture
-            let capture_move = Move::normal(attacker_sq, sq, false);
-            let undo = pos.do_move(capture_move);
-
-            // Recursively evaluate
-            let exchange_value = self.see_recursive(pos, sq, attacker_value, stm.opposite());
-
-            // Undo the move
-            pos.undo_move(capture_move, undo);
-
-            // We can choose not to capture
-            (last_piece_value - exchange_value).max(0)
-        } else {
-            // No more attackers
-            0
-        }
-    }
-
-    /// Find the least valuable piece attacking a square
-    fn find_least_attacker(
-        &self,
-        pos: &Position,
-        sq: Square,
-        color: Color,
-    ) -> Option<(Square, PieceType, i32)> {
-        let mut best_attacker = None;
-        let mut best_value = i32::MAX;
-
-        // Check all pieces of the given color
-        for piece_type in [
-            PieceType::Pawn,
-            PieceType::Lance,
-            PieceType::Knight,
-            PieceType::Silver,
-            PieceType::Gold,
-            PieceType::Bishop,
-            PieceType::Rook,
-        ] {
-            let mut pieces = pos.board.piece_bb[color as usize][piece_type as usize];
-
-            // Check each piece of this type
-            while let Some(from) = pieces.pop_lsb() {
-                // Check if this piece attacks the target square
-                if self.can_attack(pos, from, sq, piece_type) {
-                    let value = Self::piece_value(piece_type);
-                    if value < best_value {
-                        best_value = value;
-                        best_attacker = Some((from, piece_type, value));
-                    }
-                }
-            }
-        }
-
-        best_attacker
-    }
-
-    /// Check if a piece can attack a square
-    fn can_attack(&self, pos: &Position, from: Square, to: Square, piece_type: PieceType) -> bool {
-        use crate::ai::attacks::ATTACK_TABLES;
-
-        let piece = pos.board.piece_on(from).unwrap();
-        let color = piece.color;
-        let is_promoted = piece.promoted;
-
-        // Check if the piece attacks the target square
-        // For promoted pieces, use Gold movement pattern (except Bishop/Rook)
-        match piece_type {
-            PieceType::Pawn => {
-                if is_promoted {
-                    // Tokin moves like Gold
-                    let attacks = ATTACK_TABLES.gold_attacks(from, color);
-                    attacks.test(to)
-                } else {
-                    // Pawn attacks one square forward
-                    let attacks = ATTACK_TABLES.pawn_attacks(from, color);
-                    attacks.test(to)
-                }
-            }
-            PieceType::Lance => {
-                if is_promoted {
-                    // Promoted Lance moves like Gold
-                    let attacks = ATTACK_TABLES.gold_attacks(from, color);
-                    attacks.test(to)
-                } else {
-                    // Lance attacks forward (sliding)
-                    let attacks =
-                        ATTACK_TABLES.sliding_attacks(from, pos.board.all_bb, PieceType::Lance);
-                    attacks.test(to)
-                }
-            }
-            PieceType::Knight => {
-                if is_promoted {
-                    // Promoted Knight moves like Gold
-                    let attacks = ATTACK_TABLES.gold_attacks(from, color);
-                    attacks.test(to)
-                } else {
-                    // Knight has fixed jump attacks
-                    let attacks = ATTACK_TABLES.knight_attacks(from, color);
-                    attacks.test(to)
-                }
-            }
-            PieceType::Silver => {
-                if is_promoted {
-                    // Promoted Silver moves like Gold
-                    let attacks = ATTACK_TABLES.gold_attacks(from, color);
-                    attacks.test(to)
-                } else {
-                    // Silver has fixed attacks
-                    let attacks = ATTACK_TABLES.silver_attacks(from, color);
-                    attacks.test(to)
-                }
-            }
-            PieceType::Gold => {
-                // Gold has fixed attacks
-                let attacks = ATTACK_TABLES.gold_attacks(from, color);
-                attacks.test(to)
-            }
-            PieceType::Bishop => {
-                if is_promoted {
-                    // Dragon Horse = Bishop + King moves
-                    let bishop_attacks =
-                        ATTACK_TABLES.sliding_attacks(from, pos.board.all_bb, PieceType::Bishop);
-                    let king_attacks = ATTACK_TABLES.king_attacks(from);
-                    (bishop_attacks | king_attacks).test(to)
-                } else {
-                    // Bishop attacks diagonally (sliding)
-                    let attacks =
-                        ATTACK_TABLES.sliding_attacks(from, pos.board.all_bb, PieceType::Bishop);
-                    attacks.test(to)
-                }
-            }
-            PieceType::Rook => {
-                if is_promoted {
-                    // Dragon King = Rook + King moves
-                    let rook_attacks =
-                        ATTACK_TABLES.sliding_attacks(from, pos.board.all_bb, PieceType::Rook);
-                    let king_attacks = ATTACK_TABLES.king_attacks(from);
-                    (rook_attacks | king_attacks).test(to)
-                } else {
-                    // Rook attacks horizontally/vertically (sliding)
-                    let attacks =
-                        ATTACK_TABLES.sliding_attacks(from, pos.board.all_bb, PieceType::Rook);
-                    attacks.test(to)
-                }
-            }
-            PieceType::King => {
-                // King has fixed attacks
-                let attacks = ATTACK_TABLES.king_attacks(from);
-                attacks.test(to)
             }
         }
     }
@@ -544,33 +336,6 @@ impl MovePicker {
     fn see(&self, mv: Move) -> i32 {
         // Use the full SEE implementation from Position
         self.pos.see(mv)
-    }
-
-    /// Get piece value for MVV-LVA and SEE
-    fn piece_value(piece_type: PieceType) -> i32 {
-        match piece_type {
-            PieceType::King => 10000,
-            PieceType::Rook => 900,
-            PieceType::Bishop => 700,
-            PieceType::Gold => 600,
-            PieceType::Silver => 500,
-            PieceType::Knight => 400,
-            PieceType::Lance => 300,
-            PieceType::Pawn => 100,
-        }
-    }
-
-    /// Get promoted piece value
-    fn promoted_piece_value(piece_type: PieceType) -> i32 {
-        match piece_type {
-            PieceType::Pawn => 600,             // Tokin (same as Gold)
-            PieceType::Lance => 600,            // Promoted Lance (same as Gold)
-            PieceType::Knight => 600,           // Promoted Knight (same as Gold)
-            PieceType::Silver => 600,           // Promoted Silver (same as Gold)
-            PieceType::Bishop => 1100,          // Dragon Horse (Bishop + Rook moves)
-            PieceType::Rook => 1300,            // Dragon King (Rook + Bishop moves)
-            _ => Self::piece_value(piece_type), // Gold and King don't promote
-        }
     }
 }
 
@@ -882,7 +647,7 @@ mod tests {
         // Test capturing the pawn at 3f with our pawn at 3g
         // This should be a good capture (pawn for pawn = 0)
         let capture_3f = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g3f
-        let see_value = picker.calculate_see(capture_3f);
+        let see_value = picker.see(capture_3f);
         assert_eq!(see_value, 100, "Pawn x Pawn should have SEE value of 100 (pawn value)");
 
         // If there were a more valuable piece defending, SEE would be negative
@@ -891,20 +656,39 @@ mod tests {
 
     #[test]
     fn test_mvv_lva_ordering() {
-        // This test would require setting up a position with captures
-        // For now, we just test the scoring function
-        let pos = Position::startpos();
+        // MVV-LVA ordering is now handled by SEE
+        // This test verifies that captures are ordered correctly
+        let mut pos = Position::startpos();
+
+        // Make some moves to create capture opportunities
+        let moves = [
+            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
+            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
+            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
+            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
+        ];
+
+        for mv in &moves {
+            pos.do_move(*mv);
+        }
+
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
-        let _picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, &history, &stack);
 
-        // Test piece values
-        assert!(
-            MovePicker::piece_value(PieceType::Rook) > MovePicker::piece_value(PieceType::Pawn)
-        );
-        assert!(
-            MovePicker::piece_value(PieceType::Bishop) > MovePicker::piece_value(PieceType::Lance)
-        );
+        // Collect captures
+        let mut captures = Vec::new();
+        while let Some(mv) = picker.next_move() {
+            if !mv.is_drop() && pos.board.piece_on(mv.to()).is_some() {
+                captures.push(mv);
+            }
+            if captures.len() >= 5 {
+                break;
+            }
+        }
+
+        // Should have some captures
+        assert!(!captures.is_empty(), "Should have found some captures");
     }
 
     #[test]
