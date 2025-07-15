@@ -1008,7 +1008,7 @@ mod tests {
                 unsafe {
                     transform_features_avx2(&us, &them, &mut output_avx2, size);
                 }
-                assert_eq!(output_scalar, output_avx2, "AVX2 mismatch at size {}", size);
+                assert_eq!(output_scalar, output_avx2, "AVX2 mismatch at size {size}");
             }
 
             // SSE4.1 version if available
@@ -1016,21 +1016,23 @@ mod tests {
                 unsafe {
                     transform_features_sse41(&us, &them, &mut output_sse41, size);
                 }
-                assert_eq!(output_scalar, output_sse41, "SSE4.1 mismatch at size {}", size);
+                assert_eq!(output_scalar, output_sse41, "SSE4.1 mismatch at size {size}");
             }
         }
     }
 
     #[test]
-    fn test_boundary_conditions() {
-        // Test extreme values and edge cases
+    fn boundary_conditions_avx2() {
+        // ── 1. AVX2 が無い環境ではスキップ ──────────────────────────────
         if !is_x86_feature_detected!("avx2") {
             eprintln!("AVX2 not available, skipping test");
             return;
         }
 
-        // Test with i16 boundary values
-        let test_values = vec![
+        // ── 2. 定数と固定長配列を使ってヒープ確保をゼロに ───────────────
+        const WORDS: usize = 32;
+        const OUTPUT_LEN: usize = 64;
+        const TEST_VALUES: &[i16] = &[
             i16::MIN,
             i16::MIN / 2,
             -1000,
@@ -1042,19 +1044,22 @@ mod tests {
             i16::MAX,
         ];
 
-        for &val in &test_values {
-            let us = vec![val; 32];
-            // Use saturating_neg to avoid overflow when val == i16::MIN
-            let them = vec![val.saturating_neg(); 32];
-            let mut output = vec![0i8; 64];
+        // 出力バッファは再利用
+        let mut output = [0i8; OUTPUT_LEN];
 
+        for &val in TEST_VALUES {
+            // 入力は固定長配列。長さも `WORDS` 定数で一元管理
+            let us = [val; WORDS];
+            let them = [val.saturating_neg(); WORDS];
+
+            // 3. 安全性を `unsafe` ブロックの最小化に留める
             unsafe {
-                transform_features_avx2(&us, &them, &mut output, 32);
+                transform_features_avx2(&us, &them, &mut output, WORDS);
             }
 
-            // Verify no crashes and values are within bounds
-            for i in 0..64 {
-                assert!(output[i] >= -127, "Output out of bounds: {} at index {}", output[i], i);
+            // 4. Iterator + enumerate で警告回避 & 可読性向上
+            for (i, &v) in output.iter().enumerate() {
+                assert!(v >= -127, "Output out of bounds: {v} at index {i} (input = {val})");
             }
         }
     }
