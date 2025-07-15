@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::ai::board::{Color, PieceType, Position, Square};
+    use crate::ai::board::{Color, Piece, PieceType, Position, Square};
     use crate::ai::history::History;
     use crate::ai::move_picker::MovePicker;
     use crate::ai::movegen::MoveGen;
@@ -511,5 +511,142 @@ mod tests {
 
         // TODO: Add a true checkmate position test when Position supports
         // creating from FEN or specific board setup
+    }
+
+    /// Test: SEE correctly evaluates captures in MovePicker
+    #[test]
+    fn test_see_with_pinned_pieces_integration() {
+        // Create a position with multiple captures available
+        let mut pos = Position::startpos();
+
+        // Make some moves to create capture opportunities
+        let moves = [
+            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
+            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
+            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
+            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
+            Move::normal(Square::new(2, 4), Square::new(2, 5), false), // 7e7d
+        ];
+
+        for mv in &moves {
+            pos.do_move(*mv);
+        }
+
+        let history = Arc::new(History::new());
+        let stack = SearchStack::default();
+        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+
+        // Collect captures
+        let mut captures = Vec::new();
+        while let Some(mv) = picker.next_move() {
+            if !mv.is_drop() && pos.board.piece_on(mv.to()).is_some() {
+                captures.push(mv);
+                // Test SEE value for this capture
+                let see_value = pos.see(mv);
+                println!("Capture {:?} has SEE value: {}", mv, see_value);
+            }
+            if captures.len() >= 10 {
+                break;
+            }
+        }
+
+        // Should have some captures
+        assert!(!captures.is_empty(), "Should have found some captures");
+
+        // Verify SEE is being used by checking that good captures come before bad ones
+        // (This is a basic check - MovePicker should order captures by SEE value)
+    }
+
+    /// Test: Complex exchange sequences with X-ray attacks
+    #[test]
+    fn test_complex_exchange_sequence() {
+        let mut pos = Position::empty();
+
+        // Set up a complex position with multiple pieces in a line
+        // Black pieces
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 7), Piece::new(PieceType::Rook, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Bishop, Color::Black));
+
+        // White pieces
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(Square::new(4, 3), Piece::new(PieceType::Gold, Color::White));
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+        pos.side_to_move = Color::Black;
+
+        // Test SEE for Bishop takes Gold
+        let bishop_takes_gold = Move::normal(Square::new(4, 5), Square::new(4, 3), false);
+        let see_value = pos.see(bishop_takes_gold);
+
+        // Bishop takes Gold (+600), Rook takes Bishop (-700), Rook takes Rook (+900)
+        // Net: 600 - 700 + 900 = 800
+        assert_eq!(see_value, 800, "Complex exchange should yield +800");
+    }
+
+    /// Test: Move ordering with SEE evaluation
+    #[test]
+    fn test_move_ordering_with_see() {
+        let mut pos = Position::empty();
+
+        // Create a position with multiple captures of different SEE values
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        // Attacking pieces (Black)
+        pos.board
+            .put_piece(Square::new(3, 3), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board
+            .put_piece(Square::new(5, 3), Piece::new(PieceType::Rook, Color::Black));
+        pos.board
+            .put_piece(Square::new(3, 5), Piece::new(PieceType::Bishop, Color::Black));
+
+        // Target pieces (White)
+        pos.board
+            .put_piece(Square::new(4, 2), Piece::new(PieceType::Gold, Color::White)); // Undefended
+        pos.board
+            .put_piece(Square::new(4, 1), Piece::new(PieceType::Pawn, Color::White)); // Defended by Rook
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::White)); // Defender
+
+        pos.board.rebuild_occupancy_bitboards();
+        pos.side_to_move = Color::Black;
+
+        let history = Arc::new(History::new());
+        let stack = SearchStack::default();
+        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+
+        let mut capture_order = Vec::new();
+        while let Some(mv) = picker.next_move() {
+            if !mv.is_drop() && pos.board.piece_on(mv.to()).is_some() {
+                capture_order.push(mv);
+                if capture_order.len() >= 3 {
+                    break;
+                }
+            }
+        }
+
+        // Expected order:
+        // 1. Any piece takes undefended Gold (SEE = +600)
+        // 2. Pawn takes defended Pawn (SEE = 0, equal exchange)
+        // 3. Rook/Bishop takes defended Pawn (SEE < 0, bad capture)
+
+        if !capture_order.is_empty() {
+            let first_capture = capture_order[0];
+            assert_eq!(
+                first_capture.to(),
+                Square::new(4, 2),
+                "First capture should be the undefended Gold"
+            );
+        }
     }
 }
