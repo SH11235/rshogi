@@ -2,6 +2,7 @@
 //!
 //! Represents 81-square shogi board using 128-bit integers for fast operations
 
+use super::moves::Move;
 use super::piece_constants::piece_type_to_hand_index;
 use std::fmt;
 
@@ -1222,6 +1223,22 @@ impl Position {
                 self.hands[self.side_to_move as usize][hand_idx] -= 1;
             }
         }
+    }
+
+    /// Static Exchange Evaluation (SEE)
+    /// Evaluates the material gain/loss from a capture sequence
+    /// Returns the expected material gain from the move (positive = good, negative = bad)
+    pub fn see(&self, mv: Move) -> i32 {
+        // TODO: Implement efficient SEE using bitboards
+        // This will replace the existing implementations in move_picker.rs
+        0
+    }
+
+    /// Static Exchange Evaluation with threshold
+    /// Returns true if the SEE value is greater than or equal to the threshold
+    /// Commonly used with threshold=0 to check if a capture is winning
+    pub fn see_ge(&self, mv: Move, threshold: i32) -> bool {
+        self.see(mv) >= threshold
     }
 }
 
