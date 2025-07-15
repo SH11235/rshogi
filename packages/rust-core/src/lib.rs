@@ -4,10 +4,6 @@ use wasm_bindgen::prelude::*;
 mod simple_webrtc;
 pub use simple_webrtc::*;
 
-// Add mate search module
-mod mate_search;
-pub use mate_search::*;
-
 // Add opening book module
 pub mod opening_book;
 pub use opening_book::*;
