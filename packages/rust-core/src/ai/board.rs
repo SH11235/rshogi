@@ -1059,17 +1059,10 @@ impl Position {
             Some(sq) => sq,
             None => {
                 // This should never happen in a valid position
-                #[cfg(debug_assertions)]
-                panic!("King not found for color {king_color:?}");
-
-                #[cfg(not(debug_assertions))]
-                {
-                    log::warn!(
-                        "King not found for color {:?} in get_blockers_for_king",
-                        king_color
-                    );
-                    return Bitboard::EMPTY;
-                }
+                log::error!(
+                    "King not found for color {king_color:?} in get_blockers_for_king - data inconsistency"
+                );
+                return Bitboard::EMPTY;
             }
         };
 
