@@ -5,7 +5,7 @@
 use super::board::Position;
 use super::evaluate::Evaluator;
 use super::movegen::MoveGen;
-use super::moves::Move;
+use super::moves::{Move, MoveList};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -91,8 +91,9 @@ impl<E: Evaluator> Searcher<E> {
 
         // If no move is found during iterative deepening, we need a fallback
         // Generate all legal moves first as a fallback
-        let mut gen = MoveGen::new(pos);
-        let legal_moves = gen.generate_all();
+        let mut gen = MoveGen::new();
+        let mut legal_moves = MoveList::new();
+        gen.generate_all(pos, &mut legal_moves);
 
         // If there are legal moves, use the first one as a fallback
         if !legal_moves.is_empty() {
@@ -144,12 +145,13 @@ impl<E: Evaluator> Searcher<E> {
         self.pv[ply as usize].clear();
 
         // Generate moves
-        let mut gen = MoveGen::new(pos);
-        let moves = gen.generate_all();
+        let mut gen = MoveGen::new();
+        let mut moves = MoveList::new();
+        gen.generate_all(pos, &mut moves);
 
         // No legal moves - checkmate or stalemate
         if moves.is_empty() {
-            if gen.checkers.count_ones() > 0 {
+            if pos.in_check() {
                 // Checkmate - return negative score
                 return -INFINITY_SCORE + ply as i32;
             } else {

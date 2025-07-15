@@ -555,6 +555,8 @@ pub struct Position {
 
     /// Zobrist hash (full 64 bits)
     pub hash: u64,
+    /// Alias for hash (for compatibility)
+    pub zobrist_hash: u64,
 
     /// History for repetition detection
     pub history: Vec<u64>,
@@ -569,6 +571,7 @@ impl Position {
             side_to_move: Color::Black,
             ply: 0,
             hash: 0,
+            zobrist_hash: 0,
             history: Vec::new(),
         }
     }
@@ -645,6 +648,7 @@ impl Position {
 
         // Calculate hash
         pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
 
         pos
     }
@@ -652,7 +656,12 @@ impl Position {
     /// Compute Zobrist hash
     fn compute_hash(&self) -> u64 {
         use crate::ai::zobrist::ZobristHashing;
-        self.zobrist_hash()
+        ZobristHashing::zobrist_hash(self)
+    }
+
+    /// Get zobrist hash (method for compatibility)
+    pub fn zobrist_hash(&self) -> u64 {
+        self.zobrist_hash
     }
 
     /// Check for repetition
@@ -789,11 +798,101 @@ impl Position {
         // Always XOR with the White side hash to toggle between Black/White
         use crate::ai::zobrist::ZOBRIST;
         self.hash ^= ZOBRIST.side_to_move;
+        self.zobrist_hash = self.hash;
 
         // Increment ply
         self.ply += 1;
 
         undo_info
+    }
+
+    /// Check if position is draw (simplified check)
+    pub fn is_draw(&self) -> bool {
+        // Simple repetition detection would go here
+        // For now, return false
+        false
+    }
+
+    /// Check if side is in check
+    pub fn in_check(&self) -> bool {
+        // For now, simply check if king is attacked
+        let king_bb = self.board.piece_bb[self.side_to_move as usize][PieceType::King as usize];
+        if let Some(king_sq) = king_bb.lsb() {
+            self.is_attacked(king_sq, self.side_to_move.opposite())
+        } else {
+            false
+        }
+    }
+
+    /// Check if specific color is in check
+    pub fn is_check(&self, color: Color) -> bool {
+        let king_bb = self.board.piece_bb[color as usize][PieceType::King as usize];
+        if let Some(king_sq) = king_bb.lsb() {
+            self.is_attacked(king_sq, color.opposite())
+        } else {
+            false
+        }
+    }
+
+    /// Check if a square is attacked by a given color
+    pub fn is_attacked(&self, sq: Square, by_color: Color) -> bool {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        // Check pawn attacks
+        let pawn_bb = self.board.piece_bb[by_color as usize][PieceType::Pawn as usize];
+        let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
+        if !(pawn_bb & pawn_attacks).is_empty() {
+            return true;
+        }
+
+        // Check knight attacks
+        let knight_bb = self.board.piece_bb[by_color as usize][PieceType::Knight as usize];
+        let knight_attacks = ATTACK_TABLES.knight_attacks(sq, by_color.opposite());
+        if !(knight_bb & knight_attacks).is_empty() {
+            return true;
+        }
+
+        // Check king attacks
+        let king_bb = self.board.piece_bb[by_color as usize][PieceType::King as usize];
+        let king_attacks = ATTACK_TABLES.king_attacks(sq);
+        if !(king_bb & king_attacks).is_empty() {
+            return true;
+        }
+
+        // Check gold attacks
+        let gold_bb = self.board.piece_bb[by_color as usize][PieceType::Gold as usize];
+        let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
+        if !(gold_bb & gold_attacks).is_empty() {
+            return true;
+        }
+
+        // Check silver attacks
+        let silver_bb = self.board.piece_bb[by_color as usize][PieceType::Silver as usize];
+        let silver_attacks = ATTACK_TABLES.silver_attacks(sq, by_color.opposite());
+        if !(silver_bb & silver_attacks).is_empty() {
+            return true;
+        }
+
+        // Check sliding pieces (rook, bishop, lance)
+        let occupied = self.board.all_bb;
+
+        // Rook attacks
+        let rook_bb = self.board.piece_bb[by_color as usize][PieceType::Rook as usize];
+        let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        if !(rook_bb & rook_attacks).is_empty() {
+            return true;
+        }
+
+        // Bishop attacks
+        let bishop_bb = self.board.piece_bb[by_color as usize][PieceType::Bishop as usize];
+        let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+        if !(bishop_bb & bishop_attacks).is_empty() {
+            return true;
+        }
+
+        // TODO: Lance attacks need special handling
+
+        false
     }
 
     /// Undo a move on the position
@@ -803,6 +902,7 @@ impl Position {
 
         // Restore hash value
         self.hash = undo_info.previous_hash;
+        self.zobrist_hash = self.hash;
 
         // Restore side to move and ply
         self.side_to_move = self.side_to_move.opposite();

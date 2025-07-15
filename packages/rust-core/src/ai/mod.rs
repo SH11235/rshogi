@@ -7,15 +7,21 @@ pub mod benchmark;
 pub mod board;
 pub mod engine;
 pub mod evaluate;
+pub mod history;
+pub mod move_picker;
 pub mod movegen;
 pub mod moves;
 pub mod nnue;
 pub mod piece_constants;
 pub mod search;
+pub mod search_enhanced;
+pub mod tt;
 pub mod zobrist;
 
-// Modules to be added later:
-// pub mod tt;         // Transposition table
+#[cfg(test)]
+mod test_move_picker_comprehensive;
+#[cfg(test)]
+mod test_move_picker_integration;
 
 // Re-export basic types
 pub use attacks::{AttackTables, Direction, ATTACK_TABLES};
