@@ -62,6 +62,12 @@ pub struct SearchParams {
     pub futility_margin: fn(i32) -> i32,
     /// Late move count margin
     pub late_move_count: fn(i32) -> i32,
+    /// Initial aspiration window function
+    pub initial_window: fn(i32) -> i32, // depth -> window_size
+    /// Maximum aspiration window delta
+    pub max_aspiration_delta: i32,
+    /// Time pressure threshold (ratio of remaining time to elapsed time)
+    pub time_pressure_threshold: f64,
 }
 
 impl Default for SearchParams {
@@ -80,8 +86,22 @@ impl Default for SearchParams {
             lmr_reductions,
             futility_margin: |depth| 150 * depth,
             late_move_count: |depth| 3 + depth * depth / 2,
+            initial_window: |depth| (50 + depth * 5).min(i16::MAX as i32), // 初期窓幅: ±50cp + depth*5、オーバーフロー防止
+            max_aspiration_delta: 1000,   // 1000cp以上拡げても実質フル窓
+            time_pressure_threshold: 0.1, // 残り時間が経過時間の10%未満で時間圧迫
         }
     }
+}
+
+/// Search statistics for testing
+#[derive(Default, Clone)]
+pub struct SearchStats {
+    /// Number of aspiration failures per depth
+    pub aspiration_failures: Vec<u32>,
+    /// Number of aspiration windows hit per depth
+    pub aspiration_hits: Vec<u32>,
+    /// Total delta used per depth
+    pub total_delta: Vec<i32>,
 }
 
 /// Enhanced searcher with advanced techniques
@@ -104,6 +124,9 @@ pub struct EnhancedSearcher {
     start_time: Instant,
     /// Evaluator
     evaluator: Arc<dyn Evaluator + Send + Sync>,
+    /// Search statistics (for testing)
+    #[cfg(test)]
+    pub stats: SearchStats,
 }
 
 impl EnhancedSearcher {
@@ -119,6 +142,8 @@ impl EnhancedSearcher {
             node_limit: None,
             start_time: Instant::now(),
             evaluator,
+            #[cfg(test)]
+            stats: SearchStats::default(),
         }
     }
 
@@ -138,6 +163,14 @@ impl EnhancedSearcher {
         self.node_limit = node_limit;
         self.history.clear_all();
 
+        #[cfg(test)]
+        {
+            self.stats = SearchStats::default();
+            self.stats.aspiration_failures.resize(max_depth as usize + 1, 0);
+            self.stats.aspiration_hits.resize(max_depth as usize + 1, 0);
+            self.stats.total_delta.resize(max_depth as usize + 1, 0);
+        }
+
         // New search generation
         Arc::get_mut(&mut self.tt).unwrap().new_search();
 
@@ -145,18 +178,111 @@ impl EnhancedSearcher {
         let mut best_move = None;
         let mut best_score = -INFINITY;
 
+        // Aspiration Windows用の追加変数
+        // 初期評価値：TTにあればその値、なければ静的評価値を使用
+        let mut prev_score = if let Some(tt_entry) = self.tt.probe(pos.hash) {
+            tt_entry.score() as i32
+        } else {
+            self.evaluator.evaluate(pos)
+        };
+
         // Iterative deepening
         for depth in 1..=max_depth {
-            let score = self.alpha_beta(pos, -INFINITY, INFINITY, depth, 0, &mut stack);
+            // Aspiration Windows設定
+            let mut delta = (self.params.initial_window)(depth);
+            let mut alpha = if depth == 1 {
+                -INFINITY
+            } else {
+                (prev_score - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32)
+            };
+            let mut beta = if depth == 1 {
+                INFINITY
+            } else {
+                (prev_score + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32)
+            };
 
-            if self.stop.load(Ordering::Relaxed) {
-                break;
+            let mut score;
+
+            // Aspiration search with retries
+            loop {
+                #[cfg(test)]
+                {
+                    self.stats.total_delta[depth as usize] = delta;
+                }
+
+                score = self.alpha_beta(pos, alpha, beta, depth, 0, &mut stack);
+
+                if self.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Check time and stop conditions
+                if self.should_stop() {
+                    self.stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+
+                // Check aspiration window
+                if score <= alpha {
+                    // Fail-low: 窓を下方向に拡大
+                    #[cfg(test)]
+                    {
+                        self.stats.aspiration_failures[depth as usize] += 1;
+                    }
+
+                    // deltaを先に拡大
+                    delta = (delta * 2).min(self.params.max_aspiration_delta);
+                    let center = prev_score; // 収束済みの中心値を保持
+                    alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
+                    beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
+                } else if score >= beta {
+                    // Fail-high: 窓を上方向に拡大
+                    #[cfg(test)]
+                    {
+                        self.stats.aspiration_failures[depth as usize] += 1;
+                    }
+
+                    // deltaを先に拡大
+                    delta = (delta * 2).min(self.params.max_aspiration_delta);
+                    let center = prev_score; // 収束済みの中心値を保持
+                    alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
+                    beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
+                } else {
+                    // 窓内ヒット: 成功
+                    #[cfg(test)]
+                    {
+                        self.stats.aspiration_hits[depth as usize] += 1;
+                        self.stats.total_delta[depth as usize] = delta; // 成功時のdeltaを記録
+                    }
+                    break;
+                }
+
+                // 安全装置: deltaが最大値を超えたらフルウィンドウ
+                if delta >= self.params.max_aspiration_delta {
+                    alpha = -INFINITY;
+                    beta = INFINITY;
+                }
+
+                // 時間制限が厳しい場合は即座にフルウィンドウへ
+                if let Some(limit) = self.time_limit {
+                    let elapsed = self.start_time.elapsed();
+                    let remaining = limit.saturating_duration_since(Instant::now());
+                    if remaining.as_secs_f64()
+                        < elapsed.as_secs_f64() * self.params.time_pressure_threshold
+                    {
+                        alpha = -INFINITY;
+                        beta = INFINITY;
+                    }
+                }
             }
+
+            // 探索結果の保存
+            prev_score = score;
+            best_score = score;
 
             // Extract best move from TT
             if let Some(tt_entry) = self.tt.probe(pos.hash) {
                 best_move = tt_entry.get_move();
-                best_score = score;
             }
 
             // Check time
@@ -564,5 +690,112 @@ mod tests {
 
         assert!(best_move.is_some());
         assert!(score.abs() < 1000); // Should be relatively balanced
+    }
+
+    #[test]
+    fn test_aspiration_windows() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+
+        // テスト用の探索深さ（CI環境でも安定して動作する深さ）
+        let test_depth = 4;
+        let (best_move, _score) = searcher.search(&mut pos, test_depth, None, None);
+
+        assert!(best_move.is_some());
+
+        // 統計情報を確認
+        let total_depths = searcher.stats.aspiration_hits.len();
+        let mut total_hits = 0;
+        let mut total_failures = 0;
+
+        for depth in 2..=test_depth {
+            let depth_idx = depth as usize;
+            if depth_idx < total_depths {
+                total_hits += searcher.stats.aspiration_hits[depth_idx];
+                total_failures += searcher.stats.aspiration_failures[depth_idx];
+
+                // 深さ2以降では、fail-high/lowが4回以内で収束することを確認
+                // （delta: 初期値 → 2倍 → 4倍 → 8倍 → フルウィンドウ）
+                if depth >= 2 {
+                    assert!(
+                        searcher.stats.aspiration_failures[depth_idx] <= 4,
+                        "Depth {}: Too many aspiration failures ({})",
+                        depth,
+                        searcher.stats.aspiration_failures[depth_idx]
+                    );
+                }
+            }
+        }
+
+        // 全体として、一定の成功率があることを確認
+        // 序盤は評価値変動が大きいため失敗が多くなることがある
+        let hit_rate = if total_hits + total_failures > 0 {
+            (total_hits as f64) / ((total_hits + total_failures) as f64)
+        } else {
+            0.0
+        };
+        assert!(
+            hit_rate >= 0.25, // 25%以上の成功率
+            "Aspiration windows hit rate too low: {:.1}% (hits={}, failures={})",
+            hit_rate * 100.0,
+            total_hits,
+            total_failures
+        );
+
+        println!("Aspiration Window Statistics:");
+        for depth in 1..=test_depth {
+            let depth_idx = depth as usize;
+            if depth_idx < total_depths {
+                let failures = searcher.stats.aspiration_failures[depth_idx];
+                let hits = searcher.stats.aspiration_hits[depth_idx];
+                let total = hits + failures;
+                let hit_rate = if total > 0 {
+                    (hits as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "  Depth {}: hits={}, failures={}, hit_rate={:.1}%, final_delta={}",
+                    depth, hits, failures, hit_rate, searcher.stats.total_delta[depth_idx]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_aspiration_window_params() {
+        let params = SearchParams::default();
+
+        // 窓幅が深さとともに増加することを確認
+        assert_eq!((params.initial_window)(1), 55); // 50 + 1*5
+        assert_eq!((params.initial_window)(6), 80); // 50 + 6*5
+        assert_eq!((params.initial_window)(10), 100); // 50 + 10*5
+    }
+
+    #[test]
+    fn test_aspiration_windows_various_depths() {
+        let evaluator = Arc::new(MaterialEvaluator);
+
+        // 異なる深さでのAspiration Windowsの動作を確認
+        for test_depth in [2, 3, 5] {
+            let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
+            let mut pos = Position::startpos();
+
+            let (best_move, _score) = searcher.search(&mut pos, test_depth, None, None);
+            assert!(best_move.is_some(), "Depth {}: No best move found", test_depth);
+
+            // 深さ2以上では必ずAspiration Windowsが動作することを確認
+            if test_depth >= 2 {
+                let depth_idx = test_depth as usize;
+                let total_attempts = searcher.stats.aspiration_hits[depth_idx]
+                    + searcher.stats.aspiration_failures[depth_idx];
+                assert!(
+                    total_attempts > 0,
+                    "Depth {}: Aspiration windows should be used",
+                    test_depth
+                );
+            }
+        }
     }
 }
