@@ -41,6 +41,12 @@ impl<'a> MoveGenImpl<'a> {
         gen
     }
 
+    /// Helper to get captured piece type at a square
+    #[inline]
+    fn get_captured_type(&self, to: Square) -> Option<PieceType> {
+        self.pos.board.piece_on(to).map(|p| p.piece_type)
+    }
+
     /// Generate all legal moves
     pub fn generate_all(&mut self) -> MoveList {
         self.moves.clear();
@@ -241,7 +247,14 @@ impl<'a> MoveGenImpl<'a> {
         while let Some(to) = moves.pop_lsb() {
             // Check if king would be in check on target square
             if !self.would_be_in_check(from, to) {
-                self.moves.push(Move::normal(from, to, false));
+                let captured_type = self.get_captured_type(to);
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    PieceType::King,
+                    captured_type,
+                ));
             }
         }
     }
@@ -273,13 +286,32 @@ impl<'a> MoveGenImpl<'a> {
 
         let mut moves = valid_targets;
         while let Some(to) = moves.pop_lsb() {
+            let captured_type = self.get_captured_type(to);
             // Check if can promote
             if self.can_promote(from, to, us) {
-                self.moves.push(Move::normal(from, to, true));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    true,
+                    PieceType::Silver,
+                    captured_type,
+                ));
                 // Silver promotion is optional
-                self.moves.push(Move::normal(from, to, false));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    PieceType::Silver,
+                    captured_type,
+                ));
             } else {
-                self.moves.push(Move::normal(from, to, false));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    PieceType::Silver,
+                    captured_type,
+                ));
             }
         }
     }
@@ -297,6 +329,7 @@ impl<'a> MoveGenImpl<'a> {
 
         let mut moves = targets;
         while let Some(to) = moves.pop_lsb() {
+            let captured_type = self.get_captured_type(to);
             // Knight must promote if it can't move further
             let must_promote = match us {
                 Color::Black => to.rank() >= 7, // Black can't move from rank 7-8
@@ -304,12 +337,36 @@ impl<'a> MoveGenImpl<'a> {
             };
 
             if must_promote {
-                self.moves.push(Move::normal(from, to, true));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    true,
+                    PieceType::Knight,
+                    captured_type,
+                ));
             } else if self.can_promote(from, to, us) {
-                self.moves.push(Move::normal(from, to, true));
-                self.moves.push(Move::normal(from, to, false));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    true,
+                    PieceType::Knight,
+                    captured_type,
+                ));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    PieceType::Knight,
+                    captured_type,
+                ));
             } else {
-                self.moves.push(Move::normal(from, to, false));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    PieceType::Knight,
+                    captured_type,
+                ));
             }
         }
     }
@@ -346,13 +403,38 @@ impl<'a> MoveGenImpl<'a> {
                         Color::White => to.rank() == 0, // White's last rank
                     };
 
+                    let captured_type = self.get_captured_type(to);
                     if must_promote {
-                        self.moves.push(Move::normal(from, to, true));
+                        self.moves.push(Move::normal_with_piece(
+                            from,
+                            to,
+                            true,
+                            PieceType::Lance,
+                            captured_type,
+                        ));
                     } else if self.can_promote(from, to, us) {
-                        self.moves.push(Move::normal(from, to, true));
-                        self.moves.push(Move::normal(from, to, false));
+                        self.moves.push(Move::normal_with_piece(
+                            from,
+                            to,
+                            true,
+                            PieceType::Lance,
+                            captured_type,
+                        ));
+                        self.moves.push(Move::normal_with_piece(
+                            from,
+                            to,
+                            false,
+                            PieceType::Lance,
+                            captured_type,
+                        ));
                     } else {
-                        self.moves.push(Move::normal(from, to, false));
+                        self.moves.push(Move::normal_with_piece(
+                            from,
+                            to,
+                            false,
+                            PieceType::Lance,
+                            captured_type,
+                        ));
                     }
                 }
                 break; // Blocked, can't move further
@@ -365,13 +447,38 @@ impl<'a> MoveGenImpl<'a> {
                     Color::White => to.rank() == 0, // White's last rank
                 };
 
+                let captured_type = self.get_captured_type(to);
                 if must_promote {
-                    self.moves.push(Move::normal(from, to, true));
+                    self.moves.push(Move::normal_with_piece(
+                        from,
+                        to,
+                        true,
+                        PieceType::Lance,
+                        captured_type,
+                    ));
                 } else if self.can_promote(from, to, us) {
-                    self.moves.push(Move::normal(from, to, true));
-                    self.moves.push(Move::normal(from, to, false));
+                    self.moves.push(Move::normal_with_piece(
+                        from,
+                        to,
+                        true,
+                        PieceType::Lance,
+                        captured_type,
+                    ));
+                    self.moves.push(Move::normal_with_piece(
+                        from,
+                        to,
+                        false,
+                        PieceType::Lance,
+                        captured_type,
+                    ));
                 } else {
-                    self.moves.push(Move::normal(from, to, false));
+                    self.moves.push(Move::normal_with_piece(
+                        from,
+                        to,
+                        false,
+                        PieceType::Lance,
+                        captured_type,
+                    ));
                 }
             }
 
@@ -392,6 +499,7 @@ impl<'a> MoveGenImpl<'a> {
 
         let mut moves = targets;
         while let Some(to) = moves.pop_lsb() {
+            let captured_type = self.get_captured_type(to);
             // Pawn must promote if it can't move further
             let must_promote = match us {
                 Color::Black => to.rank() == 8, // Black's last rank
@@ -399,12 +507,36 @@ impl<'a> MoveGenImpl<'a> {
             };
 
             if must_promote {
-                self.moves.push(Move::normal(from, to, true));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    true,
+                    PieceType::Pawn,
+                    captured_type,
+                ));
             } else if self.can_promote(from, to, us) {
-                self.moves.push(Move::normal(from, to, true));
-                self.moves.push(Move::normal(from, to, false));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    true,
+                    PieceType::Pawn,
+                    captured_type,
+                ));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    PieceType::Pawn,
+                    captured_type,
+                ));
             } else {
-                self.moves.push(Move::normal(from, to, false));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    PieceType::Pawn,
+                    captured_type,
+                ));
             }
         }
     }
@@ -423,11 +555,25 @@ impl<'a> MoveGenImpl<'a> {
 
         let mut moves = targets;
         while let Some(to) = moves.pop_lsb() {
+            let captured_type = self.get_captured_type(to);
             if !promoted && self.can_promote(from, to, us) {
-                self.moves.push(Move::normal(from, to, true));
-                self.moves.push(Move::normal(from, to, false));
+                self.moves
+                    .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    piece_type,
+                    captured_type,
+                ));
             } else {
-                self.moves.push(Move::normal(from, to, false));
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    piece_type,
+                    captured_type,
+                ));
             }
         }
     }
@@ -941,7 +1087,15 @@ impl<'a> MoveGenImpl<'a> {
     }
 
     /// Add moves from a square to target squares
-    fn add_moves(&mut self, from: Square, mut targets: Bitboard, _promoted: bool) {
+    fn add_moves(&mut self, from: Square, targets: Bitboard, _promoted: bool) {
+        // Get piece type from the board
+        let piece = self.pos.board.piece_on(from).expect("Piece must exist at from square");
+        let piece_type = piece.piece_type;
+        self.add_moves_with_type(from, targets, piece_type);
+    }
+
+    /// Add moves from a square to target squares with known piece type
+    fn add_moves_with_type(&mut self, from: Square, mut targets: Bitboard, piece_type: PieceType) {
         // If we're in check, only allow moves that block or capture checker
         if !self.checkers.is_empty() && self.checkers.count_ones() == 1 {
             let checker_sq = self.checkers.lsb().unwrap();
@@ -960,7 +1114,9 @@ impl<'a> MoveGenImpl<'a> {
         targets &= !enemy_king_bb;
 
         while let Some(to) = targets.pop_lsb() {
-            self.moves.push(Move::normal(from, to, false));
+            let captured_type = self.get_captured_type(to);
+            self.moves
+                .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
         }
     }
 
