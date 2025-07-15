@@ -839,11 +839,11 @@ impl Position {
             );
         } else {
             // Handle normal move
-            let from = mv.from().unwrap();
+            let from = mv.from().expect("Normal move must have from square");
             let to = mv.to();
 
             // Get moving piece
-            let mut piece = self.board.piece_on(from).unwrap();
+            let mut piece = self.board.piece_on(from).expect("Move source must have a piece");
 
             // Save promoted status for undo
             undo_info.moved_piece_was_promoted = piece.promoted;
@@ -1106,7 +1106,7 @@ impl Position {
         // Check each potential attacker for blockers
         let mut lances = potential_attackers;
         while !lances.is_empty() {
-            let from = lances.pop_lsb().unwrap();
+            let from = lances.pop_lsb().expect("Lance bitboard should not be empty");
 
             // Use pre-computed between bitboard
             let between = ATTACK_TABLES.between_bb(from, sq);
@@ -1264,11 +1264,12 @@ impl Position {
             self.hands[self.side_to_move as usize][hand_idx] += 1;
         } else {
             // Undo normal move
-            let from = mv.from().unwrap();
+            let from = mv.from().expect("Normal move must have from square");
             let to = mv.to();
 
             // Get piece from destination
-            let mut piece = self.board.piece_on(to).unwrap();
+            let mut piece =
+                self.board.piece_on(to).expect("Move destination must have a piece after move");
 
             // Remove piece from destination
             self.board.remove_piece(to);
@@ -1334,7 +1335,7 @@ impl Position {
             return captured_value;
         }
 
-        let from = mv.from().unwrap();
+        let from = mv.from().expect("Normal move must have from square");
         let mut occupied = self.board.all_bb;
 
         // Get the initial attacker
@@ -1345,7 +1346,14 @@ impl Position {
             Self::see_piece_value(attacker)
         };
 
-        // Early return if initial capture is clearly insufficient
+        // Delta pruning optimization for SEE
+        //
+        // Returns early if the maximum possible gain cannot reach the threshold.
+        // This optimization is particularly effective for:
+        // - High thresholds that are clearly unreachable
+        // - Shallow exchanges (2-4 captures)
+        // - Positions with limited attacking pieces
+        //
         // Only apply for see_ge calls (threshold != 0)
         if threshold != 0 && captured_value < threshold {
             // Best case is just capturing the target piece
@@ -1571,7 +1579,8 @@ impl Position {
         while let Some(pinner_sq) = pinners_bb.pop_lsb() {
             let between = ATTACK_TABLES.between_bb(king_sq, pinner_sq) & occupied;
             if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
-                let pinned_sq = between.lsb().unwrap();
+                let pinned_sq =
+                    between.lsb().expect("Between squares must have at least one square");
                 pin_info.pinned.set(pinned_sq);
 
                 // ピンの方向を判定
@@ -1592,7 +1601,8 @@ impl Position {
         while let Some(pinner_sq) = pinners_bb.pop_lsb() {
             let between = ATTACK_TABLES.between_bb(king_sq, pinner_sq) & occupied;
             if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
-                let pinned_sq = between.lsb().unwrap();
+                let pinned_sq =
+                    between.lsb().expect("Between squares must have at least one square");
                 pin_info.pinned.set(pinned_sq);
 
                 // ピンの方向を判定
@@ -1623,7 +1633,8 @@ impl Position {
                 if can_attack {
                     let between = ATTACK_TABLES.between_bb(lance_sq, king_sq) & occupied;
                     if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
-                        let pinned_sq = between.lsb().unwrap();
+                        let pinned_sq =
+                            between.lsb().expect("Between squares must have at least one square");
                         pin_info.pinned.set(pinned_sq);
                         pin_info.vertical_pins.set(pinned_sq);
                     }
@@ -1736,7 +1747,7 @@ impl Position {
         // Check each potential attacker for blockers
         let mut lances = potential_attackers;
         while !lances.is_empty() {
-            let from = lances.pop_lsb().unwrap();
+            let from = lances.pop_lsb().expect("Lance bitboard should not be empty");
 
             // Use pre-computed between bitboard
             let between = ATTACK_TABLES.between_bb(from, sq);
@@ -2029,7 +2040,7 @@ mod tests {
         let to = Square::new(4, 4); // 5e
         let mv = Move::normal(from, to, false);
 
-        let captured_piece = pos.board.piece_on(to).unwrap();
+        let captured_piece = pos.board.piece_on(to).expect("Capture move must have captured piece");
         assert_eq!(captured_piece.piece_type, PieceType::Pawn);
         assert_eq!(captured_piece.color, Color::White);
 
@@ -2059,7 +2070,7 @@ mod tests {
         board.put_piece(Square::new(2, 7), pawn);
 
         // 成った駒になっていることを確認
-        let piece = board.piece_on(Square::new(2, 7)).unwrap();
+        let piece = board.piece_on(Square::new(2, 7)).expect("Piece should exist at Square(2, 7)");
         assert_eq!(piece.piece_type, PieceType::Pawn);
         assert!(piece.promoted);
         assert_eq!(piece.color, Color::Black);
@@ -2162,7 +2173,7 @@ mod tests {
                 panic!("Piece not found at expected position");
             }
 
-            let piece = piece.unwrap();
+            let piece = piece.expect("Piece should exist at this square");
             assert_eq!(piece.piece_type, expected_piece_type);
 
             let mv = Move::normal(from, to, false);
@@ -2170,7 +2181,8 @@ mod tests {
 
             // 駒が移動していることを確認
             assert_eq!(pos.board.piece_on(from), None);
-            let moved_piece = pos.board.piece_on(to).unwrap();
+            let moved_piece =
+                pos.board.piece_on(to).expect("Piece should exist at destination after move");
             assert_eq!(moved_piece.piece_type, expected_piece_type);
         }
     }
@@ -2210,7 +2222,8 @@ mod tests {
             let _undo_info = pos.do_move(mv);
 
             // 駒が置かれていることを確認
-            let placed_piece = pos.board.piece_on(to).unwrap();
+            let placed_piece =
+                pos.board.piece_on(to).expect("Piece should exist at destination after drop");
             assert_eq!(placed_piece.piece_type, piece_type);
             assert_eq!(placed_piece.color, Color::Black);
             assert!(!placed_piece.promoted);
@@ -2271,7 +2284,10 @@ mod tests {
         let mv11 = Move::normal(Square::new(6, 3), Square::new(6, 4), true); // 3f-3e+
         let _undo11 = pos.do_move(mv11);
 
-        let piece = pos.board.piece_on(Square::new(6, 4)).unwrap();
+        let piece = pos
+            .board
+            .piece_on(Square::new(6, 4))
+            .expect("Piece should exist at Square(6, 4)");
         assert_eq!(piece.piece_type, PieceType::Silver);
         assert!(piece.promoted);
     }
@@ -2937,7 +2953,10 @@ mod tests {
         let undo_info = pos.do_move(promote_move);
 
         // 成ったことを確認
-        let promoted_piece = pos.board.piece_on(Square::new(4, 7)).unwrap();
+        let promoted_piece = pos
+            .board
+            .piece_on(Square::new(4, 7))
+            .expect("Promoted piece should exist at Square(4, 7)");
         assert!(promoted_piece.promoted);
 
         // 手を戻す
@@ -2945,7 +2964,10 @@ mod tests {
 
         // 完全に元に戻ったことを確認
         assert_eq!(pos.hash, before_promotion.hash);
-        let original_piece = pos.board.piece_on(Square::new(4, 6)).unwrap();
+        let original_piece = pos
+            .board
+            .piece_on(Square::new(4, 6))
+            .expect("Original piece should exist at Square(4, 6)");
         assert!(!original_piece.promoted);
     }
 
