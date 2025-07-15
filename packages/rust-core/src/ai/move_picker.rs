@@ -540,37 +540,10 @@ impl MovePicker {
         }
     }
 
-    /// Static Exchange Evaluation (simplified)
+    /// Static Exchange Evaluation
     fn see(&self, mv: Move) -> i32 {
-        if mv.is_drop() {
-            return 0; // Drops are always good
-        }
-
-        let to = mv.to();
-        let from = mv.from().unwrap();
-
-        // Get initial material gain
-        let mut gain = if let Some(captured) = self.pos.board.piece_on(to) {
-            Self::piece_value(captured.piece_type)
-        } else {
-            return 0; // Not a capture
-        };
-
-        // Get attacker value
-        if let Some(attacker) = self.pos.board.piece_on(from) {
-            let attacker_value = Self::piece_value(attacker.piece_type);
-
-            // Simple SEE: assume piece is recaptured
-            // TODO: Implement full SEE with attack detection
-            gain -= attacker_value;
-
-            // Promotion value
-            if mv.is_promote() {
-                gain += Self::promotion_value(attacker.piece_type);
-            }
-        }
-
-        gain
+        // Use the full SEE implementation from Position
+        self.pos.see(mv)
     }
 
     /// Get piece value for MVV-LVA and SEE
@@ -584,17 +557,6 @@ impl MovePicker {
             PieceType::Knight => 400,
             PieceType::Lance => 300,
             PieceType::Pawn => 100,
-        }
-    }
-
-    /// Get promotion value
-    fn promotion_value(piece_type: PieceType) -> i32 {
-        match piece_type {
-            PieceType::Silver => 100, // Silver -> Gold
-            PieceType::Knight => 200, // Knight -> Gold
-            PieceType::Lance => 300,  // Lance -> Gold
-            PieceType::Pawn => 500,   // Pawn -> Gold
-            _ => 0,
         }
     }
 
@@ -976,7 +938,7 @@ mod tests {
 
         // Killers should appear relatively early (after captures)
         for &pos in &killer_positions {
-            assert!(pos < 10, "Killer move at position {} is too late", pos);
+            assert!(pos < 10, "Killer move at position {pos} is too late");
         }
     }
 
