@@ -1299,6 +1299,13 @@ impl Position {
         self.see_internal(mv, 0)
     }
 
+    /// Static Exchange Evaluation (no inline version for benchmarking)
+    /// This prevents constant folding in benchmarks
+    #[inline(never)]
+    pub fn see_noinline(&self, mv: Move) -> i32 {
+        self.see_internal(mv, 0)
+    }
+
     /// Static Exchange Evaluation with threshold
     /// Returns true if the SEE value is greater than or equal to the threshold
     pub fn see_ge(&self, mv: Move, threshold: i32) -> bool {
