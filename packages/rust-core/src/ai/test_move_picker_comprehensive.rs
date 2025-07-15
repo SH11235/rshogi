@@ -27,7 +27,7 @@ mod tests {
             let mut picker_set = HashSet::new();
 
             while let Some(mv) = picker.next_move() {
-                assert!(picker_set.insert(mv), "Duplicate move generated: {:?}", mv);
+                assert!(picker_set.insert(mv), "Duplicate move generated: {mv:?}");
                 picker_moves.push(mv);
             }
 
@@ -48,7 +48,7 @@ mod tests {
             // Check all moves are present
             let move_set: HashSet<_> = move_list.as_slice().iter().cloned().collect();
             for mv in &picker_moves {
-                assert!(move_set.contains(mv), "Move {:?} not in legal moves", mv);
+                assert!(move_set.contains(mv), "Move {mv:?} not in legal moves");
             }
         }
     }
@@ -171,9 +171,9 @@ mod tests {
                 }
                 // Check if we've reached bad captures stage
                 // (This is a simplification - in real implementation we'd check the stage)
-                if good_captures.len() > 0 && bad_captures.len() == 0 {
+                if !good_captures.is_empty() && bad_captures.is_empty() {
                     // Keep collecting good captures
-                } else if bad_captures.len() > 0 {
+                } else if !bad_captures.is_empty() {
                     found_bad_capture = true;
                 }
             }
@@ -352,7 +352,7 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 let pos = pos_clone.lock().unwrap();
-                let mut picker = MovePicker::new(&*pos, None, &history_clone, &stack_clone);
+                let mut picker = MovePicker::new(&pos, None, &history_clone, &stack_clone);
 
                 let mut moves = Vec::new();
                 for _ in 0..5 {
@@ -411,9 +411,7 @@ mod tests {
         // MovePicker should not be too much slower (allow 10x overhead for ordering logic)
         assert!(
             picker_time.as_micros() < direct_time.as_micros() * 10,
-            "MovePicker overhead too high: {:?} vs {:?}",
-            picker_time,
-            direct_time
+            "MovePicker overhead too high: {picker_time:?} vs {direct_time:?}"
         );
     }
 
