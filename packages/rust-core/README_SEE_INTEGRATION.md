@@ -1,7 +1,8 @@
-# SEE Integration Testing Framework - Quick Start
+# SEE Integration Testing Framework - 概要
 
-## 概要
-探索統合テスト基盤が整備されました。この基盤により、SEE最適化の効果を定量的に測定できます。
+## 現在の状態
+
+SEE（Static Exchange Evaluation）の統合テストフレームワークが整備されており、最適化効果を定量的に測定できる環境が構築されています。
 
 ## ファイル構成
 
@@ -11,64 +12,72 @@ tests/
 └── test_search_integration.rs   # 統合テストスイート
 
 benches/
-└── see_integration_bench.rs     # パフォーマンスベンチマーク
+├── see_bench.rs                 # SEE単体のベンチマーク
+└── see_integration_bench.rs     # 探索統合ベンチマーク
+
+src/bin/
+└── see_flamegraph.rs           # プロファイリング用バイナリ
 
 docs/
-└── see_integration_testing.md   # 詳細ドキュメント
+├── see_integration_testing.md   # 詳細ドキュメント
+├── FLAMEGRAPH_SETUP.md         # プロファイリング設定
+├── SEE_FLAMEGRAPH_ANALYSIS.md  # 性能分析結果
+└── BITBOARD_OPTIMIZATION_PLAN.md # 最適化計画
 ```
+
+## 現在の性能
+
+- **SEE計算速度**: 2.5M回/秒
+- **キャッシュミス率**: 40.81%（改善余地あり）
+- **命令/サイクル**: 3.31（良好）
 
 ## 基本的な使い方
 
-### 1. ベースライン測定（最適化前）
+### 1. ベンチマーク実行
 
 ```bash
-# 現在の性能を記録
-cargo bench --bench see_integration_bench -- --save-baseline baseline_main
+# SEE単体のベンチマーク
+cargo bench --bench see_bench
+
+# 探索統合ベンチマーク
+cargo bench --bench see_integration_bench
 ```
 
-### 2. 最適化実装
-
-最適化を実装...
-
-### 3. 効果測定
+### 2. プロファイリング
 
 ```bash
-# ベースラインと比較
-cargo bench --bench see_integration_bench -- --baseline baseline_main
+# flamegraph生成（要: cargo install flamegraph）
+RUSTFLAGS="-Cforce-frame-pointers=yes" cargo flamegraph --bin see_flamegraph -o see_profile.svg
 ```
 
-### 4. 正確性確認
+### 3. 統合テスト
 
 ```bash
-# 統合テストで動作確認
+# 戦術局面でのSEE効果確認
 cargo test --test test_search_integration -- --nocapture
 ```
 
-## 測定項目
+## 実装済み最適化
 
-### パフォーマンス指標
-- **SEE計算時間**: < 200ns（ピン検出付きで < 250ns）
-- **探索ノード数**: ベースラインからの改善率
-- **Beta cutoff率**: > 65%
-- **First move cutoff率**: > 35%
+### 1. X-ray攻撃の更新（実装済み）
+- `update_xray_attacks()`による「幽霊駒」問題の解決
+- スライディングピースの背後からの攻撃を正確に検出
 
-### 正確性指標
-- 評価値の一致
-- PV（主要変化）の安定性
-- 戦術局面での最善手発見
+### 2. ピン情報を考慮したSEE（実装済み）
+- `calculate_pins_for_see()`による両陣営のピン計算
+- ピンされた駒の移動制限を正確に反映
 
-## 次のステップ
+### 3. Delta pruning（実装済み）
+- `estimate_max_remaining_value()`による早期終了
+- 閾値に到達不可能な場合の枝刈り
 
-1. **X-ray部分ピン更新の実装**
-   - `update_pins_after_capture()`メソッドの追加
-   - 差分更新による高速化
+## 進行中の最適化
 
-2. **ビットボード最適化**
-   - pop_lsb()呼び出しの削減
-   - キャッシュの活用
+### 1. ビットボード操作の最適化（優先度: 高）
+- Magic Bitboardの実装計画
+- pop_lsb()のSIMD最適化
+- キャッシュ効率の改善
 
-3. **早期終了の強化**
-   - 閾値ベースの枝刈り
-   - 余剰価値テーブルの導入
-
-詳細は `docs/see_integration_testing.md` を参照してください。
+詳細は以下を参照：
+- プロファイリング設定: `FLAMEGRAPH_SETUP.md`
+- 性能分析結果、最適化計画: https://github.com/SH11235/shogi/issues/40
