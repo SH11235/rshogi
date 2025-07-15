@@ -1116,43 +1116,27 @@ impl Position {
         let enemy_lances = self.board.piece_bb[enemy_color as usize][PieceType::Lance as usize]
             & !self.board.promoted_bb;
 
-        // Check for lance pins in the same file
-        if enemy_color == Color::Black {
-            // Black lance can pin from below
-            for rank in (king_sq.rank() + 1)..9 {
-                let lance_sq = Square::new(king_sq.file(), rank);
-                if enemy_lances.test(lance_sq) {
-                    // Check pieces between king and lance
-                    let mut between = Bitboard::EMPTY;
-                    for r in (king_sq.rank() + 1)..rank {
-                        let sq = Square::new(king_sq.file(), r);
-                        if occupied.test(sq) {
-                            between.set(sq);
-                        }
-                    }
-                    if between.count_ones() == 1 {
-                        blockers |= between;
-                    }
-                    break;
-                }
-            }
-        } else {
-            // White lance can pin from above
-            for rank in (0..king_sq.rank()).rev() {
-                let lance_sq = Square::new(king_sq.file(), rank);
-                if enemy_lances.test(lance_sq) {
-                    // Check pieces between king and lance
-                    let mut between = Bitboard::EMPTY;
-                    for r in (rank + 1)..king_sq.rank() {
-                        let sq = Square::new(king_sq.file(), r);
-                        if occupied.test(sq) {
-                            between.set(sq);
-                        }
-                    }
-                    if between.count_ones() == 1 {
-                        blockers |= between;
-                    }
-                    break;
+        // Use file mask to get lances in the same file
+        let file_mask = ATTACK_TABLES.file_mask(king_sq.file());
+        let lances_in_file = enemy_lances & file_mask;
+
+        if !lances_in_file.is_empty() {
+            // Get the ray from king in the direction of enemy lance attacks
+            let lance_ray = if enemy_color == Color::Black {
+                // Black lance attacks from below (higher ranks)
+                ATTACK_TABLES.lance_rays[Color::White as usize][king_sq.index()]
+            } else {
+                // White lance attacks from above (lower ranks)
+                ATTACK_TABLES.lance_rays[Color::Black as usize][king_sq.index()]
+            };
+
+            // Find the closest lance that can attack the king
+            let potential_pinners = lances_in_file & lance_ray;
+            if let Some(lance_sq) = potential_pinners.lsb() {
+                // Use pre-computed between bitboard
+                let between = ATTACK_TABLES.between_bb(king_sq, lance_sq) & occupied;
+                if between.count_ones() == 1 {
+                    blockers |= between;
                 }
             }
         }
