@@ -277,15 +277,24 @@ impl History {
     }
 
     /// Get combined history score for move ordering
-    pub fn get_score(&self, color: Color, mv: Move, prev_move: Option<(usize, Square)>) -> i32 {
-        let score = self.butterfly.get(color, mv);
+    pub fn get_score(&self, color: Color, mv: Move, prev_move: Option<Move>) -> i32 {
+        let mut score = self.butterfly.get(color, mv);
 
         // Add continuation history if we have context
-        if let Some((_prev_piece, _prev_to)) = prev_move {
-            if !mv.is_drop() {
-                // For normal moves, we need to get the piece type from somewhere
-                // Since Move doesn't store piece type, we'll skip continuation history for now
-                // TODO: Pass piece type separately or store it in Move
+        if let Some(prev_mv) = prev_move {
+            if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
+                // Ensure prev_move was not a drop (needs a destination square)
+                if !prev_mv.is_drop() {
+                    let prev_to = prev_mv.to();
+                    let curr_to = mv.to();
+                    score += self.continuation.get(
+                        color,
+                        prev_piece as usize,
+                        prev_to,
+                        curr_piece as usize,
+                        curr_to,
+                    );
+                }
             }
         }
 
@@ -293,31 +302,49 @@ impl History {
     }
 
     /// Update history tables after a cut-off (good move)
-    pub fn update_cutoff(
-        &mut self,
-        color: Color,
-        mv: Move,
-        depth: i32,
-        _prev_move: Option<(usize, Square)>,
-    ) {
+    pub fn update_cutoff(&mut self, color: Color, mv: Move, depth: i32, prev_move: Option<Move>) {
         self.butterfly.update_good(color, mv, depth);
 
-        // Skip continuation history update since Move doesn't store piece type
-        // TODO: Pass piece type separately
+        // Update continuation history if we have piece type info
+        if let Some(prev_mv) = prev_move {
+            if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
+                if !prev_mv.is_drop() && !mv.is_drop() {
+                    let prev_to = prev_mv.to();
+                    let curr_to = mv.to();
+                    self.continuation.update_good(
+                        color,
+                        prev_piece as usize,
+                        prev_to,
+                        curr_piece as usize,
+                        curr_to,
+                        depth,
+                    );
+                }
+            }
+        }
     }
 
     /// Update history tables for tried moves that didn't cause cut-off
-    pub fn update_quiet(
-        &mut self,
-        color: Color,
-        mv: Move,
-        depth: i32,
-        _prev_move: Option<(usize, Square)>,
-    ) {
+    pub fn update_quiet(&mut self, color: Color, mv: Move, depth: i32, prev_move: Option<Move>) {
         self.butterfly.update_bad(color, mv, depth);
 
-        // Skip continuation history update since Move doesn't store piece type
-        // TODO: Pass piece type separately
+        // Update continuation history if we have piece type info
+        if let Some(prev_mv) = prev_move {
+            if let (Some(prev_piece), Some(curr_piece)) = (prev_mv.piece_type(), mv.piece_type()) {
+                if !prev_mv.is_drop() && !mv.is_drop() {
+                    let prev_to = prev_mv.to();
+                    let curr_to = mv.to();
+                    self.continuation.update_bad(
+                        color,
+                        prev_piece as usize,
+                        prev_to,
+                        curr_piece as usize,
+                        curr_to,
+                        depth,
+                    );
+                }
+            }
+        }
     }
 
     /// Age all history scores periodically
