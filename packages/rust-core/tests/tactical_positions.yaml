@@ -1,0 +1,112 @@
+# Tactical positions for SEE integration testing
+# Each position includes expected behavior for verification
+
+positions:
+  # Complex middle game positions with multiple captures
+  - name: "Multiple Exchange Center"
+    sfen: "lnsgk2nl/1r4gb1/p1pppp2p/1p4p2/9/2P4P1/PP1PPPP1P/1BG4R1/LNS1KGSNL b S 30"
+    description: "Complex center with multiple pieces attacking same squares"
+    expected:
+      best_move: "7f7e"
+      min_depth: 6
+      
+  - name: "Fork and Pin Combination"
+    sfen: "ln1gkg1nl/1r1s3b1/p1ppppppp/9/1p7/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 20"
+    description: "Bishop fork threat with pinned pieces"
+    expected:
+      best_move: "8h2b+"
+      min_depth: 5
+
+  # Long tactical sequences (LTAC)
+  - name: "Seven Move Combination"
+    sfen: "l2gk2nl/1r4gb1/p1ppsp2p/1p3pp2/9/2P2P1P1/PP1PP1P1P/1BG2S1R1/LN2KG1NL b SP 35"
+    description: "Complex 7-move forcing sequence"
+    expected:
+      best_move: "S*4d"
+      min_depth: 8
+      
+  - name: "Sacrifice and Mate Threat"
+    sfen: "ln1g1g1nl/1ks4b1/1pppppppp/p8/9/P8/1PPPPPPPP/1B5R1/LNSGKGSNL b RSr 25"
+    description: "Rook sacrifice leading to mate threat"
+    expected:
+      best_move: "R*8b"
+      min_depth: 7
+
+  # Bait and trap positions
+  - name: "Poisoned Pawn Trap"
+    sfen: "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 10"
+    description: "Pawn capture leads to losing position"
+    expected:
+      best_move: "7g7f"  # NOT capturing the pawn
+      min_depth: 6
+      
+  - name: "False Exchange"
+    sfen: "ln1gkg1nl/1r1s3b1/p1pppp1pp/1p4p2/9/2P4P1/PP1PPPP1P/1BG4R1/LNS1KGSNL b S 22"
+    description: "Seemingly equal exchange is actually bad"
+    expected:
+      avoid_move: "7f7e"  # Bad exchange
+      min_depth: 5
+
+  # Pin exploitation positions
+  - name: "Absolute Pin Attack"
+    sfen: "ln1gk2nl/1r4gb1/p1ppsp2p/1p3pp2/9/2P2P1P1/PP1PP1P1P/1B3S1R1/LN1GKG1NL b - 30"
+    description: "Exploiting absolutely pinned piece"
+    expected:
+      best_move: "2h5e"
+      min_depth: 4
+      
+  - name: "Cross Pin Pattern"
+    sfen: "l2gkg1nl/1r1s3b1/p1pppp1pp/1p4p2/9/2P4P1/PP1PPPP1P/1B5R1/LNSGKGSNL b N 28"
+    description: "Multiple pieces pinned in different directions"
+    expected:
+      best_move: "N*7e"
+      min_depth: 5
+
+  # X-ray attack positions
+  - name: "Double X-ray"
+    sfen: "ln1gkg1nl/6rb1/p1ppppsp1/1p5pp/9/2P4P1/PP1PPPP1P/1B5R1/LNSGKGSNL b - 32"
+    description: "X-ray attacks from both rook and bishop"
+    expected:
+      best_move: "2h2c+"
+      min_depth: 6
+      
+  - name: "Hidden Discovery"
+    sfen: "ln1g1g1nl/1ks4b1/1ppppp1pp/p5p2/9/P8/1PPPPPPPP/1B3S1R1/LN1GKG1NL b Rp 40"
+    description: "Moving piece reveals powerful X-ray"
+    expected:
+      best_move: "3h2g"
+      min_depth: 5
+
+  # Quiescence test positions
+  - name: "Quiet After Storm"
+    sfen: "ln1gkgsnl/1r5b1/p1pppp1pp/1p4p2/9/2P4P1/PP1PPPP1P/1B5R1/LNSGKGSNL b - 18"
+    description: "Multiple captures available but quiet move is best"
+    expected:
+      best_move: "5g5f"  # Quiet development
+      min_depth: 6
+      
+  - name: "Capture Chain"
+    sfen: "l2gk2nl/1r4gb1/p1ppspp1p/1p3p1p1/9/2P2P1P1/PP1PP1P1P/1BG2S1R1/LN2KG1NL b NP 38"
+    description: "Long capture sequence that must be fully evaluated"
+    expected:
+      best_move: "P*5d"
+      min_depth: 7
+
+# Performance benchmarks
+benchmarks:
+  # Expected performance metrics for optimization tracking
+  see_basic:
+    max_time_ns: 200
+    description: "Basic SEE calculation time"
+    
+  see_with_pins:
+    max_time_ns: 250
+    description: "SEE with pin detection"
+    
+  quiescence_cutoff_rate:
+    min_rate: 0.65
+    description: "Beta cutoff rate in quiescence search"
+    
+  move_ordering_efficiency:
+    first_move_cutoff_rate: 0.35
+    description: "How often first move causes cutoff"

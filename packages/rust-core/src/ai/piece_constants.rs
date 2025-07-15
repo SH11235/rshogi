@@ -94,6 +94,42 @@ pub const fn hand_index_to_piece_type(index: usize) -> Option<PieceType> {
     }
 }
 
+/// Maximum depth for SEE calculation (captures/recaptures on a single square)
+/// In shogi, it's extremely rare to have more than 16 exchanges on a single square
+pub const SEE_MAX_DEPTH: usize = 16;
+
+/// Size of the gain array for SEE calculation
+/// Must be larger than SEE_MAX_DEPTH for safety margin
+/// Using 2 * SEE_MAX_DEPTH provides sufficient buffer
+pub const SEE_GAIN_ARRAY_SIZE: usize = 32;
+
+/// SEE piece values table indexed by [promoted][piece_type]
+/// Index 0: unpromoted, Index 1: promoted
+pub const SEE_PIECE_VALUES: [[i32; 8]; 2] = [
+    // Unpromoted values
+    [
+        10000, // King (0)
+        900,   // Rook (1)
+        700,   // Bishop (2)
+        600,   // Gold (3)
+        500,   // Silver (4)
+        400,   // Knight (5)
+        300,   // Lance (6)
+        100,   // Pawn (7)
+    ],
+    // Promoted values
+    [
+        10000, // King cannot promote (0)
+        1200,  // Dragon (promoted Rook) (1)
+        900,   // Horse (promoted Bishop) (2)
+        600,   // Gold cannot promote (3)
+        600,   // Promoted Silver (4)
+        600,   // Promoted Knight (5)
+        600,   // Promoted Lance (6)
+        600,   // Tokin (promoted Pawn) (7)
+    ],
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
