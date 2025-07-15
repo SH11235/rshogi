@@ -594,6 +594,66 @@ pub struct Position {
     pub history: Vec<u64>,
 }
 
+/// SEE用の軽量なピン情報
+struct SeePinInfo {
+    /// ピンされた駒のビットボード
+    pinned: Bitboard,
+    /// ピン方向のマスク（4方向）
+    vertical_pins: Bitboard, // 縦方向のピン
+    horizontal_pins: Bitboard, // 横方向のピン
+    diag_ne_pins: Bitboard,    // 北東-南西の斜めピン
+    diag_nw_pins: Bitboard,    // 北西-南東の斜めピン
+}
+
+impl SeePinInfo {
+    /// 空のピン情報を作成
+    fn empty() -> Self {
+        SeePinInfo {
+            pinned: Bitboard::EMPTY,
+            vertical_pins: Bitboard::EMPTY,
+            horizontal_pins: Bitboard::EMPTY,
+            diag_ne_pins: Bitboard::EMPTY,
+            diag_nw_pins: Bitboard::EMPTY,
+        }
+    }
+
+    /// 指定された駒が指定された方向に移動できるかチェック
+    fn can_move(&self, from: Square, to: Square) -> bool {
+        // ピンされていない駒は自由に動ける
+        if !self.pinned.test(from) {
+            return true;
+        }
+
+        // ピンされている場合、ピンの方向に沿った移動のみ許可
+
+        // 縦方向のピン
+        if self.vertical_pins.test(from) {
+            return from.file() == to.file();
+        }
+
+        // 横方向のピン
+        if self.horizontal_pins.test(from) {
+            return from.rank() == to.rank();
+        }
+
+        // 北東-南西の斜めピン
+        if self.diag_ne_pins.test(from) {
+            let file_diff = from.file() as i8 - to.file() as i8;
+            let rank_diff = from.rank() as i8 - to.rank() as i8;
+            return file_diff == rank_diff;
+        }
+
+        // 北西-南東の斜めピン
+        if self.diag_nw_pins.test(from) {
+            let file_diff = from.file() as i8 - to.file() as i8;
+            let rank_diff = from.rank() as i8 - to.rank() as i8;
+            return file_diff == -rank_diff;
+        }
+
+        false
+    }
+}
+
 impl Position {
     /// Create empty position
     pub fn empty() -> Self {
@@ -1269,6 +1329,9 @@ impl Position {
 
         // No early pruning - calculate exact value
 
+        // Calculate pin information for both colors
+        let (black_pins, white_pins) = self.calculate_pins_for_see();
+
         // Gain array to track material balance at each ply
         let mut gain = [0i32; 32]; // Maximum depth of 32 should be enough
         let mut depth = 0;
@@ -1288,29 +1351,45 @@ impl Position {
         let mut _last_captured_value = attacker_value;
 
         // Generate capture sequence
-        while let Some((sq, _, attacker_value)) =
-            self.pop_least_valuable_attacker(&mut attackers, occupied, stm)
-        {
-            depth += 1;
+        loop {
+            // Select appropriate pin info based on side to move
+            let pin_info = match stm {
+                Color::Black => &black_pins,
+                Color::White => &white_pins,
+            };
 
-            // gain[d] = 取られた駒の価値 - gain[d‑1]
-            gain[depth] = _last_captured_value - gain[depth - 1];
+            // Get next attacker considering pin constraints
+            match self.pop_least_valuable_attacker_with_pins(
+                &mut attackers,
+                occupied,
+                stm,
+                to,
+                pin_info,
+            ) {
+                Some((sq, _, attacker_value)) => {
+                    depth += 1;
 
-            // 深さの上限チェック
-            if depth >= 16 {
-                break;
+                    // gain[d] = 取られた駒の価値 - gain[d‑1]
+                    gain[depth] = _last_captured_value - gain[depth - 1];
+
+                    // 深さの上限チェック
+                    if depth >= 16 {
+                        break;
+                    }
+
+                    // 盤面を更新
+                    occupied.clear(sq); // 攻撃駒を元の升から除去
+                    occupied.set(to); // 取った駒が目的地に移動
+                    _last_captured_value = attacker_value; // 次に取られる駒の価値を更新
+
+                    // X-ray を更新して「幽霊駒」問題を防ぐ
+                    self.update_xray_attacks(sq, to, &mut attackers, occupied);
+
+                    // 手番を反転
+                    stm = stm.opposite();
+                }
+                None => break,
             }
-
-            // 盤面を更新
-            occupied.clear(sq); // 攻撃駒を元の升から除去
-            occupied.set(to); // 取った駒が目的地に移動
-            _last_captured_value = attacker_value; // 次に取られる駒の価値を更新
-
-            // X-ray を更新して「幽霊駒」問題を防ぐ
-            self.update_xray_attacks(sq, to, &mut attackers, occupied);
-
-            // 手番を反転
-            stm = stm.opposite();
         }
 
         // Apply negamax propagation from the end
@@ -1365,6 +1444,106 @@ impl Position {
             PieceType::Lance => 300,
             PieceType::Pawn => 100,
         }
+    }
+
+    /// SEE用の軽量なピン計算（両陣営分）
+    fn calculate_pins_for_see(&self) -> (SeePinInfo, SeePinInfo) {
+        let black_pins = self.calculate_pins_for_color(Color::Black);
+        let white_pins = self.calculate_pins_for_color(Color::White);
+        (black_pins, white_pins)
+    }
+
+    /// 特定色のピン計算
+    fn calculate_pins_for_color(&self, color: Color) -> SeePinInfo {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        // ピンが存在しない場合の早期リターン最適化
+        let king_bb = self.board.piece_bb[color as usize][PieceType::King as usize];
+        let king_sq = match king_bb.lsb() {
+            Some(sq) => sq,
+            None => return SeePinInfo::empty(),
+        };
+
+        let mut pin_info = SeePinInfo::empty();
+        let enemy = color.opposite();
+        let occupied = self.board.all_bb;
+        let our_pieces = self.board.occupied_bb[color as usize];
+
+        // 敵のスライダー駒を取得
+        let enemy_rooks = self.board.piece_bb[enemy as usize][PieceType::Rook as usize];
+        let enemy_bishops = self.board.piece_bb[enemy as usize][PieceType::Bishop as usize];
+        let enemy_lances = self.board.piece_bb[enemy as usize][PieceType::Lance as usize]
+            & !self.board.promoted_bb;
+
+        // 飛車・竜による縦横のピン
+        let rook_xray = ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Rook);
+        let potential_rook_pinners = enemy_rooks & rook_xray;
+
+        let mut pinners_bb = potential_rook_pinners;
+        while let Some(pinner_sq) = pinners_bb.pop_lsb() {
+            let between = ATTACK_TABLES.between_bb(king_sq, pinner_sq) & occupied;
+            if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
+                let pinned_sq = between.lsb().unwrap();
+                pin_info.pinned.set(pinned_sq);
+
+                // ピンの方向を判定
+                if king_sq.file() == pinner_sq.file() {
+                    pin_info.vertical_pins.set(pinned_sq);
+                } else {
+                    pin_info.horizontal_pins.set(pinned_sq);
+                }
+            }
+        }
+
+        // 角・馬による斜めのピン
+        let bishop_xray =
+            ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Bishop);
+        let potential_bishop_pinners = enemy_bishops & bishop_xray;
+
+        pinners_bb = potential_bishop_pinners;
+        while let Some(pinner_sq) = pinners_bb.pop_lsb() {
+            let between = ATTACK_TABLES.between_bb(king_sq, pinner_sq) & occupied;
+            if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
+                let pinned_sq = between.lsb().unwrap();
+                pin_info.pinned.set(pinned_sq);
+
+                // ピンの方向を判定
+                let file_diff = king_sq.file() as i8 - pinner_sq.file() as i8;
+                let rank_diff = king_sq.rank() as i8 - pinner_sq.rank() as i8;
+
+                if file_diff == rank_diff {
+                    pin_info.diag_ne_pins.set(pinned_sq);
+                } else {
+                    pin_info.diag_nw_pins.set(pinned_sq);
+                }
+            }
+        }
+
+        // 香車による縦のピン（特殊処理）
+        let file_mask = ATTACK_TABLES.file_masks[king_sq.file() as usize];
+        let lances_in_file = enemy_lances & file_mask;
+
+        if !lances_in_file.is_empty() {
+            // 香車は方向性があるので、敵香車の位置と王の位置関係を確認
+            let mut lance_bb = lances_in_file;
+            while let Some(lance_sq) = lance_bb.pop_lsb() {
+                let can_attack = match enemy {
+                    Color::Black => lance_sq.rank() < king_sq.rank(),
+                    Color::White => lance_sq.rank() > king_sq.rank(),
+                };
+
+                if can_attack {
+                    let between = ATTACK_TABLES.between_bb(lance_sq, king_sq) & occupied;
+                    if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
+                        let pinned_sq = between.lsb().unwrap();
+                        pin_info.pinned.set(pinned_sq);
+                        pin_info.vertical_pins.set(pinned_sq);
+                    }
+                }
+            }
+        }
+
+        pin_info
     }
 
     /// Get promoted piece value for SEE
@@ -1497,6 +1676,7 @@ impl Position {
 
     /// Pop the least valuable attacker from the attackers bitboard
     /// occupied parameter is used to filter out pieces that have already moved
+    #[allow(dead_code)]
     fn pop_least_valuable_attacker(
         &self,
         attackers: &mut Bitboard,
@@ -1535,6 +1715,63 @@ impl Position {
         let king_bb =
             self.board.piece_bb[color as usize][PieceType::King as usize] & *attackers & occupied;
         if let Some(sq) = king_bb.lsb() {
+            attackers.clear(sq);
+            return Some((sq, PieceType::King, Self::see_piece_type_value(PieceType::King)));
+        }
+
+        None
+    }
+
+    /// Pop the least valuable attacker considering pin constraints
+    fn pop_least_valuable_attacker_with_pins(
+        &self,
+        attackers: &mut Bitboard,
+        occupied: Bitboard,
+        color: Color,
+        to: Square,
+        pin_info: &SeePinInfo,
+    ) -> Option<(Square, PieceType, i32)> {
+        // Check pieces in order of increasing value
+        for piece_type in [
+            PieceType::Pawn,
+            PieceType::Lance,
+            PieceType::Knight,
+            PieceType::Silver,
+            PieceType::Gold,
+            PieceType::Bishop,
+            PieceType::Rook,
+        ] {
+            // Only consider pieces that are still on the board
+            let pieces =
+                self.board.piece_bb[color as usize][piece_type as usize] & *attackers & occupied;
+
+            // For each potential attacker of this type
+            let mut candidates = pieces;
+            while let Some(sq) = candidates.lsb() {
+                candidates.clear(sq);
+
+                // Check if this piece can legally move to the target square considering pins
+                if pin_info.can_move(sq, to) {
+                    attackers.clear(sq);
+
+                    // Check if piece is promoted
+                    let is_promoted = self.board.promoted_bb.test(sq);
+                    let value = if is_promoted {
+                        Self::see_promoted_piece_value(piece_type)
+                    } else {
+                        Self::see_piece_type_value(piece_type)
+                    };
+
+                    return Some((sq, piece_type, value));
+                }
+            }
+        }
+
+        // King should not normally participate in exchanges, but check anyway
+        let king_bb =
+            self.board.piece_bb[color as usize][PieceType::King as usize] & *attackers & occupied;
+        if let Some(sq) = king_bb.lsb() {
+            // Kings are never pinned
             attackers.clear(sq);
             return Some((sq, PieceType::King, Self::see_piece_type_value(PieceType::King)));
         }
@@ -2311,6 +2548,86 @@ mod tests {
         // Net: 100 - 900 + 900 = 100
         assert_eq!(pos.see(mv), 100);
         assert!(pos.see_ge(mv, 0));
+    }
+
+    #[test]
+    fn test_see_with_pinned_piece() {
+        // Test SEE with pinned pieces
+        let mut pos = Position::empty();
+
+        // Black King at 5i (file 4, rank 8)
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+
+        // Black Gold at 5e (file 4, rank 4) - will be pinned
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::Black));
+
+        // White Rook at 5a (file 4, rank 0) - pinning the Gold
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::White));
+
+        // White Pawn at 4e (file 5, rank 4) - can be captured
+        pos.board
+            .put_piece(Square::new(5, 4), Piece::new(PieceType::Pawn, Color::White));
+
+        // Black Silver at 6f (file 3, rank 5) - can capture the pawn
+        pos.board
+            .put_piece(Square::new(3, 5), Piece::new(PieceType::Silver, Color::Black));
+
+        // White King at 9a (file 0, rank 0)
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+        pos.side_to_move = Color::Black;
+
+        // The Gold cannot capture the Pawn because it's pinned
+        // Only the Silver can capture
+        let mv = Move::normal(Square::new(3, 5), Square::new(5, 4), false); // Silver takes Pawn
+
+        // Silver takes Pawn (+100)
+        assert_eq!(pos.see(mv), 100);
+    }
+
+    #[test]
+    fn test_see_with_diagonal_pin() {
+        // Test SEE with diagonally pinned piece
+        let mut pos = Position::empty();
+
+        // Black King at 5i (file 4, rank 8)
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+
+        // Black Silver at 4h (file 5, rank 7) - will be pinned diagonally
+        pos.board
+            .put_piece(Square::new(5, 7), Piece::new(PieceType::Silver, Color::Black));
+
+        // White Bishop at 1e (file 8, rank 4) - pinning the Silver
+        pos.board
+            .put_piece(Square::new(8, 4), Piece::new(PieceType::Bishop, Color::White));
+
+        // White Pawn at 3h (file 6, rank 7) - Silver cannot capture due to pin
+        pos.board
+            .put_piece(Square::new(6, 7), Piece::new(PieceType::Pawn, Color::White));
+
+        // Black Gold at 3g (file 6, rank 6) - can capture the pawn
+        pos.board
+            .put_piece(Square::new(6, 6), Piece::new(PieceType::Gold, Color::Black));
+
+        // White King at 9a (file 0, rank 0)
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+        pos.side_to_move = Color::Black;
+
+        // The Silver is pinned and cannot capture
+        // Only the Gold can capture
+        let mv = Move::normal(Square::new(6, 6), Square::new(6, 7), false); // Gold takes Pawn
+
+        // Gold takes Pawn (+100)
+        assert_eq!(pos.see(mv), 100);
     }
 
     #[test]
