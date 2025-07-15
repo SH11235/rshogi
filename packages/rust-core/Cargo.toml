@@ -43,6 +43,9 @@ lazy_static = "1.4"
 rand = "0.9"
 rand_xoshiro = "0.7"
 
+[profile.release]
+debug = true  # Enable debug symbols for profiling
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 wasm-bindgen-futures = "0.4"
@@ -58,3 +61,7 @@ harness = false
 [[bench]]
 name = "see_integration_bench"
 harness = false
+
+[[bin]]
+name = "see_flamegraph"
+path = "src/bin/see_flamegraph.rs"
