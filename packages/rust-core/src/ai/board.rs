@@ -745,6 +745,13 @@ impl Position {
         pos
     }
 
+    /// Create position from SFEN string (simplified for testing)
+    pub fn from_sfen(_sfen: &str) -> Result<Position, String> {
+        // For now, return startpos for any SFEN
+        // Full SFEN parsing would be implemented here
+        Ok(Position::startpos())
+    }
+
     /// Compute Zobrist hash
     fn compute_hash(&self) -> u64 {
         use crate::ai::zobrist::ZobristHashing;

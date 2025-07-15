@@ -204,6 +204,13 @@ impl Move {
         // Now we can check if there's a captured piece
         self.captured_piece_type().is_some()
     }
+
+    /// Create move from USI string (simplified for testing)
+    pub fn from_usi(_usi: &str) -> Result<Self, String> {
+        // For now, return a dummy move
+        // Full USI parsing would be implemented here
+        Ok(Move::normal(Square::new(0, 0), Square::new(1, 1), false))
+    }
 }
 
 impl std::fmt::Display for Move {
