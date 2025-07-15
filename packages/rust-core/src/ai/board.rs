@@ -538,7 +538,21 @@ impl Board {
     /// Find king square
     pub fn king_square(&self, color: Color) -> Option<Square> {
         let mut bb = self.piece_bb[color as usize][PieceType::King as usize];
-        bb.pop_lsb()
+        let king_sq = bb.pop_lsb();
+
+        #[cfg(debug_assertions)]
+        {
+            if king_sq.is_none() {
+                eprintln!("Warning: No king found for {color:?}");
+                eprintln!("Board state: all_bb has {} pieces", self.all_bb.count_ones());
+            }
+            // Verify there's only one king
+            if !bb.is_empty() {
+                panic!("Multiple kings found for {color:?}");
+            }
+        }
+
+        king_sq
     }
 }
 
@@ -1013,42 +1027,22 @@ impl Position {
             return attackers;
         }
 
-        // Lance can only attack along the same file
-        if by_color == Color::Black {
-            // Black lance attacks upward (toward rank 8)
-            // Use pop_lsb() to efficiently iterate through lances
-            let mut lances = lances_in_file;
-            while !lances.is_empty() {
-                let from = lances.pop_lsb().unwrap();
+        // Get potential lance attackers using pre-computed rays
+        // Note: We use the opposite color because lance_rays[color][sq] gives squares a lance can ATTACK from sq,
+        // but we want squares that can attack sq
+        let lance_ray = ATTACK_TABLES.lance_rays[by_color.opposite() as usize][sq.index()];
+        let potential_attackers = lances_in_file & lance_ray;
 
-                // Only check lances below the target square
-                if from.rank() < sq.rank() {
-                    // Check if the path is clear between lance and target
-                    let between = ATTACK_TABLES.between_bb(from, sq);
-                    if (between & occupied).is_empty() {
-                        // Path is clear, lance can attack
-                        attackers.set(from);
-                        // Continue checking - there might be another lance behind
-                    }
-                }
-            }
-        } else {
-            // White lance attacks downward (toward rank 0)
-            // Use pop_lsb() to efficiently iterate through lances
-            let mut lances = lances_in_file;
-            while !lances.is_empty() {
-                let from = lances.pop_lsb().unwrap();
+        // Check each potential attacker for blockers
+        let mut lances = potential_attackers;
+        while !lances.is_empty() {
+            let from = lances.pop_lsb().unwrap();
 
-                // Only check lances above the target square
-                if from.rank() > sq.rank() {
-                    // Check if the path is clear between lance and target
-                    let between = ATTACK_TABLES.between_bb(from, sq);
-                    if (between & occupied).is_empty() {
-                        // Path is clear, lance can attack
-                        attackers.set(from);
-                        // Continue checking - there might be another lance behind
-                    }
-                }
+            // Use pre-computed between bitboard
+            let between = ATTACK_TABLES.between_bb(from, sq);
+            if (between & occupied).is_empty() {
+                // Path is clear, lance can attack
+                attackers.set(from);
             }
         }
 
