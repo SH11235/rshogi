@@ -526,6 +526,11 @@ impl EnhancedSearcher {
 
         false
     }
+
+    /// Get node count for testing
+    pub fn nodes(&self) -> u64 {
+        self.nodes.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
