@@ -67,6 +67,24 @@ pub struct AttackTables {
 
     /// Pawn attacks from each square
     pub pawn_attacks: [[Bitboard; 81]; 2], // [color][square]
+
+    /// File masks for quick file operations
+    pub file_masks: [Bitboard; 9],
+
+    /// Rank masks for quick rank operations
+    pub rank_masks: [Bitboard; 9],
+
+    /// Bitboard of squares between two squares (exclusive)
+    /// between_bb[sq1][sq2] gives the squares between sq1 and sq2
+    pub between_bb: [[Bitboard; 81]; 81],
+
+    /// Ray attacks from each square in each direction (without blockers)
+    /// ray_bb[sq][dir] gives all squares in direction dir from sq
+    pub ray_bb: [[Bitboard; 8]; 81], // 8 directions per square
+
+    /// Lance-specific ray attacks for optimization
+    /// lance_rays[color][sq] gives all squares a lance can attack from sq
+    pub lance_rays: [[Bitboard; 81]; 2], // [color][square]
 }
 
 impl Default for AttackTables {
@@ -85,7 +103,29 @@ impl AttackTables {
             knight_attacks: [[Bitboard::EMPTY; 81]; 2],
             lance_attacks: [[Bitboard::EMPTY; 81]; 2],
             pawn_attacks: [[Bitboard::EMPTY; 81]; 2],
+            file_masks: [Bitboard::EMPTY; 9],
+            rank_masks: [Bitboard::EMPTY; 9],
+            between_bb: [[Bitboard::EMPTY; 81]; 81],
+            ray_bb: [[Bitboard::EMPTY; 8]; 81],
+            lance_rays: [[Bitboard::EMPTY; 81]; 2],
         };
+
+        // Generate file and rank masks
+        for file in 0..9 {
+            let mut file_mask = Bitboard::EMPTY;
+            for rank in 0..9 {
+                file_mask.set(Square::new(file, rank));
+            }
+            tables.file_masks[file as usize] = file_mask;
+        }
+
+        for rank in 0..9 {
+            let mut rank_mask = Bitboard::EMPTY;
+            for file in 0..9 {
+                rank_mask.set(Square::new(file, rank));
+            }
+            tables.rank_masks[rank as usize] = rank_mask;
+        }
 
         // Generate tables for each square
         for sq in 0..81 {
@@ -104,6 +144,23 @@ impl AttackTables {
                     tables.generate_lance_attacks(square, color);
                 tables.pawn_attacks[color_idx][sq as usize] =
                     tables.generate_pawn_attacks(square, color);
+
+                // Generate lance rays (full ray without blockers)
+                tables.lance_rays[color_idx][sq as usize] =
+                    tables.generate_lance_attacks(square, color);
+            }
+
+            // Generate ray attacks for all directions
+            for (dir_idx, &dir) in Direction::ALL.iter().enumerate() {
+                tables.ray_bb[sq as usize][dir_idx] = tables.generate_ray_attacks(square, dir);
+            }
+        }
+
+        // Generate between bitboards
+        for sq1 in 0..81 {
+            for sq2 in 0..81 {
+                tables.between_bb[sq1][sq2] =
+                    tables.generate_between_bb(Square(sq1 as u8), Square(sq2 as u8));
             }
         }
 
@@ -388,8 +445,55 @@ impl AttackTables {
         attacks
     }
 
-    /// Get bitboard of squares between two squares (exclusive)
+    /// Get file mask for a given file
+    #[inline]
+    pub fn file_mask(&self, file: u8) -> Bitboard {
+        self.file_masks[file as usize]
+    }
+
+    /// Get rank mask for a given rank
+    #[inline]
+    pub fn rank_mask(&self, rank: u8) -> Bitboard {
+        self.rank_masks[rank as usize]
+    }
+
+    /// Get bitboard of squares between two squares (exclusive) - uses pre-computed table
+    #[inline]
     pub fn between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
+        self.between_bb[sq1.index()][sq2.index()]
+    }
+
+    /// Generate ray attacks from a square in a given direction (for initialization)
+    fn generate_ray_attacks(&self, from: Square, dir: Direction) -> Bitboard {
+        let mut attacks = Bitboard::EMPTY;
+        let file = from.file() as i8;
+        let rank = from.rank() as i8;
+
+        let (file_delta, rank_delta) = match dir {
+            Direction::North => (0, -1),
+            Direction::NorthEast => (1, -1),
+            Direction::East => (1, 0),
+            Direction::SouthEast => (1, 1),
+            Direction::South => (0, 1),
+            Direction::SouthWest => (-1, 1),
+            Direction::West => (-1, 0),
+            Direction::NorthWest => (-1, -1),
+        };
+
+        let mut f = file + file_delta;
+        let mut r = rank + rank_delta;
+
+        while (0..9).contains(&f) && (0..9).contains(&r) {
+            attacks.set(Square::new(f as u8, r as u8));
+            f += file_delta;
+            r += rank_delta;
+        }
+
+        attacks
+    }
+
+    /// Generate bitboard of squares between two squares (for initialization)
+    fn generate_between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
         let file1 = sq1.file() as i8;
         let rank1 = sq1.rank() as i8;
         let file2 = sq2.file() as i8;

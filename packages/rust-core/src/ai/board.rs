@@ -518,10 +518,41 @@ impl Board {
         self.squares[sq.index()]
     }
 
+    /// Rebuild occupancy bitboards from piece bitboards
+    /// This is useful after manual bitboard manipulation (e.g., in tests)
+    pub fn rebuild_occupancy_bitboards(&mut self) {
+        // Clear existing occupancy bitboards
+        self.all_bb = Bitboard::EMPTY;
+        self.occupied_bb[0] = Bitboard::EMPTY;
+        self.occupied_bb[1] = Bitboard::EMPTY;
+
+        // Rebuild from piece bitboards
+        for color in 0..2 {
+            for piece_type in 0..8 {
+                self.occupied_bb[color] |= self.piece_bb[color][piece_type];
+            }
+            self.all_bb |= self.occupied_bb[color];
+        }
+    }
+
     /// Find king square
     pub fn king_square(&self, color: Color) -> Option<Square> {
         let mut bb = self.piece_bb[color as usize][PieceType::King as usize];
-        bb.pop_lsb()
+        let king_sq = bb.pop_lsb();
+
+        #[cfg(debug_assertions)]
+        {
+            if king_sq.is_none() {
+                eprintln!("Warning: No king found for {color:?}");
+                eprintln!("Board state: all_bb has {} pieces", self.all_bb.count_ones());
+            }
+            // Verify there's only one king
+            if !bb.is_empty() {
+                panic!("Multiple kings found for {color:?}");
+            }
+        }
+
+        king_sq
     }
 }
 
@@ -890,9 +921,250 @@ impl Position {
             return true;
         }
 
-        // TODO: Lance attacks need special handling
+        // Lance attacks
+        let lance_bb = self.board.piece_bb[by_color as usize][PieceType::Lance as usize]
+            & !self.board.promoted_bb;
+        let lance_attackers = self.get_lance_attackers_to(sq, by_color, lance_bb, occupied);
+        if !lance_attackers.is_empty() {
+            return true;
+        }
 
         false
+    }
+
+    /// Get all pieces of a given color attacking a square
+    /// Returns a bitboard with all attacking pieces
+    pub fn get_attackers_to(&self, sq: Square, by_color: Color) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+        let mut attackers = Bitboard::EMPTY;
+
+        // Check pawn attacks
+        let pawn_bb = self.board.piece_bb[by_color as usize][PieceType::Pawn as usize];
+        let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
+        attackers |= pawn_bb & pawn_attacks;
+
+        // Check knight attacks
+        let knight_bb = self.board.piece_bb[by_color as usize][PieceType::Knight as usize];
+        let knight_attacks = ATTACK_TABLES.knight_attacks(sq, by_color.opposite());
+        attackers |= knight_bb & knight_attacks;
+
+        // Check king attacks
+        let king_bb = self.board.piece_bb[by_color as usize][PieceType::King as usize];
+        let king_attacks = ATTACK_TABLES.king_attacks(sq);
+        attackers |= king_bb & king_attacks;
+
+        // Check gold attacks (including promoted pieces that move like gold)
+        let gold_bb = self.board.piece_bb[by_color as usize][PieceType::Gold as usize];
+        let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
+        attackers |= gold_bb & gold_attacks;
+
+        // Check promoted pawns, lances, knights, and silvers (they move like gold)
+        let promoted_bb = self.board.promoted_bb;
+        let tokin_bb = pawn_bb & promoted_bb;
+        let promoted_lance_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Lance as usize] & promoted_bb;
+        let promoted_knight_bb = knight_bb & promoted_bb;
+        let promoted_silver_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Silver as usize] & promoted_bb;
+        attackers |=
+            (tokin_bb | promoted_lance_bb | promoted_knight_bb | promoted_silver_bb) & gold_attacks;
+
+        // Check silver attacks (unpromoted only)
+        let silver_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Silver as usize] & !promoted_bb;
+        let silver_attacks = ATTACK_TABLES.silver_attacks(sq, by_color.opposite());
+        attackers |= silver_bb & silver_attacks;
+
+        // Check sliding pieces (rook, bishop, lance)
+        let occupied = self.board.all_bb;
+
+        // Rook attacks (including dragon)
+        let rook_bb = self.board.piece_bb[by_color as usize][PieceType::Rook as usize];
+        let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        attackers |= rook_bb & rook_attacks;
+
+        // Dragon (promoted rook) also has king moves
+        let dragon_bb = rook_bb & promoted_bb;
+        attackers |= dragon_bb & king_attacks;
+
+        // Bishop attacks (including horse)
+        let bishop_bb = self.board.piece_bb[by_color as usize][PieceType::Bishop as usize];
+        let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+        attackers |= bishop_bb & bishop_attacks;
+
+        // Horse (promoted bishop) also has king moves
+        let horse_bb = bishop_bb & promoted_bb;
+        attackers |= horse_bb & king_attacks;
+
+        // Lance attacks (only unpromoted, as promoted lance moves like gold)
+        let lance_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Lance as usize] & !promoted_bb;
+
+        // Use attack tables for efficient lance detection
+        attackers |= self.get_lance_attackers_to(sq, by_color, lance_bb, occupied);
+
+        attackers
+    }
+
+    /// Get lance attackers to a square using optimized bitboard operations
+    fn get_lance_attackers_to(
+        &self,
+        sq: Square,
+        by_color: Color,
+        lance_bb: Bitboard,
+        occupied: Bitboard,
+    ) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        let mut attackers = Bitboard::EMPTY;
+        let file = sq.file();
+
+        // Get all lances in the same file
+        let file_mask = ATTACK_TABLES.file_masks[file as usize];
+        let lances_in_file = lance_bb & file_mask;
+
+        if lances_in_file.is_empty() {
+            return attackers;
+        }
+
+        // Get potential lance attackers using pre-computed rays
+        // Note: We use the opposite color because lance_rays[color][sq] gives squares a lance can ATTACK from sq,
+        // but we want squares that can attack sq
+        let lance_ray = ATTACK_TABLES.lance_rays[by_color.opposite() as usize][sq.index()];
+        let potential_attackers = lances_in_file & lance_ray;
+
+        // Check each potential attacker for blockers
+        let mut lances = potential_attackers;
+        while !lances.is_empty() {
+            let from = lances.pop_lsb().unwrap();
+
+            // Use pre-computed between bitboard
+            let between = ATTACK_TABLES.between_bb(from, sq);
+            if (between & occupied).is_empty() {
+                // Path is clear, lance can attack
+                attackers.set(from);
+            }
+        }
+
+        attackers
+    }
+
+    /// Get blockers for king (simplified version)
+    /// Returns a bitboard of pieces that are pinned to the king
+    pub fn get_blockers_for_king(&self, king_color: Color) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        let king_bb = self.board.piece_bb[king_color as usize][PieceType::King as usize];
+        let king_sq = match king_bb.lsb() {
+            Some(sq) => sq,
+            None => {
+                // This should never happen in a valid position
+                log::error!(
+                    "King not found for color {king_color:?} in get_blockers_for_king - data inconsistency"
+                );
+                return Bitboard::EMPTY;
+            }
+        };
+
+        let enemy_color = king_color.opposite();
+        let occupied = self.board.all_bb;
+        let mut blockers = Bitboard::EMPTY;
+
+        // Check for pins by sliding pieces (rook, bishop, lance)
+
+        // Rook and Dragon pins (horizontal and vertical)
+        let enemy_rooks = self.board.piece_bb[enemy_color as usize][PieceType::Rook as usize];
+        let _rook_attacks = ATTACK_TABLES.sliding_attacks(king_sq, occupied, PieceType::Rook);
+        let rook_xray = ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Rook);
+
+        // Find pieces between king and enemy rooks
+        let potential_rook_pinners = enemy_rooks & rook_xray;
+        let mut pinners_bb = potential_rook_pinners;
+        while let Some(pinner_sq) = pinners_bb.pop_lsb() {
+            // Check if there's exactly one piece between king and pinner
+            let between = self.get_between_bb(king_sq, pinner_sq) & occupied;
+            if between.count_ones() == 1 {
+                blockers |= between;
+            }
+        }
+
+        // Bishop and Horse pins (diagonal)
+        let enemy_bishops = self.board.piece_bb[enemy_color as usize][PieceType::Bishop as usize];
+        let _bishop_attacks = ATTACK_TABLES.sliding_attacks(king_sq, occupied, PieceType::Bishop);
+        let bishop_xray =
+            ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Bishop);
+
+        // Find pieces between king and enemy bishops
+        let potential_bishop_pinners = enemy_bishops & bishop_xray;
+        let mut pinners_bb = potential_bishop_pinners;
+        while let Some(pinner_sq) = pinners_bb.pop_lsb() {
+            // Check if there's exactly one piece between king and pinner
+            let between = self.get_between_bb(king_sq, pinner_sq) & occupied;
+            if between.count_ones() == 1 {
+                blockers |= between;
+            }
+        }
+
+        // Lance pins (vertical only)
+        let enemy_lances = self.board.piece_bb[enemy_color as usize][PieceType::Lance as usize]
+            & !self.board.promoted_bb;
+
+        // Use file mask to get lances in the same file
+        let file_mask = ATTACK_TABLES.file_mask(king_sq.file());
+        let lances_in_file = enemy_lances & file_mask;
+
+        if !lances_in_file.is_empty() {
+            // Get the ray from king in the direction of enemy lance attacks
+            let lance_ray = if enemy_color == Color::Black {
+                // Black lance attacks from below (higher ranks)
+                ATTACK_TABLES.lance_rays[Color::White as usize][king_sq.index()]
+            } else {
+                // White lance attacks from above (lower ranks)
+                ATTACK_TABLES.lance_rays[Color::Black as usize][king_sq.index()]
+            };
+
+            // Find the closest lance that can attack the king
+            let potential_pinners = lances_in_file & lance_ray;
+            if let Some(lance_sq) = potential_pinners.lsb() {
+                // Use pre-computed between bitboard
+                let between = ATTACK_TABLES.between_bb(king_sq, lance_sq) & occupied;
+                if between.count_ones() == 1 {
+                    blockers |= between;
+                }
+            }
+        }
+
+        blockers
+    }
+
+    /// Get bitboard of squares between two squares (exclusive)
+    fn get_between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
+        let mut between = Bitboard::EMPTY;
+
+        let file1 = sq1.file() as i8;
+        let rank1 = sq1.rank() as i8;
+        let file2 = sq2.file() as i8;
+        let rank2 = sq2.rank() as i8;
+
+        let file_diff = file2 - file1;
+        let rank_diff = rank2 - rank1;
+
+        // Check if squares are aligned
+        if file_diff == 0 || rank_diff == 0 || file_diff.abs() == rank_diff.abs() {
+            let file_step = file_diff.signum();
+            let rank_step = rank_diff.signum();
+
+            let mut file = file1 + file_step;
+            let mut rank = rank1 + rank_step;
+
+            while file != file2 || rank != rank2 {
+                between.set(Square::new(file as u8, rank as u8));
+                file += file_step;
+                rank += rank_step;
+            }
+        }
+
+        between
     }
 
     /// Undo a move on the position
@@ -1719,5 +1991,149 @@ mod tests {
             let square = Square(sq);
             assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
         }
+    }
+
+    #[test]
+    fn test_is_attacked_with_lance() {
+        // Test is_attacked method with lance attacks
+        let mut pos = Position::empty();
+
+        // Black lance at 5i (file 4, rank 8)
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::Lance, Color::Black));
+
+        // White lance at 5a (file 4, rank 0)
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::Lance, Color::White));
+
+        // Add kings to make position valid
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Black lance at rank 8 cannot attack backward (toward rank 9)
+        // Black lance attacks are toward rank 0-7 only
+        assert!(!pos.is_attacked(Square::new(4, 7), Color::Black)); // Black lance at rank 8 cannot attack rank 7
+        assert!(!pos.is_attacked(Square::new(4, 6), Color::Black));
+        assert!(!pos.is_attacked(Square::new(3, 7), Color::Black)); // Different file
+
+        // White lance at rank 0 cannot attack backward (toward rank -1)
+        // White lance attacks are toward rank 1-8 only
+        assert!(!pos.is_attacked(Square::new(4, 1), Color::White)); // White lance at rank 0 cannot attack rank 1
+        assert!(!pos.is_attacked(Square::new(4, 2), Color::White));
+
+        // Move lances to positions where they can attack
+        pos.board.remove_piece(Square::new(4, 8));
+        pos.board.remove_piece(Square::new(4, 0));
+        pos.board
+            .put_piece(Square::new(4, 2), Piece::new(PieceType::Lance, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::White));
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Now test actual attacks
+        // Black lance at rank 2 attacks toward rank 8
+        assert!(pos.is_attacked(Square::new(4, 3), Color::Black));
+        assert!(pos.is_attacked(Square::new(4, 4), Color::Black));
+        assert!(pos.is_attacked(Square::new(4, 5), Color::Black));
+
+        // White lance at rank 6 attacks toward rank 0
+        assert!(pos.is_attacked(Square::new(4, 5), Color::White));
+        assert!(pos.is_attacked(Square::new(4, 4), Color::White));
+        assert!(pos.is_attacked(Square::new(4, 3), Color::White));
+
+        // Test with blocker
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board.rebuild_occupancy_bitboards();
+
+        // is_attacked() now correctly considers blockers for lance attacks
+        // because it uses get_lance_attackers_to() internally
+
+        // is_attacked() now correctly considers blockers for lance attacks
+        // because it uses get_lance_attackers_to() internally
+
+        // Black lance at rank 2 is blocked by pawn at rank 4
+        assert!(pos.is_attacked(Square::new(4, 3), Color::Black)); // Lance can attack rank 3
+        assert!(pos.is_attacked(Square::new(4, 4), Color::Black)); // Lance can attack blocker
+
+        // Note: Square(4, 5) is attacked by the Black pawn at rank 4, not the lance!
+        assert!(pos.is_attacked(Square::new(4, 5), Color::Black)); // Attacked by pawn at rank 4
+
+        // Lance cannot attack beyond the blocker
+        assert!(!pos.is_attacked(Square::new(4, 6), Color::Black)); // Lance blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::new(4, 7), Color::Black)); // Lance blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::new(4, 8), Color::Black)); // Lance blocked by pawn at rank 4
+
+        // White lance at rank 6 is blocked by pawn at rank 4
+        assert!(pos.is_attacked(Square::new(4, 5), Color::White)); // Can attack rank 5
+        assert!(!pos.is_attacked(Square::new(4, 3), Color::White)); // Blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::new(4, 1), Color::White)); // Blocked by pawn at rank 4
+    }
+
+    #[test]
+    fn test_get_lance_attackers_performance() {
+        // Skip test in CI environment
+        if std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping performance test in CI environment");
+            return;
+        }
+
+        use std::time::Instant;
+
+        // Create a position with multiple lances
+        let mut pos = Position::empty();
+
+        // Add multiple lances on the same file to test worst case
+        for rank in 0..9 {
+            if rank % 3 == 0 {
+                pos.board
+                    .put_piece(Square::new(4, rank), Piece::new(PieceType::Lance, Color::Black));
+            }
+        }
+
+        // Add some blockers
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Pawn, Color::White));
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Performance test: Call get_lance_attackers_to many times
+        let iterations = 100_000;
+        let target = Square::new(4, 7);
+        let lance_bb = pos.board.piece_bb[Color::Black as usize][PieceType::Lance as usize];
+        let occupied = pos.board.all_bb;
+
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let attackers = pos.get_lance_attackers_to(target, Color::Black, lance_bb, occupied);
+            // Force evaluation to prevent optimization
+            std::hint::black_box(attackers);
+        }
+        let elapsed = start.elapsed();
+
+        // Calculate performance metrics
+        let ns_per_call = elapsed.as_nanos() / iterations as u128;
+        let calls_per_sec = 1_000_000_000 / ns_per_call;
+
+        println!("Lance attackers performance:");
+        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Calls per second: {}", calls_per_sec);
+
+        // Assert reasonable performance
+        // Note: Debug builds are much slower than release builds
+        #[cfg(debug_assertions)]
+        let max_ns = 500; // Allow up to 500ns in debug mode
+        #[cfg(not(debug_assertions))]
+        let max_ns = 100; // Expect under 100ns in release mode
+
+        assert!(
+            ns_per_call < max_ns,
+            "get_lance_attackers_to is too slow: {} ns (max: {} ns)",
+            ns_per_call,
+            max_ns
+        );
     }
 }
