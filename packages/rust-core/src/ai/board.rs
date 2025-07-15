@@ -992,12 +992,7 @@ impl Position {
         attackers
     }
 
-    /// Get lance attackers to a square using attack tables
-    ///
-    /// TODO: Performance optimization opportunities:
-    /// - Use occupied.pop_lsb() to find first lance in file
-    /// - Pre-compute rook-like attackers & lance_bb intersection
-    /// - Cache file-based lance positions for repeated queries
+    /// Get lance attackers to a square using optimized bitboard operations
     fn get_lance_attackers_to(
         &self,
         sq: Square,
@@ -1010,38 +1005,49 @@ impl Position {
         let mut attackers = Bitboard::EMPTY;
         let file = sq.file();
 
+        // Get all lances in the same file
+        let file_mask = ATTACK_TABLES.file_masks[file as usize];
+        let lances_in_file = lance_bb & file_mask;
+
+        if lances_in_file.is_empty() {
+            return attackers;
+        }
+
         // Lance can only attack along the same file
         if by_color == Color::Black {
-            // Black lance attacks upward (toward rank 8, from lower rank numbers)
-            // Check squares from rank 0 up to the target square
-            for rank in 0..sq.rank() {
-                let from = Square::new(file, rank);
+            // Black lance attacks upward (toward rank 8)
+            // Use pop_lsb() to efficiently iterate through lances
+            let mut lances = lances_in_file;
+            while !lances.is_empty() {
+                let from = lances.pop_lsb().unwrap();
 
-                // Check if there's a lance at this position
-                if lance_bb.test(from) {
+                // Only check lances below the target square
+                if from.rank() < sq.rank() {
                     // Check if the path is clear between lance and target
                     let between = ATTACK_TABLES.between_bb(from, sq);
                     if (between & occupied).is_empty() {
                         // Path is clear, lance can attack
                         attackers.set(from);
+                        // Continue checking - there might be another lance behind
                     }
-                    // Don't break - there might be another lance behind
                 }
             }
         } else {
-            // White lance attacks downward (toward rank 0, from higher rank numbers)
-            // Check squares from rank 8 down to the target square
-            for rank in ((sq.rank() + 1)..9).rev() {
-                let from = Square::new(file, rank);
+            // White lance attacks downward (toward rank 0)
+            // Use pop_lsb() to efficiently iterate through lances
+            let mut lances = lances_in_file;
+            while !lances.is_empty() {
+                let from = lances.pop_lsb().unwrap();
 
-                if lance_bb.test(from) {
+                // Only check lances above the target square
+                if from.rank() > sq.rank() {
                     // Check if the path is clear between lance and target
                     let between = ATTACK_TABLES.between_bb(from, sq);
                     if (between & occupied).is_empty() {
                         // Path is clear, lance can attack
                         attackers.set(from);
+                        // Continue checking - there might be another lance behind
                     }
-                    // Don't break - there might be another lance behind
                 }
             }
         }
@@ -2095,5 +2101,68 @@ mod tests {
         assert!(pos.is_attacked(Square::new(4, 5), Color::White)); // Can attack rank 5
         assert!(!pos.is_attacked(Square::new(4, 3), Color::White)); // Blocked by pawn at rank 4
         assert!(!pos.is_attacked(Square::new(4, 1), Color::White)); // Blocked by pawn at rank 4
+    }
+
+    #[test]
+    fn test_get_lance_attackers_performance() {
+        // Skip test in CI environment
+        if std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping performance test in CI environment");
+            return;
+        }
+
+        use std::time::Instant;
+
+        // Create a position with multiple lances
+        let mut pos = Position::empty();
+
+        // Add multiple lances on the same file to test worst case
+        for rank in 0..9 {
+            if rank % 3 == 0 {
+                pos.board
+                    .put_piece(Square::new(4, rank), Piece::new(PieceType::Lance, Color::Black));
+            }
+        }
+
+        // Add some blockers
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Pawn, Color::White));
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Performance test: Call get_lance_attackers_to many times
+        let iterations = 100_000;
+        let target = Square::new(4, 7);
+        let lance_bb = pos.board.piece_bb[Color::Black as usize][PieceType::Lance as usize];
+        let occupied = pos.board.all_bb;
+
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let attackers = pos.get_lance_attackers_to(target, Color::Black, lance_bb, occupied);
+            // Force evaluation to prevent optimization
+            std::hint::black_box(attackers);
+        }
+        let elapsed = start.elapsed();
+
+        // Calculate performance metrics
+        let ns_per_call = elapsed.as_nanos() / iterations as u128;
+        let calls_per_sec = 1_000_000_000 / ns_per_call;
+
+        println!("Lance attackers performance:");
+        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Calls per second: {}", calls_per_sec);
+
+        // Assert reasonable performance
+        // Note: Debug builds are much slower than release builds
+        #[cfg(debug_assertions)]
+        let max_ns = 500; // Allow up to 500ns in debug mode
+        #[cfg(not(debug_assertions))]
+        let max_ns = 100; // Expect under 100ns in release mode
+
+        assert!(
+            ns_per_call < max_ns,
+            "get_lance_attackers_to is too slow: {} ns (max: {} ns)",
+            ns_per_call,
+            max_ns
+        );
     }
 }
