@@ -616,22 +616,20 @@ impl MovePicker {
 impl Position {
     /// Check if the current player has a pawn in the given file
     fn has_pawn_in_file(&self, file: u8) -> bool {
-        let color = self.side_to_move;
-        let pawn_bb = self.board.piece_bb[color as usize][PieceType::Pawn as usize];
+        self.has_pawn_in_file_for_color(file, self.side_to_move)
+    }
 
-        // Check each square in the file
-        for rank in 0..9 {
-            let sq = Square::new(file, rank);
-            if pawn_bb.test(sq) {
-                // Check if it's not a promoted pawn
-                if let Some(piece) = self.board.piece_on(sq) {
-                    if piece.piece_type == PieceType::Pawn && !piece.promoted {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+    /// Check if the specified color has a pawn in the given file
+    fn has_pawn_in_file_for_color(&self, file: u8, color: Color) -> bool {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        let pawn_bb = self.board.piece_bb[color as usize][PieceType::Pawn as usize];
+        let file_mask = ATTACK_TABLES.file_mask(file);
+
+        // Get unpromoted pawns in this file
+        let unpromoted_pawns_in_file = pawn_bb & file_mask & !self.board.promoted_bb;
+
+        !unpromoted_pawns_in_file.is_empty()
     }
 
     /// Check if dropping a pawn would result in checkmate
@@ -672,24 +670,28 @@ impl Position {
             return false; // Pawn doesn't give check
         }
 
-        // Step 1: Check if the pawn has support (can't be captured by king)
-        if !self.is_attacked(pawn_sq, self.side_to_move) {
+        // Step 1: Simulate pawn drop to check support and captures in the actual position
+        let mut test_pos = self.clone();
+        test_pos.do_move(pawn_drop);
+
+        // Check if the pawn has support (can't be captured by king)
+        if !test_pos.is_attacked(pawn_sq, self.side_to_move) {
             return false; // The pawn has no followers, king can capture it
         }
 
         // Step 2: Check if opponent's pieces (except king/lance/pawn) can capture the pawn
-        let capture_candidates = self.get_attackers_to(pawn_sq, defense_color);
+        let capture_candidates = test_pos.get_attackers_to(pawn_sq, defense_color);
 
         // Exclude king, lance, and pawn from capture candidates
-        let king_bb = self.board.piece_bb[defense_color as usize][PieceType::King as usize];
-        let lance_bb = self.board.piece_bb[defense_color as usize][PieceType::Lance as usize];
-        let pawn_bb = self.board.piece_bb[defense_color as usize][PieceType::Pawn as usize];
+        let king_bb = test_pos.board.piece_bb[defense_color as usize][PieceType::King as usize];
+        let lance_bb = test_pos.board.piece_bb[defense_color as usize][PieceType::Lance as usize];
+        let pawn_bb = test_pos.board.piece_bb[defense_color as usize][PieceType::Pawn as usize];
         let excluded = king_bb | lance_bb | pawn_bb;
 
         let valid_capture_candidates = capture_candidates & !excluded;
 
         // Check for pinned pieces
-        let pinned = self.get_blockers_for_king(defense_color);
+        let pinned = test_pos.get_blockers_for_king(defense_color);
         let pawn_file_mask = Bitboard::file_mask(pawn_sq.file());
         let not_pinned_for_capture = !pinned | pawn_file_mask;
 
@@ -710,10 +712,6 @@ impl Position {
         let mut pawn_sq_bb = Bitboard::EMPTY;
         pawn_sq_bb.set(pawn_sq);
         king_escape_candidates &= !pawn_sq_bb;
-
-        // Simulate pawn drop for checking escapes
-        let mut test_pos = self.clone();
-        test_pos.do_move(pawn_drop);
 
         // Check each escape square
         let mut candidates = king_escape_candidates;
@@ -1333,5 +1331,355 @@ mod tests {
         // This test case is invalid. Let's accept it passes trivially.
         let is_legal = pos.is_legal_move(checkmate_drop);
         assert!(is_legal, "This is not actually checkmate, so move should be legal");
+    }
+
+    #[test]
+    fn test_uchifuzume_diagonal_escape() {
+        // Test case where king can escape diagonally
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+        pos.side_to_move = Color::Black;
+
+        // White king at 5e (file 4, rank 4)
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::White));
+
+        // Black pieces blocking some escapes but not diagonals
+        pos.board
+            .put_piece(Square::new(4, 3), Piece::new(PieceType::Gold, Color::Black)); // 5d
+        pos.board
+            .put_piece(Square::new(3, 4), Piece::new(PieceType::Gold, Color::Black)); // 6e
+        pos.board
+            .put_piece(Square::new(5, 4), Piece::new(PieceType::Gold, Color::Black)); // 4e
+
+        // Black gold supporting the pawn drop
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Gold, Color::Black)); // 5g
+
+        // Black king
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+
+        // Give black a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1;
+
+        // Rebuild occupancy bitboards
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Try to drop pawn at 5f (file 4, rank 5) - gives check
+        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(4, 5));
+
+        // This should be legal because king can escape diagonally to 6d, 6f, 4d, or 4f
+        let is_legal = pos.is_legal_move(pawn_drop);
+        assert!(is_legal, "Should allow pawn drop when king can escape diagonally");
+    }
+
+    #[test]
+    fn test_uchifuzume_white_side() {
+        // Test checkmate by pawn drop for White side (symmetry test)
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+        pos.side_to_move = Color::White;
+
+        // Black king at 5i (file 4, rank 8)
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+
+        // White gold pieces blocking escape
+        pos.board
+            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::White)); // 6i
+        pos.board
+            .put_piece(Square::new(5, 8), Piece::new(PieceType::Gold, Color::White)); // 4i
+
+        // White golds protecting each other
+        pos.board
+            .put_piece(Square::new(3, 7), Piece::new(PieceType::Gold, Color::White)); // 6h
+        pos.board
+            .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::White)); // 4h
+
+        // White lance supporting pawn
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::White)); // 5g
+
+        // White king
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        // Give white a pawn in hand
+        pos.hands[Color::White as usize][6] = 1;
+
+        // Rebuild occupancy bitboards
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Try to drop pawn at 5h (file 4, rank 7) - this would be checkmate
+        let checkmate_drop = Move::drop(PieceType::Pawn, Square::new(4, 7));
+
+        // This should be illegal (uchifuzume)
+        let is_legal = pos.is_legal_move(checkmate_drop);
+        assert!(!is_legal, "Should not allow checkmate by pawn drop for White");
+    }
+
+    #[test]
+    fn test_uchifuzume_no_support_but_king_cannot_capture() {
+        // Test case where pawn has no support but king cannot capture due to another attacker
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+        pos.side_to_move = Color::Black;
+
+        // White king at 5a (file 4, rank 0)
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+
+        // Black bishop at 1e (file 8, rank 4) - controls diagonal including 5a
+        pos.board
+            .put_piece(Square::new(8, 4), Piece::new(PieceType::Bishop, Color::Black));
+
+        // Some blocking pieces to prevent other escapes
+        pos.board
+            .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::Black)); // 6a
+        pos.board
+            .put_piece(Square::new(5, 0), Piece::new(PieceType::Gold, Color::Black)); // 4a
+
+        // Black king
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+
+        // Give black a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1;
+
+        // Rebuild occupancy bitboards
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Try to drop pawn at 5b (file 4, rank 1)
+        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(4, 1));
+
+        // The pawn has no direct support, but king cannot capture it because
+        // that would put the king in check from the bishop
+        // This should still be legal because it's not checkmate (not all conditions met)
+        let is_legal = pos.is_legal_move(pawn_drop);
+        assert!(is_legal, "Should allow pawn drop even without support if king cannot capture due to other threats");
+    }
+
+    #[test]
+    fn test_uchifuzume_double_check() {
+        // Test case where pawn drop creates double check
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+        pos.side_to_move = Color::Black;
+
+        // White king at 5e (file 4, rank 4)
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::White));
+
+        // Black rook at 5a (file 4, rank 0) - will give check when pawn moves
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::Black));
+
+        // Black bishop at 1a (file 8, rank 0) - diagonal check
+        pos.board
+            .put_piece(Square::new(8, 0), Piece::new(PieceType::Bishop, Color::Black));
+
+        // Black gold supporting the pawn
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Gold, Color::Black)); // 5g
+
+        // Black king
+        pos.board
+            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
+
+        // Give black a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1;
+
+        // Rebuild occupancy bitboards
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Try to drop pawn at 5f (file 4, rank 5) - creates double check
+        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(4, 5));
+
+        // Even with double check, if king has escape squares, it's not checkmate
+        let is_legal = pos.is_legal_move(pawn_drop);
+        // The king can potentially escape to various squares, so this should be legal
+        assert!(
+            is_legal,
+            "Should allow pawn drop even if it creates double check when king has escapes"
+        );
+    }
+
+    #[test]
+    fn test_nifu_with_promoted_pawn() {
+        // Test that promoted pawn doesn't count for nifu (double pawn)
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+        pos.side_to_move = Color::Black;
+
+        // Place a promoted black pawn on file 5 (index 4)
+        let sq = Square::new(4, 5); // 5f
+        pos.board.put_piece(
+            sq,
+            Piece {
+                piece_type: PieceType::Pawn,
+                color: Color::Black,
+                promoted: true,
+            },
+        );
+        pos.board.promoted_bb.set(sq); // Mark as promoted
+
+        // Black king
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+        // White king
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        // Give black a pawn in hand
+        pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
+
+        // Rebuild occupancy bitboards
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Try to drop a pawn in the same file - should be legal because existing pawn is promoted
+        let legal_drop = Move::drop(PieceType::Pawn, Square::new(4, 3)); // 5d
+        assert!(
+            pos.is_legal_move(legal_drop),
+            "Should allow pawn drop when only promoted pawn exists in file"
+        );
+    }
+
+    #[test]
+    fn test_pawn_drop_last_rank_restrictions() {
+        // Test that pawns cannot be dropped on the last rank
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+
+        // Black king
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+        // White king
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        // Test Black pawn drop on rank 0 (last rank for Black)
+        pos.side_to_move = Color::Black;
+        pos.hands[Color::Black as usize][6] = 1;
+        pos.board.rebuild_occupancy_bitboards();
+
+        let illegal_drop = Move::drop(PieceType::Pawn, Square::new(4, 0)); // 5a
+        assert!(
+            !pos.is_legal_move(illegal_drop),
+            "Black should not be able to drop pawn on rank 0"
+        );
+
+        // Test White pawn drop on rank 8 (last rank for White)
+        pos.side_to_move = Color::White;
+        pos.hands[Color::Black as usize][6] = 0; // Remove Black's pawn
+        pos.hands[Color::White as usize][6] = 1;
+
+        let illegal_drop = Move::drop(PieceType::Pawn, Square::new(4, 8)); // 5i
+        assert!(
+            !pos.is_legal_move(illegal_drop),
+            "White should not be able to drop pawn on rank 8"
+        );
+    }
+
+    #[test]
+    fn test_lance_drop_last_rank_restrictions() {
+        // Test that lances cannot be dropped on the last rank
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+
+        // Black king
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+        // White king
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        // Test Black lance drop on rank 0 (last rank for Black)
+        pos.side_to_move = Color::Black;
+        pos.hands[Color::Black as usize][5] = 1; // Lance is index 5
+        pos.board.rebuild_occupancy_bitboards();
+
+        let illegal_drop = Move::drop(PieceType::Lance, Square::new(4, 0)); // 5a
+        assert!(
+            !pos.is_legal_move(illegal_drop),
+            "Black should not be able to drop lance on rank 0"
+        );
+
+        // Test White lance drop on rank 8 (last rank for White)
+        pos.side_to_move = Color::White;
+        pos.hands[Color::Black as usize][5] = 0; // Remove Black's lance
+        pos.hands[Color::White as usize][5] = 1;
+
+        let illegal_drop = Move::drop(PieceType::Lance, Square::new(4, 8)); // 5i
+        assert!(
+            !pos.is_legal_move(illegal_drop),
+            "White should not be able to drop lance on rank 8"
+        );
+    }
+
+    #[test]
+    fn test_knight_drop_last_two_ranks_restrictions() {
+        // Test that knights cannot be dropped on the last two ranks
+        use crate::ai::board::Piece;
+        let mut pos = Position::empty();
+        pos.board = Board::empty();
+
+        // Black king
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+        // White king
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+
+        // Test Black knight drop
+        pos.side_to_move = Color::Black;
+        pos.hands[Color::Black as usize][4] = 1; // Knight is index 4
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Cannot drop on rank 0 or 1
+        let illegal_drop1 = Move::drop(PieceType::Knight, Square::new(4, 0)); // 5a
+        assert!(
+            !pos.is_legal_move(illegal_drop1),
+            "Black should not be able to drop knight on rank 0"
+        );
+
+        let illegal_drop2 = Move::drop(PieceType::Knight, Square::new(4, 1)); // 5b
+        assert!(
+            !pos.is_legal_move(illegal_drop2),
+            "Black should not be able to drop knight on rank 1"
+        );
+
+        // Can drop on rank 2
+        let legal_drop = Move::drop(PieceType::Knight, Square::new(4, 2)); // 5c
+        assert!(pos.is_legal_move(legal_drop), "Black should be able to drop knight on rank 2");
+
+        // Test White knight drop
+        pos.side_to_move = Color::White;
+        pos.hands[Color::Black as usize][4] = 0; // Remove Black's knight
+        pos.hands[Color::White as usize][4] = 1;
+
+        // Cannot drop on rank 8 or 7
+        let illegal_drop1 = Move::drop(PieceType::Knight, Square::new(4, 8)); // 5i
+        assert!(
+            !pos.is_legal_move(illegal_drop1),
+            "White should not be able to drop knight on rank 8"
+        );
+
+        let illegal_drop2 = Move::drop(PieceType::Knight, Square::new(4, 7)); // 5h
+        assert!(
+            !pos.is_legal_move(illegal_drop2),
+            "White should not be able to drop knight on rank 7"
+        );
+
+        // Can drop on rank 6
+        let legal_drop = Move::drop(PieceType::Knight, Square::new(4, 6)); // 5g
+        assert!(pos.is_legal_move(legal_drop), "White should be able to drop knight on rank 6");
     }
 }
