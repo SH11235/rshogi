@@ -94,6 +94,13 @@ pub const fn hand_index_to_piece_type(index: usize) -> Option<PieceType> {
     }
 }
 
+// ==== SEE (Static Exchange Evaluation) Constants ====
+
+/// Performance thresholds for SEE optimizations (in nanoseconds)
+/// These values determine when to use simple vs complex SEE algorithms
+pub const SEE_SIMPLE_CAPTURE_THRESHOLD: i32 = 200; // ns - Use simple algorithm for fast paths
+pub const SEE_WITH_PINS_THRESHOLD: i32 = 250; // ns - Include pin calculations for accuracy
+
 /// Maximum depth for SEE calculation (captures/recaptures on a single square)
 /// In shogi, it's extremely rare to have more than 16 exchanges on a single square
 pub const SEE_MAX_DEPTH: usize = 16;
