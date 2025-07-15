@@ -2,6 +2,7 @@
 //!
 //! Represents 81-square shogi board using 128-bit integers for fast operations
 
+use super::moves::Move;
 use super::piece_constants::piece_type_to_hand_index;
 use std::fmt;
 
@@ -1223,6 +1224,402 @@ impl Position {
             }
         }
     }
+
+    /// Static Exchange Evaluation (SEE)
+    /// Evaluates the material gain/loss from a capture sequence
+    /// Returns the expected material gain from the move (positive = good, negative = bad)
+    pub fn see(&self, mv: Move) -> i32 {
+        self.see_internal(mv, 0)
+    }
+
+    /// Static Exchange Evaluation with threshold
+    /// Returns true if the SEE value is greater than or equal to the threshold
+    pub fn see_ge(&self, mv: Move, threshold: i32) -> bool {
+        self.see(mv) >= threshold
+    }
+
+    /// Internal SEE implementation using gain array algorithm
+    /// Returns the expected material gain from the move
+    fn see_internal(&self, mv: Move, _threshold: i32) -> i32 {
+        let to = mv.to();
+
+        // Not a capture
+        let captured = match self.board.piece_on(to) {
+            Some(piece) => piece,
+            None => return 0,
+        };
+
+        let captured_value = Self::see_piece_value(captured);
+
+        // For drops, we assume the piece is safe
+        if mv.is_drop() {
+            return captured_value;
+        }
+
+        let from = mv.from().unwrap();
+        let mut occupied = self.board.all_bb;
+
+        // Get the initial attacker
+        let attacker = self.board.piece_on(from).expect("Move source must have a piece");
+        let attacker_value = if mv.is_promote() {
+            Self::see_promoted_piece_value(attacker.piece_type)
+        } else {
+            Self::see_piece_value(attacker)
+        };
+
+        // No early pruning - calculate exact value
+
+        // Gain array to track material balance at each ply
+        let mut gain = [0i32; 32]; // Maximum depth of 32 should be enough
+        let mut depth = 0;
+
+        // gain[0] is the initial capture value
+        gain[0] = captured_value;
+
+        // Make the initial capture
+        occupied.clear(from);
+        occupied.set(to); // The capturing piece now occupies the target square
+
+        // Get all attackers
+        let mut attackers = self.get_all_attackers_to(to, occupied);
+
+        let mut stm = self.side_to_move.opposite();
+        // The first piece to be potentially recaptured is the initial attacker
+        let mut _last_captured_value = attacker_value;
+
+        // Generate capture sequence
+        while let Some((sq, _, attacker_value)) =
+            self.pop_least_valuable_attacker(&mut attackers, occupied, stm)
+        {
+            depth += 1;
+
+            // gain[d] = 取られた駒の価値 - gain[d‑1]
+            gain[depth] = _last_captured_value - gain[depth - 1];
+
+            // 深さの上限チェック
+            if depth >= 16 {
+                break;
+            }
+
+            // 盤面を更新
+            occupied.clear(sq); // 攻撃駒を元の升から除去
+            occupied.set(to); // 取った駒が目的地に移動
+            _last_captured_value = attacker_value; // 次に取られる駒の価値を更新
+
+            // X-ray を更新して「幽霊駒」問題を防ぐ
+            self.update_xray_attacks(sq, to, &mut attackers, occupied);
+
+            // 手番を反転
+            stm = stm.opposite();
+        }
+
+        // Apply negamax propagation from the end
+
+        // Propagate scores from the end
+        // At odd depths (1, 3, 5...), the opponent moved last, so we negate and maximize
+        // At even depths (0, 2, 4...), we moved last, so we keep the sign
+
+        // Work backwards, alternating between minimizing and maximizing
+        for d in (0..depth).rev() {
+            let _old_gain = gain[d];
+
+            // Check who moved at this depth
+            // depth 0: initial attacker (same as side_to_move)
+            // depth 1: opponent
+            // depth 2: initial attacker again
+            // etc.
+
+            // At each depth, we're computing from the perspective of who moved at that depth
+            // They choose between standing pat (-gain[d]) or opponent's best continuation (gain[d+1])
+            gain[d] = std::cmp::max(-gain[d], gain[d + 1]);
+        }
+
+        // Fix sign for even number of exchanges
+        // When depth is odd (meaning even number of total exchanges),
+        // the last move was made by the opponent, so we need to negate
+        if depth & 1 == 1 {
+            gain[0] = -gain[0];
+        }
+
+        gain[0]
+    }
+
+    /// Get piece value for SEE calculation
+    fn see_piece_value(piece: Piece) -> i32 {
+        if piece.promoted {
+            Self::see_promoted_piece_value(piece.piece_type)
+        } else {
+            Self::see_piece_type_value(piece.piece_type)
+        }
+    }
+
+    /// Get base piece type value for SEE
+    fn see_piece_type_value(piece_type: PieceType) -> i32 {
+        match piece_type {
+            PieceType::King => 10000,
+            PieceType::Rook => 900,
+            PieceType::Bishop => 700,
+            PieceType::Gold => 600,
+            PieceType::Silver => 500,
+            PieceType::Knight => 400,
+            PieceType::Lance => 300,
+            PieceType::Pawn => 100,
+        }
+    }
+
+    /// Get promoted piece value for SEE
+    fn see_promoted_piece_value(piece_type: PieceType) -> i32 {
+        match piece_type {
+            PieceType::Pawn => 600,                      // Tokin (same as Gold)
+            PieceType::Lance => 600,                     // Promoted Lance (same as Gold)
+            PieceType::Knight => 600,                    // Promoted Knight (same as Gold)
+            PieceType::Silver => 600,                    // Promoted Silver (same as Gold)
+            PieceType::Bishop => 1100,                   // Horse
+            PieceType::Rook => 1300,                     // Dragon
+            _ => Self::see_piece_type_value(piece_type), // Gold and King don't promote
+        }
+    }
+
+    /// Get all attackers to a square (both colors)
+    fn get_all_attackers_to(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+        // Get attackers from both colors with current occupancy
+        let black_attackers = self.get_attackers_to_with_occupancy(sq, Color::Black, occupied);
+        let white_attackers = self.get_attackers_to_with_occupancy(sq, Color::White, occupied);
+        black_attackers | white_attackers
+    }
+
+    /// Get attackers to a square with custom occupancy (for X-ray detection)
+    fn get_attackers_to_with_occupancy(
+        &self,
+        sq: Square,
+        by_color: Color,
+        occupied: Bitboard,
+    ) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+        let mut attackers = Bitboard::EMPTY;
+
+        // Check pawn attacks
+        let pawn_bb = self.board.piece_bb[by_color as usize][PieceType::Pawn as usize];
+        let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
+        attackers |= pawn_bb & pawn_attacks;
+
+        // Check knight attacks
+        let knight_bb = self.board.piece_bb[by_color as usize][PieceType::Knight as usize];
+        let knight_attacks = ATTACK_TABLES.knight_attacks(sq, by_color.opposite());
+        attackers |= knight_bb & knight_attacks;
+
+        // Check king attacks
+        let king_bb = self.board.piece_bb[by_color as usize][PieceType::King as usize];
+        let king_attacks = ATTACK_TABLES.king_attacks(sq);
+        attackers |= king_bb & king_attacks;
+
+        // Check gold attacks (including promoted pieces that move like gold)
+        let gold_bb = self.board.piece_bb[by_color as usize][PieceType::Gold as usize];
+        let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
+        attackers |= gold_bb & gold_attacks;
+
+        // Check promoted pawns, lances, knights, and silvers (they move like gold)
+        let promoted_bb = self.board.promoted_bb;
+        let tokin_bb = pawn_bb & promoted_bb;
+        let promoted_lance_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Lance as usize] & promoted_bb;
+        let promoted_knight_bb = knight_bb & promoted_bb;
+        let promoted_silver_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Silver as usize] & promoted_bb;
+        attackers |=
+            (tokin_bb | promoted_lance_bb | promoted_knight_bb | promoted_silver_bb) & gold_attacks;
+
+        // Check silver attacks (non-promoted)
+        let silver_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Silver as usize] & !promoted_bb;
+        let silver_attacks = ATTACK_TABLES.silver_attacks(sq, by_color.opposite());
+        attackers |= silver_bb & silver_attacks;
+
+        // Check sliding attacks with custom occupancy
+        let rook_bb = self.board.piece_bb[by_color as usize][PieceType::Rook as usize];
+        let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        attackers |= rook_bb & rook_attacks;
+
+        let bishop_bb =
+            self.board.piece_bb[by_color as usize][PieceType::Bishop as usize] & occupied;
+        let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+        attackers |= bishop_bb & bishop_attacks;
+
+        // Check lance attacks with custom occupancy
+        let lance_bb = (self.board.piece_bb[by_color as usize][PieceType::Lance as usize]
+            & occupied)
+            & !promoted_bb;
+        attackers |= self.get_lance_attackers_to_with_occupancy(sq, by_color, lance_bb, occupied);
+
+        attackers
+    }
+
+    /// Get lance attackers with custom occupancy
+    fn get_lance_attackers_to_with_occupancy(
+        &self,
+        sq: Square,
+        by_color: Color,
+        lance_bb: Bitboard,
+        occupied: Bitboard,
+    ) -> Bitboard {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        let mut attackers = Bitboard::EMPTY;
+        let file = sq.file();
+
+        // Get all lances in the same file
+        let file_mask = ATTACK_TABLES.file_masks[file as usize];
+        let lances_in_file = lance_bb & file_mask;
+
+        if lances_in_file.is_empty() {
+            return attackers;
+        }
+
+        // Get potential lance attackers using pre-computed rays
+        let lance_ray = ATTACK_TABLES.lance_rays[by_color.opposite() as usize][sq.index()];
+        let potential_attackers = lances_in_file & lance_ray;
+
+        // Check each potential attacker for blockers
+        let mut lances = potential_attackers;
+        while !lances.is_empty() {
+            let from = lances.pop_lsb().unwrap();
+
+            // Use pre-computed between bitboard
+            let between = ATTACK_TABLES.between_bb(from, sq);
+            if (between & occupied).is_empty() {
+                // Path is clear, lance can attack
+                attackers.set(from);
+            }
+        }
+
+        attackers
+    }
+
+    /// Pop the least valuable attacker from the attackers bitboard
+    /// occupied parameter is used to filter out pieces that have already moved
+    fn pop_least_valuable_attacker(
+        &self,
+        attackers: &mut Bitboard,
+        occupied: Bitboard,
+        color: Color,
+    ) -> Option<(Square, PieceType, i32)> {
+        // Check pieces in order of increasing value
+        for piece_type in [
+            PieceType::Pawn,
+            PieceType::Lance,
+            PieceType::Knight,
+            PieceType::Silver,
+            PieceType::Gold,
+            PieceType::Bishop,
+            PieceType::Rook,
+        ] {
+            // Only consider pieces that are still on the board
+            let pieces =
+                self.board.piece_bb[color as usize][piece_type as usize] & *attackers & occupied;
+            if let Some(sq) = pieces.lsb() {
+                attackers.clear(sq);
+
+                // Check if piece is promoted
+                let is_promoted = self.board.promoted_bb.test(sq);
+                let value = if is_promoted {
+                    Self::see_promoted_piece_value(piece_type)
+                } else {
+                    Self::see_piece_type_value(piece_type)
+                };
+
+                return Some((sq, piece_type, value));
+            }
+        }
+
+        // King should not normally participate in exchanges, but check anyway
+        let king_bb =
+            self.board.piece_bb[color as usize][PieceType::King as usize] & *attackers & occupied;
+        if let Some(sq) = king_bb.lsb() {
+            attackers.clear(sq);
+            return Some((sq, PieceType::King, Self::see_piece_type_value(PieceType::King)));
+        }
+
+        None
+    }
+
+    /// Update X-ray attacks after removing a piece
+    fn update_xray_attacks(
+        &self,
+        from: Square,
+        to: Square,
+        attackers: &mut Bitboard,
+        occupied: Bitboard,
+    ) {
+        use crate::ai::attacks::ATTACK_TABLES;
+
+        // Check if there's a clear line between from and to
+        let between = ATTACK_TABLES.between_bb(from, to);
+        if between.is_empty() {
+            return; // Not aligned, no x-rays possible
+        }
+
+        // Check for rook/dragon x-rays (orthogonal)
+        if from.file() == to.file() || from.rank() == to.rank() {
+            let rook_attackers = (self.board.piece_bb[Color::Black as usize]
+                [PieceType::Rook as usize]
+                | self.board.piece_bb[Color::White as usize][PieceType::Rook as usize])
+                & occupied;
+            let rook_attacks = ATTACK_TABLES.sliding_attacks(to, occupied, PieceType::Rook);
+            *attackers |= rook_attackers & rook_attacks;
+        }
+
+        // Check for bishop/horse x-rays (diagonal)
+        if (from.file() as i8 - to.file() as i8).abs()
+            == (from.rank() as i8 - to.rank() as i8).abs()
+        {
+            let bishop_attackers = (self.board.piece_bb[Color::Black as usize]
+                [PieceType::Bishop as usize]
+                | self.board.piece_bb[Color::White as usize][PieceType::Bishop as usize])
+                & occupied;
+            let bishop_attacks = ATTACK_TABLES.sliding_attacks(to, occupied, PieceType::Bishop);
+            *attackers |= bishop_attackers & bishop_attacks;
+        }
+
+        // Check for lance x-rays (vertical only)
+        if from.file() == to.file() {
+            // Black lances attack upward (towards rank 8)
+            if from.rank() < to.rank() {
+                let black_lances = self.board.piece_bb[Color::Black as usize]
+                    [PieceType::Lance as usize]
+                    & occupied;
+                // Find black lances that can reach the target
+                let mut lance_candidates = black_lances;
+                while let Some(lance_sq) = lance_candidates.lsb() {
+                    lance_candidates.clear(lance_sq);
+                    if lance_sq.file() == to.file() && lance_sq.rank() < to.rank() {
+                        // Check if path is clear
+                        let between_lance = ATTACK_TABLES.between_bb(lance_sq, to);
+                        if (between_lance & occupied).is_empty() {
+                            attackers.set(lance_sq);
+                        }
+                    }
+                }
+            }
+            // White lances attack downward (towards rank 0)
+            else if from.rank() > to.rank() {
+                let white_lances = self.board.piece_bb[Color::White as usize]
+                    [PieceType::Lance as usize]
+                    & occupied;
+                // Find white lances that can reach the target
+                let mut lance_candidates = white_lances;
+                while let Some(lance_sq) = lance_candidates.lsb() {
+                    lance_candidates.clear(lance_sq);
+                    if lance_sq.file() == to.file() && lance_sq.rank() > to.rank() {
+                        // Check if path is clear
+                        let between_lance = ATTACK_TABLES.between_bb(lance_sq, to);
+                        if (between_lance & occupied).is_empty() {
+                            attackers.set(lance_sq);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1805,6 +2202,118 @@ mod tests {
     }
 
     #[test]
+    fn test_see_simple_pawn_capture() {
+        // Test simple pawn takes pawn
+        let mut pos = Position::empty();
+
+        // Black pawn on 5e (Square::new(4, 4))
+        let black_pawn = Piece::new(PieceType::Pawn, Color::Black);
+        pos.board.put_piece(Square::new(4, 4), black_pawn);
+
+        // White pawn on 5d (Square::new(4, 3))
+        let white_pawn = Piece::new(PieceType::Pawn, Color::White);
+        pos.board.put_piece(Square::new(4, 3), white_pawn);
+
+        // Black to move, pawn takes pawn
+        pos.side_to_move = Color::Black;
+        let mv = Move::normal(Square::new(4, 4), Square::new(4, 3), false);
+
+        // SEE should be 100 (pawn value)
+        assert_eq!(pos.see(mv), 100);
+        assert!(pos.see_ge(mv, 0));
+        assert!(pos.see_ge(mv, 100));
+        assert!(!pos.see_ge(mv, 101));
+    }
+
+    #[test]
+    fn test_see_bad_exchange() {
+        // Test rook takes pawn defended by pawn
+        let mut pos = Position::empty();
+
+        // Black rook on 5f (Square::new(4, 5))
+        let black_rook = Piece::new(PieceType::Rook, Color::Black);
+        pos.board.put_piece(Square::new(4, 5), black_rook);
+
+        // White pawn on 5d (Square::new(4, 3))
+        let white_pawn = Piece::new(PieceType::Pawn, Color::White);
+        pos.board.put_piece(Square::new(4, 3), white_pawn);
+
+        // White gold on 5c defending (Square::new(4, 2))
+        let white_gold = Piece::new(PieceType::Gold, Color::White);
+        pos.board.put_piece(Square::new(4, 2), white_gold);
+
+        // Black to move, rook takes pawn
+        pos.side_to_move = Color::Black;
+        let mv = Move::normal(Square::new(4, 5), Square::new(4, 3), false);
+
+        // SEE should be 100 - 900 = -800 (win pawn, lose rook to gold)
+        assert_eq!(pos.see(mv), -800);
+        assert!(!pos.see_ge(mv, 0));
+    }
+
+    #[test]
+    fn test_see_complex_exchange() {
+        // Test complex exchange: pawn takes pawn, gold takes pawn, silver takes gold
+        let mut pos = Position::empty();
+
+        // Black pawn on 5e
+        let black_pawn = Piece::new(PieceType::Pawn, Color::Black);
+        pos.board.put_piece(Square::new(4, 4), black_pawn);
+
+        // White pawn on 5d
+        let white_pawn = Piece::new(PieceType::Pawn, Color::White);
+        pos.board.put_piece(Square::new(4, 3), white_pawn);
+
+        // White gold on 5c (can capture on 5d)
+        let white_gold = Piece::new(PieceType::Gold, Color::White);
+        pos.board.put_piece(Square::new(4, 2), white_gold);
+
+        // Black silver on 6e (can capture on 5d diagonally)
+        let black_silver = Piece::new(PieceType::Silver, Color::Black);
+        pos.board.put_piece(Square::new(5, 4), black_silver);
+
+        // Black to move, pawn takes pawn
+        pos.side_to_move = Color::Black;
+        let mv = Move::normal(Square::new(4, 4), Square::new(4, 3), false);
+
+        // Exchange: PxP (win 100), GxP (lose 100), SxG (win 600)
+        // Net: 100 - 100 + 600 = 600
+        assert_eq!(pos.see(mv), 600);
+        assert!(pos.see_ge(mv, 0));
+    }
+
+    #[test]
+    fn test_see_x_ray_attack() {
+        // Test X-ray attack: rook behind rook
+        let mut pos = Position::empty();
+
+        // Black rook on 5f
+        let black_rook1 = Piece::new(PieceType::Rook, Color::Black);
+        pos.board.put_piece(Square::new(4, 5), black_rook1);
+
+        // Black rook on 5g (behind first rook)
+        let black_rook2 = Piece::new(PieceType::Rook, Color::Black);
+        pos.board.put_piece(Square::new(4, 6), black_rook2);
+
+        // White pawn on 5d
+        let white_pawn = Piece::new(PieceType::Pawn, Color::White);
+        pos.board.put_piece(Square::new(4, 3), white_pawn);
+
+        // White rook on 5a (defending)
+        let white_rook = Piece::new(PieceType::Rook, Color::White);
+        pos.board.put_piece(Square::new(4, 0), white_rook);
+
+        // Black to move, rook takes pawn
+        pos.side_to_move = Color::Black;
+        let mv = Move::normal(Square::new(4, 5), Square::new(4, 3), false);
+
+        // Exchange: RxP (win 100), RxR (lose 900), RxR (win 900)
+        // Net: 100 - 900 + 900 = 100
+        assert_eq!(pos.see(mv), 100);
+        assert!(pos.see_ge(mv, 0));
+    }
+
+    #[test]
     fn test_bitboard_file_mask() {
         // 各筋のマスクをテスト
         for file in 0..9 {
@@ -2119,8 +2628,8 @@ mod tests {
         let calls_per_sec = 1_000_000_000 / ns_per_call;
 
         println!("Lance attackers performance:");
-        println!("  Time per call: {} ns", ns_per_call);
-        println!("  Calls per second: {}", calls_per_sec);
+        println!("  Time per call: {ns_per_call} ns");
+        println!("  Calls per second: {calls_per_sec}");
 
         // Assert reasonable performance
         // Note: Debug builds are much slower than release builds
@@ -2131,9 +2640,7 @@ mod tests {
 
         assert!(
             ns_per_call < max_ns,
-            "get_lance_attackers_to is too slow: {} ns (max: {} ns)",
-            ns_per_call,
-            max_ns
+            "get_lance_attackers_to is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
     }
 }
