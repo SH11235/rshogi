@@ -13,3 +13,9 @@ coverage/
 test_data/nn.bin
 test_data/mock_nn.bin
 # Keep: test_data/mock_nn.bin.gz
+
+# Profiling outputs
+flamegraph.svg
+see_profile.svg
+perf.data
+perf.data.old
