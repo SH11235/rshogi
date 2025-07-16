@@ -119,10 +119,15 @@ impl PVTable {
     }
 
     /// Clear PV at given ply
+    ///
+    /// This method only writes to memory if the PV is not already empty,
+    /// avoiding unnecessary cache misses during repeated clear calls.
     #[inline]
     pub fn clear(&mut self, ply: usize) {
         debug_assert!(ply < MAX_PLY, "ply {ply} exceeds MAX_PLY {MAX_PLY}");
-        self.len[ply] = 0;
+        if self.len[ply] != 0 {
+            self.len[ply] = 0;
+        }
     }
 
     /// Update PV when new best move is found
