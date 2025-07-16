@@ -5,6 +5,31 @@
 use super::moves::Move;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// Bit layout constants for TTEntry data field
+const MOVE_SHIFT: u8 = 48;
+#[allow(dead_code)]
+const MOVE_BITS: u8 = 16;
+const SCORE_SHIFT: u8 = 32;
+#[allow(dead_code)]
+const SCORE_BITS: u8 = 16;
+const DEPTH_SHIFT: u8 = 25;
+#[allow(dead_code)]
+const DEPTH_BITS: u8 = 7;
+const DEPTH_MASK: u8 = 0x7F;
+const NODE_TYPE_SHIFT: u8 = 23;
+#[allow(dead_code)]
+const NODE_TYPE_BITS: u8 = 2;
+const NODE_TYPE_MASK: u8 = 0x3;
+const ASPIRATION_FAIL_SHIFT: u8 = 22;
+const AGE_SHIFT: u8 = 16;
+#[allow(dead_code)]
+const AGE_BITS: u8 = 6;
+const AGE_MASK: u8 = 0x3F;
+#[allow(dead_code)]
+const EVAL_SHIFT: u8 = 0;
+#[allow(dead_code)]
+const EVAL_BITS: u8 = 16;
+
 /// Type of node in the search tree
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -75,12 +100,12 @@ impl TTEntry {
         // [22]: aspiration_fail flag (1 bit)
         // [21-16]: age (6 bits)
         // [15-0]: static eval (16 bits)
-        let data = ((move_data as u64) << 48)
-            | ((score as u16 as u64) << 32)  // Store as unsigned 16-bit value (preserves 2's complement)
-            | (((depth & 0x7F) as u64) << 25)  // 7 bits for depth (max 127)
-            | ((node_type as u64) << 23)
-            | ((aspiration_fail as u64) << 22)
-            | (((age & 0x3F) as u64) << 16)  // 6 bits for age (max 63)
+        let data = ((move_data as u64) << MOVE_SHIFT)
+            | ((score as u16 as u64) << SCORE_SHIFT)  // Store as unsigned 16-bit value (preserves 2's complement)
+            | (((depth & DEPTH_MASK) as u64) << DEPTH_SHIFT)  // 7 bits for depth (max 127)
+            | ((node_type as u64) << NODE_TYPE_SHIFT)
+            | ((aspiration_fail as u64) << ASPIRATION_FAIL_SHIFT)
+            | (((age & AGE_MASK) as u64) << AGE_SHIFT)  // 6 bits for age (max 63)
             | (eval as u16 as u64); // Store as unsigned 16-bit value (preserves 2's complement)
 
         TTEntry { key, data }
@@ -94,7 +119,7 @@ impl TTEntry {
 
     /// Extract move from entry
     pub fn get_move(&self) -> Option<Move> {
-        let move_data = ((self.data >> 48) & 0xFFFF) as u16;
+        let move_data = ((self.data >> MOVE_SHIFT) & 0xFFFF) as u16;
 
         if move_data == 0 {
             return None;
@@ -106,7 +131,7 @@ impl TTEntry {
     /// Get score from entry
     #[inline]
     pub fn score(&self) -> i16 {
-        ((self.data >> 32) & 0xFFFF) as i16
+        ((self.data >> SCORE_SHIFT) & 0xFFFF) as i16
     }
 
     /// Get static evaluation from entry
@@ -118,13 +143,13 @@ impl TTEntry {
     /// Get search depth
     #[inline]
     pub fn depth(&self) -> u8 {
-        ((self.data >> 25) & 0x7F) as u8 // 7 bits for depth
+        ((self.data >> DEPTH_SHIFT) & DEPTH_MASK as u64) as u8 // 7 bits for depth
     }
 
     /// Get node type
     #[inline]
     pub fn node_type(&self) -> NodeType {
-        match (self.data >> 23) & 0x3 {
+        match (self.data >> NODE_TYPE_SHIFT) & NODE_TYPE_MASK as u64 {
             0 => NodeType::Exact,
             1 => NodeType::LowerBound,
             2 => NodeType::UpperBound,
@@ -135,13 +160,13 @@ impl TTEntry {
     /// Get age
     #[inline]
     pub fn age(&self) -> u8 {
-        ((self.data >> 16) & 0x3F) as u8 // 6 bits for age
+        ((self.data >> AGE_SHIFT) & AGE_MASK as u64) as u8 // 6 bits for age
     }
 
     /// Get aspiration fail flag
     #[inline]
     pub fn aspiration_fail(&self) -> bool {
-        ((self.data >> 22) & 0x1) != 0
+        ((self.data >> ASPIRATION_FAIL_SHIFT) & 0x1) != 0
     }
 }
 
@@ -319,7 +344,7 @@ impl TranspositionTable {
 
     /// Advance to next generation (for age-based replacement)
     pub fn new_search(&mut self) {
-        self.age = self.age.wrapping_add(1) & 0x3F; // 6-bit age (max 63)
+        self.age = self.age.wrapping_add(1) & AGE_MASK; // 6-bit age (max 63)
     }
 
     /// Get fill rate (percentage of non-empty entries)
@@ -619,7 +644,7 @@ mod tests {
             let hash = 0xDDDDDDDDDDDDDDDD;
             tt.store(hash, None, 100, 50, 200, NodeType::Exact);
             let entry = tt.probe(hash).unwrap();
-            assert_eq!(entry.depth(), 200 & 0x7F); // 200 & 0x7F = 72
+            assert_eq!(entry.depth(), 200 & DEPTH_MASK); // 200 & DEPTH_MASK = 72
         }
 
         // Test minimum values
