@@ -226,19 +226,26 @@ impl EnhancedSearcher {
         let mut stack = vec![SearchStack::default(); MAX_PLY + 10];
         let mut best_move = None;
         let mut best_score = -INFINITY;
-
-        // Aspiration Windows用の追加変数
-        // 初期評価値：TTにあればその値、なければ静的評価値を使用
-        let mut prev_score = if let Some(tt_entry) = self.tt.probe(pos.hash) {
-            tt_entry.score() as i32
-        } else {
-            self.evaluator.evaluate(pos)
-        };
+        let mut last_root_score = -INFINITY; // 前回の反復深化で確定したスコア
 
         // Iterative deepening
         for depth in 1..=max_depth {
             // ゲームフェーズを判定
             let phase = self.estimate_game_phase(pos);
+
+            // Aspiration Windows用の初期値設定
+            let prev_score = if depth > 1 {
+                last_root_score // 直前の確定スコアを最優先
+            } else if let Some(entry) = self.tt.probe(pos.hash) {
+                if entry.node_type() == NodeType::Exact {
+                    // EXACT だけ採用
+                    entry.score() as i32
+                } else {
+                    self.evaluator.evaluate(pos) // 境界値なら捨てる
+                }
+            } else {
+                self.evaluator.evaluate(pos)
+            };
 
             // Aspiration Windows設定（フェーズを考慮）
             let mut delta = (self.params.initial_window)(depth, phase);
@@ -325,8 +332,8 @@ impl EnhancedSearcher {
             }
 
             // 探索結果の保存
-            prev_score = score;
             best_score = score;
+            last_root_score = score; // 次の深さで使用するため更新
 
             // Extract best move from TT
             if let Some(tt_entry) = self.tt.probe(pos.hash) {
