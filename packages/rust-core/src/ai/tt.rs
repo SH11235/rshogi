@@ -859,6 +859,52 @@ mod tests {
         assert_eq!(entry_overflow.eval(), -32768);
         assert!(entry_overflow.aspiration_fail());
     }
+
+    #[test]
+    fn test_replacement_with_different_positions() {
+        let tt = TranspositionTable::new(0); // Minimum size to force collisions
+
+        // Create two different hash values that will map to the same index
+        // We need to ensure they have the same lower bits (used for indexing)
+        // but different upper bits (used for key matching)
+        let base_index = 0x1234; // Arbitrary index within table size
+        let hash1 = 0x1111_1111_1111_0000 | base_index;
+        let hash2 = 0x2222_2222_2222_0000 | base_index;
+
+        // Verify they map to the same index but are different positions
+        assert_eq!(tt.index(hash1), tt.index(hash2), "Hashes should map to same index");
+        assert_ne!(hash1 & KEY_MASK, hash2 & KEY_MASK, "Keys should be different");
+
+        // Store first position
+        tt.store(hash1, None, 100, 50, 10, NodeType::Exact);
+
+        // Verify we can retrieve it
+        let entry1 = tt.probe(hash1);
+        assert!(entry1.is_some(), "First entry should be found");
+        assert_eq!(entry1.unwrap().score(), 100);
+
+        // Store second position at same index
+        tt.store(hash2, None, 200, 100, 8, NodeType::LowerBound);
+
+        // Now probe both - only the second should exist since it replaced the first
+        let entry1_after = tt.probe(hash1);
+        let entry2_after = tt.probe(hash2);
+
+        assert!(entry1_after.is_none(), "First entry should be replaced");
+        assert!(entry2_after.is_some(), "Second entry should exist");
+        assert_eq!(entry2_after.unwrap().score(), 200);
+
+        // Store a deeper entry for the first position - should replace the second
+        tt.store(hash1, None, 300, 150, 15, NodeType::Exact);
+
+        let entry1_final = tt.probe(hash1);
+        let entry2_final = tt.probe(hash2);
+
+        assert!(entry1_final.is_some(), "First entry with deeper search should exist");
+        assert_eq!(entry1_final.unwrap().score(), 300);
+        assert_eq!(entry1_final.unwrap().depth(), 15);
+        assert!(entry2_final.is_none(), "Second entry should be replaced by deeper search");
+    }
 }
 
 // Include parallel safety tests
