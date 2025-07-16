@@ -5,7 +5,7 @@
 use super::board::{PieceType, Square};
 
 /// Move representation
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Move {
     /// Encoded move data (32-bit):
     /// - bits 0-6: destination square (0-80)
@@ -16,6 +16,17 @@ pub struct Move {
     /// - bits 20-23: captured piece type (0-13, 15 for no capture)
     /// - bits 24-31: reserved for future use
     data: u32,
+}
+
+impl Default for Move {
+    /// Returns a null move (no-op move)
+    ///
+    /// This ensures that the default move is consistently a null move,
+    /// which is semantically meaningful in the context of chess/shogi engines.
+    #[inline]
+    fn default() -> Self {
+        Self::null()
+    }
 }
 
 impl Move {
