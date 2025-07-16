@@ -6,12 +6,13 @@
 //! - Search performance with SEE
 //! - Move ordering efficiency
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use shogi_core::ai::board::{Color, Piece, PieceType, Position, Square};
 use shogi_core::ai::evaluate::MaterialEvaluator;
 use shogi_core::ai::movegen::MoveGen;
 use shogi_core::ai::moves::{Move, MoveList};
 use shogi_core::ai::search_enhanced::EnhancedSearcher;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
