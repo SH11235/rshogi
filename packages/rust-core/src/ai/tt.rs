@@ -128,7 +128,7 @@ impl TTEntry {
             0 => NodeType::Exact,
             1 => NodeType::LowerBound,
             2 => NodeType::UpperBound,
-            _ => NodeType::UpperBound, // Default to UpperBound for corrupted data
+            _ => NodeType::Exact, // Default to Exact for corrupted data (no pruning)
         }
     }
 
@@ -261,9 +261,9 @@ impl TranspositionTable {
             return false;
         }
 
-        // 6. Same depth, same conditions → tie-break by generation
-        // Only replace if new is current generation and old is not
-        new_is_current && !old_is_current
+        // 6. Same depth, same conditions → don't replace
+        // (Same generation case, or new is old generation)
+        false
     }
 
     /// Store entry with aspiration fail flag
@@ -653,7 +653,7 @@ mod tests {
             data: 0xFFFFFFFFFFFFFFFF, // All bits set
         };
 
-        // Should return UpperBound as default for corrupted data
-        assert_eq!(entry.node_type(), NodeType::UpperBound);
+        // Should return Exact as default for corrupted data (safest for alpha-beta)
+        assert_eq!(entry.node_type(), NodeType::Exact);
     }
 }
