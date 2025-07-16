@@ -438,6 +438,14 @@ impl EnhancedSearcher {
             };
 
             let mut score;
+            // Aspiration失敗フラグ
+            // このフラグは、現在の探索でaspiration window失敗（fail-lowまたはfail-high）が
+            // 発生したかを追跡します。一度trueになると、その探索深度では保持されます。
+            //
+            // 重要：このフラグは「失敗履歴」を記録するものであり、最終的なTTエントリの
+            // 信頼性は、このフラグとノードタイプ（Exact/UpperBound/LowerBound）の両方で
+            // 判断されます。Exact値（窓内ヒット）の場合は、過去の失敗履歴に関わらず
+            // 常に信頼できるエントリとして保存されます。
             let mut aspiration_failed = false;
 
             // Aspiration search with retries
@@ -864,6 +872,14 @@ impl EnhancedSearcher {
         };
 
         // ルートノードでAspiration失敗時は、信頼性を記録
+        //
+        // TTエントリの信頼性判定：
+        // - ルートノード（ctx.ply == 0）でのみaspiration失敗を記録
+        // - aspiration_failedフラグがtrueでも、Exact値は常に信頼できる
+        // - つまり、fail-low/fail-highで得られたbound値のみが信頼性低とマークされる
+        //
+        // 例：aspiration windowで失敗が複数回発生しても、最終的に窓内ヒット（Exact）
+        // した場合、そのTTエントリは完全に信頼できるものとして保存される
         let is_aspiration_fail =
             ctx.ply == 0 && ctx.aspiration_failed && node_type != NodeType::Exact;
 
