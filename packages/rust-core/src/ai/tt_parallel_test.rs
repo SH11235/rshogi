@@ -234,8 +234,8 @@ mod tests {
         }
 
         let torn = torn_reads.load(Ordering::Relaxed);
-        println!("Concurrent stress test completed: {} torn reads", torn);
-        assert_eq!(torn, 0, "Detected {} torn reads", torn);
+        println!("Concurrent stress test completed: {torn} torn reads");
+        assert_eq!(torn, 0, "Detected {torn} torn reads");
     }
 
     /// Test that ensures proper memory ordering prevents stale data
@@ -274,7 +274,7 @@ mod tests {
                     assert_eq!(eval, 50);
                     assert_eq!(node_type, NodeType::Exact);
                 } else {
-                    panic!("Got inconsistent data: depth={}", depth);
+                    panic!("Got inconsistent data: depth={depth}");
                 }
             }
         }
@@ -315,7 +315,7 @@ mod tests {
 
                     // Score should only increase (or stay same)
                     if let Some(last) = last_score {
-                        assert!(score >= last, "Score went backwards: {} -> {}", last, score);
+                        assert!(score >= last, "Score went backwards: {last} -> {score}");
                     }
                     last_score = Some(score);
                 }

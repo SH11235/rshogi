@@ -46,6 +46,7 @@ anyhow = "1.0"
 lazy_static = "1.4"
 rand = "0.9"
 rand_xoshiro = "0.7"
+smallvec = "1.13"
 
 [profile.release]
 debug = true  # Enable debug symbols for profiling

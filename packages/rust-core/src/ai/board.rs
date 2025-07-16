@@ -2706,11 +2706,11 @@ mod tests {
 
         // Test see_ge with various thresholds
         // Should use delta pruning for early termination
-        assert_eq!(pos.see_ge(mv, 600), false); // 500 < 600
-        assert_eq!(pos.see_ge(mv, 500), true); // 500 >= 500
-        assert_eq!(pos.see_ge(mv, 400), true); // 500 > 400
-        assert_eq!(pos.see_ge(mv, 0), true); // 500 > 0
-        assert_eq!(pos.see_ge(mv, -100), true); // 500 > -100
+        assert!(!pos.see_ge(mv, 600)); // 500 < 600
+        assert!(pos.see_ge(mv, 500)); // 500 >= 500
+        assert!(pos.see_ge(mv, 400)); // 500 > 400
+        assert!(pos.see_ge(mv, 0)); // 500 > 0
+        assert!(pos.see_ge(mv, -100)); // 500 > -100
     }
 
     #[test]
@@ -2741,11 +2741,11 @@ mod tests {
         assert_eq!(pos.see(mv), 100);
 
         // Test see_ge with threshold that triggers early termination
-        assert_eq!(pos.see_ge(mv, 1000), false); // Can't reach 1000 with just a pawn capture
-        assert_eq!(pos.see_ge(mv, 500), false); // Can't reach 500 either
-        assert_eq!(pos.see_ge(mv, 200), false); // Can't reach 200
-        assert_eq!(pos.see_ge(mv, 100), true); // Exactly 100
-        assert_eq!(pos.see_ge(mv, 0), true); // Greater than 0
+        assert!(!pos.see_ge(mv, 1000)); // Can't reach 1000 with just a pawn capture
+        assert!(!pos.see_ge(mv, 500)); // Can't reach 500 either
+        assert!(!pos.see_ge(mv, 200)); // Can't reach 200
+        assert!(pos.see_ge(mv, 100)); // Exactly 100
+        assert!(pos.see_ge(mv, 0)); // Greater than 0
     }
 
     #[test]
@@ -2788,13 +2788,13 @@ mod tests {
         // But actually the exchange ends with +600 - 100 = 500 since White will not take the pawn
         // with Silver if it loses material
         let see_value = pos.see(mv);
-        assert!(see_value > 0, "Should be a good exchange: {}", see_value);
+        assert!(see_value > 0, "Should be a good exchange: {see_value}");
 
         // Test that see_ge works correctly with multiple attackers
         // The key test is that the algorithm considers all remaining attackers
-        assert_eq!(pos.see_ge(mv, 0), true); // Positive value
-        assert_eq!(pos.see_ge(mv, 500), true); // Can reach 500
-        assert_eq!(pos.see_ge(mv, 1500), false); // Cannot reach 1500
+        assert!(pos.see_ge(mv, 0)); // Positive value
+        assert!(pos.see_ge(mv, 500)); // Can reach 500
+        assert!(!pos.see_ge(mv, 1500)); // Cannot reach 1500
     }
 
     #[test]
@@ -2836,12 +2836,12 @@ mod tests {
         // +600 (tokin) - 500 (silver) + 1200 (dragon) - 900 (horse) = 400
         // But White won't take if it loses material, so it's just +600 - 500 = 100
         let see_value = pos.see(mv);
-        assert!(see_value > 0, "Should be a good exchange: {}", see_value);
+        assert!(see_value > 0, "Should be a good exchange: {see_value}");
 
         // Test that the algorithm correctly sums multiple promoted pieces
-        assert_eq!(pos.see_ge(mv, 0), true); // Positive value
-        assert_eq!(pos.see_ge(mv, 100), true); // Exactly 100
-        assert_eq!(pos.see_ge(mv, 200), false); // Cannot reach 200
+        assert!(pos.see_ge(mv, 0)); // Positive value
+        assert!(pos.see_ge(mv, 100)); // Exactly 100
+        assert!(!pos.see_ge(mv, 200)); // Cannot reach 200
     }
 
     #[test]

@@ -22,7 +22,7 @@ mod tests {
             let stack = SearchStack::default();
 
             // Generate moves with MovePicker
-            let mut picker = MovePicker::new(&pos, None, &history, &stack);
+            let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
             let mut picker_moves = Vec::new();
             let mut picker_set = HashSet::new();
 
@@ -105,7 +105,7 @@ mod tests {
         history.update_cutoff(pos.side_to_move, history_move, 10, None);
 
         let history_arc = Arc::new(history);
-        let mut picker = MovePicker::new(&pos, tt_move, &history_arc, &stack);
+        let mut picker = MovePicker::new(&pos, tt_move, None, &history_arc, &stack);
 
         // Check order
         let first = picker.next_move();
@@ -155,7 +155,7 @@ mod tests {
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
 
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
 
         // Collect good and bad captures separately
         let mut good_captures = Vec::new();
@@ -209,7 +209,7 @@ mod tests {
         history.update_cutoff(Color::Black, low_score_move, 5, None);
 
         let history_arc = Arc::new(history);
-        let mut picker = MovePicker::new(&pos, None, &history_arc, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history_arc, &stack);
 
         // Skip captures and killers
         let mut quiet_moves = Vec::new();
@@ -243,7 +243,7 @@ mod tests {
         let tt_move = Some(the_move);
         stack.killers[0] = Some(the_move);
 
-        let mut picker = MovePicker::new(&pos, tt_move, &history, &stack);
+        let mut picker = MovePicker::new(&pos, tt_move, None, &history, &stack);
 
         // Count occurrences
         let mut count = 0;
@@ -282,7 +282,7 @@ mod tests {
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
 
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
 
         // Count moves
         let mut move_count = 0;
@@ -307,7 +307,7 @@ mod tests {
         let mut move_sequences = Vec::new();
 
         for _ in 0..5 {
-            let mut picker = MovePicker::new(&pos, None, &history, &stack);
+            let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
             let mut moves = Vec::new();
 
             for _ in 0..10 {
@@ -352,7 +352,7 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 let pos = pos_clone.lock().unwrap();
-                let mut picker = MovePicker::new(&pos, None, &history_clone, &stack_clone);
+                let mut picker = MovePicker::new(&pos, None, None, &history_clone, &stack_clone);
 
                 let mut moves = Vec::new();
                 for _ in 0..5 {
@@ -394,7 +394,7 @@ mod tests {
         // Time MovePicker
         let start = Instant::now();
         for _ in 0..100 {
-            let mut picker = MovePicker::new(&pos, None, &history, &stack);
+            let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
             while picker.next_move().is_some() {}
         }
         let picker_time = start.elapsed();
@@ -425,7 +425,7 @@ mod tests {
         // Create an invalid move (impossible in starting position)
         let invalid_tt = Some(Move::normal(Square::new(4, 4), Square::new(4, 5), false));
 
-        let mut picker = MovePicker::new(&pos, invalid_tt, &history, &stack);
+        let mut picker = MovePicker::new(&pos, invalid_tt, None, &history, &stack);
 
         // First move should not be the invalid TT move
         let first = picker.next_move();
@@ -452,14 +452,14 @@ mod tests {
             let stack = SearchStack::default();
 
             // Generate with picker
-            let mut picker1 = MovePicker::new(&pos, None, &history, &stack);
+            let mut picker1 = MovePicker::new(&pos, None, None, &history, &stack);
             let mut moves1 = Vec::new();
             while let Some(mv) = picker1.next_move() {
                 moves1.push(mv);
             }
 
             // Generate again
-            let mut picker2 = MovePicker::new(&pos, None, &history, &stack);
+            let mut picker2 = MovePicker::new(&pos, None, None, &history, &stack);
             let mut moves2 = Vec::new();
             while let Some(mv) = picker2.next_move() {
                 moves2.push(mv);
@@ -499,7 +499,7 @@ mod tests {
         let stack = SearchStack::default();
 
         // Create picker and count moves
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
         let mut move_count = 0;
         while picker.next_move().is_some() {
             move_count += 1;
@@ -534,7 +534,7 @@ mod tests {
 
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
 
         // Collect captures
         let mut captures = Vec::new();
@@ -543,7 +543,7 @@ mod tests {
                 captures.push(mv);
                 // Test SEE value for this capture
                 let see_value = pos.see(mv);
-                println!("Capture {:?} has SEE value: {}", mv, see_value);
+                println!("Capture {mv:?} has SEE value: {see_value}");
             }
             if captures.len() >= 10 {
                 break;
@@ -623,7 +623,7 @@ mod tests {
 
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
 
         let mut capture_order = Vec::new();
         while let Some(mv) = picker.next_move() {
