@@ -70,17 +70,17 @@ impl TTEntry {
         // Pack all data into 64 bits:
         // [63-48]: move (16 bits)
         // [47-32]: score (16 bits)
-        // [31-24]: depth (8 bits)
-        // [23-22]: node type (2 bits)
-        // [21]: aspiration_fail flag (1 bit)
-        // [20-16]: age (5 bits)
+        // [31-25]: depth (7 bits)
+        // [24-23]: node type (2 bits)
+        // [22]: aspiration_fail flag (1 bit)
+        // [21-16]: age (6 bits)
         // [15-0]: static eval (16 bits)
         let data = ((move_data as u64) << 48)
             | ((score as u16 as u64) << 32)
-            | ((depth as u64) << 24)
-            | ((node_type as u64) << 22)
-            | ((aspiration_fail as u64) << 21)
-            | (((age & 0x1F) as u64) << 16)  // 5 bits for age
+            | (((depth & 0x7F) as u64) << 25)  // 7 bits for depth (max 127)
+            | ((node_type as u64) << 23)
+            | ((aspiration_fail as u64) << 22)
+            | (((age & 0x3F) as u64) << 16)  // 6 bits for age (max 63)
             | (eval as u16 as u64);
 
         TTEntry { key, data }
@@ -118,13 +118,13 @@ impl TTEntry {
     /// Get search depth
     #[inline]
     pub fn depth(&self) -> u8 {
-        ((self.data >> 24) & 0xFF) as u8
+        ((self.data >> 25) & 0x7F) as u8 // 7 bits for depth
     }
 
     /// Get node type
     #[inline]
     pub fn node_type(&self) -> NodeType {
-        match (self.data >> 22) & 0x3 {
+        match (self.data >> 23) & 0x3 {
             0 => NodeType::Exact,
             1 => NodeType::LowerBound,
             2 => NodeType::UpperBound,
@@ -135,13 +135,13 @@ impl TTEntry {
     /// Get age
     #[inline]
     pub fn age(&self) -> u8 {
-        ((self.data >> 16) & 0x1F) as u8 // 5 bits for age
+        ((self.data >> 16) & 0x3F) as u8 // 6 bits for age
     }
 
     /// Get aspiration fail flag
     #[inline]
     pub fn aspiration_fail(&self) -> bool {
-        ((self.data >> 21) & 0x1) != 0
+        ((self.data >> 22) & 0x1) != 0
     }
 }
 
@@ -280,7 +280,7 @@ impl TranspositionTable {
 
     /// Advance to next generation (for age-based replacement)
     pub fn new_search(&mut self) {
-        self.age = self.age.wrapping_add(1) & 0x1F; // 5-bit age
+        self.age = self.age.wrapping_add(1) & 0x3F; // 6-bit age (max 63)
     }
 
     /// Get fill rate (percentage of non-empty entries)
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(entry.eval(), 567);
         assert_eq!(entry.depth(), 10);
         assert_eq!(entry.node_type(), NodeType::Exact);
-        assert_eq!(entry.age(), 42 & 0x1F); // 5 bits only
+        assert_eq!(entry.age(), 42 & 0x3F); // 6 bits only
 
         // Check move extraction
         let extracted_move = entry.get_move().unwrap();
@@ -399,5 +399,41 @@ mod tests {
         let entry = tt.probe(hash).unwrap();
         assert_eq!(entry.depth(), 10); // Still the deeper entry
         assert_eq!(entry.score(), 200);
+    }
+
+    #[test]
+    fn test_age_wrap_around() {
+        let mut tt = TranspositionTable::new(1);
+
+        // Test that age wraps around at 64 (6 bits)
+        tt.age = 63;
+        tt.new_search();
+        assert_eq!(tt.age, 0);
+
+        // Test normal increment
+        tt.age = 30;
+        tt.new_search();
+        assert_eq!(tt.age, 31);
+
+        // Test age extraction from entry
+        let hash = 0x1234567890ABCDEF;
+        tt.age = 63;
+        tt.store(hash, None, 100, 50, 5, NodeType::Exact);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.age(), 63);
+    }
+
+    #[test]
+    fn test_depth_limit() {
+        // Test that depth is limited to 7 bits (max 127)
+        let entry = TTEntry::new(0x1234567890ABCDEF, None, 0, 0, 255, NodeType::Exact, 0);
+        assert_eq!(entry.depth(), 127); // Should be clamped to 127
+
+        let entry2 = TTEntry::new(0x1234567890ABCDEF, None, 0, 0, 127, NodeType::Exact, 0);
+        assert_eq!(entry2.depth(), 127);
+
+        let entry3 = TTEntry::new(0x1234567890ABCDEF, None, 0, 0, 100, NodeType::Exact, 0);
+        assert_eq!(entry3.depth(), 100);
     }
 }
