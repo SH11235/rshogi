@@ -130,7 +130,7 @@ mod search_integration_tests {
                 Some(100_000), // node limit
             );
 
-            println!("Position: {}", sfen);
+            println!("Position: {sfen}");
             println!("  Best move: {:?}", result_with_see.0);
             println!("  Score: {}", result_with_see.1);
 
@@ -163,7 +163,7 @@ mod search_integration_tests {
             // Store a dummy PV length for consistency check
             pv_lengths.push(5);
 
-            println!("Search completed with score: {}", score);
+            println!("Search completed with score: {score}");
         }
 
         // Verify consistency
@@ -174,6 +174,7 @@ mod search_integration_tests {
 
         // PV length should be reasonably consistent
         let first_pv_len = pv_lengths[0];
+        #[allow(clippy::unnecessary_cast)]
         for pv_len in &pv_lengths {
             let diff = (*pv_len as i32 - first_pv_len as i32).abs();
             assert!(diff <= 1, "PV length should be consistent");
@@ -207,21 +208,21 @@ mod search_integration_tests {
 
             let stats = create_mock_stats(searcher.nodes());
 
-            println!("  Time: {:?}", elapsed);
+            println!("  Time: {elapsed:?}");
             println!(
                 "  Nodes: {} (NPS: {:.0})",
                 stats.nodes,
                 stats.nodes as f64 / elapsed.as_secs_f64()
             );
-            println!("  Best move: {:?}", best_move);
-            println!("  Score: {}", score);
+            println!("  Best move: {best_move:?}");
+            println!("  Score: {score}");
 
             // Verify expected results if specified
             if let Some(expected_move) = &position.expected.best_move {
                 if let Some(best) = best_move {
                     let move_str = format_move(best);
                     if move_str != *expected_move {
-                        println!("  WARNING: Expected {}, got {}", expected_move, move_str);
+                        println!("  WARNING: Expected {expected_move}, got {move_str}");
                     }
                 }
             }
@@ -297,7 +298,7 @@ mod search_integration_tests {
         let elapsed = start.elapsed();
         let avg_time_ns = elapsed.as_nanos() / 10000;
 
-        println!("Basic SEE performance: {} ns/call", avg_time_ns);
+        println!("Basic SEE performance: {avg_time_ns} ns/call");
         assert!(
             avg_time_ns <= database.benchmarks.see_basic.max_time_ns as u128,
             "SEE performance regression: {} ns > {} ns",
@@ -322,8 +323,8 @@ mod search_integration_tests {
     /// Helper function to format a square
     fn format_square(sq: Square) -> String {
         let file = (sq.file() + 1).to_string();
-        let rank = ((sq.rank() as u8 + b'a') as char).to_string();
-        format!("{}{}", file, rank)
+        let rank = ((sq.rank() + b'a') as char).to_string();
+        format!("{file}{rank}")
     }
 }
 
