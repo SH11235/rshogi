@@ -31,11 +31,12 @@ impl Default for Move {
 
 impl Move {
     /// Null move constant
+    ///
+    /// Represents a no-op move, used in various contexts:
+    /// - Default/uninitialized move value
+    /// - Null move pruning in search algorithms
+    /// - Placeholder when no valid move exists
     pub const NULL: Self = Move { data: 0 };
-
-    /// Invalid move constant (same as NULL but more explicit intent)
-    /// Use this when representing an explicitly invalid or uninitialized move
-    pub const INVALID_MOVE: Self = Move { data: 0 };
 
     /// Create null move (for compatibility)
     #[inline]
