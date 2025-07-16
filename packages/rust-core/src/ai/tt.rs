@@ -43,6 +43,21 @@ impl TTEntry {
         node_type: NodeType,
         age: u8,
     ) -> Self {
+        Self::new_with_aspiration(key, mv, score, eval, depth, node_type, age, false)
+    }
+
+    /// Create new TT entry with aspiration fail flag
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_aspiration(
+        key: u64,
+        mv: Option<Move>,
+        score: i16,
+        eval: i16,
+        depth: u8,
+        node_type: NodeType,
+        age: u8,
+        aspiration_fail: bool,
+    ) -> Self {
         // Use high 48 bits of key (lower 16 bits used for indexing)
         let key = key & 0xFFFF_FFFF_FFFF_0000;
 
@@ -57,13 +72,15 @@ impl TTEntry {
         // [47-32]: score (16 bits)
         // [31-24]: depth (8 bits)
         // [23-22]: node type (2 bits)
-        // [21-16]: age (6 bits)
+        // [21]: aspiration_fail flag (1 bit)
+        // [20-16]: age (5 bits)
         // [15-0]: static eval (16 bits)
         let data = ((move_data as u64) << 48)
             | ((score as u16 as u64) << 32)
             | ((depth as u64) << 24)
             | ((node_type as u64) << 22)
-            | (((age & 0x3F) as u64) << 16)
+            | ((aspiration_fail as u64) << 21)
+            | (((age & 0x1F) as u64) << 16)  // 5 bits for age
             | (eval as u16 as u64);
 
         TTEntry { key, data }
@@ -118,7 +135,13 @@ impl TTEntry {
     /// Get age
     #[inline]
     pub fn age(&self) -> u8 {
-        ((self.data >> 16) & 0x3F) as u8
+        ((self.data >> 16) & 0x1F) as u8 // 5 bits for age
+    }
+
+    /// Get aspiration fail flag
+    #[inline]
+    pub fn aspiration_fail(&self) -> bool {
+        ((self.data >> 21) & 0x1) != 0
     }
 }
 
@@ -190,11 +213,35 @@ impl TranspositionTable {
         depth: u8,
         node_type: NodeType,
     ) {
+        self.store_with_aspiration(hash, mv, score, eval, depth, node_type, false)
+    }
+
+    /// Store entry with aspiration fail flag
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_with_aspiration(
+        &self,
+        hash: u64,
+        mv: Option<Move>,
+        score: i16,
+        eval: i16,
+        depth: u8,
+        node_type: NodeType,
+        aspiration_fail: bool,
+    ) {
         let idx = self.index(hash);
         let base_idx = idx * 2;
 
         // Create new entry
-        let entry = TTEntry::new(hash, mv, score, eval, depth, node_type, self.age);
+        let entry = TTEntry::new_with_aspiration(
+            hash,
+            mv,
+            score,
+            eval,
+            depth,
+            node_type,
+            self.age,
+            aspiration_fail,
+        );
 
         // Read existing entry
         let old_key = self.table[base_idx].load(Ordering::Relaxed);
@@ -208,11 +255,13 @@ impl TranspositionTable {
         // 1. Always replace if empty or different position
         // 2. For same position, replace if:
         //    - New entry is from current generation and old is not
-        //    - Both from same generation but new has greater depth
+        //    - New entry is aspiration success (not fail) and old is fail
+        //    - Both same aspiration status but new has greater depth
         let should_replace = !old_entry.matches(hash)
             || old_entry.depth() == 0
             || (entry.age() == self.age && old_entry.age() != self.age)
-            || (entry.age() == old_entry.age() && depth >= old_entry.depth());
+            || (!aspiration_fail && old_entry.aspiration_fail())  // Aspiration成功を優先
+            || (entry.aspiration_fail() == old_entry.aspiration_fail() && depth >= old_entry.depth());
 
         if should_replace {
             // Store atomically (order matters for concurrent access)
@@ -231,7 +280,7 @@ impl TranspositionTable {
 
     /// Advance to next generation (for age-based replacement)
     pub fn new_search(&mut self) {
-        self.age = self.age.wrapping_add(1) & 0x3F; // 6-bit age
+        self.age = self.age.wrapping_add(1) & 0x1F; // 5-bit age
     }
 
     /// Get fill rate (percentage of non-empty entries)
@@ -291,7 +340,7 @@ mod tests {
         assert_eq!(entry.eval(), 567);
         assert_eq!(entry.depth(), 10);
         assert_eq!(entry.node_type(), NodeType::Exact);
-        assert_eq!(entry.age(), 42);
+        assert_eq!(entry.age(), 42 & 0x1F); // 5 bits only
 
         // Check move extraction
         let extracted_move = entry.get_move().unwrap();
