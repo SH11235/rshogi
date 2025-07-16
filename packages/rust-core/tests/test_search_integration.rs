@@ -105,7 +105,7 @@ mod search_integration_tests {
 
         // Create two searchers - one with SEE, one without (simulated)
         let mut searcher_with_see = EnhancedSearcher::new(16, evaluator.clone());
-        let mut searcher_baseline = EnhancedSearcher::new(16, evaluator.clone());
+        let searcher_baseline = EnhancedSearcher::new(16, evaluator.clone());
 
         // Test position with many captures available
         let test_positions = vec![
@@ -116,7 +116,7 @@ mod search_integration_tests {
         ];
 
         for sfen in test_positions {
-            let mut pos = Position::from_sfen(sfen).expect("Valid SFEN");
+            let pos = Position::from_sfen(sfen).expect("Valid SFEN");
 
             // Search with normal settings
             let result_with_see = searcher_with_see.search(
@@ -142,7 +142,7 @@ mod search_integration_tests {
         let mut searcher = EnhancedSearcher::new(16, evaluator);
 
         // Position where move ordering matters significantly
-        let mut pos = Position::from_sfen(
+        let pos = Position::from_sfen(
             "ln1gk2nl/1r4gb1/p1ppsp2p/1p3pp2/9/2P2P1P1/PP1PP1P1P/1BG2S1R1/LN2KG1NL b SP 35",
         )
         .expect("Valid SFEN");
