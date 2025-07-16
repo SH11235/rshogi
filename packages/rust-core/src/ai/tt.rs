@@ -486,7 +486,7 @@ mod tests {
     fn test_age_wrap_around() {
         let mut tt = TranspositionTable::new(1);
 
-        // Test that age wraps around at 64 (6 bits)
+        // Test that age wraps around at 64 (6 bits: 0-63)
         tt.age = 63;
         tt.new_search();
         assert_eq!(tt.age, 0);
@@ -503,6 +503,19 @@ mod tests {
 
         let entry = tt.probe(hash).unwrap();
         assert_eq!(entry.age(), 63);
+
+        // Test that age is properly masked in TTEntry::new_with_aspiration
+        let entry_with_overflow = TTEntry::new_with_aspiration(
+            hash,
+            None,
+            100,
+            50,
+            5,
+            NodeType::Exact,
+            255, // This should be masked to 63 (255 & 0x3F = 63)
+            false,
+        );
+        assert_eq!(entry_with_overflow.age(), 63);
     }
 
     #[test]
