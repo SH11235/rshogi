@@ -99,6 +99,17 @@ impl Default for PVTable {
 }
 
 impl PVTable {
+    /// Create new PVTable with safety assertion
+    #[allow(clippy::int_plus_one)]
+    pub fn new() -> Self {
+        // Ensure MAX_PLY fits safely in u8 with room for +1
+        debug_assert!(
+            MAX_PLY <= u8::MAX as usize - 1,
+            "MAX_PLY must fit in u8 with room for +1 operation"
+        );
+        Self::default()
+    }
+
     /// Get the principal variation from root
     ///
     /// # Lifetime
@@ -276,7 +287,7 @@ impl EnhancedSearcher {
             node_limit: None,
             start_time: Instant::now(),
             evaluator,
-            pv: PVTable::default(),
+            pv: PVTable::new(),
             #[cfg(test)]
             stats: SearchStats::default(),
         }
@@ -1154,7 +1165,7 @@ mod tests {
 
     #[test]
     fn test_pv_table_boundary() {
-        let mut pv_table = PVTable::default();
+        let mut pv_table = PVTable::new();
 
         // 境界値テスト
         let test_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
