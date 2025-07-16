@@ -63,6 +63,20 @@ pub struct SearchStack {
     pub in_check: bool,
 }
 
+/// Search context for alpha-beta search
+struct SearchContext {
+    /// Current alpha bound
+    alpha: i32,
+    /// Current beta bound  
+    beta: i32,
+    /// Remaining depth
+    depth: i32,
+    /// Distance from root
+    ply: usize,
+    /// Whether this is an aspiration window retry
+    aspiration_failed: bool,
+}
+
 /// Search parameters
 pub struct SearchParams {
     /// Null move reduction
@@ -251,11 +265,11 @@ impl EnhancedSearcher {
             let prev_score = if depth > 1 {
                 last_root_score // 直前の確定スコアを最優先
             } else if let Some(entry) = self.tt.probe(pos.hash) {
-                if entry.node_type() == NodeType::Exact {
-                    // EXACT だけ採用
+                if entry.node_type() == NodeType::Exact && !entry.aspiration_fail() {
+                    // EXACT かつ aspiration成功の値だけ採用
                     entry.score() as i32
                 } else {
-                    self.evaluator.evaluate(pos) // 境界値なら捨てる
+                    self.evaluator.evaluate(pos) // 境界値やaspiration失敗なら捨てる
                 }
             } else {
                 self.evaluator.evaluate(pos)
@@ -275,6 +289,7 @@ impl EnhancedSearcher {
             };
 
             let mut score;
+            let mut aspiration_failed = false;
 
             // Aspiration search with retries
             loop {
@@ -283,7 +298,15 @@ impl EnhancedSearcher {
                     self.stats.total_delta[depth as usize] = delta;
                 }
 
-                score = self.alpha_beta(pos, alpha, beta, depth, 0, &mut stack);
+                score = self.alpha_beta_with_aspiration(
+                    pos,
+                    alpha,
+                    beta,
+                    depth,
+                    0,
+                    &mut stack,
+                    depth > 1 && aspiration_failed,
+                );
 
                 if self.stop.load(Ordering::Relaxed) {
                     break;
@@ -298,6 +321,7 @@ impl EnhancedSearcher {
                 // Check aspiration window
                 if score <= alpha {
                     // Fail-low: 窓を下方向に拡大
+                    aspiration_failed = true;
                     #[cfg(test)]
                     {
                         self.stats.aspiration_failures[depth as usize] += 1;
@@ -308,6 +332,7 @@ impl EnhancedSearcher {
                     (alpha, beta) = self.update_aspiration_window(delta, prev_score);
                 } else if score >= beta {
                     // Fail-high: 窓を上方向に拡大
+                    aspiration_failed = true;
                     #[cfg(test)]
                     {
                         self.stats.aspiration_failures[depth as usize] += 1;
@@ -363,14 +388,53 @@ impl EnhancedSearcher {
         (best_move, best_score)
     }
 
+    /// Alpha-beta search with aspiration window tracking
+    #[allow(clippy::too_many_arguments)]
+    fn alpha_beta_with_aspiration(
+        &mut self,
+        pos: &mut Position,
+        alpha: i32,
+        beta: i32,
+        depth: i32,
+        ply: usize,
+        stack: &mut [SearchStack],
+        aspiration_failed: bool,
+    ) -> i32 {
+        let ctx = SearchContext {
+            alpha,
+            beta,
+            depth,
+            ply,
+            aspiration_failed,
+        };
+        self.alpha_beta_internal(pos, ctx, stack)
+    }
+
     /// Alpha-beta search with enhancements
     fn alpha_beta(
         &mut self,
         pos: &mut Position,
-        mut alpha: i32,
-        mut beta: i32,
+        alpha: i32,
+        beta: i32,
         depth: i32,
         ply: usize,
+        stack: &mut [SearchStack],
+    ) -> i32 {
+        let ctx = SearchContext {
+            alpha,
+            beta,
+            depth,
+            ply,
+            aspiration_failed: false,
+        };
+        self.alpha_beta_internal(pos, ctx, stack)
+    }
+
+    /// Internal alpha-beta search with aspiration tracking
+    fn alpha_beta_internal(
+        &mut self,
+        pos: &mut Position,
+        mut ctx: SearchContext,
         stack: &mut [SearchStack],
     ) -> i32 {
         // Check limits
@@ -388,19 +452,19 @@ impl EnhancedSearcher {
         }
 
         // Mate distance pruning
-        alpha = alpha.max(-MATE_SCORE + ply as i32);
-        beta = beta.min(MATE_SCORE - ply as i32 - 1);
-        if alpha >= beta {
-            return alpha;
+        ctx.alpha = ctx.alpha.max(-MATE_SCORE + ctx.ply as i32);
+        ctx.beta = ctx.beta.min(MATE_SCORE - ctx.ply as i32 - 1);
+        if ctx.alpha >= ctx.beta {
+            return ctx.alpha;
         }
 
         // Initialize stack entry
-        stack[ply].pv = (beta - alpha) > 1;
-        stack[ply].in_check = pos.in_check();
+        stack[ctx.ply].pv = (ctx.beta - ctx.alpha) > 1;
+        stack[ctx.ply].in_check = pos.in_check();
 
         // Quiescence search at leaf nodes
-        if depth <= 0 {
-            return self.quiescence(pos, alpha, beta, ply, stack);
+        if ctx.depth <= 0 {
+            return self.quiescence(pos, ctx.alpha, ctx.beta, ctx.ply, stack);
         }
 
         // Probe transposition table
@@ -415,63 +479,70 @@ impl EnhancedSearcher {
             tt_eval = entry.eval() as i32;
 
             // TT cutoff
-            if entry.depth() >= depth as u8 && ply > 0 {
+            if entry.depth() >= ctx.depth as u8 && ctx.ply > 0 {
                 match entry.node_type() {
                     NodeType::Exact => return tt_value,
                     NodeType::LowerBound => {
-                        if tt_value >= beta {
+                        if tt_value >= ctx.beta {
                             return tt_value;
                         }
-                        alpha = alpha.max(tt_value);
+                        ctx.alpha = ctx.alpha.max(tt_value);
                     }
                     NodeType::UpperBound => {
-                        if tt_value <= alpha {
+                        if tt_value <= ctx.alpha {
                             return tt_value;
                         }
-                        beta = beta.min(tt_value);
+                        ctx.beta = ctx.beta.min(tt_value);
                     }
                 }
             }
         }
 
         // Static evaluation
-        let static_eval = if stack[ply].in_check {
+        let static_eval = if stack[ctx.ply].in_check {
             -INFINITY
         } else if tt_hit.is_some() {
             tt_eval
         } else {
             self.evaluator.evaluate(pos)
         };
-        stack[ply].static_eval = static_eval;
+        stack[ctx.ply].static_eval = static_eval;
 
         // Null move pruning
-        if !stack[ply].pv
-            && !stack[ply].in_check
-            && depth >= 3
-            && static_eval >= beta
-            && !stack[ply].null_move
+        if !stack[ctx.ply].pv
+            && !stack[ctx.ply].in_check
+            && ctx.depth >= 3
+            && static_eval >= ctx.beta
+            && !stack[ctx.ply].null_move
             && self.has_non_pawn_material(pos, pos.side_to_move)
         {
-            let r = (self.params.null_move_reduction)(depth);
+            let r = (self.params.null_move_reduction)(ctx.depth);
 
             // Make null move
-            stack[ply + 1].null_move = true;
+            stack[ctx.ply + 1].null_move = true;
             let undo = self.do_null_move(pos);
 
-            let score = -self.alpha_beta(pos, -beta, -beta + 1, depth - r - 1, ply + 1, stack);
+            let score = -self.alpha_beta(
+                pos,
+                -ctx.beta,
+                -ctx.beta + 1,
+                ctx.depth - r - 1,
+                ctx.ply + 1,
+                stack,
+            );
 
             // Undo null move
             self.undo_null_move(pos, undo);
-            stack[ply + 1].null_move = false;
+            stack[ctx.ply + 1].null_move = false;
 
-            if score >= beta {
+            if score >= ctx.beta {
                 return score;
             }
         }
 
         // Use MovePicker for efficient move ordering
         let history_arc = Arc::new(self.history.clone());
-        let mut move_picker = MovePicker::new(pos, tt_move, &history_arc, &stack[ply]);
+        let mut move_picker = MovePicker::new(pos, tt_move, &history_arc, &stack[ctx.ply]);
 
         let mut best_score = -INFINITY;
         let mut best_move = None;
@@ -481,8 +552,8 @@ impl EnhancedSearcher {
         // Search moves
         while let Some(mv) = move_picker.next_move() {
             // Late move pruning
-            if !stack[ply].in_check
-                && moves_searched >= (self.params.late_move_count)(depth)
+            if !stack[ctx.ply].in_check
+                && moves_searched >= (self.params.late_move_count)(ctx.depth)
                 && !self.is_capture(pos, mv)
                 && !mv.is_promote()
             {
@@ -496,7 +567,7 @@ impl EnhancedSearcher {
             // Prefetch TT
             self.tt.prefetch(pos.hash);
 
-            let mut new_depth = depth - 1;
+            let mut new_depth = ctx.depth - 1;
 
             // Extensions
             if pos.in_check() {
@@ -505,34 +576,50 @@ impl EnhancedSearcher {
 
             // Late move reductions
             let mut score;
-            if depth >= 3
+            if ctx.depth >= 3
                 && moves_searched > 1
-                && !stack[ply].in_check
+                && !stack[ctx.ply].in_check
                 && !self.is_capture(pos, mv)
                 && !mv.is_promote()
             {
-                let r = self.params.lmr_reductions[depth.min(63) as usize]
+                let r = self.params.lmr_reductions[ctx.depth.min(63) as usize]
                     [moves_searched.min(63) as usize];
                 let reduced_depth = (new_depth - r).max(1);
 
                 // Reduced search
-                score = -self.alpha_beta(pos, -alpha - 1, -alpha, reduced_depth, ply + 1, stack);
+                score = -self.alpha_beta(
+                    pos,
+                    -ctx.alpha - 1,
+                    -ctx.alpha,
+                    reduced_depth,
+                    ctx.ply + 1,
+                    stack,
+                );
 
                 // Re-search if failed high
-                if score > alpha {
-                    score = -self.alpha_beta(pos, -beta, -alpha, new_depth, ply + 1, stack);
+                if score > ctx.alpha {
+                    score =
+                        -self.alpha_beta(pos, -ctx.beta, -ctx.alpha, new_depth, ctx.ply + 1, stack);
                 }
             } else if moves_searched > 1 {
                 // Null window search
-                score = -self.alpha_beta(pos, -alpha - 1, -alpha, new_depth, ply + 1, stack);
+                score = -self.alpha_beta(
+                    pos,
+                    -ctx.alpha - 1,
+                    -ctx.alpha,
+                    new_depth,
+                    ctx.ply + 1,
+                    stack,
+                );
 
                 // Re-search with full window if needed
-                if score > alpha && score < beta {
-                    score = -self.alpha_beta(pos, -beta, -alpha, new_depth, ply + 1, stack);
+                if score > ctx.alpha && score < ctx.beta {
+                    score =
+                        -self.alpha_beta(pos, -ctx.beta, -ctx.alpha, new_depth, ctx.ply + 1, stack);
                 }
             } else {
                 // Full window search
-                score = -self.alpha_beta(pos, -beta, -alpha, new_depth, ply + 1, stack);
+                score = -self.alpha_beta(pos, -ctx.beta, -ctx.alpha, new_depth, ctx.ply + 1, stack);
             }
 
             // Undo move
@@ -551,18 +638,18 @@ impl EnhancedSearcher {
                 best_score = score;
                 best_move = Some(mv);
 
-                if score > alpha {
-                    alpha = score;
+                if score > ctx.alpha {
+                    ctx.alpha = score;
 
-                    if score >= beta {
+                    if score >= ctx.beta {
                         // Update history for good quiet move
                         if !self.is_capture(pos, mv) {
-                            self.history.update_cutoff(pos.side_to_move, mv, depth, None);
+                            self.history.update_cutoff(pos.side_to_move, mv, ctx.depth, None);
 
                             // Update killers
-                            if stack[ply].killers[0] != Some(mv) {
-                                stack[ply].killers[1] = stack[ply].killers[0];
-                                stack[ply].killers[0] = Some(mv);
+                            if stack[ctx.ply].killers[0] != Some(mv) {
+                                stack[ctx.ply].killers[1] = stack[ctx.ply].killers[0];
+                                stack[ctx.ply].killers[0] = Some(mv);
                             }
 
                             // Penalize other quiet moves that were tried
@@ -571,7 +658,7 @@ impl EnhancedSearcher {
                                     self.history.update_quiet(
                                         pos.side_to_move,
                                         quiet_mv,
-                                        depth,
+                                        ctx.depth,
                                         None,
                                     );
                                 }
@@ -585,29 +672,34 @@ impl EnhancedSearcher {
 
         // Check for no legal moves
         if moves_searched == 0 {
-            return if stack[ply].in_check {
-                -MATE_SCORE + ply as i32
+            return if stack[ctx.ply].in_check {
+                -MATE_SCORE + ctx.ply as i32
             } else {
                 DRAW_SCORE
             };
         }
 
         // Store in transposition table
-        let node_type = if best_score >= beta {
+        let node_type = if best_score >= ctx.beta {
             NodeType::LowerBound
-        } else if best_score <= alpha {
+        } else if best_score <= ctx.alpha {
             NodeType::UpperBound
         } else {
             NodeType::Exact
         };
 
-        self.tt.store(
+        // ルートノードでAspiration失敗時は、信頼性を記録
+        let is_aspiration_fail =
+            ctx.ply == 0 && ctx.aspiration_failed && node_type != NodeType::Exact;
+
+        self.tt.store_with_aspiration(
             pos.hash,
             best_move,
             best_score as i16,
             static_eval as i16,
-            depth as u8,
+            ctx.depth as u8,
             node_type,
+            is_aspiration_fail,
         );
 
         best_score
