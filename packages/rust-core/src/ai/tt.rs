@@ -260,7 +260,7 @@ impl TranspositionTable {
         let should_replace = !old_entry.matches(hash)
             || old_entry.depth() == 0
             || (entry.age() == self.age && old_entry.age() != self.age)
-            || (!aspiration_fail && old_entry.aspiration_fail())  // Aspiration成功を優先
+            || (!entry.aspiration_fail() && old_entry.aspiration_fail())  // Aspiration成功を優先
             || (entry.aspiration_fail() == old_entry.aspiration_fail() && depth >= old_entry.depth());
 
         if should_replace {
