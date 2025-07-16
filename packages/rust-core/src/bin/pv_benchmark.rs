@@ -6,6 +6,26 @@ use shogi_core::ai::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Run search with panic recovery
+fn run_search_safe(
+    searcher: &mut EnhancedSearcher,
+    pos: &mut Position,
+    depth: u8,
+) -> Result<(Option<shogi_core::ai::moves::Move>, i32, u64), String> {
+    use std::panic;
+
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let (best_move, score) = searcher.search(pos, depth.into(), None, None);
+        let nodes = searcher.nodes();
+        (best_move, score, nodes)
+    }));
+
+    match result {
+        Ok((best_move, score, nodes)) => Ok((best_move, score, nodes)),
+        Err(_) => Err("Search panicked".to_string()),
+    }
+}
+
 fn main() {
     println!("PV Table Performance Benchmark");
     println!("==============================\n");
@@ -33,17 +53,28 @@ fn main() {
         for i in 0..iterations {
             let mut pos_copy = pos.clone();
             let start = Instant::now();
-            let (best_move, score) = searcher_with_pv.search(&mut pos_copy, depth, None, None);
-            let elapsed = start.elapsed();
 
-            let nodes = searcher_with_pv.nodes();
-            total_nodes += nodes;
-            total_time += elapsed;
+            match run_search_safe(&mut searcher_with_pv, &mut pos_copy, depth) {
+                Ok((best_move, score, nodes)) => {
+                    let elapsed = start.elapsed();
+                    total_nodes += nodes;
+                    total_time += elapsed;
 
-            if i == 0 {
-                println!("  Best move: {best_move:?}, Score: {score}");
-                let pv = searcher_with_pv.principal_variation();
-                println!("  PV (length {}): {:?}", pv.len(), pv.iter().take(5).collect::<Vec<_>>());
+                    if i == 0 {
+                        println!("  Best move: {best_move:?}, Score: {score}");
+                        println!("  Nodes searched: {nodes}");
+                        let pv = searcher_with_pv.principal_variation();
+                        println!(
+                            "  PV (length {}): {:?}",
+                            pv.len(),
+                            pv.iter().take(5).collect::<Vec<_>>()
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Search failed at iteration {}: {}", i + 1, e);
+                    continue;
+                }
             }
         }
 
@@ -70,18 +101,26 @@ fn main() {
     let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
 
     for depth in 1..=8 {
+        let mut pos_copy = pos.clone();
         let start = Instant::now();
-        let (best_move, score) = searcher.search(&mut pos.clone(), depth, None, None);
-        let elapsed = start.elapsed();
-        let nodes = searcher.nodes();
-        let nps = if elapsed.as_secs_f64() > 0.0 {
-            nodes as f64 / elapsed.as_secs_f64()
-        } else {
-            0.0
-        };
 
-        println!(
-            "  Depth {depth}: {nodes} nodes in {elapsed:?} ({nps:.0} nps), score: {score}, move: {best_move:?}"
-        );
+        match run_search_safe(&mut searcher, &mut pos_copy, depth) {
+            Ok((best_move, score, nodes)) => {
+                let elapsed = start.elapsed();
+                let nps = if elapsed.as_secs_f64() > 0.0 {
+                    nodes as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+
+                println!(
+                    "  Depth {depth}: {nodes} nodes in {elapsed:?} ({nps:.0} nps), score: {score}, move: {best_move:?}"
+                );
+            }
+            Err(e) => {
+                eprintln!("  Search failed at depth {depth}: {e}");
+                break;
+            }
+        }
     }
 }
