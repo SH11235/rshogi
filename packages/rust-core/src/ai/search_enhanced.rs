@@ -33,6 +33,17 @@ const MATE_SCORE: i32 = 28000;
 /// Draw score
 const DRAW_SCORE: i32 = 0;
 
+/// Game phase enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GamePhase {
+    /// Opening phase (0-20 moves)
+    Opening,
+    /// Middle game (21-60 moves)
+    MiddleGame,
+    /// End game (61+ moves or few pieces)
+    EndGame,
+}
+
 /// Search stack entry
 #[derive(Clone, Default)]
 pub struct SearchStack {
@@ -62,6 +73,12 @@ pub struct SearchParams {
     pub futility_margin: fn(i32) -> i32,
     /// Late move count margin
     pub late_move_count: fn(i32) -> i32,
+    /// Initial aspiration window function (phase-aware)
+    pub initial_window: fn(i32, GamePhase) -> i32, // (depth, phase) -> window_size
+    /// Maximum aspiration window delta (depth-dependent)
+    pub max_aspiration_delta: fn(i32) -> i32, // depth -> max_delta
+    /// Time pressure threshold (ratio of remaining time to elapsed time)
+    pub time_pressure_threshold: f64,
 }
 
 impl Default for SearchParams {
@@ -80,8 +97,39 @@ impl Default for SearchParams {
             lmr_reductions,
             futility_margin: |depth| 150 * depth,
             late_move_count: |depth| 3 + depth * depth / 2,
+            initial_window: |depth, phase| {
+                // フェーズに応じた動的窓幅調整
+                let base_window = match phase {
+                    GamePhase::Opening => 30,    // 序盤は狭い窓（評価が安定）
+                    GamePhase::MiddleGame => 50, // 中盤は標準的な窓
+                    GamePhase::EndGame => 100,   // 終盤は広い窓（評価が激しく変動）
+                };
+                let depth_factor = match phase {
+                    GamePhase::Opening => 3,    // 序盤は深さの影響を小さく
+                    GamePhase::MiddleGame => 5, // 中盤は標準
+                    GamePhase::EndGame => 10,   // 終盤は深さの影響を大きく
+                };
+                (base_window + depth * depth_factor).min(i16::MAX as i32)
+            },
+            max_aspiration_delta: |depth| {
+                // 深さが深いほど大きな窓幅を許容
+                (800 + 40 * depth).min(2000)
+            },
+            time_pressure_threshold: 0.1, // 残り時間が経過時間の10%未満で時間圧迫
         }
     }
+}
+
+/// Search statistics for testing
+#[cfg(test)]
+#[derive(Default, Clone)]
+pub struct SearchStats {
+    /// Number of aspiration failures per depth
+    pub aspiration_failures: Vec<u32>,
+    /// Number of aspiration windows hit per depth
+    pub aspiration_hits: Vec<u32>,
+    /// Total delta used per depth
+    pub total_delta: Vec<i32>,
 }
 
 /// Enhanced searcher with advanced techniques
@@ -104,6 +152,9 @@ pub struct EnhancedSearcher {
     start_time: Instant,
     /// Evaluator
     evaluator: Arc<dyn Evaluator + Send + Sync>,
+    /// Search statistics (for testing)
+    #[cfg(test)]
+    pub stats: SearchStats,
 }
 
 impl EnhancedSearcher {
@@ -119,7 +170,34 @@ impl EnhancedSearcher {
             node_limit: None,
             start_time: Instant::now(),
             evaluator,
+            #[cfg(test)]
+            stats: SearchStats::default(),
         }
+    }
+
+    /// Estimate game phase based on move count and material
+    fn estimate_game_phase(&self, pos: &Position) -> GamePhase {
+        let ply = pos.ply as i32;
+
+        // Count pieces on board using cached bitboard
+        let total_pieces = pos.board.all_bb.count_ones();
+
+        // Determine phase based on move count and piece count
+        if ply < 20 {
+            GamePhase::Opening
+        } else if ply > 60 || total_pieces < 20 {
+            // End game if many moves or few pieces remain
+            GamePhase::EndGame
+        } else {
+            GamePhase::MiddleGame
+        }
+    }
+
+    /// Update aspiration window bounds based on delta and center score
+    fn update_aspiration_window(&self, delta: i32, center: i32) -> (i32, i32) {
+        let alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
+        let beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
+        (alpha, beta)
     }
 
     /// Search position with iterative deepening
@@ -138,25 +216,142 @@ impl EnhancedSearcher {
         self.node_limit = node_limit;
         self.history.clear_all();
 
+        #[cfg(test)]
+        {
+            // 再利用：既存のベクタをクリアして再使用
+            let required_size = max_depth as usize + 1;
+
+            // リサイズが必要な場合のみ実行
+            if self.stats.aspiration_failures.len() < required_size {
+                self.stats.aspiration_failures.resize(required_size, 0);
+                self.stats.aspiration_hits.resize(required_size, 0);
+                self.stats.total_delta.resize(required_size, 0);
+            } else {
+                // 既存の領域をゼロクリア
+                self.stats.aspiration_failures.fill(0);
+                self.stats.aspiration_hits.fill(0);
+                self.stats.total_delta.fill(0);
+            }
+        }
+
         // New search generation
         Arc::get_mut(&mut self.tt).unwrap().new_search();
 
         let mut stack = vec![SearchStack::default(); MAX_PLY + 10];
         let mut best_move = None;
         let mut best_score = -INFINITY;
+        let mut last_root_score = -INFINITY; // 前回の反復深化で確定したスコア
 
         // Iterative deepening
         for depth in 1..=max_depth {
-            let score = self.alpha_beta(pos, -INFINITY, INFINITY, depth, 0, &mut stack);
+            // ゲームフェーズを判定
+            let phase = self.estimate_game_phase(pos);
 
-            if self.stop.load(Ordering::Relaxed) {
-                break;
+            // Aspiration Windows用の初期値設定
+            let prev_score = if depth > 1 {
+                last_root_score // 直前の確定スコアを最優先
+            } else if let Some(entry) = self.tt.probe(pos.hash) {
+                if entry.node_type() == NodeType::Exact {
+                    // EXACT だけ採用
+                    entry.score() as i32
+                } else {
+                    self.evaluator.evaluate(pos) // 境界値なら捨てる
+                }
+            } else {
+                self.evaluator.evaluate(pos)
+            };
+
+            // Aspiration Windows設定（フェーズを考慮）
+            let mut delta = (self.params.initial_window)(depth, phase);
+            let mut alpha = if depth == 1 {
+                -INFINITY
+            } else {
+                (prev_score - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32)
+            };
+            let mut beta = if depth == 1 {
+                INFINITY
+            } else {
+                (prev_score + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32)
+            };
+
+            let mut score;
+
+            // Aspiration search with retries
+            loop {
+                #[cfg(test)]
+                {
+                    self.stats.total_delta[depth as usize] = delta;
+                }
+
+                score = self.alpha_beta(pos, alpha, beta, depth, 0, &mut stack);
+
+                if self.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Check time and stop conditions
+                if self.should_stop() {
+                    self.stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+
+                // Check aspiration window
+                if score <= alpha {
+                    // Fail-low: 窓を下方向に拡大
+                    #[cfg(test)]
+                    {
+                        self.stats.aspiration_failures[depth as usize] += 1;
+                    }
+
+                    // deltaを先に拡大
+                    delta = (delta * 2).min((self.params.max_aspiration_delta)(depth));
+                    (alpha, beta) = self.update_aspiration_window(delta, prev_score);
+                } else if score >= beta {
+                    // Fail-high: 窓を上方向に拡大
+                    #[cfg(test)]
+                    {
+                        self.stats.aspiration_failures[depth as usize] += 1;
+                    }
+
+                    // deltaを先に拡大
+                    delta = (delta * 2).min((self.params.max_aspiration_delta)(depth));
+                    (alpha, beta) = self.update_aspiration_window(delta, prev_score);
+                } else {
+                    // 窓内ヒット: 成功
+                    #[cfg(test)]
+                    {
+                        self.stats.aspiration_hits[depth as usize] += 1;
+                        self.stats.total_delta[depth as usize] = delta; // 成功時のdeltaを記録
+                    }
+                    break;
+                }
+
+                // 安全装置: deltaが最大値を超えたらフルウィンドウ
+                if delta >= (self.params.max_aspiration_delta)(depth) {
+                    alpha = -INFINITY;
+                    beta = INFINITY;
+                }
+
+                // 時間制限が厳しい場合は即座にフルウィンドウへ
+                if let Some(limit) = self.time_limit {
+                    let elapsed = self.start_time.elapsed();
+                    let remaining = limit.saturating_duration_since(Instant::now());
+                    if remaining.as_secs_f64()
+                        < elapsed.as_secs_f64() * self.params.time_pressure_threshold
+                    {
+                        alpha = -INFINITY;
+                        beta = INFINITY;
+                    }
+                }
             }
+
+            // 探索結果の保存
+            best_score = score;
+            last_root_score = score; // 次の深さで使用するため更新
 
             // Extract best move from TT
             if let Some(tt_entry) = self.tt.probe(pos.hash) {
                 best_move = tt_entry.get_move();
-                best_score = score;
             }
 
             // Check time
@@ -564,5 +759,178 @@ mod tests {
 
         assert!(best_move.is_some());
         assert!(score.abs() < 1000); // Should be relatively balanced
+    }
+
+    #[test]
+    fn test_aspiration_windows() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+
+        // テスト用の探索深さ（CI環境でも安定して動作する深さ）
+        let test_depth = 4;
+        let (best_move, _score) = searcher.search(&mut pos, test_depth, None, None);
+
+        assert!(best_move.is_some());
+
+        // 統計情報を確認
+        let total_depths = searcher.stats.aspiration_hits.len();
+        let mut total_hits = 0;
+        let mut total_failures = 0;
+
+        for depth in 2..=test_depth {
+            let depth_idx = depth as usize;
+            if depth_idx < total_depths {
+                total_hits += searcher.stats.aspiration_hits[depth_idx];
+                total_failures += searcher.stats.aspiration_failures[depth_idx];
+
+                // 深さ2以降では、fail-high/lowが4回以内で収束することを確認
+                // （delta: 初期値 → 2倍 → 4倍 → 8倍 → フルウィンドウ）
+                if depth >= 2 {
+                    assert!(
+                        searcher.stats.aspiration_failures[depth_idx] <= 4,
+                        "Depth {}: Too many aspiration failures ({})",
+                        depth,
+                        searcher.stats.aspiration_failures[depth_idx]
+                    );
+                }
+            }
+        }
+
+        // 全体として、一定の成功率があることを確認
+        // 序盤は評価値変動が大きいため失敗が多くなることがある
+        let hit_rate = if total_hits + total_failures > 0 {
+            (total_hits as f64) / ((total_hits + total_failures) as f64)
+        } else {
+            0.0
+        };
+        assert!(
+            hit_rate >= 0.25, // 25%以上の成功率
+            "Aspiration windows hit rate too low: {:.1}% (hits={}, failures={})",
+            hit_rate * 100.0,
+            total_hits,
+            total_failures
+        );
+
+        println!("Aspiration Window Statistics:");
+        for depth in 1..=test_depth {
+            let depth_idx = depth as usize;
+            if depth_idx < total_depths {
+                let failures = searcher.stats.aspiration_failures[depth_idx];
+                let hits = searcher.stats.aspiration_hits[depth_idx];
+                let total = hits + failures;
+                let hit_rate = if total > 0 {
+                    (hits as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "  Depth {}: hits={}, failures={}, hit_rate={:.1}%, final_delta={}",
+                    depth, hits, failures, hit_rate, searcher.stats.total_delta[depth_idx]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_aspiration_window_params() {
+        let params = SearchParams::default();
+
+        // 各フェーズで窓幅が適切に設定されることを確認
+        // Opening phase
+        assert_eq!((params.initial_window)(1, GamePhase::Opening), 33); // 30 + 1*3
+        assert_eq!((params.initial_window)(6, GamePhase::Opening), 48); // 30 + 6*3
+
+        // Middle game phase
+        assert_eq!((params.initial_window)(1, GamePhase::MiddleGame), 55); // 50 + 1*5
+        assert_eq!((params.initial_window)(6, GamePhase::MiddleGame), 80); // 50 + 6*5
+
+        // End game phase
+        assert_eq!((params.initial_window)(1, GamePhase::EndGame), 110); // 100 + 1*10
+        assert_eq!((params.initial_window)(6, GamePhase::EndGame), 160); // 100 + 6*10
+    }
+
+    #[test]
+    fn test_game_phase_estimation() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let searcher = EnhancedSearcher::new(16, evaluator);
+
+        // Opening position
+        let mut pos = Position::startpos();
+        assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::Opening);
+
+        // Simulate middle game (set ply count)
+        pos.ply = 30;
+        assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::MiddleGame);
+
+        // Simulate end game (high ply count)
+        pos.ply = 70;
+        assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::EndGame);
+    }
+
+    #[test]
+    fn test_aspiration_windows_various_depths() {
+        let evaluator = Arc::new(MaterialEvaluator);
+
+        // 異なる深さでのAspiration Windowsの動作を確認
+        for test_depth in [2, 3, 5] {
+            let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
+            let mut pos = Position::startpos();
+
+            let (best_move, _score) = searcher.search(&mut pos, test_depth, None, None);
+            assert!(best_move.is_some(), "Depth {}: No best move found", test_depth);
+
+            // 深さ2以上では必ずAspiration Windowsが動作することを確認
+            if test_depth >= 2 {
+                let depth_idx = test_depth as usize;
+                let total_attempts = searcher.stats.aspiration_hits[depth_idx]
+                    + searcher.stats.aspiration_failures[depth_idx];
+                assert!(
+                    total_attempts > 0,
+                    "Depth {}: Aspiration windows should be used",
+                    test_depth
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dynamic_window_adjustment() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let test_depth = 3;
+
+        // Test different game phases
+        for (ply, expected_phase) in [
+            (5, GamePhase::Opening),
+            (30, GamePhase::MiddleGame),
+            (70, GamePhase::EndGame),
+        ] {
+            let mut pos = Position::startpos();
+            pos.ply = ply;
+
+            let phase = searcher.estimate_game_phase(&pos);
+            assert_eq!(phase, expected_phase, "Ply {}: Wrong phase", ply);
+
+            // Search and verify aspiration windows are used
+            let (best_move, _score) = searcher.search(&mut pos, test_depth, None, None);
+            assert!(best_move.is_some());
+
+            // Check that window size varies by phase
+            let window_size = (searcher.params.initial_window)(test_depth, phase);
+            match phase {
+                GamePhase::Opening => {
+                    assert!(window_size < 50, "Opening window too wide: {}", window_size)
+                }
+                GamePhase::MiddleGame => assert!(
+                    window_size >= 50 && window_size < 100,
+                    "Middle game window out of range: {}",
+                    window_size
+                ),
+                GamePhase::EndGame => {
+                    assert!(window_size >= 100, "End game window too narrow: {}", window_size)
+                }
+            }
+        }
     }
 }
