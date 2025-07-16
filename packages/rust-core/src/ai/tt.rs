@@ -76,12 +76,12 @@ impl TTEntry {
         // [21-16]: age (6 bits)
         // [15-0]: static eval (16 bits)
         let data = ((move_data as u64) << 48)
-            | ((score as u16 as u64) << 32)
+            | ((score as u16 as u64) << 32)  // Store as unsigned 16-bit value (preserves 2's complement)
             | (((depth & 0x7F) as u64) << 25)  // 7 bits for depth (max 127)
             | ((node_type as u64) << 23)
             | ((aspiration_fail as u64) << 22)
             | (((age & 0x3F) as u64) << 16)  // 6 bits for age (max 63)
-            | (eval as u16 as u64);
+            | (eval as u16 as u64); // Store as unsigned 16-bit value (preserves 2's complement)
 
         TTEntry { key, data }
     }
@@ -128,7 +128,7 @@ impl TTEntry {
             0 => NodeType::Exact,
             1 => NodeType::LowerBound,
             2 => NodeType::UpperBound,
-            _ => unreachable!(),
+            _ => NodeType::UpperBound, // Default to UpperBound for corrupted data
         }
     }
 
@@ -218,44 +218,52 @@ impl TranspositionTable {
 
     /// Determine if new entry should replace old entry
     /// Returns true if new entry is stronger and should replace the old one
-    fn is_stronger(&self, new: &TTEntry, old: &TTEntry, depth: u8, hash: u64) -> bool {
-        // 1. Empty slot or different position
+    fn is_stronger(&self, new: &TTEntry, old: &TTEntry, hash: u64) -> bool {
+        // 1. Empty slot or different position (most common case)
         if !old.matches(hash) || old.depth() == 0 {
             return true;
         }
 
         // 2. Current generation always replaces old generation
-        if new.age() == self.age && old.age() != self.age {
+        let new_is_current = new.age() == self.age;
+        let old_is_current = old.age() == self.age;
+        if new_is_current && !old_is_current {
             return true;
         }
 
         // 3. Node type priority: Exact > Lower/Upper
-        if new.node_type() == NodeType::Exact && old.node_type() != NodeType::Exact {
+        let new_type = new.node_type();
+        let old_type = old.node_type();
+        if new_type == NodeType::Exact && old_type != NodeType::Exact {
             return true;
         }
-        if new.node_type() != NodeType::Exact && old.node_type() == NodeType::Exact {
+        if new_type != NodeType::Exact && old_type == NodeType::Exact {
             return false;
         }
 
         // 4. Aspiration: success > fail
-        if !new.aspiration_fail() && old.aspiration_fail() {
+        let new_asp_fail = new.aspiration_fail();
+        let old_asp_fail = old.aspiration_fail();
+        if !new_asp_fail && old_asp_fail {
             return true;
         }
-        if new.aspiration_fail() && !old.aspiration_fail() {
+        if new_asp_fail && !old_asp_fail {
             return false;
         }
 
         // 5. Depth comparison
-        if depth > old.depth() {
+        let new_depth = new.depth();
+        let old_depth = old.depth();
+        if new_depth > old_depth {
             return true;
         }
-        if depth < old.depth() {
+        if new_depth < old_depth {
             return false;
         }
 
         // 6. Same depth, same conditions → tie-break by generation
         // Only replace if new is current generation and old is not
-        new.age() == self.age && old.age() != self.age
+        new_is_current && !old_is_current
     }
 
     /// Store entry with aspiration fail flag
@@ -294,7 +302,7 @@ impl TranspositionTable {
         };
 
         // Use is_stronger to determine if replacement should occur
-        if self.is_stronger(&entry, &old_entry, depth, hash) {
+        if self.is_stronger(&entry, &old_entry, hash) {
             // Store atomically (order matters for concurrent access)
             self.table[base_idx].store(entry.key, Ordering::Relaxed);
             self.table[base_idx + 1].store(entry.data, Ordering::Relaxed);
@@ -566,5 +574,86 @@ mod tests {
         let entry = tt.probe(hash).unwrap();
         assert!(!entry.aspiration_fail());
         assert_eq!(entry.score(), 200);
+    }
+
+    #[test]
+    fn test_negative_scores() {
+        let tt = TranspositionTable::new(1);
+
+        // Test various negative scores with different hash values to avoid conflicts
+        let test_cases: Vec<(u64, i16)> = vec![
+            (0x1111111111111111, -32768),
+            (0x2222222222222222, -30000),
+            (0x3333333333333333, -1000),
+            (0x4444444444444444, -1),
+            (0x5555555555555555, 0),
+            (0x6666666666666666, 1),
+            (0x7777777777777777, 1000),
+            (0x8888888888888888, 30000),
+            (0x9999999999999999, 32767),
+        ];
+
+        for (hash, score) in test_cases {
+            tt.store(hash, None, score, score / 2, 10, NodeType::Exact);
+
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.score(), score, "Failed to store/retrieve score: {}", score);
+            assert_eq!(entry.eval(), score / 2, "Failed to store/retrieve eval: {}", score / 2);
+        }
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Test maximum depth (127)
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xCCCCCCCCCCCCCCCC;
+            tt.store(hash, None, 100, 50, 127, NodeType::Exact);
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.depth(), 127);
+        }
+
+        // Test depth overflow (masked to 7 bits)
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xDDDDDDDDDDDDDDDD;
+            tt.store(hash, None, 100, 50, 200, NodeType::Exact);
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.depth(), 200 & 0x7F); // 200 & 0x7F = 72
+        }
+
+        // Test minimum values
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xEEEEEEEEEEEEEEEE;
+            tt.store(hash, None, -32768, -32768, 1, NodeType::Exact); // depth must be > 0
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.score(), -32768);
+            assert_eq!(entry.eval(), -32768);
+            assert_eq!(entry.depth(), 1);
+        }
+
+        // Test maximum values
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xFFFFFFFFFFFFFFFF;
+            tt.store(hash, None, 32767, 32767, 127, NodeType::Exact);
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.score(), 32767);
+            assert_eq!(entry.eval(), 32767);
+            assert_eq!(entry.depth(), 127);
+        }
+    }
+
+    #[test]
+    fn test_corrupted_node_type() {
+        // Create an entry with all bits set in node type field
+        let entry = TTEntry {
+            key: 0x1234567890AB0000,
+            data: 0xFFFFFFFFFFFFFFFF, // All bits set
+        };
+
+        // Should return UpperBound as default for corrupted data
+        assert_eq!(entry.node_type(), NodeType::UpperBound);
     }
 }
