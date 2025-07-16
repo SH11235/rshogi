@@ -154,8 +154,58 @@ done | tee benchmark_results.txt
 2. 複数回実行して平均を取る
 3. より長い実行時間を設定
 
+## ベンチマーク実行例と期待される出力
+
+### NNUE性能ベンチマーク
+
+```bash
+cargo run --release --bin nnue_benchmark
+```
+
+期待される出力例（リリースビルド、2025年7月15日測定）：
+```
+=== NNUE Performance Benchmark ===
+
+1. Direct Evaluation Function Comparison
+========================================
+Material Evaluator:
+  - Evaluations/sec: 12,106,317
+  - Avg time: 82 ns
+
+NNUE Evaluator:
+  - Evaluations/sec: 1,140,383
+  - Avg time: 876 ns
+
+Performance Comparison:
+  - NNUE is 10.6x slower than Material evaluator
+  - NNUE overhead: 961.6%
+
+2. Search Performance Comparison
+=================================
+Position 1:
+  Material Engine:
+    Nodes: 26,718,665
+    Time: 5.000009636s
+    NPS: 5,343,723
+    
+  NNUE Engine:
+    Nodes: 2,903,757
+    Time: 2.502101829s
+    NPS: 1,160,527
+    
+Search Comparison:
+  Material NPS: 5,343,723
+  NNUE NPS: 1,160,527
+  NPS ratio: 4.60x
+  NNUE search overhead: 78.3%
+```
+
+注: デバッグビルドでは約20倍遅くなります（NNUE評価関数: 約10,000 評価/秒）
+
 ## 関連ドキュメント
 
-- [PVテーブルのパフォーマンス分析](pv-table-performance.md)
-- [NNUE評価関数のパフォーマンス分析](nnue-performance-analysis.md)
+- [PVテーブルのパフォーマンス分析](analysis/pv-table-performance.md)
+- [NNUE評価関数のパフォーマンス分析](analysis/nnue-performance.md)
+- [SEEのパフォーマンス分析](analysis/see-performance.md)
+- [プロファイリングガイド](profiling-guide.md)
 - [CLAUDE.md](../../CLAUDE.md) - 開発時の品質チェックコマンド

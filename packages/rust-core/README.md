@@ -36,6 +36,13 @@ src/
 └── opening_book_reader.rs   # Opening book reader interface
 ```
 
+## Documentation
+
+- [Performance Documentation](docs/performance/) - ベンチマーク、プロファイリング、性能分析
+- [Development Guide](docs/development/) - TDD開発ガイド、テスト戦略
+- [Implementation Docs](docs/implementation/) - 実装詳細
+- [Reference](docs/reference/) - フォーマット仕様など
+
 ## Building
 
 ### From project root
