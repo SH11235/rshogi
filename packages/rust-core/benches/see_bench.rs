@@ -1,9 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use shogi_core::ai::movegen::MoveGen;
 use shogi_core::ai::moves::MoveList;
 use shogi_core::{Color, Move, Piece, PieceType, Position, Square};
+use std::hint::black_box;
 
 /// Create various test positions for benchmarking
 fn create_test_positions() -> Vec<(String, Position)> {
