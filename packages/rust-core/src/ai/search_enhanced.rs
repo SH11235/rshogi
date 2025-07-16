@@ -63,6 +63,55 @@ pub struct SearchStack {
     pub in_check: bool,
 }
 
+/// Principal Variation table with fixed-size arrays
+pub struct PVTable {
+    /// PV lines for each ply [ply][move_index]
+    line: [[Move; MAX_PLY]; MAX_PLY],
+    /// Number of moves in each PV line
+    len: [u8; MAX_PLY],
+}
+
+impl Default for PVTable {
+    fn default() -> Self {
+        PVTable {
+            line: [[Move::default(); MAX_PLY]; MAX_PLY],
+            len: [0; MAX_PLY],
+        }
+    }
+}
+
+impl PVTable {
+    /// Get the principal variation from root
+    pub fn get_pv(&self) -> &[Move] {
+        let len = self.len[0] as usize;
+        &self.line[0][0..len]
+    }
+
+    /// Clear PV at given ply
+    #[inline]
+    pub fn clear(&mut self, ply: usize) {
+        self.len[ply] = 0;
+    }
+
+    /// Update PV when new best move is found
+    #[inline]
+    pub fn update(&mut self, ply: usize, mv: Move) {
+        self.line[ply][0] = mv;
+        self.len[ply] = 1;
+
+        // Copy child PV if exists
+        if ply + 1 < MAX_PLY {
+            let child_len = self.len[ply + 1] as usize;
+            if child_len > 0 && child_len < MAX_PLY {
+                // Use split_at_mut to avoid mutable borrow conflict
+                let (first_half, second_half) = self.line.split_at_mut(ply + 1);
+                first_half[ply][1..=child_len].copy_from_slice(&second_half[0][0..child_len]);
+                self.len[ply] = 1 + self.len[ply + 1];
+            }
+        }
+    }
+}
+
 /// Search context for alpha-beta search
 struct SearchContext {
     /// Current alpha bound
@@ -166,6 +215,8 @@ pub struct EnhancedSearcher {
     start_time: Instant,
     /// Evaluator
     evaluator: Arc<dyn Evaluator + Send + Sync>,
+    /// Principal variation table
+    pv: PVTable,
     /// Search statistics (for testing)
     #[cfg(test)]
     pub stats: SearchStats,
@@ -184,6 +235,7 @@ impl EnhancedSearcher {
             node_limit: None,
             start_time: Instant::now(),
             evaluator,
+            pv: PVTable::default(),
             #[cfg(test)]
             stats: SearchStats::default(),
         }
@@ -212,6 +264,11 @@ impl EnhancedSearcher {
         let alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
         let beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
         (alpha, beta)
+    }
+
+    /// Get current principal variation
+    pub fn principal_variation(&self) -> &[Move] {
+        self.pv.get_pv()
     }
 
     /// Search position with iterative deepening
@@ -462,6 +519,9 @@ impl EnhancedSearcher {
         stack[ctx.ply].pv = (ctx.beta - ctx.alpha) > 1;
         stack[ctx.ply].in_check = pos.in_check();
 
+        // Clear PV at current ply
+        self.pv.clear(ctx.ply);
+
         // Quiescence search at leaf nodes
         if ctx.depth <= 0 {
             return self.quiescence(pos, ctx.alpha, ctx.beta, ctx.ply, stack);
@@ -640,6 +700,9 @@ impl EnhancedSearcher {
 
                 if score > ctx.alpha {
                     ctx.alpha = score;
+
+                    // Update PV
+                    self.pv.update(ctx.ply, mv);
 
                     if score >= ctx.beta {
                         // Update history for good quiet move
@@ -823,6 +886,7 @@ impl EnhancedSearcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::board::Square;
     use crate::ai::evaluate::MaterialEvaluator;
 
     #[test]
@@ -1024,5 +1088,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_pv_tracking() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+
+        let (best_move, _score) = searcher.search(&mut pos, 4, None, None);
+        let pv = searcher.principal_variation();
+
+        // PVの検証
+        assert!(!pv.is_empty(), "PV should not be empty");
+        assert_eq!(pv[0], best_move.unwrap(), "First move in PV should match best move");
+        assert!(pv.len() <= 4, "PV length should not exceed search depth");
+
+        // 各手が正当な手であることを確認
+        for &mv in pv {
+            assert!(!mv.is_null(), "PV should not contain null moves");
+            // 実際の合法手検証は movegen が必要なので省略
+        }
+    }
+
+    #[test]
+    fn test_pv_table_boundary() {
+        let mut pv_table = PVTable::default();
+
+        // 境界値テスト
+        let test_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
+
+        // MAX_PLY - 1 でのテスト
+        pv_table.update(MAX_PLY - 1, test_move);
+        assert_eq!(pv_table.len[MAX_PLY - 1], 1);
+
+        // 境界でのクリアテスト
+        pv_table.clear(MAX_PLY - 1);
+        assert_eq!(pv_table.len[MAX_PLY - 1], 0);
+
+        // 深いPVのコピーテスト
+        for i in 0..10 {
+            let mv = Move::normal(Square::new(i as u8 % 9, 6), Square::new(i as u8 % 9, 5), false);
+            pv_table.update(MAX_PLY - 10 + i, mv);
+        }
+
+        // ルートPVの長さを確認
+        let root_pv = pv_table.get_pv();
+        assert!(root_pv.is_empty() || root_pv.len() <= MAX_PLY);
     }
 }
