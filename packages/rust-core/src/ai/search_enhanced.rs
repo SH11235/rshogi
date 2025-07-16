@@ -33,6 +33,17 @@ const MATE_SCORE: i32 = 28000;
 /// Draw score
 const DRAW_SCORE: i32 = 0;
 
+/// Game phase enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GamePhase {
+    /// Opening phase (0-20 moves)
+    Opening,
+    /// Middle game (21-60 moves)
+    MiddleGame,
+    /// End game (61+ moves or few pieces)
+    EndGame,
+}
+
 /// Search stack entry
 #[derive(Clone, Default)]
 pub struct SearchStack {
@@ -62,8 +73,8 @@ pub struct SearchParams {
     pub futility_margin: fn(i32) -> i32,
     /// Late move count margin
     pub late_move_count: fn(i32) -> i32,
-    /// Initial aspiration window function
-    pub initial_window: fn(i32) -> i32, // depth -> window_size
+    /// Initial aspiration window function (phase-aware)
+    pub initial_window: fn(i32, GamePhase) -> i32, // (depth, phase) -> window_size
     /// Maximum aspiration window delta
     pub max_aspiration_delta: i32,
     /// Time pressure threshold (ratio of remaining time to elapsed time)
@@ -86,7 +97,20 @@ impl Default for SearchParams {
             lmr_reductions,
             futility_margin: |depth| 150 * depth,
             late_move_count: |depth| 3 + depth * depth / 2,
-            initial_window: |depth| (50 + depth * 5).min(i16::MAX as i32), // 初期窓幅: ±50cp + depth*5、オーバーフロー防止
+            initial_window: |depth, phase| {
+                // フェーズに応じた動的窓幅調整
+                let base_window = match phase {
+                    GamePhase::Opening => 30,    // 序盤は狭い窓（評価が安定）
+                    GamePhase::MiddleGame => 50, // 中盤は標準的な窓
+                    GamePhase::EndGame => 100,   // 終盤は広い窓（評価が激しく変動）
+                };
+                let depth_factor = match phase {
+                    GamePhase::Opening => 3,    // 序盤は深さの影響を小さく
+                    GamePhase::MiddleGame => 5, // 中盤は標準
+                    GamePhase::EndGame => 10,   // 終盤は深さの影響を大きく
+                };
+                (base_window + depth * depth_factor).min(i16::MAX as i32)
+            },
             max_aspiration_delta: 1000,   // 1000cp以上拡げても実質フル窓
             time_pressure_threshold: 0.1, // 残り時間が経過時間の10%未満で時間圧迫
         }
@@ -147,6 +171,24 @@ impl EnhancedSearcher {
         }
     }
 
+    /// Estimate game phase based on move count and material
+    fn estimate_game_phase(&self, pos: &Position) -> GamePhase {
+        let ply = pos.ply as i32;
+
+        // Count pieces on board using cached bitboard
+        let total_pieces = pos.board.all_bb.count_ones();
+
+        // Determine phase based on move count and piece count
+        if ply < 20 {
+            GamePhase::Opening
+        } else if ply > 60 || total_pieces < 20 {
+            // End game if many moves or few pieces remain
+            GamePhase::EndGame
+        } else {
+            GamePhase::MiddleGame
+        }
+    }
+
     /// Search position with iterative deepening
     pub fn search(
         &mut self,
@@ -188,8 +230,11 @@ impl EnhancedSearcher {
 
         // Iterative deepening
         for depth in 1..=max_depth {
-            // Aspiration Windows設定
-            let mut delta = (self.params.initial_window)(depth);
+            // ゲームフェーズを判定
+            let phase = self.estimate_game_phase(pos);
+
+            // Aspiration Windows設定（フェーズを考慮）
+            let mut delta = (self.params.initial_window)(depth, phase);
             let mut alpha = if depth == 1 {
                 -INFINITY
             } else {
@@ -767,10 +812,36 @@ mod tests {
     fn test_aspiration_window_params() {
         let params = SearchParams::default();
 
-        // 窓幅が深さとともに増加することを確認
-        assert_eq!((params.initial_window)(1), 55); // 50 + 1*5
-        assert_eq!((params.initial_window)(6), 80); // 50 + 6*5
-        assert_eq!((params.initial_window)(10), 100); // 50 + 10*5
+        // 各フェーズで窓幅が適切に設定されることを確認
+        // Opening phase
+        assert_eq!((params.initial_window)(1, GamePhase::Opening), 33); // 30 + 1*3
+        assert_eq!((params.initial_window)(6, GamePhase::Opening), 48); // 30 + 6*3
+
+        // Middle game phase
+        assert_eq!((params.initial_window)(1, GamePhase::MiddleGame), 55); // 50 + 1*5
+        assert_eq!((params.initial_window)(6, GamePhase::MiddleGame), 80); // 50 + 6*5
+
+        // End game phase
+        assert_eq!((params.initial_window)(1, GamePhase::EndGame), 110); // 100 + 1*10
+        assert_eq!((params.initial_window)(6, GamePhase::EndGame), 160); // 100 + 6*10
+    }
+
+    #[test]
+    fn test_game_phase_estimation() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let searcher = EnhancedSearcher::new(16, evaluator);
+
+        // Opening position
+        let mut pos = Position::startpos();
+        assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::Opening);
+
+        // Simulate middle game (set ply count)
+        pos.ply = 30;
+        assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::MiddleGame);
+
+        // Simulate end game (high ply count)
+        pos.ply = 70;
+        assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::EndGame);
     }
 
     #[test]
@@ -795,6 +866,46 @@ mod tests {
                     "Depth {}: Aspiration windows should be used",
                     test_depth
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dynamic_window_adjustment() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let test_depth = 3;
+
+        // Test different game phases
+        for (ply, expected_phase) in [
+            (5, GamePhase::Opening),
+            (30, GamePhase::MiddleGame),
+            (70, GamePhase::EndGame),
+        ] {
+            let mut pos = Position::startpos();
+            pos.ply = ply;
+
+            let phase = searcher.estimate_game_phase(&pos);
+            assert_eq!(phase, expected_phase, "Ply {}: Wrong phase", ply);
+
+            // Search and verify aspiration windows are used
+            let (best_move, _score) = searcher.search(&mut pos, test_depth, None, None);
+            assert!(best_move.is_some());
+
+            // Check that window size varies by phase
+            let window_size = (searcher.params.initial_window)(test_depth, phase);
+            match phase {
+                GamePhase::Opening => {
+                    assert!(window_size < 50, "Opening window too wide: {}", window_size)
+                }
+                GamePhase::MiddleGame => assert!(
+                    window_size >= 50 && window_size < 100,
+                    "Middle game window out of range: {}",
+                    window_size
+                ),
+                GamePhase::EndGame => {
+                    assert!(window_size >= 100, "End game window too narrow: {}", window_size)
+                }
             }
         }
     }
