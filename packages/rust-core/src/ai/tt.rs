@@ -5,6 +5,31 @@
 use super::moves::Move;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// Bit layout constants for TTEntry data field
+const MOVE_SHIFT: u8 = 48;
+const MOVE_BITS: u8 = 16;
+const MOVE_MASK: u64 = (1 << MOVE_BITS) - 1; // 0xFFFF (16 bits for move)
+const SCORE_SHIFT: u8 = 32;
+const SCORE_BITS: u8 = 16;
+const SCORE_MASK: u64 = (1 << SCORE_BITS) - 1; // 0xFFFF (16 bits for score)
+const DEPTH_SHIFT: u8 = 25;
+const DEPTH_BITS: u8 = 7;
+const DEPTH_MASK: u8 = (1 << DEPTH_BITS) - 1; // 0x7F (7 bits for depth)
+const NODE_TYPE_SHIFT: u8 = 23;
+const NODE_TYPE_BITS: u8 = 2;
+const NODE_TYPE_MASK: u8 = (1 << NODE_TYPE_BITS) - 1; // 0x3 (2 bits for node type)
+const ASPIRATION_FAIL_SHIFT: u8 = 22;
+const AGE_SHIFT: u8 = 16;
+const AGE_BITS: u8 = 6;
+const AGE_MASK: u8 = (1 << AGE_BITS) - 1; // 0x3F (6 bits for age)
+#[allow(dead_code)]
+const EVAL_SHIFT: u8 = 0;
+const EVAL_BITS: u8 = 16;
+const EVAL_MASK: u64 = (1 << EVAL_BITS) - 1; // 0xFFFF (16 bits for static eval)
+
+// Key mask (use high 48 bits, lower 16 bits used for indexing)
+const KEY_MASK: u64 = 0xFFFF_FFFF_FFFF_0000;
+
 /// Type of node in the search tree
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -59,7 +84,7 @@ impl TTEntry {
         aspiration_fail: bool,
     ) -> Self {
         // Use high 48 bits of key (lower 16 bits used for indexing)
-        let key = key & 0xFFFF_FFFF_FFFF_0000;
+        let key = key & KEY_MASK;
 
         // Pack move into 16 bits
         let move_data = match mv {
@@ -75,13 +100,13 @@ impl TTEntry {
         // [22]: aspiration_fail flag (1 bit)
         // [21-16]: age (6 bits)
         // [15-0]: static eval (16 bits)
-        let data = ((move_data as u64) << 48)
-            | ((score as u16 as u64) << 32)
-            | (((depth & 0x7F) as u64) << 25)  // 7 bits for depth (max 127)
-            | ((node_type as u64) << 23)
-            | ((aspiration_fail as u64) << 22)
-            | (((age & 0x3F) as u64) << 16)  // 6 bits for age (max 63)
-            | (eval as u16 as u64);
+        let data = ((move_data as u64) << MOVE_SHIFT)
+            | ((score as u16 as u64) << SCORE_SHIFT)  // Store as unsigned 16-bit value (preserves 2's complement)
+            | (((depth & DEPTH_MASK) as u64) << DEPTH_SHIFT)  // 7 bits for depth (max 127)
+            | ((node_type as u64) << NODE_TYPE_SHIFT)
+            | ((aspiration_fail as u64) << ASPIRATION_FAIL_SHIFT)
+            | (((age & AGE_MASK) as u64) << AGE_SHIFT)  // 6 bits for age (max 63)
+            | (eval as u16 as u64); // Store as unsigned 16-bit value (preserves 2's complement)
 
         TTEntry { key, data }
     }
@@ -89,12 +114,12 @@ impl TTEntry {
     /// Check if entry matches the given key
     #[inline]
     pub fn matches(&self, key: u64) -> bool {
-        (self.key & 0xFFFF_FFFF_FFFF_0000) == (key & 0xFFFF_FFFF_FFFF_0000)
+        (self.key & KEY_MASK) == (key & KEY_MASK)
     }
 
     /// Extract move from entry
     pub fn get_move(&self) -> Option<Move> {
-        let move_data = ((self.data >> 48) & 0xFFFF) as u16;
+        let move_data = ((self.data >> MOVE_SHIFT) & MOVE_MASK) as u16;
 
         if move_data == 0 {
             return None;
@@ -106,42 +131,42 @@ impl TTEntry {
     /// Get score from entry
     #[inline]
     pub fn score(&self) -> i16 {
-        ((self.data >> 32) & 0xFFFF) as i16
+        ((self.data >> SCORE_SHIFT) & SCORE_MASK) as i16
     }
 
     /// Get static evaluation from entry
     #[inline]
     pub fn eval(&self) -> i16 {
-        (self.data & 0xFFFF) as i16
+        (self.data & EVAL_MASK) as i16
     }
 
     /// Get search depth
     #[inline]
     pub fn depth(&self) -> u8 {
-        ((self.data >> 25) & 0x7F) as u8 // 7 bits for depth
+        ((self.data >> DEPTH_SHIFT) & DEPTH_MASK as u64) as u8 // 7 bits for depth
     }
 
     /// Get node type
     #[inline]
     pub fn node_type(&self) -> NodeType {
-        match (self.data >> 23) & 0x3 {
+        match (self.data >> NODE_TYPE_SHIFT) & NODE_TYPE_MASK as u64 {
             0 => NodeType::Exact,
             1 => NodeType::LowerBound,
             2 => NodeType::UpperBound,
-            _ => unreachable!(),
+            _ => NodeType::Exact, // Default to Exact for corrupted data (no pruning)
         }
     }
 
     /// Get age
     #[inline]
     pub fn age(&self) -> u8 {
-        ((self.data >> 16) & 0x3F) as u8 // 6 bits for age
+        ((self.data >> AGE_SHIFT) & AGE_MASK as u64) as u8 // 6 bits for age
     }
 
     /// Get aspiration fail flag
     #[inline]
     pub fn aspiration_fail(&self) -> bool {
-        ((self.data >> 22) & 0x1) != 0
+        ((self.data >> ASPIRATION_FAIL_SHIFT) & 0x1) != 0
     }
 }
 
@@ -216,6 +241,56 @@ impl TranspositionTable {
         self.store_with_aspiration(hash, mv, score, eval, depth, node_type, false)
     }
 
+    /// Determine if new entry should replace old entry
+    /// Returns true if new entry is stronger and should replace the old one
+    fn is_stronger(&self, new: &TTEntry, old: &TTEntry, hash: u64) -> bool {
+        // 1. Empty slot or different position (most common case)
+        if !old.matches(hash) || old.depth() == 0 {
+            return true;
+        }
+
+        // 2. Current generation always replaces old generation
+        let new_is_current = new.age() == self.age;
+        let old_is_current = old.age() == self.age;
+        if new_is_current && !old_is_current {
+            return true;
+        }
+
+        // 3. Node type priority: Exact > Lower/Upper
+        let new_type = new.node_type();
+        let old_type = old.node_type();
+        if new_type == NodeType::Exact && old_type != NodeType::Exact {
+            return true;
+        }
+        if new_type != NodeType::Exact && old_type == NodeType::Exact {
+            return false;
+        }
+
+        // 4. Aspiration: success > fail
+        let new_asp_fail = new.aspiration_fail();
+        let old_asp_fail = old.aspiration_fail();
+        if !new_asp_fail && old_asp_fail {
+            return true;
+        }
+        if new_asp_fail && !old_asp_fail {
+            return false;
+        }
+
+        // 5. Depth comparison
+        let new_depth = new.depth();
+        let old_depth = old.depth();
+        if new_depth > old_depth {
+            return true;
+        }
+        if new_depth < old_depth {
+            return false;
+        }
+
+        // 6. Same depth, same conditions → don't replace
+        // (Same generation case, or new is old generation)
+        false
+    }
+
     /// Store entry with aspiration fail flag
     #[allow(clippy::too_many_arguments)]
     pub fn store_with_aspiration(
@@ -251,19 +326,8 @@ impl TranspositionTable {
             data: old_data,
         };
 
-        // Replacement strategy:
-        // 1. Always replace if empty or different position
-        // 2. For same position, replace if:
-        //    - New entry is from current generation and old is not
-        //    - New entry is aspiration success (not fail) and old is fail
-        //    - Both same aspiration status but new has greater depth
-        let should_replace = !old_entry.matches(hash)
-            || old_entry.depth() == 0
-            || (entry.age() == self.age && old_entry.age() != self.age)
-            || (!entry.aspiration_fail() && old_entry.aspiration_fail())  // Aspiration成功を優先
-            || (entry.aspiration_fail() == old_entry.aspiration_fail() && depth >= old_entry.depth());
-
-        if should_replace {
+        // Use is_stronger to determine if replacement should occur
+        if self.is_stronger(&entry, &old_entry, hash) {
             // Store atomically (order matters for concurrent access)
             self.table[base_idx].store(entry.key, Ordering::Relaxed);
             self.table[base_idx + 1].store(entry.data, Ordering::Relaxed);
@@ -280,7 +344,7 @@ impl TranspositionTable {
 
     /// Advance to next generation (for age-based replacement)
     pub fn new_search(&mut self) {
-        self.age = self.age.wrapping_add(1) & 0x3F; // 6-bit age (max 63)
+        self.age = self.age.wrapping_add(1) & AGE_MASK; // 6-bit age (max 63)
     }
 
     /// Get fill rate (percentage of non-empty entries)
@@ -435,5 +499,186 @@ mod tests {
 
         let entry3 = TTEntry::new(0x1234567890ABCDEF, None, 0, 0, 100, NodeType::Exact, 0);
         assert_eq!(entry3.depth(), 100);
+    }
+
+    #[test]
+    fn test_replacement_policy_node_type_priority() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store LowerBound entry
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::LowerBound, false);
+
+        // Store Exact entry with same depth - should replace
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Exact entry
+        assert_eq!(entry.node_type(), NodeType::Exact);
+
+        // Store another LowerBound with deeper search - should NOT replace Exact
+        tt.store_with_aspiration(hash, None, 300, 250, 15, NodeType::LowerBound, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Still Exact entry
+        assert_eq!(entry.node_type(), NodeType::Exact);
+    }
+
+    #[test]
+    fn test_replacement_policy_aspiration_priority() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store aspiration fail entry
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, true);
+
+        // Store aspiration success entry with same depth - should replace
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Success entry
+        assert!(!entry.aspiration_fail());
+
+        // Store another fail entry with deeper search - should NOT replace success
+        tt.store_with_aspiration(hash, None, 300, 250, 15, NodeType::Exact, true);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Still success entry
+        assert!(!entry.aspiration_fail());
+    }
+
+    #[test]
+    fn test_replacement_policy_generation_tiebreak() {
+        let mut tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store entry in generation 0
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, false);
+
+        // Advance generation
+        tt.new_search();
+
+        // Store entry with same depth, same node type, same aspiration - should replace due to newer generation
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // New generation entry
+        assert_eq!(entry.age(), 1);
+    }
+
+    #[test]
+    fn test_replacement_policy_same_generation_same_depth() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store initial entry
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, false);
+
+        // Store another entry with same depth, same generation - should NOT replace
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 100); // Old entry retained
+    }
+
+    #[test]
+    fn test_aspiration_entry() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store entry with aspiration fail flag
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, true);
+
+        let entry = tt.probe(hash).unwrap();
+        assert!(entry.aspiration_fail());
+        assert_eq!(entry.score(), 100);
+
+        // Store entry without aspiration fail flag
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert!(!entry.aspiration_fail());
+        assert_eq!(entry.score(), 200);
+    }
+
+    #[test]
+    fn test_negative_scores() {
+        let tt = TranspositionTable::new(1);
+
+        // Test various negative scores with different hash values to avoid conflicts
+        let test_cases: Vec<(u64, i16)> = vec![
+            (0x1111111111111111, -32768),
+            (0x2222222222222222, -30000),
+            (0x3333333333333333, -1000),
+            (0x4444444444444444, -1),
+            (0x5555555555555555, 0),
+            (0x6666666666666666, 1),
+            (0x7777777777777777, 1000),
+            (0x8888888888888888, 30000),
+            (0x9999999999999999, 32767),
+        ];
+
+        for (hash, score) in test_cases {
+            tt.store(hash, None, score, score / 2, 10, NodeType::Exact);
+
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.score(), score, "Failed to store/retrieve score: {}", score);
+            assert_eq!(entry.eval(), score / 2, "Failed to store/retrieve eval: {}", score / 2);
+        }
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Test maximum depth (127)
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xCCCCCCCCCCCCCCCC;
+            tt.store(hash, None, 100, 50, 127, NodeType::Exact);
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.depth(), 127);
+        }
+
+        // Test depth overflow (masked to 7 bits)
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xDDDDDDDDDDDDDDDD;
+            tt.store(hash, None, 100, 50, 200, NodeType::Exact);
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.depth(), 200 & DEPTH_MASK); // 200 & DEPTH_MASK = 72
+        }
+
+        // Test minimum values
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xEEEEEEEEEEEEEEEE;
+            tt.store(hash, None, -32768, -32768, 1, NodeType::Exact); // depth must be > 0
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.score(), -32768);
+            assert_eq!(entry.eval(), -32768);
+            assert_eq!(entry.depth(), 1);
+        }
+
+        // Test maximum values
+        {
+            let tt = TranspositionTable::new(1);
+            let hash = 0xFFFFFFFFFFFFFFFF;
+            tt.store(hash, None, 32767, 32767, 127, NodeType::Exact);
+            let entry = tt.probe(hash).unwrap();
+            assert_eq!(entry.score(), 32767);
+            assert_eq!(entry.eval(), 32767);
+            assert_eq!(entry.depth(), 127);
+        }
+    }
+
+    #[test]
+    fn test_corrupted_node_type() {
+        // Create an entry with all bits set in node type field
+        let entry = TTEntry {
+            key: 0x1234567890AB0000,
+            data: 0xFFFFFFFFFFFFFFFF, // All bits set
+        };
+
+        // Should return Exact as default for corrupted data (safest for alpha-beta)
+        assert_eq!(entry.node_type(), NodeType::Exact);
     }
 }
