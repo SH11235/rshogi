@@ -197,8 +197,8 @@ impl TranspositionTable {
             (size_mb * 1024 * 1024) / entry_size
         };
 
-        // Round down to power of 2 for fast indexing
-        let size = size.next_power_of_two() / 2;
+        // Round to power of 2 for fast indexing
+        let size = size.next_power_of_two();
 
         // Allocate table (2 AtomicU64 per entry)
         let mut table = Vec::with_capacity(size * 2);
@@ -698,6 +698,21 @@ mod tests {
 
         // Should return Exact as default for corrupted data (safest for alpha-beta)
         assert_eq!(entry.node_type(), NodeType::Exact);
+    }
+
+    #[test]
+    fn test_table_size_calculation() {
+        // Test minimum size (0 MB)
+        let tt = TranspositionTable::new(0);
+        assert_eq!(tt.size(), 4096); // Should be exactly 4096 entries (64KB)
+
+        // Test 1 MB
+        let tt = TranspositionTable::new(1);
+        assert_eq!(tt.size(), 65536); // 1MB / 16 bytes = 65536 entries
+
+        // Test non-power-of-two size
+        let tt = TranspositionTable::new(3);
+        assert_eq!(tt.size(), 262144); // Next power of 2 from 196608
     }
 }
 
