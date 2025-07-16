@@ -75,8 +75,8 @@ pub struct SearchParams {
     pub late_move_count: fn(i32) -> i32,
     /// Initial aspiration window function (phase-aware)
     pub initial_window: fn(i32, GamePhase) -> i32, // (depth, phase) -> window_size
-    /// Maximum aspiration window delta
-    pub max_aspiration_delta: i32,
+    /// Maximum aspiration window delta (depth-dependent)
+    pub max_aspiration_delta: fn(i32) -> i32, // depth -> max_delta
     /// Time pressure threshold (ratio of remaining time to elapsed time)
     pub time_pressure_threshold: f64,
 }
@@ -111,13 +111,17 @@ impl Default for SearchParams {
                 };
                 (base_window + depth * depth_factor).min(i16::MAX as i32)
             },
-            max_aspiration_delta: 1000,   // 1000cp以上拡げても実質フル窓
+            max_aspiration_delta: |depth| {
+                // 深さが深いほど大きな窓幅を許容
+                (800 + 40 * depth).min(2000)
+            },
             time_pressure_threshold: 0.1, // 残り時間が経過時間の10%未満で時間圧迫
         }
     }
 }
 
 /// Search statistics for testing
+#[cfg(test)]
 #[derive(Default, Clone)]
 pub struct SearchStats {
     /// Number of aspiration failures per depth
@@ -214,10 +218,20 @@ impl EnhancedSearcher {
 
         #[cfg(test)]
         {
-            self.stats = SearchStats::default();
-            self.stats.aspiration_failures.resize(max_depth as usize + 1, 0);
-            self.stats.aspiration_hits.resize(max_depth as usize + 1, 0);
-            self.stats.total_delta.resize(max_depth as usize + 1, 0);
+            // 再利用：既存のベクタをクリアして再使用
+            let required_size = max_depth as usize + 1;
+
+            // リサイズが必要な場合のみ実行
+            if self.stats.aspiration_failures.len() < required_size {
+                self.stats.aspiration_failures.resize(required_size, 0);
+                self.stats.aspiration_hits.resize(required_size, 0);
+                self.stats.total_delta.resize(required_size, 0);
+            } else {
+                // 既存の領域をゼロクリア
+                self.stats.aspiration_failures.fill(0);
+                self.stats.aspiration_hits.fill(0);
+                self.stats.total_delta.fill(0);
+            }
         }
 
         // New search generation
@@ -290,7 +304,7 @@ impl EnhancedSearcher {
                     }
 
                     // deltaを先に拡大
-                    delta = (delta * 2).min(self.params.max_aspiration_delta);
+                    delta = (delta * 2).min((self.params.max_aspiration_delta)(depth));
                     (alpha, beta) = self.update_aspiration_window(delta, prev_score);
                 } else if score >= beta {
                     // Fail-high: 窓を上方向に拡大
@@ -300,7 +314,7 @@ impl EnhancedSearcher {
                     }
 
                     // deltaを先に拡大
-                    delta = (delta * 2).min(self.params.max_aspiration_delta);
+                    delta = (delta * 2).min((self.params.max_aspiration_delta)(depth));
                     (alpha, beta) = self.update_aspiration_window(delta, prev_score);
                 } else {
                     // 窓内ヒット: 成功
@@ -313,7 +327,7 @@ impl EnhancedSearcher {
                 }
 
                 // 安全装置: deltaが最大値を超えたらフルウィンドウ
-                if delta >= self.params.max_aspiration_delta {
+                if delta >= (self.params.max_aspiration_delta)(depth) {
                     alpha = -INFINITY;
                     beta = INFINITY;
                 }
