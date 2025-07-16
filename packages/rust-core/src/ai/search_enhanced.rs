@@ -189,6 +189,13 @@ impl EnhancedSearcher {
         }
     }
 
+    /// Update aspiration window bounds based on delta and center score
+    fn update_aspiration_window(&self, delta: i32, center: i32) -> (i32, i32) {
+        let alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
+        let beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
+        (alpha, beta)
+    }
+
     /// Search position with iterative deepening
     pub fn search(
         &mut self,
@@ -277,9 +284,7 @@ impl EnhancedSearcher {
 
                     // deltaを先に拡大
                     delta = (delta * 2).min(self.params.max_aspiration_delta);
-                    let center = prev_score; // 収束済みの中心値を保持
-                    alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
-                    beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
+                    (alpha, beta) = self.update_aspiration_window(delta, prev_score);
                 } else if score >= beta {
                     // Fail-high: 窓を上方向に拡大
                     #[cfg(test)]
@@ -289,9 +294,7 @@ impl EnhancedSearcher {
 
                     // deltaを先に拡大
                     delta = (delta * 2).min(self.params.max_aspiration_delta);
-                    let center = prev_score; // 収束済みの中心値を保持
-                    alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
-                    beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
+                    (alpha, beta) = self.update_aspiration_window(delta, prev_score);
                 } else {
                     // 窓内ヒット: 成功
                     #[cfg(test)]
