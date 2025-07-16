@@ -3,7 +3,7 @@
 //! Lock-free implementation suitable for parallel search
 
 use super::moves::Move;
-use std::sync::atomic::{AtomicU64, Ordering};
+use super::sync_compat::{AtomicU64, Ordering};
 
 // Bit layout constants for TTEntry data field
 const MOVE_SHIFT: u8 = 48;
@@ -131,12 +131,14 @@ impl TTEntry {
     /// Get score from entry
     #[inline]
     pub fn score(&self) -> i16 {
+        // Score is always valid since it's stored as u16 and cast to i16
         ((self.data >> SCORE_SHIFT) & SCORE_MASK) as i16
     }
 
     /// Get static evaluation from entry
     #[inline]
     pub fn eval(&self) -> i16 {
+        // Eval is always valid since it's stored as u16 and cast to i16
         (self.data & EVAL_MASK) as i16
     }
 
@@ -149,7 +151,9 @@ impl TTEntry {
     /// Get node type
     #[inline]
     pub fn node_type(&self) -> NodeType {
-        match (self.data >> NODE_TYPE_SHIFT) & NODE_TYPE_MASK as u64 {
+        let raw = (self.data >> NODE_TYPE_SHIFT) & NODE_TYPE_MASK as u64;
+        debug_assert!(raw <= 2, "Corrupted node_type bits: {raw}");
+        match raw {
             0 => NodeType::Exact,
             1 => NodeType::LowerBound,
             2 => NodeType::UpperBound,
@@ -186,7 +190,12 @@ impl TranspositionTable {
     pub fn new(size_mb: usize) -> Self {
         // Each entry is 16 bytes (2 * u64)
         let entry_size = 16;
-        let size = (size_mb * 1024 * 1024) / entry_size;
+        let size = if size_mb == 0 {
+            // Minimum size: 64KB = 4096 entries
+            4096
+        } else {
+            (size_mb * 1024 * 1024) / entry_size
+        };
 
         // Round down to power of 2 for fast indexing
         let size = size.next_power_of_two() / 2;
@@ -215,13 +224,20 @@ impl TranspositionTable {
         let idx = self.index(hash);
         let base_idx = idx * 2;
 
-        // Read both parts atomically
-        let key = self.table[base_idx].load(Ordering::Relaxed);
+        // Read key with Acquire ordering to ensure data consistency
+        let key = self.table[base_idx].load(Ordering::Acquire);
+
+        // Check key match before reading data
+        if (key & KEY_MASK) != (hash & KEY_MASK) {
+            return None;
+        }
+
+        // Read data (Relaxed is sufficient after key match with Acquire)
         let data = self.table[base_idx + 1].load(Ordering::Relaxed);
 
         let entry = TTEntry { key, data };
 
-        if entry.matches(hash) && entry.depth() > 0 {
+        if entry.depth() > 0 {
             Some(entry)
         } else {
             None
@@ -328,9 +344,10 @@ impl TranspositionTable {
 
         // Use is_stronger to determine if replacement should occur
         if self.is_stronger(&entry, &old_entry, hash) {
-            // Store atomically (order matters for concurrent access)
-            self.table[base_idx].store(entry.key, Ordering::Relaxed);
-            self.table[base_idx + 1].store(entry.data, Ordering::Relaxed);
+            // Store data first, then key with Release ordering to ensure consistency
+            // This prevents torn reads where key matches but data is stale
+            self.table[base_idx + 1].store(entry.data, Ordering::Release);
+            self.table[base_idx].store(entry.key, Ordering::Release);
         }
     }
 
@@ -671,6 +688,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(debug_assertions))] // Skip in debug mode due to debug_assert!
     fn test_corrupted_node_type() {
         // Create an entry with all bits set in node type field
         let entry = TTEntry {
@@ -682,3 +700,8 @@ mod tests {
         assert_eq!(entry.node_type(), NodeType::Exact);
     }
 }
+
+// Include parallel safety tests
+#[cfg(test)]
+#[path = "tt_parallel_test.rs"]
+mod tt_parallel_test;
