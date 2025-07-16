@@ -5,7 +5,7 @@
 use super::board::{PieceType, Square};
 
 /// Move representation
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Move {
     /// Encoded move data (32-bit):
     /// - bits 0-6: destination square (0-80)
