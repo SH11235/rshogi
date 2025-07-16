@@ -727,6 +727,70 @@ mod tests {
         let tt = TranspositionTable::new(3);
         assert_eq!(tt.size(), 262144); // Next power of 2 from 196608
     }
+
+    #[test]
+    fn test_bit_field_isolation() {
+        // Test that each field is properly isolated and doesn't affect others
+        // Use maximum values for each field to ensure no overflow into adjacent fields
+
+        // Test with all fields at maximum values
+        let entry_max = TTEntry::new_with_aspiration(
+            0xFFFF_FFFF_FFFF_FFFF,
+            Some(Move::from_u16(0xFFFF)), // Max move value
+            -1,                           // 0xFFFF when stored as u16
+            -1,                           // 0xFFFF when stored as u16
+            127,                          // Max depth (7 bits)
+            NodeType::UpperBound,         // Value 2
+            63,                           // Max age (6 bits)
+            true,                         // Aspiration fail set
+        );
+
+        // Verify each field independently
+        assert!(entry_max.matches(0xFFFF_FFFF_FFFF_0000));
+        assert_eq!(entry_max.score(), -1);
+        assert_eq!(entry_max.eval(), -1);
+        assert_eq!(entry_max.depth(), 127);
+        assert_eq!(entry_max.node_type(), NodeType::UpperBound);
+        assert_eq!(entry_max.age(), 63);
+        assert!(entry_max.aspiration_fail());
+
+        // Test with alternating bit patterns to check isolation
+        let entry_pattern = TTEntry::new_with_aspiration(
+            0xAAAA_AAAA_AAAA_AAAA,
+            Some(Move::from_u16(0x5555)), // Alternating bits
+            0x5555_u16 as i16,            // Alternating bits
+            0x5555_u16 as i16,            // Alternating bits
+            0x55,                         // Alternating bits (85 decimal)
+            NodeType::LowerBound,
+            0x2A, // Alternating bits (42 decimal)
+            false,
+        );
+
+        assert_eq!(entry_pattern.score(), 0x5555_u16 as i16);
+        assert_eq!(entry_pattern.eval(), 0x5555_u16 as i16);
+        assert_eq!(entry_pattern.depth(), 0x55);
+        assert_eq!(entry_pattern.node_type(), NodeType::LowerBound);
+        assert_eq!(entry_pattern.age(), 0x2A);
+        assert!(!entry_pattern.aspiration_fail());
+
+        // Test that overflow values are properly masked
+        let entry_overflow = TTEntry::new_with_aspiration(
+            0x1234_5678_9ABC_DEF0,
+            None,
+            32767,
+            -32768,
+            255, // Should be masked to 127
+            NodeType::Exact,
+            255, // Should be masked to 63
+            true,
+        );
+
+        assert_eq!(entry_overflow.depth(), 127); // 255 & 0x7F = 127
+        assert_eq!(entry_overflow.age(), 63); // 255 & 0x3F = 63
+        assert_eq!(entry_overflow.score(), 32767);
+        assert_eq!(entry_overflow.eval(), -32768);
+        assert!(entry_overflow.aspiration_fail());
+    }
 }
 
 // Include parallel safety tests
