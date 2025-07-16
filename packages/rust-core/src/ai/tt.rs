@@ -7,28 +7,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 // Bit layout constants for TTEntry data field
 const MOVE_SHIFT: u8 = 48;
-#[allow(dead_code)]
 const MOVE_BITS: u8 = 16;
+const MOVE_MASK: u64 = (1 << MOVE_BITS) - 1; // 0xFFFF (16 bits for move)
 const SCORE_SHIFT: u8 = 32;
-#[allow(dead_code)]
 const SCORE_BITS: u8 = 16;
+const SCORE_MASK: u64 = (1 << SCORE_BITS) - 1; // 0xFFFF (16 bits for score)
 const DEPTH_SHIFT: u8 = 25;
-#[allow(dead_code)]
 const DEPTH_BITS: u8 = 7;
-const DEPTH_MASK: u8 = 0x7F;
+const DEPTH_MASK: u8 = (1 << DEPTH_BITS) - 1; // 0x7F (7 bits for depth)
 const NODE_TYPE_SHIFT: u8 = 23;
-#[allow(dead_code)]
 const NODE_TYPE_BITS: u8 = 2;
-const NODE_TYPE_MASK: u8 = 0x3;
+const NODE_TYPE_MASK: u8 = (1 << NODE_TYPE_BITS) - 1; // 0x3 (2 bits for node type)
 const ASPIRATION_FAIL_SHIFT: u8 = 22;
 const AGE_SHIFT: u8 = 16;
-#[allow(dead_code)]
 const AGE_BITS: u8 = 6;
-const AGE_MASK: u8 = 0x3F;
+const AGE_MASK: u8 = (1 << AGE_BITS) - 1; // 0x3F (6 bits for age)
 #[allow(dead_code)]
 const EVAL_SHIFT: u8 = 0;
-#[allow(dead_code)]
 const EVAL_BITS: u8 = 16;
+const EVAL_MASK: u64 = (1 << EVAL_BITS) - 1; // 0xFFFF (16 bits for static eval)
+
+// Key mask (use high 48 bits, lower 16 bits used for indexing)
+const KEY_MASK: u64 = 0xFFFF_FFFF_FFFF_0000;
 
 /// Type of node in the search tree
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +84,7 @@ impl TTEntry {
         aspiration_fail: bool,
     ) -> Self {
         // Use high 48 bits of key (lower 16 bits used for indexing)
-        let key = key & 0xFFFF_FFFF_FFFF_0000;
+        let key = key & KEY_MASK;
 
         // Pack move into 16 bits
         let move_data = match mv {
@@ -114,12 +114,12 @@ impl TTEntry {
     /// Check if entry matches the given key
     #[inline]
     pub fn matches(&self, key: u64) -> bool {
-        (self.key & 0xFFFF_FFFF_FFFF_0000) == (key & 0xFFFF_FFFF_FFFF_0000)
+        (self.key & KEY_MASK) == (key & KEY_MASK)
     }
 
     /// Extract move from entry
     pub fn get_move(&self) -> Option<Move> {
-        let move_data = ((self.data >> MOVE_SHIFT) & 0xFFFF) as u16;
+        let move_data = ((self.data >> MOVE_SHIFT) & MOVE_MASK) as u16;
 
         if move_data == 0 {
             return None;
@@ -131,13 +131,13 @@ impl TTEntry {
     /// Get score from entry
     #[inline]
     pub fn score(&self) -> i16 {
-        ((self.data >> SCORE_SHIFT) & 0xFFFF) as i16
+        ((self.data >> SCORE_SHIFT) & SCORE_MASK) as i16
     }
 
     /// Get static evaluation from entry
     #[inline]
     pub fn eval(&self) -> i16 {
-        (self.data & 0xFFFF) as i16
+        (self.data & EVAL_MASK) as i16
     }
 
     /// Get search depth
