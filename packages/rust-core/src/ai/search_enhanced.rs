@@ -77,7 +77,8 @@ pub struct SearchStack {
 ///
 /// # Memory Usage
 ///
-/// Size: approximately 64KB (MAX_PLY × MAX_PLY × size_of::<Move>())
+/// Size: dynamically calculated as `MAX_PLY × MAX_PLY × size_of::<Move>()` bytes
+/// - With current `Move` size of 4 bytes and `MAX_PLY = 127`: ~64KB per instance
 /// - With 8 threads: ~512KB total
 /// - With 32 threads: ~2MB total
 ///
@@ -1187,5 +1188,25 @@ mod tests {
         // ルートPVの長さを確認
         let root_pv = pv_table.get_pv();
         assert!(root_pv.is_empty() || root_pv.len() <= MAX_PLY);
+    }
+
+    #[test]
+    fn test_pv_table_memory_size() {
+        use std::mem;
+
+        // Verify the actual size of PVTable
+        let pv_table_size = mem::size_of::<PVTable>();
+        let move_size = mem::size_of::<Move>();
+        let expected_size = MAX_PLY * MAX_PLY * move_size + MAX_PLY; // line + len arrays
+
+        println!("PVTable memory usage:");
+        println!("  Move size: {} bytes", move_size);
+        println!("  MAX_PLY: {}", MAX_PLY);
+        println!("  Expected size: ~{} bytes", expected_size);
+        println!("  Actual size: {} bytes", pv_table_size);
+
+        // The actual size might be slightly larger due to alignment
+        assert!(pv_table_size >= expected_size);
+        assert!(pv_table_size < expected_size + 1024); // Allow up to 1KB padding
     }
 }
