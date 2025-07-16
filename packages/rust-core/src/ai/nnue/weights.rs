@@ -12,7 +12,8 @@ use std::mem;
 /// NNUE file header
 #[derive(Debug, Clone, Copy)]
 pub struct NNUEHeader {
-    magic: [u8; 4],    // "NNUE"
+    #[allow(dead_code)]
+    magic: [u8; 4], // "NNUE"
     version: u32,      // Version number
     architecture: u32, // Architecture ID
     size: u32,         // File size
