@@ -64,6 +64,24 @@ pub struct SearchStack {
 }
 
 /// Principal Variation table with fixed-size arrays
+///
+/// This structure tracks the principal variation (best move sequence) found during search.
+/// Each ply maintains its own PV line which is updated when a better move is found.
+///
+/// # Thread Safety
+///
+/// **WARNING**: This structure is NOT thread-safe. In multi-threaded search scenarios:
+/// - Each thread should maintain its own independent PVTable instance, OR
+/// - Use synchronization primitives (Mutex/RwLock) if sharing is required, OR
+/// - Implement a lock-free approach where only the root thread updates the shared PV
+///
+/// # Memory Usage
+///
+/// Size: approximately 64KB (MAX_PLY × MAX_PLY × size_of::<Move>())
+/// - With 8 threads: ~512KB total
+/// - With 32 threads: ~2MB total
+///
+/// For memory-constrained environments, consider using const generics to reduce MAX_PLY.
 pub struct PVTable {
     /// PV lines for each ply [ply][move_index]
     line: [[Move; MAX_PLY]; MAX_PLY],
@@ -82,6 +100,19 @@ impl Default for PVTable {
 
 impl PVTable {
     /// Get the principal variation from root
+    ///
+    /// # Lifetime
+    ///
+    /// The returned slice is only valid until the next search operation.
+    /// Starting a new search will clear and overwrite the PV data.
+    /// If you need to preserve the PV across searches, clone the data.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let pv = searcher.principal_variation();
+    /// let pv_copy: Vec<Move> = pv.to_vec(); // Clone if needed across searches
+    /// ```
     pub fn get_pv(&self) -> &[Move] {
         let len = self.len[0] as usize;
         &self.line[0][0..len]
@@ -90,12 +121,14 @@ impl PVTable {
     /// Clear PV at given ply
     #[inline]
     pub fn clear(&mut self, ply: usize) {
+        debug_assert!(ply < MAX_PLY, "ply {ply} exceeds MAX_PLY {MAX_PLY}");
         self.len[ply] = 0;
     }
 
     /// Update PV when new best move is found
     #[inline]
     pub fn update(&mut self, ply: usize, mv: Move) {
+        debug_assert!(ply < MAX_PLY, "ply {ply} exceeds MAX_PLY {MAX_PLY}");
         self.line[ply][0] = mv;
         self.len[ply] = 1;
 
