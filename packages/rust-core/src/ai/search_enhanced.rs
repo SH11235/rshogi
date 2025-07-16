@@ -140,7 +140,10 @@ impl PVTable {
         // Copy child PV if exists
         if ply + 1 < MAX_PLY {
             let child_len = self.len[ply + 1] as usize;
-            if child_len > 0 && child_len < MAX_PLY {
+            // We need child_len + 1 positions: index 0 for the new move,
+            // and indices 1..=child_len for the child PV
+            #[allow(clippy::int_plus_one)]
+            if child_len > 0 && child_len + 1 <= MAX_PLY {
                 // Use split_at_mut to avoid mutable borrow conflict
                 let (first_half, second_half) = self.line.split_at_mut(ply + 1);
                 first_half[ply][1..=child_len].copy_from_slice(&second_half[0][0..child_len]);
