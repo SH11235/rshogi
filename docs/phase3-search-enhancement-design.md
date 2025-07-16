@@ -1789,3 +1789,91 @@ Phase 3完了時に、以下が準備されています：
 5. **デバッグ/分析用ログ**: JSON Lines形式での出力
 
 これらにより、Phase 4でのWASM統合と最終調整が可能になります。
+
+
+
+2025/07/17追記
+❌ 未実装
+
+- 高度な探索技術: [Singular Extension](./singular-extension-implementation-guide.md)、[ProbCut](./probcut-implementation-guide.md)、[Internal Iterative Deepening (IID)](./iid-implementation-guide.md)
+- 並列探索: thread_pool.rs (Lazy SMP)
+- 時間管理: time_management.rs
+
+📊 残タスク
+
+1. 高度な探索技術の実装状況確認
+2. 並列探索・時間管理の必要性評価
+3. 現在の性能測定
+4. 成功基準の達成状況確認
+
+
+## 11. WASM SIMD最適化への準備
+## 13. 探索ログフォーマット
+
+3つの最適化技術は互いに干渉なく実装可能です
+
+現在のsearch_enhanced.rsの実装を確認したところ：
+
+1. SearchStackの構造
+  - 必要なフィールド（excluded_moveなど）を追加可能
+  - 現在の構造は拡張しやすい設計
+2. 探索メソッドの設計
+  - 単一のsearchメソッドがあり、拡張ポイントが明確
+  - Null Move PruningやLMRが既に実装されており、同様のパターンで追加可能
+3. 相互干渉の回避
+
+// 実装時の構造例
+impl Searcher {
+    fn search(&mut self, pos: &Position, alpha: i32, beta: i32, depth: i32) -> i32 {
+        // 1. IID（最初に実行）
+        if tt_move.is_none() && depth >= IID_DEPTH {
+            // 浅い探索で良い手を発見
+            self.internal_iterative_deepening(...);
+        }
+
+        // 2. Singular Extension（特定の手に対して）
+        if depth >= SE_DEPTH && tt_move.is_some() {
+            // excluded_moveをSearchStackに追加
+            if let Some(extension) = self.singular_extension(...) {
+                depth += extension;
+            }
+        }
+
+        // 3. ProbCut（早期枝刈り）
+        if !pv_node && depth >= PROBCUT_DEPTH {
+            if let Some(value) = self.prob_cut(...) {
+                return value;
+            }
+        }
+
+        // 既存のNull Move Pruning、LMR等
+        // ...
+    }
+}
+
+📊 実装順序の推奨
+
+1. IID → 最も独立性が高く、既存コードへの影響が最小
+2. ProbCut → 早期リターンのため、他の技術と独立
+3. Singular Extension → SearchStackの拡張が必要だが、他の技術とは独立
+
+⚠️ 実装時の注意点
+
+1. SearchStackの拡張
+pub struct SearchStack {
+    // 既存フィールド
+    // ...
+
+    // 追加が必要
+    pub excluded_move: Option<Move>,  // SE用
+    pub probcut_tried: bool,          // ProbCut再帰防止用
+}
+2. パラメータ管理
+  - 各技術のパラメータをSearchParams構造体に追加
+  - デフォルト値の適切な設定
+3. 性能測定
+  - 各技術を個別に有効/無効にできるフラグ
+  - 組み合わせた場合の相乗効果の測定
+
+これらの技術は探索の異なるフェーズで動作するため、適切に実装すれば干渉することなく、それぞれの
+効果を発揮できます。
