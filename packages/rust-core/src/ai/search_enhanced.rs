@@ -1229,6 +1229,102 @@ mod tests {
     }
 
     #[test]
+    fn test_aspiration_failure_tracking() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+
+        // 極小窓でaspirationFailureを人為的に発生させる
+        searcher.params.initial_window = |_, _| 1;
+        searcher.params.max_aspiration_delta = |_| 50;
+
+        let (_, _) = searcher.search(&mut pos, 3, None, None);
+
+        // TTエントリを確認
+        if let Some(entry) = searcher.tt.probe(pos.hash) {
+            // Exact値の場合、aspiration_failはfalseであるべき
+            if entry.node_type() == NodeType::Exact {
+                assert!(
+                    !entry.aspiration_fail(),
+                    "Exact value should not have aspiration_fail flag set"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_tt_aspiration_replacement_policy() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let searcher = EnhancedSearcher::new(16, evaluator);
+        let hash = 0x1234567890ABCDEF;
+
+        // Test 1: 失敗エントリ(深さ8) → 成功エントリ(深さ4)で上書き
+        searcher.tt.store_with_aspiration(hash, None, 100, 50, 8, NodeType::Exact, true);
+        searcher
+            .tt
+            .store_with_aspiration(hash, None, 200, 150, 4, NodeType::Exact, false);
+
+        let entry = searcher.tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200, "Aspiration success should replace fail entry");
+        assert!(!entry.aspiration_fail(), "Entry should not have aspiration_fail flag");
+
+        // Test 2: 成功エントリ(深さ10) → 失敗エントリ(深さ12) は **上書きされない**
+        let hash2 = 0x9876543210FEDCBA;
+        searcher
+            .tt
+            .store_with_aspiration(hash2, None, 300, 250, 10, NodeType::Exact, false);
+        searcher
+            .tt
+            .store_with_aspiration(hash2, None, 400, 350, 12, NodeType::Exact, true);
+
+        let entry2 = searcher.tt.probe(hash2).unwrap();
+        assert_eq!(
+            entry2.score(),
+            300,
+            "Less‑reliable aspiration‑fail entry must NOT overwrite a valid Exact entry"
+        );
+        assert!(
+            !entry2.aspiration_fail(),
+            "Less‑reliable aspiration‑fail entry must NOT overwrite the existing exact entry"
+        );
+
+        // Test 3: 失敗エントリ(深さ8) → 失敗エントリ(深さ12) では深い方が採用される
+        let hash3 = 0x0FF1CEB00C123456;
+        searcher
+            .tt
+            .store_with_aspiration(hash3, None, 100, 50, 8, NodeType::Exact, true);
+        searcher
+            .tt
+            .store_with_aspiration(hash3, None, 200, 50, 12, NodeType::Exact, true);
+
+        let entry3 = searcher.tt.probe(hash3).unwrap();
+        assert_eq!(entry3.score(), 200);
+        assert!(entry3.aspiration_fail());
+    }
+
+    #[test]
+    fn test_aspiration_flag_lifecycle() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+
+        // 通常の窓幅でsearch実行
+        let (best_move, _) = searcher.search(&mut pos, 4, None, None);
+        assert!(best_move.is_some());
+
+        // TTエントリを確認
+        if let Some(entry) = searcher.tt.probe(pos.hash) {
+            // 通常の探索では、最終的にExact値が得られるはずなので、aspiration_failはfalseであるべき
+            if entry.node_type() == NodeType::Exact {
+                assert!(
+                    !entry.aspiration_fail(),
+                    "Normal search should result in non-aspiration-fail Exact entry"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_pv_tracking() {
         let evaluator = Arc::new(MaterialEvaluator);
         let mut searcher = EnhancedSearcher::new(16, evaluator);
