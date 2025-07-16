@@ -216,6 +216,48 @@ impl TranspositionTable {
         self.store_with_aspiration(hash, mv, score, eval, depth, node_type, false)
     }
 
+    /// Determine if new entry should replace old entry
+    /// Returns true if new entry is stronger and should replace the old one
+    fn is_stronger(&self, new: &TTEntry, old: &TTEntry, depth: u8, hash: u64) -> bool {
+        // 1. Empty slot or different position
+        if !old.matches(hash) || old.depth() == 0 {
+            return true;
+        }
+
+        // 2. Current generation always replaces old generation
+        if new.age() == self.age && old.age() != self.age {
+            return true;
+        }
+
+        // 3. Node type priority: Exact > Lower/Upper
+        if new.node_type() == NodeType::Exact && old.node_type() != NodeType::Exact {
+            return true;
+        }
+        if new.node_type() != NodeType::Exact && old.node_type() == NodeType::Exact {
+            return false;
+        }
+
+        // 4. Aspiration: success > fail
+        if !new.aspiration_fail() && old.aspiration_fail() {
+            return true;
+        }
+        if new.aspiration_fail() && !old.aspiration_fail() {
+            return false;
+        }
+
+        // 5. Depth comparison
+        if depth > old.depth() {
+            return true;
+        }
+        if depth < old.depth() {
+            return false;
+        }
+
+        // 6. Same depth, same conditions → tie-break by generation
+        // Only replace if new is current generation and old is not
+        new.age() == self.age && old.age() != self.age
+    }
+
     /// Store entry with aspiration fail flag
     #[allow(clippy::too_many_arguments)]
     pub fn store_with_aspiration(
@@ -251,19 +293,8 @@ impl TranspositionTable {
             data: old_data,
         };
 
-        // Replacement strategy:
-        // 1. Always replace if empty or different position
-        // 2. For same position, replace if:
-        //    - New entry is from current generation and old is not
-        //    - New entry is aspiration success (not fail) and old is fail
-        //    - Both same aspiration status but new has greater depth
-        let should_replace = !old_entry.matches(hash)
-            || old_entry.depth() == 0
-            || (entry.age() == self.age && old_entry.age() != self.age)
-            || (!entry.aspiration_fail() && old_entry.aspiration_fail())  // Aspiration成功を優先
-            || (entry.aspiration_fail() == old_entry.aspiration_fail() && depth >= old_entry.depth());
-
-        if should_replace {
+        // Use is_stronger to determine if replacement should occur
+        if self.is_stronger(&entry, &old_entry, depth, hash) {
             // Store atomically (order matters for concurrent access)
             self.table[base_idx].store(entry.key, Ordering::Relaxed);
             self.table[base_idx + 1].store(entry.data, Ordering::Relaxed);
@@ -435,5 +466,105 @@ mod tests {
 
         let entry3 = TTEntry::new(0x1234567890ABCDEF, None, 0, 0, 100, NodeType::Exact, 0);
         assert_eq!(entry3.depth(), 100);
+    }
+
+    #[test]
+    fn test_replacement_policy_node_type_priority() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store LowerBound entry
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::LowerBound, false);
+
+        // Store Exact entry with same depth - should replace
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Exact entry
+        assert_eq!(entry.node_type(), NodeType::Exact);
+
+        // Store another LowerBound with deeper search - should NOT replace Exact
+        tt.store_with_aspiration(hash, None, 300, 250, 15, NodeType::LowerBound, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Still Exact entry
+        assert_eq!(entry.node_type(), NodeType::Exact);
+    }
+
+    #[test]
+    fn test_replacement_policy_aspiration_priority() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store aspiration fail entry
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, true);
+
+        // Store aspiration success entry with same depth - should replace
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Success entry
+        assert!(!entry.aspiration_fail());
+
+        // Store another fail entry with deeper search - should NOT replace success
+        tt.store_with_aspiration(hash, None, 300, 250, 15, NodeType::Exact, true);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // Still success entry
+        assert!(!entry.aspiration_fail());
+    }
+
+    #[test]
+    fn test_replacement_policy_generation_tiebreak() {
+        let mut tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store entry in generation 0
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, false);
+
+        // Advance generation
+        tt.new_search();
+
+        // Store entry with same depth, same node type, same aspiration - should replace due to newer generation
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200); // New generation entry
+        assert_eq!(entry.age(), 1);
+    }
+
+    #[test]
+    fn test_replacement_policy_same_generation_same_depth() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store initial entry
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, false);
+
+        // Store another entry with same depth, same generation - should NOT replace
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 100); // Old entry retained
+    }
+
+    #[test]
+    fn test_aspiration_entry() {
+        let tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store entry with aspiration fail flag
+        tt.store_with_aspiration(hash, None, 100, 50, 10, NodeType::Exact, true);
+
+        let entry = tt.probe(hash).unwrap();
+        assert!(entry.aspiration_fail());
+        assert_eq!(entry.score(), 100);
+
+        // Store entry without aspiration fail flag
+        tt.store_with_aspiration(hash, None, 200, 150, 10, NodeType::Exact, false);
+
+        let entry = tt.probe(hash).unwrap();
+        assert!(!entry.aspiration_fail());
+        assert_eq!(entry.score(), 200);
     }
 }
