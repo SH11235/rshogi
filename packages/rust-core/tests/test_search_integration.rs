@@ -41,6 +41,7 @@ mod search_integration_tests {
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct Benchmarks {
         see_basic: PerformanceMetric,
         see_with_pins: PerformanceMetric,
@@ -49,18 +50,21 @@ mod search_integration_tests {
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct PerformanceMetric {
         max_time_ns: u64,
         description: String,
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct RateMetric {
         min_rate: f64,
         description: String,
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct OrderingMetric {
         first_move_cutoff_rate: f64,
         description: String,
@@ -105,7 +109,7 @@ mod search_integration_tests {
 
         // Create two searchers - one with SEE, one without (simulated)
         let mut searcher_with_see = EnhancedSearcher::new(16, evaluator.clone());
-        let searcher_baseline = EnhancedSearcher::new(16, evaluator.clone());
+        let _searcher_baseline = EnhancedSearcher::new(16, evaluator.clone());
 
         // Test position with many captures available
         let test_positions = vec![
@@ -152,7 +156,7 @@ mod search_integration_tests {
         let mut scores = Vec::new();
 
         for _ in 0..3 {
-            let (best_move, score) = searcher.search(&mut pos.clone(), 6, None, Some(50_000));
+            let (_best_move, score) = searcher.search(&mut pos.clone(), 6, None, Some(50_000));
 
             scores.push(score);
 
@@ -327,6 +331,7 @@ mod search_integration_tests {
 
 /// Search statistics for testing
 #[derive(Default)]
+#[allow(dead_code)]
 struct SearchStats {
     nodes: u64,
     quiescence_nodes: u64,
