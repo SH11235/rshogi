@@ -18,7 +18,7 @@ mod tests {
         let pos = Position::startpos();
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
 
         // Collect all moves from picker
         let mut picker_moves = HashSet::new();
@@ -51,7 +51,7 @@ mod tests {
 
         // Set a specific move as TT move (2g2f)
         let tt_move = Some(Move::normal(Square::new(7, 2), Square::new(7, 3), false));
-        let mut picker = MovePicker::new(&pos, tt_move, &history, &stack);
+        let mut picker = MovePicker::new(&pos, tt_move, None, &history, &stack);
 
         // First move should be TT move
         assert_eq!(picker.next_move(), tt_move);
@@ -67,7 +67,7 @@ mod tests {
         stack.killers[0] = Some(Move::normal(Square::new(2, 2), Square::new(2, 3), false));
         stack.killers[1] = Some(Move::normal(Square::new(3, 2), Square::new(3, 3), false));
 
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
 
         // Collect early moves
         let mut early_moves = Vec::new();
@@ -127,7 +127,7 @@ mod tests {
 
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack);
 
         // Get first few moves
         let mut first_moves = Vec::new();
@@ -208,7 +208,7 @@ mod tests {
         history.update_cutoff(Color::Black, good_move, 10, None);
 
         let history_arc = Arc::new(history);
-        let mut picker = MovePicker::new(&pos, None, &history_arc, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history_arc, &stack);
 
         // Collect all quiet moves
         let mut quiet_moves = Vec::new();
