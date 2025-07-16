@@ -175,10 +175,8 @@ mod search_integration_tests {
         // PV length should be reasonably consistent
         let first_pv_len = pv_lengths[0];
         for pv_len in &pv_lengths {
-            assert!(
-                (*pv_len as i32 - first_pv_len as i32).abs() <= 1,
-                "PV length should be consistent"
-            );
+            let diff = (*pv_len as i32 - first_pv_len as i32).abs();
+            assert!(diff <= 1, "PV length should be consistent");
         }
     }
 

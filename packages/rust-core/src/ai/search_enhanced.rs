@@ -72,6 +72,7 @@ pub struct SearchStack {
 /// # Thread Safety
 ///
 /// **WARNING**: This structure is NOT thread-safe. In multi-threaded search scenarios:
+/// - Not Sync: each Searcher owns its PVTable
 /// - Each thread should maintain its own independent PVTable instance, OR
 /// - Use synchronization primitives (Mutex/RwLock) if sharing is required, OR
 /// - Implement a lock-free approach where only the root thread updates the shared PV
@@ -710,6 +711,13 @@ impl EnhancedSearcher {
             None
         };
 
+        // At root node, prioritize PV move over TT move
+        let (tt_move, pv_move) = if ctx.ply == 0 && pv_move.is_some() {
+            (pv_move, None) // Use PV move in TT slot at root
+        } else {
+            (tt_move, pv_move)
+        };
+
         // Use MovePicker for efficient move ordering
         let history_arc = Arc::new(self.history.clone());
         let mut move_picker = MovePicker::new(pos, tt_move, pv_move, &history_arc, &stack[ctx.ply]);
@@ -990,6 +998,14 @@ impl EnhancedSearcher {
     /// Get node count for testing
     pub fn nodes(&self) -> u64 {
         self.nodes.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for EnhancedSearcher {
+    fn drop(&mut self) {
+        // Automatically invalidate PV on drop to prevent stale data usage
+        // This ensures safety even if search is interrupted by panic
+        self.pv.invalidate_last_pv();
     }
 }
 
