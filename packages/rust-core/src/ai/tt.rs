@@ -729,6 +729,74 @@ mod tests {
     }
 
     #[test]
+    fn test_tt_entry_packing_with_aspiration() {
+        let mv = Some(Move::normal(Square::new(2, 7), Square::new(2, 6), false));
+
+        // Comprehensive boundary value test cases
+        let test_cases = vec![
+            // (move, score, eval, depth, node_type, age, aspiration_fail)
+            (mv, -32768i16, -32768i16, 0u8, NodeType::Exact, 0u8, false),
+            (mv, 32767, 32767, 127, NodeType::LowerBound, 63, true),
+            (None, 0, 0, 127, NodeType::UpperBound, 15, false),
+            (
+                Some(Move::drop(PieceType::Pawn, Square::new(5, 5))),
+                -1000,
+                500,
+                50,
+                NodeType::Exact,
+                31,
+                true,
+            ),
+            (
+                Some(Move::normal(Square::new(7, 7), Square::new(7, 6), true)),
+                1500,
+                -200,
+                25,
+                NodeType::LowerBound,
+                0,
+                false,
+            ),
+        ];
+
+        for (mv, score, eval, depth, node_type, age, asp_fail) in test_cases {
+            let entry = TTEntry::new_with_aspiration(
+                0x1234567890ABCDEF,
+                mv,
+                score,
+                eval,
+                depth,
+                node_type,
+                age,
+                asp_fail,
+            );
+
+            assert_eq!(entry.score(), score, "Score mismatch for test case");
+            assert_eq!(entry.eval(), eval, "Eval mismatch for test case");
+            assert_eq!(entry.depth(), depth & DEPTH_MASK, "Depth mismatch for test case");
+            assert_eq!(entry.node_type(), node_type, "NodeType mismatch for test case");
+            assert_eq!(entry.age(), age & AGE_MASK, "Age mismatch for test case");
+            assert_eq!(entry.aspiration_fail(), asp_fail, "Aspiration fail mismatch for test case");
+
+            if let Some(m) = mv {
+                let retrieved = entry.get_move().expect("Move should be present");
+                assert_eq!(retrieved.from(), m.from(), "Move from square mismatch");
+                assert_eq!(retrieved.to(), m.to(), "Move to square mismatch");
+                assert_eq!(retrieved.is_promote(), m.is_promote(), "Move promotion mismatch");
+                assert_eq!(retrieved.is_drop(), m.is_drop(), "Move drop type mismatch");
+                if m.is_drop() {
+                    assert_eq!(
+                        retrieved.drop_piece_type(),
+                        m.drop_piece_type(),
+                        "Drop piece type mismatch"
+                    );
+                }
+            } else {
+                assert_eq!(entry.get_move(), None, "Move should be None");
+            }
+        }
+    }
+
+    #[test]
     fn test_bit_field_isolation() {
         // Test that each field is properly isolated and doesn't affect others
         // Use maximum values for each field to ensure no overflow into adjacent fields
