@@ -46,8 +46,12 @@ impl ScoredMove {
 /// the efficiency of alpha-beta pruning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MovePickerStage {
+    /// Root PV move (highest priority at root node)
+    RootPV,
     /// TT move
     TTMove,
+    /// PV move (from previous iteration)
+    PVMove,
     /// Generate captures
     GenerateCaptures,
     /// Good captures (SEE >= 0)
@@ -70,6 +74,8 @@ pub struct MovePicker {
     pos: Position,
     /// TT move
     tt_move: Option<Move>,
+    /// PV move (from previous iteration)
+    pv_move: Option<Move>,
     /// History heuristics
     history: Arc<History>,
     /// Search stack entry
@@ -94,15 +100,33 @@ impl MovePicker {
     pub fn new(
         pos: &Position,
         tt_move: Option<Move>,
+        pv_move: Option<Move>,
         history: &Arc<History>,
         stack: &SearchStack,
+        ply: usize,
     ) -> Self {
+        // Validate PV move: check for duplicates and legality
+        let validated_pv_move = pv_move.filter(|&mv| {
+            // Skip if same as TT move
+            tt_move != Some(mv) &&
+            // Check legality
+            pos.is_legal_move(mv)
+        });
+
+        // Determine starting stage based on root node and PV availability
+        let stage = if ply == 0 && validated_pv_move.is_some() {
+            MovePickerStage::RootPV
+        } else {
+            MovePickerStage::TTMove
+        };
+
         MovePicker {
             pos: pos.clone(),
             tt_move,
+            pv_move: validated_pv_move,
             history: Arc::clone(history),
             stack: stack.clone(),
-            stage: MovePickerStage::TTMove,
+            stage,
             moves: Vec::new(),
             bad_captures: Vec::new(),
             current: 0, // Initialize to 0, will be used differently in each stage
@@ -121,8 +145,9 @@ impl MovePicker {
         tt_move: Option<Move>,
         history: &Arc<History>,
         stack: &SearchStack,
+        ply: usize,
     ) -> Self {
-        let mut picker = Self::new(pos, tt_move, history, stack);
+        let mut picker = Self::new(pos, tt_move, None, history, stack, ply);
         picker.skip_quiets = true;
         picker
     }
@@ -131,12 +156,26 @@ impl MovePicker {
     pub fn next_move(&mut self) -> Option<Move> {
         loop {
             match self.stage {
+                MovePickerStage::RootPV => {
+                    self.stage = MovePickerStage::TTMove;
+                    if let Some(pv_move) = self.pv_move {
+                        return Some(pv_move);
+                    }
+                }
+
                 MovePickerStage::TTMove => {
-                    self.stage = MovePickerStage::GenerateCaptures;
+                    self.stage = MovePickerStage::PVMove;
                     if let Some(tt_move) = self.tt_move {
                         if self.pos.is_legal_move(tt_move) {
                             return Some(tt_move);
                         }
+                    }
+                }
+
+                MovePickerStage::PVMove => {
+                    self.stage = MovePickerStage::GenerateCaptures;
+                    if let Some(pv_move) = self.pv_move {
+                        return Some(pv_move);
                     }
                 }
 
@@ -591,7 +630,7 @@ mod tests {
             false,
         ));
 
-        let mut picker = MovePicker::new(&pos, tt_move, &history, &stack);
+        let mut picker = MovePicker::new(&pos, tt_move, None, &history, &stack, 1);
 
         // First move should be TT move
         let first_move = picker.next_move();
@@ -614,7 +653,7 @@ mod tests {
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
 
-        let mut picker = MovePicker::new_quiescence(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new_quiescence(&pos, None, &history, &stack, 1);
 
         // In starting position, there should be no captures
         assert!(picker.next_move().is_none());
@@ -642,7 +681,7 @@ mod tests {
 
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
-        let picker = MovePicker::new(&pos, None, &history, &stack);
+        let picker = MovePicker::new(&pos, None, None, &history, &stack, 1);
 
         // Test capturing the pawn at 3f with our pawn at 3g
         // This should be a good capture (pawn for pawn = 0)
@@ -674,7 +713,7 @@ mod tests {
 
         let history = Arc::new(History::new());
         let stack = SearchStack::default();
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack, 1);
 
         // Collect captures
         let mut captures = Vec::new();
@@ -705,7 +744,7 @@ mod tests {
         stack.killers[0] = Some(killer1);
         stack.killers[1] = Some(killer2);
 
-        let mut picker = MovePicker::new(&pos, None, &history, &stack);
+        let mut picker = MovePicker::new(&pos, None, None, &history, &stack, 1);
 
         // Collect moves and track when killers appear
         let mut move_count = 0;
