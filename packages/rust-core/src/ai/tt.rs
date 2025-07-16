@@ -905,6 +905,79 @@ mod tests {
         assert_eq!(entry1_final.unwrap().depth(), 15);
         assert!(entry2_final.is_none(), "Second entry should be replaced by deeper search");
     }
+
+    #[test]
+    fn test_age_based_replacement() {
+        let mut tt = TranspositionTable::new(1);
+        let hash = 0x1234567890ABCDEF;
+
+        // Store entry in generation 0
+        tt.age = 0;
+        tt.store(hash, None, 100, 50, 10, NodeType::Exact);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 100);
+        assert_eq!(entry.age(), 0);
+
+        // Advance to generation 5
+        for _ in 0..5 {
+            tt.new_search();
+        }
+        assert_eq!(tt.age, 5);
+
+        // Store new entry with same depth in newer generation
+        // Should replace old entry even with same depth due to newer generation
+        tt.store(hash, None, 200, 100, 10, NodeType::Exact);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 200);
+        assert_eq!(entry.age(), 5);
+
+        // Try to store an older generation entry with deeper search
+        // Create an old entry by manipulating the age
+        let old_entry = TTEntry::new_with_aspiration(
+            hash,
+            None,
+            300,
+            150,
+            15, // Deeper search
+            NodeType::Exact,
+            0, // Old generation
+            false,
+        );
+
+        // Manually store it to simulate old generation entry
+        let idx = tt.index(hash);
+        let base_idx = idx * 2;
+        tt.table[base_idx + 1].store(old_entry.data, std::sync::atomic::Ordering::Release);
+        tt.table[base_idx].store(old_entry.key, std::sync::atomic::Ordering::Release);
+
+        // Now try to store current generation entry with shallower depth
+        tt.store(hash, None, 400, 200, 8, NodeType::Exact);
+
+        // Current generation should win despite shallower depth
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 400);
+        assert_eq!(entry.depth(), 8);
+        assert_eq!(entry.age(), 5);
+
+        // Test wrap-around scenario
+        // Set age to near maximum
+        tt.age = 62;
+        tt.store(hash, None, 500, 250, 12, NodeType::Exact);
+
+        // Wrap around
+        tt.new_search();
+        tt.new_search();
+        assert_eq!(tt.age, 0); // Wrapped to 0
+
+        // New generation 0 should still replace old generation 62
+        tt.store(hash, None, 600, 300, 12, NodeType::Exact);
+
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 600);
+        assert_eq!(entry.age(), 0);
+    }
 }
 
 // Include parallel safety tests
