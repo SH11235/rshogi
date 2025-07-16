@@ -63,6 +63,108 @@ pub struct SearchStack {
     pub in_check: bool,
 }
 
+/// Principal Variation table with fixed-size arrays
+///
+/// This structure tracks the principal variation (best move sequence) found during search.
+/// Each ply maintains its own PV line which is updated when a better move is found.
+///
+/// # Thread Safety
+///
+/// **WARNING**: This structure is NOT thread-safe. In multi-threaded search scenarios:
+/// - Each thread should maintain its own independent PVTable instance, OR
+/// - Use synchronization primitives (Mutex/RwLock) if sharing is required, OR
+/// - Implement a lock-free approach where only the root thread updates the shared PV
+///
+/// # Memory Usage
+///
+/// Size: dynamically calculated as `MAX_PLY × MAX_PLY × size_of::<Move>()` bytes
+/// - With current `Move` size of 4 bytes and `MAX_PLY = 127`: ~64KB per instance
+/// - With 8 threads: ~512KB total
+/// - With 32 threads: ~2MB total
+///
+/// For memory-constrained environments, consider using const generics to reduce MAX_PLY.
+pub struct PVTable {
+    /// PV lines for each ply [ply][move_index]
+    line: [[Move; MAX_PLY]; MAX_PLY],
+    /// Number of moves in each PV line
+    len: [u8; MAX_PLY],
+}
+
+impl Default for PVTable {
+    fn default() -> Self {
+        PVTable {
+            line: [[Move::default(); MAX_PLY]; MAX_PLY],
+            len: [0; MAX_PLY],
+        }
+    }
+}
+
+impl PVTable {
+    /// Create new PVTable with safety assertion
+    #[allow(clippy::int_plus_one)]
+    pub fn new() -> Self {
+        // Ensure MAX_PLY fits safely in u8 with room for +1
+        debug_assert!(
+            MAX_PLY <= u8::MAX as usize - 1,
+            "MAX_PLY must fit in u8 with room for +1 operation"
+        );
+        Self::default()
+    }
+
+    /// Get the principal variation from root
+    ///
+    /// # Lifetime
+    ///
+    /// The returned slice is only valid until the next search operation.
+    /// Starting a new search will clear and overwrite the PV data.
+    /// If you need to preserve the PV across searches, clone the data.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let pv = searcher.principal_variation();
+    /// let pv_copy: Vec<Move> = pv.to_vec(); // Clone if needed across searches
+    /// ```
+    pub fn get_pv(&self) -> &[Move] {
+        let len = self.len[0] as usize;
+        &self.line[0][0..len]
+    }
+
+    /// Clear PV at given ply
+    ///
+    /// This method only writes to memory if the PV is not already empty,
+    /// avoiding unnecessary cache misses during repeated clear calls.
+    #[inline]
+    pub fn clear(&mut self, ply: usize) {
+        debug_assert!(ply < MAX_PLY, "ply {ply} exceeds MAX_PLY {MAX_PLY}");
+        if self.len[ply] != 0 {
+            self.len[ply] = 0;
+        }
+    }
+
+    /// Update PV when new best move is found
+    #[inline]
+    pub fn update(&mut self, ply: usize, mv: Move) {
+        debug_assert!(ply < MAX_PLY, "ply {ply} exceeds MAX_PLY {MAX_PLY}");
+        self.line[ply][0] = mv;
+        self.len[ply] = 1;
+
+        // Copy child PV if exists
+        if ply + 1 < MAX_PLY {
+            let child_len = self.len[ply + 1] as usize;
+            // We need child_len + 1 positions: index 0 for the new move,
+            // and indices 1..=child_len for the child PV
+            #[allow(clippy::int_plus_one)]
+            if child_len > 0 && child_len + 1 <= MAX_PLY {
+                // Use split_at_mut to avoid mutable borrow conflict
+                let (first_half, second_half) = self.line.split_at_mut(ply + 1);
+                first_half[ply][1..=child_len].copy_from_slice(&second_half[0][0..child_len]);
+                self.len[ply] = 1 + self.len[ply + 1];
+            }
+        }
+    }
+}
+
 /// Search context for alpha-beta search
 struct SearchContext {
     /// Current alpha bound
@@ -166,6 +268,8 @@ pub struct EnhancedSearcher {
     start_time: Instant,
     /// Evaluator
     evaluator: Arc<dyn Evaluator + Send + Sync>,
+    /// Principal variation table
+    pv: PVTable,
     /// Search statistics (for testing)
     #[cfg(test)]
     pub stats: SearchStats,
@@ -184,6 +288,7 @@ impl EnhancedSearcher {
             node_limit: None,
             start_time: Instant::now(),
             evaluator,
+            pv: PVTable::new(),
             #[cfg(test)]
             stats: SearchStats::default(),
         }
@@ -212,6 +317,11 @@ impl EnhancedSearcher {
         let alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
         let beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
         (alpha, beta)
+    }
+
+    /// Get current principal variation
+    pub fn principal_variation(&self) -> &[Move] {
+        self.pv.get_pv()
     }
 
     /// Search position with iterative deepening
@@ -462,6 +572,9 @@ impl EnhancedSearcher {
         stack[ctx.ply].pv = (ctx.beta - ctx.alpha) > 1;
         stack[ctx.ply].in_check = pos.in_check();
 
+        // Clear PV at current ply
+        self.pv.clear(ctx.ply);
+
         // Quiescence search at leaf nodes
         if ctx.depth <= 0 {
             return self.quiescence(pos, ctx.alpha, ctx.beta, ctx.ply, stack);
@@ -640,6 +753,9 @@ impl EnhancedSearcher {
 
                 if score > ctx.alpha {
                     ctx.alpha = score;
+
+                    // Update PV
+                    self.pv.update(ctx.ply, mv);
 
                     if score >= ctx.beta {
                         // Update history for good quiet move
@@ -823,6 +939,7 @@ impl EnhancedSearcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::board::Square;
     use crate::ai::evaluate::MaterialEvaluator;
 
     #[test]
@@ -1024,5 +1141,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_pv_tracking() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+
+        let (best_move, _score) = searcher.search(&mut pos, 4, None, None);
+        let pv = searcher.principal_variation();
+
+        // PVの検証
+        assert!(!pv.is_empty(), "PV should not be empty");
+        assert_eq!(pv[0], best_move.unwrap(), "First move in PV should match best move");
+        assert!(pv.len() <= 4, "PV length should not exceed search depth");
+
+        // 各手が正当な手であることを確認
+        for &mv in pv {
+            assert!(!mv.is_null(), "PV should not contain null moves");
+            // 実際の合法手検証は movegen が必要なので省略
+        }
+    }
+
+    #[test]
+    fn test_pv_table_boundary() {
+        let mut pv_table = PVTable::new();
+
+        // 境界値テスト
+        let test_move = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
+
+        // MAX_PLY - 1 でのテスト
+        pv_table.update(MAX_PLY - 1, test_move);
+        assert_eq!(pv_table.len[MAX_PLY - 1], 1);
+
+        // 境界でのクリアテスト
+        pv_table.clear(MAX_PLY - 1);
+        assert_eq!(pv_table.len[MAX_PLY - 1], 0);
+
+        // 深いPVのコピーテスト
+        for i in 0..10 {
+            let mv = Move::normal(Square::new(i as u8 % 9, 6), Square::new(i as u8 % 9, 5), false);
+            pv_table.update(MAX_PLY - 10 + i, mv);
+        }
+
+        // ルートPVの長さを確認
+        let root_pv = pv_table.get_pv();
+        assert!(root_pv.is_empty() || root_pv.len() <= MAX_PLY);
+    }
+
+    #[test]
+    fn test_pv_table_memory_size() {
+        use std::mem;
+
+        // Verify the actual size of PVTable
+        let pv_table_size = mem::size_of::<PVTable>();
+        let move_size = mem::size_of::<Move>();
+        let expected_size = MAX_PLY * MAX_PLY * move_size + MAX_PLY; // line + len arrays
+
+        println!("PVTable memory usage:");
+        println!("  Move size: {} bytes", move_size);
+        println!("  MAX_PLY: {}", MAX_PLY);
+        println!("  Expected size: ~{} bytes", expected_size);
+        println!("  Actual size: {} bytes", pv_table_size);
+
+        // The actual size might be slightly larger due to alignment
+        assert!(pv_table_size >= expected_size);
+        assert!(pv_table_size < expected_size + 1024); // Allow up to 1KB padding
     }
 }

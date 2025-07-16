@@ -6,7 +6,7 @@
 //! - Search performance with SEE
 //! - Move ordering efficiency
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use shogi_core::ai::board::{Color, Piece, PieceType, Position, Square};
 use shogi_core::ai::evaluate::MaterialEvaluator;
 use shogi_core::ai::movegen::MoveGen;
