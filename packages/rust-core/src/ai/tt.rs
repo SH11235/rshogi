@@ -639,7 +639,7 @@ mod tests {
             tt.store(hash, None, score, score / 2, 10, NodeType::Exact);
 
             let entry = tt.probe(hash).unwrap();
-            assert_eq!(entry.score(), score, "Failed to store/retrieve score: {}", score);
+            assert_eq!(entry.score(), score, "Failed to store/retrieve score: {score}");
             assert_eq!(entry.eval(), score / 2, "Failed to store/retrieve eval: {}", score / 2);
         }
     }
