@@ -93,9 +93,6 @@ pub struct MovePicker {
     current: usize,
     /// Skip quiet moves (for quiescence search)
     skip_quiets: bool,
-    /// Current ply (0 = root node)
-    #[allow(dead_code)]
-    ply: usize,
 }
 
 impl MovePicker {
@@ -134,7 +131,6 @@ impl MovePicker {
             bad_captures: Vec::new(),
             current: 0, // Initialize to 0, will be used differently in each stage
             skip_quiets: false,
-            ply,
         }
     }
 
