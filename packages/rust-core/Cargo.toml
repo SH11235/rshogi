@@ -6,6 +6,10 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Loom feature for parallel safety testing (not available on WASM)
+loom = ["dep:loom"]
+
 [[bin]]
 name = "convert_opening_book"
 path = "src/bin/convert_opening_book.rs"
@@ -49,6 +53,10 @@ debug = true  # Enable debug symbols for profiling
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 wasm-bindgen-futures = "0.4"
+
+# Loom is only available for non-WASM targets
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+loom = { version = "0.7", features = ["checkpoint"], optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
