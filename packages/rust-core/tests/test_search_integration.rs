@@ -41,6 +41,7 @@ mod search_integration_tests {
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct Benchmarks {
         see_basic: PerformanceMetric,
         see_with_pins: PerformanceMetric,
@@ -49,18 +50,21 @@ mod search_integration_tests {
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct PerformanceMetric {
         max_time_ns: u64,
         description: String,
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct RateMetric {
         min_rate: f64,
         description: String,
     }
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
     struct OrderingMetric {
         first_move_cutoff_rate: f64,
         description: String,
@@ -105,7 +109,7 @@ mod search_integration_tests {
 
         // Create two searchers - one with SEE, one without (simulated)
         let mut searcher_with_see = EnhancedSearcher::new(16, evaluator.clone());
-        let mut searcher_baseline = EnhancedSearcher::new(16, evaluator.clone());
+        let _searcher_baseline = EnhancedSearcher::new(16, evaluator.clone());
 
         // Test position with many captures available
         let test_positions = vec![
@@ -116,7 +120,7 @@ mod search_integration_tests {
         ];
 
         for sfen in test_positions {
-            let mut pos = Position::from_sfen(sfen).expect("Valid SFEN");
+            let pos = Position::from_sfen(sfen).expect("Valid SFEN");
 
             // Search with normal settings
             let result_with_see = searcher_with_see.search(
@@ -142,7 +146,7 @@ mod search_integration_tests {
         let mut searcher = EnhancedSearcher::new(16, evaluator);
 
         // Position where move ordering matters significantly
-        let mut pos = Position::from_sfen(
+        let pos = Position::from_sfen(
             "ln1gk2nl/1r4gb1/p1ppsp2p/1p3pp2/9/2P2P1P1/PP1PP1P1P/1BG2S1R1/LN2KG1NL b SP 35",
         )
         .expect("Valid SFEN");
@@ -152,7 +156,7 @@ mod search_integration_tests {
         let mut scores = Vec::new();
 
         for _ in 0..3 {
-            let (best_move, score) = searcher.search(&mut pos.clone(), 6, None, Some(50_000));
+            let (_best_move, score) = searcher.search(&mut pos.clone(), 6, None, Some(50_000));
 
             scores.push(score);
 
@@ -327,6 +331,7 @@ mod search_integration_tests {
 
 /// Search statistics for testing
 #[derive(Default)]
+#[allow(dead_code)]
 struct SearchStats {
     nodes: u64,
     quiescence_nodes: u64,

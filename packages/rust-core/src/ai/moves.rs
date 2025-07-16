@@ -18,8 +18,24 @@ pub struct Move {
     data: u32,
 }
 
+impl Default for Move {
+    /// Returns a null move (no-op move)
+    ///
+    /// This ensures that the default move is consistently a null move,
+    /// which is semantically meaningful in the context of chess/shogi engines.
+    #[inline]
+    fn default() -> Self {
+        Self::null()
+    }
+}
+
 impl Move {
     /// Null move constant
+    ///
+    /// Represents a no-op move, used in various contexts:
+    /// - Default/uninitialized move value
+    /// - Null move pruning in search algorithms
+    /// - Placeholder when no valid move exists
     pub const NULL: Self = Move { data: 0 };
 
     /// Create null move (for compatibility)
