@@ -171,7 +171,16 @@ impl PVTable {
         }
     }
 
-    /// Save current PV for the next iteration (realloc-reduced version)
+    /// Save the current principal variation (PV) for the next search iteration.
+    ///
+    /// This method copies the current PV from the `line` array into the `last_pv` field
+    /// and marks it as valid by setting `last_pv_valid` to `true`. It is typically called
+    /// at the end of a search iteration to preserve the best sequence of moves found so far.
+    ///
+    /// # Relationship with `invalidate_last_pv`
+    /// If the search is interrupted or the PV becomes outdated, the `invalidate_last_pv`
+    /// method should be called to mark the saved PV as invalid. This ensures that stale
+    /// data is not used in subsequent operations.
     pub fn save_pv(&mut self) {
         let len = self.len[0] as usize;
         self.last_pv.clear();
