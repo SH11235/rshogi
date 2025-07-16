@@ -235,9 +235,9 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                         let index = halfkp_index(king_sq, bona_piece);
                         features.push(index);
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(debug_assertions)]
-                        eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                        eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
                     }
                 }
             }

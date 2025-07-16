@@ -175,18 +175,18 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
         // Remove old hand count
         match BonaPiece::from_hand(piece_type, color, count) {
             Ok(bona_hand_black) => removed.push(halfkp_index(black_king, bona_hand_black)),
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
             }
         }
 
         let color_white = color.flip();
         match BonaPiece::from_hand(piece_type, color_white, count) {
             Ok(bona_hand_white) => removed.push(halfkp_index(white_king_flipped, bona_hand_white)),
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
             }
         }
 
@@ -196,9 +196,9 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
                 Ok(bona_hand_black_new) => {
                     added.push(halfkp_index(black_king, bona_hand_black_new))
                 }
-                Err(e) => {
+                Err(_e) => {
                     #[cfg(debug_assertions)]
-                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
                 }
             }
 
@@ -206,9 +206,9 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
                 Ok(bona_hand_white_new) => {
                     added.push(halfkp_index(white_king_flipped, bona_hand_white_new))
                 }
-                Err(e) => {
+                Err(_e) => {
                     #[cfg(debug_assertions)]
-                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
                 }
             }
         }
@@ -273,9 +273,9 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
 
             match BonaPiece::from_hand(hand_type, hand_color, new_count) {
                 Ok(bona_hand_black) => added.push(halfkp_index(black_king, bona_hand_black)),
-                Err(e) => {
+                Err(_e) => {
                     #[cfg(debug_assertions)]
-                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
                 }
             }
 
@@ -284,9 +284,9 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
                 Ok(bona_hand_white) => {
                     added.push(halfkp_index(white_king_flipped, bona_hand_white))
                 }
-                Err(e) => {
+                Err(_e) => {
                     #[cfg(debug_assertions)]
-                    eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                    eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
                 }
             }
 
@@ -296,9 +296,9 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
                     Ok(bona_hand_old_black) => {
                         removed.push(halfkp_index(black_king, bona_hand_old_black))
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(debug_assertions)]
-                        eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                        eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
                     }
                 }
 
@@ -306,9 +306,9 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
                     Ok(bona_hand_old_white) => {
                         removed.push(halfkp_index(white_king_flipped, bona_hand_old_white))
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(debug_assertions)]
-                        eprintln!("[NNUE] Error creating BonaPiece from hand: {e}");
+                        eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
                     }
                 }
             }
