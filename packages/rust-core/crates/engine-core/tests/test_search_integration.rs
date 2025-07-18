@@ -73,7 +73,7 @@ mod search_integration_tests {
     /// Load tactical positions from YAML
     fn load_tactical_positions() -> TacticalDatabase {
         // Return mock data if file doesn't exist
-        if !std::path::Path::new("tests/tactical_positions.yaml").exists() {
+        if !std::path::Path::new("data/tactical_positions.yaml").exists() {
             return TacticalDatabase {
                 positions: vec![],
                 benchmarks: Benchmarks {
@@ -96,7 +96,7 @@ mod search_integration_tests {
                 },
             };
         }
-        let yaml_content = fs::read_to_string("tests/tactical_positions.yaml")
+        let yaml_content = fs::read_to_string("data/tactical_positions.yaml")
             .expect("Failed to read tactical positions");
         serde_yaml::from_str(&yaml_content).expect("Failed to parse YAML")
     }
