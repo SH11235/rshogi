@@ -10,8 +10,8 @@ anyhow = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-clap = { version = "4.0", features = ["derive"] }
-env_logger = "0.11"
+clap = { workspace = true }
+env_logger = { workspace = true }
 rayon = "1.7"
 flate2 = "1.0"
 criterion = { version = "0.6", features = ["html_reports"] }
