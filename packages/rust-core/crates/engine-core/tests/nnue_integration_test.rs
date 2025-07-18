@@ -1,7 +1,7 @@
 //! Integration tests for NNUE evaluation
 
-use shogi_core::ai::engine::EngineType;
-use shogi_core::ai::{Engine, Position, SearchLimits};
+use engine_core::ai::engine::EngineType;
+use engine_core::ai::{Engine, Position, SearchLimits};
 use std::time::Duration;
 
 #[test]
@@ -55,7 +55,7 @@ fn test_nnue_vs_material_comparison() {
 
 #[test]
 fn test_load_nnue_file() {
-    use shogi_core::ai::nnue::weights::load_weights;
+    use engine_core::ai::nnue::weights::load_weights;
     use std::fs;
     use std::path::Path;
 
@@ -112,8 +112,8 @@ fn test_load_nnue_file() {
 
 #[test]
 fn test_nnue_evaluation_with_mock_weights() {
-    use shogi_core::ai::nnue::NNUEEvaluatorWrapper;
-    use shogi_core::ai::{Evaluator, Position};
+    use engine_core::ai::nnue::NNUEEvaluatorWrapper;
+    use engine_core::ai::{Evaluator, Position};
     use std::fs;
     use std::path::Path;
 
@@ -140,7 +140,7 @@ fn test_nnue_evaluation_with_mock_weights() {
     let positions = vec![Position::startpos(), {
         // Create a different position
         let mut pos = Position::empty();
-        use shogi_core::ai::{Color, Piece, PieceType, Square};
+        use engine_core::ai::{Color, Piece, PieceType, Square};
         pos.board
             .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
         pos.board
