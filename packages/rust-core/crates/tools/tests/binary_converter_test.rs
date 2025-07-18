@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod binary_converter_tests {
-    use shogi_core::opening_book::*;
     use std::io::Cursor;
+    use tools::opening_book::{
+        binary_converter::BinaryConverter, BinaryFileHeader, CompactMove, CompactPosition,
+        PositionFilter, RawMove, RawSfenEntry,
+    };
 
     fn create_test_entries() -> Vec<RawSfenEntry> {
         vec![
