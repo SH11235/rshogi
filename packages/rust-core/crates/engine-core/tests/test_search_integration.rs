@@ -6,10 +6,10 @@
 //! - Pruning decisions
 //! - Complex tactical positions
 
-use shogi_core::ai::board::{Position, Square};
-use shogi_core::ai::evaluate::MaterialEvaluator;
-use shogi_core::ai::moves::Move;
-use shogi_core::ai::search_enhanced::EnhancedSearcher;
+use engine_core::ai::board::{Position, Square};
+use engine_core::ai::evaluate::MaterialEvaluator;
+use engine_core::ai::moves::Move;
+use engine_core::ai::search_enhanced::EnhancedSearcher;
 use std::sync::Arc;
 use std::time::Duration;
 

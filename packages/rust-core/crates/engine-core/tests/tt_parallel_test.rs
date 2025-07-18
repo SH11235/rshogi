@@ -1,8 +1,10 @@
 //! Parallel safety tests for transposition table
 
+mod util;
+
 #[cfg(test)]
 mod tests {
-    use crate::ai::sync_compat::{thread, Arc, AtomicU64, Ordering};
+    use super::util::sync_compat::{thread, Arc, AtomicU64, Ordering};
     use crate::ai::tt::*;
     use std::time::Duration;
 
