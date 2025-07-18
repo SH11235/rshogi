@@ -1,6 +1,6 @@
 //! SIMD implementation benchmark
 
-use shogi_core::ai::nnue::simd;
+use engine_core::ai::nnue::simd;
 use std::time::Instant;
 
 fn benchmark_affine_transform() {

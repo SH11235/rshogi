@@ -1,8 +1,8 @@
 //! NNUE performance benchmark
 
-use shogi_core::ai::benchmark::{benchmark_evaluation, run_benchmark};
-use shogi_core::ai::engine::EngineType;
-use shogi_core::ai::{Engine, Position, SearchLimits};
+use engine_core::ai::benchmark::{benchmark_evaluation, run_benchmark};
+use engine_core::ai::engine::EngineType;
+use engine_core::ai::{Engine, Position, SearchLimits};
 use std::time::{Duration, Instant};
 
 fn main() {

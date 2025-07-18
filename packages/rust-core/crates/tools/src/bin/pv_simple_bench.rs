@@ -1,6 +1,6 @@
 //! PVテーブル効果の簡易測定
 
-use shogi_core::ai::{
+use engine_core::ai::{
     board::Position, evaluate::MaterialEvaluator, search_enhanced::EnhancedSearcher,
 };
 use std::sync::Arc;
@@ -11,7 +11,7 @@ fn run_search_safe(
     searcher: &mut EnhancedSearcher,
     pos: &mut Position,
     depth: u8,
-) -> Result<(Option<shogi_core::ai::moves::Move>, i32, u64), String> {
+) -> Result<(Option<engine_core::ai::moves::Move>, i32, u64), String> {
     use std::panic;
 
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {

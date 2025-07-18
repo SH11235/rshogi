@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use shogi_core::opening_book::*;
+use engine_core::opening_book::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};

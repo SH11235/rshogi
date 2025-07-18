@@ -4,7 +4,7 @@
 //! Example: cargo run --bin sfen_hasher -- "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
 
 use anyhow::Result;
-use shogi_core::opening_book::position_hasher::PositionHasher;
+use engine_core::opening_book::position_hasher::PositionHasher;
 use std::env;
 
 fn main() -> Result<()> {

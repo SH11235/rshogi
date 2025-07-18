@@ -1,8 +1,8 @@
 //! Check which SIMD implementation is being used
 
-use shogi_core::ai::board::Position;
-use shogi_core::ai::engine::{Engine, EngineType};
-use shogi_core::ai::search::SearchLimits;
+use engine_core::ai::board::Position;
+use engine_core::ai::engine::{Engine, EngineType};
+use engine_core::ai::search::SearchLimits;
 use std::time::Duration;
 
 fn main() {

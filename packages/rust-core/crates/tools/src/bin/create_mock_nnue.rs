@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::Path;
 
 // Import NNUE structures
-use shogi_core::ai::nnue::{features::FeatureTransformer, network::Network};
+use engine_core::ai::nnue::{features::FeatureTransformer, network::Network};
 
 // We need to implement save_weights here since it's marked as #[cfg(test)]
 // This is a copy of the save_weights function from weights.rs
