@@ -1,6 +1,6 @@
 //! Test SSE4.1 implementation by manually calling it
 
-use shogi_core::ai::nnue::simd;
+use engine_core::ai::nnue::simd;
 use std::time::Instant;
 
 fn main() {

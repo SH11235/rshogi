@@ -1,6 +1,6 @@
 //! Shogi AI Benchmark
 
-use shogi_core::ai::benchmark::run_benchmark;
+use engine_core::ai::benchmark::run_benchmark;
 
 fn main() {
     let result = run_benchmark();
