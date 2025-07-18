@@ -5,9 +5,9 @@
 
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use shogi_core::ai::movegen::MoveGen;
-use shogi_core::ai::moves::MoveList;
-use shogi_core::{Color, Move, Piece, PieceType, Position, Square};
+use engine_core::ai::movegen::MoveGen;
+use engine_core::ai::moves::MoveList;
+use engine_core::{Color, Move, Piece, PieceType, Position, Square};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
