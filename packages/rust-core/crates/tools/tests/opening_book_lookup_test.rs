@@ -1,8 +1,6 @@
 //! 初期盤面付近での定跡検索テスト
 //! $ cargo test --test opening_book_initial_position_test -- --nocapture
 
-use shogi_core::opening_book::PositionHasher;
-use shogi_core::opening_book_reader::OpeningBookReader;
 use std::fs::File;
 use std::io::Read;
 
