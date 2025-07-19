@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use engine_core::{Engine, OpeningBookReader};
+use wasm_bindgen::prelude::*;
 
 /// エンジンを保持するハンドル
 #[wasm_bindgen]
@@ -12,7 +12,9 @@ pub struct WasmEngine {
 impl WasmEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmEngine {
-        WasmEngine { inner: Engine::new(Default::default()) }
+        WasmEngine {
+            inner: Engine::new(Default::default()),
+        }
     }
 }
 
@@ -58,7 +60,6 @@ impl OpeningBookReaderWasm {
         self.inner.is_loaded()
     }
 }
-
 
 // WebAssembly specific tests
 #[cfg(all(test, target_arch = "wasm32"))]

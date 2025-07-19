@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod move_encoder_tests {
-    use tools::opening_book::MoveEncoder;
+    use engine_core::opening_book::MoveEncoder;
 
     #[test]
     fn test_encode_normal_moves() {
