@@ -9,8 +9,7 @@
 //!   cargo run --bin search_opening_book -- converted_openings/opening_book_web.binz --hash 0x6327d878264056a0
 
 use anyhow::{anyhow, Result};
-use engine_core::opening_book::position_hasher::PositionHasher;
-use engine_core::opening_book_reader::OpeningBookReader;
+use engine_core::opening_book::PositionHasher;
 use std::env;
 use std::fs;
 use std::path::Path;
