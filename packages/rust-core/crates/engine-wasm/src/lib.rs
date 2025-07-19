@@ -39,7 +39,7 @@ impl OpeningBookReaderWasm {
 
     #[wasm_bindgen]
     pub fn load_data(&mut self, compressed_data: Vec<u8>) -> Result<String, JsValue> {
-        self.inner.load_data(&compressed_data).map_err(|e| JsValue::from_str(&e))
+        self.inner.load_data(&compressed_data).map_err(|e: &str| JsValue::from_str(e))
     }
 
     #[wasm_bindgen]
