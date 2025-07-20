@@ -7,11 +7,10 @@
 //! - Move ordering efficiency
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use shogi_core::ai::board::{Color, Piece, PieceType, Position, Square};
-use shogi_core::ai::evaluate::MaterialEvaluator;
-use shogi_core::ai::movegen::MoveGen;
-use shogi_core::ai::moves::{Move, MoveList};
-use shogi_core::ai::search_enhanced::EnhancedSearcher;
+use engine_core::evaluate::MaterialEvaluator;
+use engine_core::search::search_enhanced::EnhancedSearcher;
+use engine_core::shogi::{Move, MoveList};
+use engine_core::{Color, MoveGen, Piece, PieceType, Position, Square};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
