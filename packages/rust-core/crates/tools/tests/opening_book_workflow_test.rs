@@ -1,8 +1,12 @@
 #[cfg(test)]
 mod integration_tests {
-    use shogi_core::opening_book::*;
     use std::io::Cursor;
     use std::time::Instant;
+
+    use engine_core::{
+        opening_book::{BinaryConverter, PositionFilter, RawMove, RawSfenEntry, SfenParser},
+        MoveEncoder,
+    };
 
     fn create_sample_sfen_data() -> String {
         r#"#YANEURAOU-DB2016 1.00

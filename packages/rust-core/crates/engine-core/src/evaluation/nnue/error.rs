@@ -2,9 +2,10 @@
 //!
 //! Provides error handling for NNUE operations
 
-use crate::ai::board::{Color, Square};
 use std::error::Error;
 use std::fmt;
+
+use crate::{Color, Square};
 
 /// NNUE-specific errors
 #[derive(Debug, Clone)]

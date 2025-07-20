@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod data_structures_tests {
-    use shogi_core::opening_book::*;
+    use engine_core::opening_book::{
+        CompactMove, CompactPosition, PositionIndex, RawMove, RawSfenEntry,
+    };
 
     #[test]
     fn test_raw_sfen_entry_creation() {

@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod binary_converter_tests {
-    use std::io::Cursor;
     use engine_core::opening_book::{
         binary_converter::BinaryConverter, BinaryFileHeader, CompactMove, CompactPosition,
         PositionFilter, RawMove, RawSfenEntry,
     };
+    use std::io::Cursor;
 
     fn create_test_entries() -> Vec<RawSfenEntry> {
         vec![

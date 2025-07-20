@@ -1,7 +1,8 @@
 //! Test SSE4.1 implementation by manually calling it
 
-use engine_core::ai::nnue::simd;
 use std::time::Instant;
+
+use engine_core::nnue::simd;
 
 fn main() {
     println!("=== SSE4.1 Only Performance Test ===\n");

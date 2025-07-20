@@ -2,10 +2,14 @@
 //!
 //! Provides fast incremental hash computation for transposition tables and repetition detection
 
-use super::board::{Color, Piece, PieceType, Square, BOARD_SQUARES, MAX_PIECE_INDEX};
 use lazy_static::lazy_static;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
+
+use crate::{
+    shogi::board::{BOARD_SQUARES, MAX_PIECE_INDEX},
+    Color, Piece, PieceType, Position, Square,
+};
 
 /// Maximum number of pieces that can be held in hand (18 pieces max)
 const MAX_HAND_COUNT: usize = 18;
@@ -123,7 +127,7 @@ pub trait ZobristHashing {
     fn update_hash_side(&self, hash: u64) -> u64;
 }
 
-impl ZobristHashing for super::board::Position {
+impl ZobristHashing for Position {
     fn zobrist_hash(&self) -> u64 {
         let mut hash = 0u64;
 
@@ -248,7 +252,7 @@ impl ZobristHashing for super::board::Position {
 }
 
 /// Helper methods for Position to use in do_move
-impl super::board::Position {
+impl Position {
     /// Get zobrist hash for piece on square
     pub fn piece_square_zobrist(&self, piece: Piece, sq: Square) -> u64 {
         ZOBRIST.piece_square_hash(piece, sq)
@@ -268,7 +272,6 @@ impl super::board::Position {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::board::Position;
 
     #[test]
     fn test_zobrist_deterministic() {

@@ -2,8 +2,10 @@
 //!
 //! HalfKP uses the king position and all other pieces as features
 
-use crate::ai::board::{Color, Piece, PieceType, Position, Square};
-use crate::ai::piece_constants::{piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES};
+use crate::{
+    shogi::{piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES},
+    Color, Piece, PieceType, Position, Square,
+};
 
 /// Maximum pieces in hand for each type (indexed as in hands array)
 const MAX_HAND_PIECES: [u8; 7] = [

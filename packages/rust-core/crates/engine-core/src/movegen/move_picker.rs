@@ -7,11 +7,10 @@
 //! 4. Bad captures
 //! 5. Quiet moves (history ordered)
 
-use super::board::{Bitboard, Color, PieceType, Position, Square};
-use super::history::History;
-use super::movegen::MoveGen;
-use super::moves::{Move, MoveList};
-use super::search_enhanced::SearchStack;
+use crate::search::search_enhanced::SearchStack;
+use crate::shogi::{Move, MoveList, ATTACK_TABLES};
+use crate::{Bitboard, Color, History, MoveGen, PieceType, Position, Square};
+
 use std::sync::Arc;
 
 /// Scored move for ordering
@@ -387,8 +386,6 @@ impl Position {
 
     /// Check if the specified color has a pawn in the given file
     fn has_pawn_in_file_for_color(&self, file: u8, color: Color) -> bool {
-        use crate::ai::attacks::ATTACK_TABLES;
-
         let pawn_bb = self.board.piece_bb[color as usize][PieceType::Pawn as usize];
         let file_mask = ATTACK_TABLES.file_mask(file);
 
@@ -467,7 +464,6 @@ impl Position {
         }
 
         // Step 3: Check if king can escape
-        use crate::ai::attacks::ATTACK_TABLES;
         let king_moves = ATTACK_TABLES.king_attacks(king_sq);
 
         // King cannot capture its own pieces (Shogi rule)
@@ -613,8 +609,9 @@ impl Position {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Board, Piece};
+
     use super::*;
-    use crate::ai::board::{Board, Piece, Square};
 
     #[test]
     fn test_move_picker_stages() {
@@ -767,8 +764,6 @@ mod tests {
 
     #[test]
     fn test_pawn_drop_restrictions() {
-        use crate::ai::board::Piece;
-
         // Test nifu (double pawn) restriction
         // Start with empty position to have full control
         let mut pos = Position::empty();
@@ -799,8 +794,6 @@ mod tests {
 
     #[test]
     fn test_uchifuzume_restriction() {
-        use crate::ai::board::Piece;
-
         // Create a position where a pawn drop would be checkmate
         let mut pos = Position::empty();
         pos.side_to_move = Color::Black;
@@ -1121,7 +1114,6 @@ mod tests {
     #[test]
     fn test_uchifuzume_diagonal_escape() {
         // Test case where king can escape diagonally
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
         pos.side_to_move = Color::Black;
@@ -1163,7 +1155,6 @@ mod tests {
     #[test]
     fn test_uchifuzume_white_side() {
         // Test checkmate by pawn drop for White side (symmetry test)
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
         pos.side_to_move = Color::White;
@@ -1209,7 +1200,6 @@ mod tests {
     #[test]
     fn test_uchifuzume_no_support_but_king_cannot_capture() {
         // Test case where pawn has no support but king cannot capture due to another attacker
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
         pos.side_to_move = Color::Black;
@@ -1251,7 +1241,6 @@ mod tests {
     #[test]
     fn test_uchifuzume_double_check() {
         // Test case where pawn drop creates double check
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
         pos.side_to_move = Color::Black;
@@ -1297,7 +1286,6 @@ mod tests {
     #[test]
     fn test_nifu_with_promoted_pawn() {
         // Test that promoted pawn doesn't count for nifu (double pawn)
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
         pos.side_to_move = Color::Black;
@@ -1338,7 +1326,6 @@ mod tests {
     #[test]
     fn test_pawn_drop_last_rank_restrictions() {
         // Test that pawns cannot be dropped on the last rank
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
 
@@ -1375,7 +1362,6 @@ mod tests {
     #[test]
     fn test_lance_drop_last_rank_restrictions() {
         // Test that lances cannot be dropped on the last rank
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
 
@@ -1412,7 +1398,6 @@ mod tests {
     #[test]
     fn test_knight_drop_last_two_ranks_restrictions() {
         // Test that knights cannot be dropped on the last two ranks
-        use crate::ai::board::Piece;
         let mut pos = Position::empty();
         pos.board = Board::empty();
 

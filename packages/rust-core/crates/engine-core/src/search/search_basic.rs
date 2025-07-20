@@ -2,12 +2,12 @@
 //!
 //! Implements alpha-beta search with basic enhancements
 
-use super::board::Position;
-use super::evaluate::Evaluator;
-use super::movegen::MoveGen;
-use super::moves::{Move, MoveList};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::evaluate::Evaluator;
+use crate::shogi::{Move, MoveList};
+use crate::{MoveGen, Position};
 
 /// Infinity score for search bounds
 const INFINITY_SCORE: i32 = 30000;
@@ -224,9 +224,9 @@ impl<E: Evaluator> Searcher<E> {
 
 #[cfg(test)]
 mod tests {
+    use crate::evaluate::MaterialEvaluator;
+
     use super::*;
-    use crate::ai::board::Position;
-    use crate::ai::evaluate::MaterialEvaluator;
 
     #[test]
     fn test_search_startpos() {

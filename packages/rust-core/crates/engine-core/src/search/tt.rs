@@ -2,8 +2,8 @@
 //!
 //! Lock-free implementation suitable for parallel search
 
-use super::moves::Move;
-use super::sync_compat::{AtomicU64, Ordering};
+use crate::{shogi::Move, util};
+use util::sync_compat::{AtomicU64, Ordering};
 
 // Bit layout constants for TTEntry data field
 const MOVE_SHIFT: u8 = 48;
@@ -403,8 +403,9 @@ impl TranspositionTable {
 
 #[cfg(test)]
 mod tests {
+    use crate::{PieceType, Square};
+
     use super::*;
-    use crate::ai::board::{PieceType, Square};
 
     #[test]
     fn test_tt_entry_packing() {
@@ -979,8 +980,3 @@ mod tests {
         assert_eq!(entry.age(), 0);
     }
 }
-
-// Include parallel safety tests
-#[cfg(test)]
-#[path = "tt_parallel_test.rs"]
-mod tt_parallel_test;

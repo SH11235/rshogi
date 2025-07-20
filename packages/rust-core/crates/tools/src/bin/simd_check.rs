@@ -1,9 +1,12 @@
 //! Check which SIMD implementation is being used
 
-use engine_core::ai::board::Position;
-use engine_core::ai::engine::{Engine, EngineType};
-use engine_core::ai::search::SearchLimits;
 use std::time::Duration;
+
+use engine_core::{
+    engine::controller::{Engine, EngineType},
+    search::search_basic::SearchLimits,
+    Position,
+};
 
 fn main() {
     println!("=== SIMD Implementation Check ===\n");

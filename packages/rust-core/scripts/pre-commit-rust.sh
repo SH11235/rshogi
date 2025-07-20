@@ -19,24 +19,42 @@ fi
 
 # 2. Run cargo fmt check (non-destructive check)
 echo "📝 Checking Rust formatting..."
-if ! cargo fmt -- --check; then
-    echo "❌ Rust code is not formatted. Run 'cargo fmt' to fix."
-    exit 1
-fi
+
+# Format each crate individually
+CRATES=("crates/engine-core" "crates/engine-wasm" "crates/tools" "crates/webrtc-p2p")
+for crate_dir in "${CRATES[@]}"; do
+    if [ -d "$crate_dir" ]; then
+        echo "  Formatting $crate_dir..."
+        if ! cargo fmt --manifest-path "$crate_dir/Cargo.toml" -- --check; then
+            echo "❌ Rust code in $crate_dir is not formatted. Run 'cargo fmt --manifest-path $crate_dir/Cargo.toml' to fix."
+            exit 1
+        fi
+    fi
+done
 
 # 3. Run cargo clippy
 echo "🔍 Running Clippy lints..."
-if ! cargo clippy -- -D warnings; then
-    echo "❌ Clippy found issues. Please fix them before committing."
-    exit 1
-fi
+for crate_dir in "${CRATES[@]}"; do
+    if [ -d "$crate_dir" ]; then
+        echo "  Clippy check for $crate_dir..."
+        if ! cargo clippy --manifest-path "$crate_dir/Cargo.toml" -- -D warnings; then
+            echo "❌ Clippy found issues in $crate_dir. Please fix them before committing."
+            exit 1
+        fi
+    fi
+done
 
 # 4. Run cargo check (fast type checking)
 echo "🔍 Running cargo check..."
-if ! cargo check; then
-    echo "❌ Cargo check failed. Please fix compilation errors."
-    exit 1
-fi
+for crate_dir in "${CRATES[@]}"; do
+    if [ -d "$crate_dir" ]; then
+        echo "  Type checking $crate_dir..."
+        if ! cargo check --manifest-path "$crate_dir/Cargo.toml"; then
+            echo "❌ Cargo check failed for $crate_dir. Please fix compilation errors."
+            exit 1
+        fi
+    fi
+done
 
 # 5. Run tests (optional - can be commented out if too slow)
 # echo "🧪 Running Rust tests..."
