@@ -10,6 +10,7 @@
 
 use anyhow::{anyhow, Result};
 use engine_core::opening_book::PositionHasher;
+use engine_core::OpeningBookReader;
 use std::env;
 use std::fs;
 use std::path::Path;

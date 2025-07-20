@@ -2,7 +2,7 @@
 //!
 //! Implements 256x2-32-32-1 architecture with ClippedReLU activation
 
-use super::simd::SimdDispatcher;
+use crate::nnue::simd::SimdDispatcher;
 
 /// Neural network for NNUE evaluation
 pub struct Network {

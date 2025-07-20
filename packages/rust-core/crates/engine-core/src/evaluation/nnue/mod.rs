@@ -40,7 +40,9 @@ pub mod network;
 pub mod simd;
 pub mod weights;
 
-use super::board::{Color, Position};
+use crate::shogi::Move;
+use crate::{Color, Position};
+
 use super::evaluate::Evaluator;
 use accumulator::Accumulator;
 use error::{NNUEError, NNUEResult};
@@ -141,7 +143,7 @@ impl NNUEEvaluatorWrapper {
     }
 
     /// Update accumulator when making a move
-    pub fn do_move(&mut self, pos: &Position, mv: super::moves::Move) -> NNUEResult<()> {
+    pub fn do_move(&mut self, pos: &Position, mv: Move) -> NNUEResult<()> {
         let current_acc = self.accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
         let mut new_acc = current_acc.clone();
 
@@ -210,9 +212,9 @@ impl Evaluator for NNUEEvaluatorWrapper {
 
 #[cfg(test)]
 mod tests {
+    use crate::{shogi::Move, Piece, PieceType, Square};
+
     use super::*;
-    use crate::ai::board::{Color, Piece, PieceType, Square};
-    use crate::ai::moves::Move;
 
     #[test]
     fn test_nnue_evaluator_creation() {

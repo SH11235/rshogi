@@ -7,12 +7,12 @@
 //! - History Heuristics
 //! - Transposition Table
 
-use super::board::{Color, Position};
-use super::evaluate::Evaluator;
 use super::history::History;
-use super::move_picker::MovePicker;
-use super::moves::Move;
 use super::tt::{NodeType, TranspositionTable};
+use crate::evaluate::Evaluator;
+use crate::shogi::Move;
+use crate::zobrist::ZOBRIST;
+use crate::{Color, MovePicker, Position};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -973,14 +973,14 @@ impl EnhancedSearcher {
     fn do_null_move(&self, pos: &mut Position) -> Color {
         let prev_side = pos.side_to_move;
         pos.side_to_move = pos.side_to_move.opposite();
-        pos.hash ^= super::zobrist::ZOBRIST.side_to_move;
+        pos.hash ^= ZOBRIST.side_to_move;
         prev_side
     }
 
     /// Undo null move
     fn undo_null_move(&self, pos: &mut Position, prev_side: Color) {
         pos.side_to_move = prev_side;
-        pos.hash ^= super::zobrist::ZOBRIST.side_to_move;
+        pos.hash ^= ZOBRIST.side_to_move;
     }
 
     /// Check if search should stop
@@ -1022,12 +1022,9 @@ impl Drop for EnhancedSearcher {
 
 #[cfg(test)]
 mod tests {
+    use crate::{evaluate::MaterialEvaluator, shogi::MoveList, MoveGen, Square};
+
     use super::*;
-    use crate::ai::board::Square;
-    use crate::ai::evaluate::MaterialEvaluator;
-    use crate::ai::move_picker::MovePicker;
-    use crate::ai::movegen::MoveGen;
-    use crate::ai::moves::MoveList;
 
     #[test]
     fn test_search_params() {

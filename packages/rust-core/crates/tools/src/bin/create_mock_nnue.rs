@@ -3,15 +3,16 @@
 //! This generates a small NNUE file with random weights suitable for testing.
 //! The weights are small random values to ensure different positions get different evaluations.
 
+// Import NNUE structures
+use engine_core::nnue::features::FeatureTransformer;
+
+use engine_core::nnue::network::Network;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256Plus;
 use std::error::Error;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-
-// Import NNUE structures
-use engine_core::ai::nnue::{features::FeatureTransformer, network::Network};
 
 // We need to implement save_weights here since it's marked as #[cfg(test)]
 // This is a copy of the save_weights function from weights.rs

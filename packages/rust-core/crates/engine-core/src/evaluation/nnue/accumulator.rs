@@ -5,9 +5,8 @@
 use super::error::{NNUEError, NNUEResult};
 use super::features::{extract_features, halfkp_index, BonaPiece, FeatureTransformer};
 use super::simd::SimdDispatcher;
-use crate::ai::board::{Color, Piece, PieceType, Position, Square};
-use crate::ai::moves::Move;
-use crate::ai::piece_constants::piece_type_to_hand_index;
+use crate::shogi::{piece_type_to_hand_index, Move};
+use crate::{Color, Piece, PieceType, Position, Square};
 
 /// Accumulator for storing transformed features
 #[derive(Clone)]

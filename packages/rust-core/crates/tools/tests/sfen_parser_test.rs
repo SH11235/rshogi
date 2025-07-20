@@ -3,9 +3,10 @@
 
 #[cfg(test)]
 mod sfen_parser_integration_tests {
-    use shogi_core::opening_book::SfenParser;
     use std::fs;
     use std::path::Path;
+
+    use engine_core::opening_book::SfenParser;
 
     #[test]
     fn test_parse_mini_user_book_file() {

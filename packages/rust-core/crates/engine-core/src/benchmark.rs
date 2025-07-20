@@ -1,11 +1,11 @@
 //! Benchmark for AI performance testing
 
-use super::board::{Color, Piece, PieceType, Position, Square};
-use super::evaluate::{Evaluator, MaterialEvaluator};
-use super::movegen::MoveGen;
-use super::moves::MoveList;
-use super::nnue::NNUEEvaluatorWrapper;
-use super::search::{SearchLimits, Searcher};
+use crate::evaluate::{Evaluator, MaterialEvaluator};
+use crate::movegen::MoveGen;
+use crate::nnue::NNUEEvaluatorWrapper;
+use crate::search::search_basic::{SearchLimits, Searcher};
+use crate::shogi::MoveList;
+use crate::shogi::{Color, Piece, PieceType, Position, Square};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

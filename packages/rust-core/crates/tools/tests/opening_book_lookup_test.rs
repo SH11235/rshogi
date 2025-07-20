@@ -4,6 +4,8 @@
 use std::fs::File;
 use std::io::Read;
 
+use engine_core::{OpeningBookReader, PositionHasher};
+
 // 初期盤面のSFEN（手数0）
 const INITIAL_SFEN: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 0";
 // 2六歩の後の盤面

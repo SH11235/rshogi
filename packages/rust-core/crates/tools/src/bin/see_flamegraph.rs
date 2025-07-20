@@ -3,9 +3,8 @@
 //! This binary is designed to run SEE calculations intensively for 3-5 seconds
 //! to generate meaningful flamegraph data.
 
-use engine_core::ai::movegen::MoveGen;
-use engine_core::ai::moves::MoveList;
-use engine_core::{Color, Move, Piece, PieceType, Position, Square};
+use engine_core::shogi::{Move, MoveList};
+use engine_core::{Color, MoveGen, Piece, PieceType, Position, Square};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::hint::black_box;

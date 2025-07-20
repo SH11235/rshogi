@@ -1,7 +1,8 @@
 //! SIMD implementation benchmark
 
-use engine_core::ai::nnue::simd;
 use std::time::Instant;
+
+use engine_core::nnue::simd;
 
 fn benchmark_affine_transform() {
     println!("\n=== Affine Transform Benchmark ===");
