@@ -2,10 +2,10 @@
 //!
 //! Generates all legal moves for a given position
 
-use super::attacks::ATTACK_TABLES;
-use super::board::{Bitboard, Color, PieceType, Position, Square};
-use super::moves::{Move, MoveList};
-use super::piece_constants::ALL_PIECE_TYPES;
+use crate::{
+    shogi::{Move, MoveList, ALL_PIECE_TYPES, ATTACK_TABLES},
+    Bitboard, Color, PieceType, Position, Square,
+};
 
 /// Move generator
 pub struct MoveGenImpl<'a> {
@@ -1292,7 +1292,8 @@ impl MoveGen {
 
 #[cfg(test)]
 mod tests {
-    use super::super::board::Piece;
+    use crate::Piece;
+
     use super::*;
 
     #[test]

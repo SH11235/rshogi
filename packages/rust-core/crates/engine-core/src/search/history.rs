@@ -2,8 +2,7 @@
 //!
 //! Tracks the success rate of moves in different contexts to improve move ordering
 
-use super::board::{Color, Square};
-use super::moves::Move;
+use crate::{shogi::Move, Color, Square};
 
 /// Maximum history score
 const MAX_HISTORY_SCORE: i32 = 10000;
@@ -363,8 +362,9 @@ impl History {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Color, PieceType};
+
     use super::*;
-    use crate::ai::board::PieceType;
 
     #[test]
     fn test_butterfly_history() {

@@ -2,11 +2,12 @@
 
 use anyhow::Result;
 use clap::Parser;
+use engine_core::opening_book::{BinaryConverter, ConversionStats, PositionFilter, SfenParser};
+use engine_core::MoveEncoder;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
-use engine_core::opening_book::SfenParser;
 
 #[derive(Parser, Debug)]
 #[clap(

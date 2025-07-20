@@ -1,9 +1,13 @@
 //! NNUE performance benchmark
 
-use engine_core::ai::benchmark::{benchmark_evaluation, run_benchmark};
-use engine_core::ai::engine::EngineType;
-use engine_core::ai::{Engine, Position, SearchLimits};
 use std::time::{Duration, Instant};
+
+use engine_core::{
+    benchmark::{benchmark_evaluation, run_benchmark},
+    engine::controller::{Engine, EngineType},
+    search::search_basic::SearchLimits,
+    Position,
+};
 
 fn main() {
     println!("=== NNUE Performance Benchmark ===\n");

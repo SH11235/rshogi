@@ -6,16 +6,16 @@
 //! - Pruning decisions
 //! - Complex tactical positions
 
-use engine_core::ai::board::{Position, Square};
-use engine_core::ai::evaluate::MaterialEvaluator;
-use engine_core::ai::moves::Move;
-use engine_core::ai::search_enhanced::EnhancedSearcher;
 use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(test)]
 mod search_integration_tests {
     use super::*;
+    use engine_core::{
+        evaluate::MaterialEvaluator, search::search_enhanced::EnhancedSearcher, shogi::Move,
+        Position, Square,
+    };
     use serde::Deserialize;
     use std::fs;
 

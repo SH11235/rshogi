@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod position_hasher_tests {
-    use shogi_core::opening_book::*;
+    use engine_core::PositionHasher;
 
     #[test]
     fn test_hash_initial_position() {

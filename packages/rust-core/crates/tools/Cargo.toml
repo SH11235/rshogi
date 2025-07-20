@@ -14,8 +14,8 @@ clap = { workspace = true }
 env_logger = { workspace = true }
 flate2 = "1.0"
 criterion = { version = "0.6", features = ["html_reports"] }
-rand = "0.9"
-rand_xoshiro = "0.7"
+rand = { workspace = true }
+rand_xoshiro = { workspace = true }
 
 # Binary definitions
 [[bin]]

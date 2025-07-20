@@ -1,76 +1,22 @@
-[package]
-name = "shogi_core"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = [
+    "crates/webrtc-p2p",
+    "crates/tools",
+    "crates/engine-core",
+    "crates/engine-wasm",
+]
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-[features]
-# Loom feature for parallel safety testing (not available on WASM)
-loom = ["dep:loom"]
-
-[[bin]]
-name = "convert_opening_book"
-path = "src/bin/convert_opening_book.rs"
-
-[[bin]]
-name = "verify_opening_book"
-path = "src/bin/verify_opening_book.rs"
-
-[dependencies]
+[workspace.dependencies]
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = "1.0"
+anyhow      = "1.0"
+log         = "0.4"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-futures = "0.3"
-log = "0.4"
-wasm-logger = "0.2"
 js-sys = "0.3.77"
-gloo-timers = { version = "0.3.0", features = ["futures"] }
-web-sys = { version = "0.3", features = [
-    "console",
-    "CustomEvent", "CustomEventInit", "Window", "Location",
-    "RtcPeerConnection", "RtcConfiguration", "RtcDataChannel", "RtcDataChannelEvent",
-    "RtcPeerConnectionIceEvent", "RtcIceCandidate", "RtcSessionDescription",
-    "RtcSessionDescriptionInit", "RtcSdpType", "RtcDataChannelState",
-    "RtcIceConnectionState", "RtcSignalingState", "MessageEvent",
-    "Performance"
-] }
-serde_json = "1.0"
-base64 = "0.22"
-serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9"
-flate2 = "1.0"
-rayon = "1.7"
+web-sys = "0.3"
 clap = { version = "4.0", features = ["derive"] }
-anyhow = "1.0"
-lazy_static = "1.4"
+env_logger = "0.11"
 rand = "0.9"
 rand_xoshiro = "0.7"
-smallvec = "1.15"
-
-[profile.release]
-debug = true  # Enable debug symbols for profiling
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.3", features = ["wasm_js"] }
-wasm-bindgen-futures = "0.4"
-
-# Loom is only available for non-WASM targets
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-loom = { version = "0.7", features = ["checkpoint"], optional = true }
-
-[dev-dependencies]
-wasm-bindgen-test = "0.3"
-criterion = { version = "0.6", features = ["html_reports"] }
-
-[[bench]]
-name = "see_bench"
-harness = false
-
-[[bench]]
-name = "see_integration_bench"
-harness = false
-
-[[bin]]
-name = "see_flamegraph"
-path = "src/bin/see_flamegraph.rs"

@@ -2,6 +2,9 @@
 //!
 //! Represents 81-square shogi board using 128-bit integers for fast operations
 
+use crate::shogi::ATTACK_TABLES;
+use crate::zobrist::ZOBRIST;
+
 use super::moves::Move;
 use super::piece_constants::{
     piece_type_to_hand_index, SEE_GAIN_ARRAY_SIZE, SEE_MAX_DEPTH, SEE_PIECE_VALUES,
@@ -756,7 +759,7 @@ impl Position {
 
     /// Compute Zobrist hash
     fn compute_hash(&self) -> u64 {
-        use crate::ai::zobrist::ZobristHashing;
+        use crate::zobrist::ZobristHashing;
         ZobristHashing::zobrist_hash(self)
     }
 
@@ -897,7 +900,6 @@ impl Position {
         // Switch side to move
         self.side_to_move = self.side_to_move.opposite();
         // Always XOR with the White side hash to toggle between Black/White
-        use crate::ai::zobrist::ZOBRIST;
         self.hash ^= ZOBRIST.side_to_move;
         self.zobrist_hash = self.hash;
 
@@ -937,8 +939,6 @@ impl Position {
 
     /// Check if a square is attacked by a given color
     pub fn is_attacked(&self, sq: Square, by_color: Color) -> bool {
-        use crate::ai::attacks::ATTACK_TABLES;
-
         // Check pawn attacks
         let pawn_bb = self.board.piece_bb[by_color as usize][PieceType::Pawn as usize];
         let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
@@ -1005,7 +1005,6 @@ impl Position {
     /// Get all pieces of a given color attacking a square
     /// Returns a bitboard with all attacking pieces
     pub fn get_attackers_to(&self, sq: Square, by_color: Color) -> Bitboard {
-        use crate::ai::attacks::ATTACK_TABLES;
         let mut attackers = Bitboard::EMPTY;
 
         // Check pawn attacks
@@ -1084,8 +1083,6 @@ impl Position {
         lance_bb: Bitboard,
         occupied: Bitboard,
     ) -> Bitboard {
-        use crate::ai::attacks::ATTACK_TABLES;
-
         let mut attackers = Bitboard::EMPTY;
         let file = sq.file();
 
@@ -1122,8 +1119,6 @@ impl Position {
     /// Get blockers for king (simplified version)
     /// Returns a bitboard of pieces that are pinned to the king
     pub fn get_blockers_for_king(&self, king_color: Color) -> Bitboard {
-        use crate::ai::attacks::ATTACK_TABLES;
-
         let king_bb = self.board.piece_bb[king_color as usize][PieceType::King as usize];
         let king_sq = match king_bb.lsb() {
             Some(sq) => sq,
@@ -1551,8 +1546,6 @@ impl Position {
 
     /// 特定色のピン計算
     fn calculate_pins_for_color(&self, color: Color) -> SeePinInfo {
-        use crate::ai::attacks::ATTACK_TABLES;
-
         // ピンが存在しない場合の早期リターン最適化
         let king_bb = self.board.piece_bb[color as usize][PieceType::King as usize];
         let king_sq = match king_bb.lsb() {
@@ -1660,7 +1653,6 @@ impl Position {
         by_color: Color,
         occupied: Bitboard,
     ) -> Bitboard {
-        use crate::ai::attacks::ATTACK_TABLES;
         let mut attackers = Bitboard::EMPTY;
 
         // Check pawn attacks
@@ -1727,8 +1719,6 @@ impl Position {
         lance_bb: Bitboard,
         occupied: Bitboard,
     ) -> Bitboard {
-        use crate::ai::attacks::ATTACK_TABLES;
-
         let mut attackers = Bitboard::EMPTY;
         let file = sq.file();
 
@@ -1823,8 +1813,6 @@ impl Position {
         attackers: &mut Bitboard,
         occupied: Bitboard,
     ) {
-        use crate::ai::attacks::ATTACK_TABLES;
-
         // Check if there's a clear line between from and to
         let between = ATTACK_TABLES.between_bb(from, to);
         if between.is_empty() {
@@ -1898,7 +1886,6 @@ impl Position {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::moves::Move;
 
     #[test]
     fn test_square_operations() {

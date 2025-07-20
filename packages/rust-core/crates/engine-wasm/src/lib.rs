@@ -1,20 +1,30 @@
-use engine_core::{Engine, OpeningBookReader};
+use engine_core::{
+    engine::controller::{Engine, EngineType},
+    OpeningBookReader,
+};
 use wasm_bindgen::prelude::*;
 
 /// エンジンを保持するハンドル
 #[wasm_bindgen]
 pub struct WasmEngine {
+    #[allow(dead_code)]
     inner: Engine,
 }
 
 // TODO: Web向けのインターフェースを設計・実装
+impl Default for WasmEngine {
+    fn default() -> Self {
+        WasmEngine {
+            inner: Engine::new(EngineType::Nnue),
+        }
+    }
+}
+
 #[wasm_bindgen]
 impl WasmEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmEngine {
-        WasmEngine {
-            inner: Engine::new(Default::default()),
-        }
+        WasmEngine::default()
     }
 }
 
@@ -41,7 +51,9 @@ impl OpeningBookReaderWasm {
 
     #[wasm_bindgen]
     pub fn load_data(&mut self, compressed_data: Vec<u8>) -> Result<String, JsValue> {
-        self.inner.load_data(&compressed_data).map_err(|e: &str| JsValue::from_str(e))
+        self.inner
+            .load_data(&compressed_data)
+            .map_err(|e: String| JsValue::from_str(&e))
     }
 
     #[wasm_bindgen]

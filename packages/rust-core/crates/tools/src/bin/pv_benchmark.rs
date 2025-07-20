@@ -1,17 +1,19 @@
 //! PVテーブル効果測定用ベンチマーク
 
-use engine_core::ai::{
-    board::Position, evaluate::MaterialEvaluator, search_enhanced::EnhancedSearcher,
-};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use engine_core::evaluate::MaterialEvaluator;
+use engine_core::search::search_enhanced::EnhancedSearcher;
+use engine_core::shogi::Move;
+use engine_core::Position;
 
 /// Run search with panic recovery
 fn run_search_safe(
     searcher: &mut EnhancedSearcher,
     pos: &mut Position,
     depth: u8,
-) -> Result<(Option<engine_core::ai::moves::Move>, i32, u64), String> {
+) -> Result<(Option<Move>, i32, u64), String> {
     use std::panic;
 
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {

@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod position_filter_tests {
-    use shogi_core::opening_book::*;
+    use engine_core::opening_book::{PositionFilter, RawMove, RawSfenEntry};
 
     fn create_test_entry(move_count: u32, moves: Vec<(i32, u32)>) -> RawSfenEntry {
         RawSfenEntry {

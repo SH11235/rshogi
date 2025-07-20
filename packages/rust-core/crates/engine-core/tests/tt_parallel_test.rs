@@ -1,17 +1,15 @@
 //! Parallel safety tests for transposition table
 
-mod util;
-
 #[cfg(test)]
 mod tests {
-    use super::util::sync_compat::{thread, Arc, AtomicU64, Ordering};
-    use crate::ai::tt::*;
+    use engine_core::search::tt::{NodeType, TranspositionTable};
+    use engine_core::util::sync_compat::{thread, Arc, AtomicU64, Ordering};
     use std::time::Duration;
 
     #[cfg(all(feature = "loom", not(target_arch = "wasm32")))]
-    use crate::ai::board::{PieceType, Square};
+    use engine_core::shogi::Move;
     #[cfg(all(feature = "loom", not(target_arch = "wasm32")))]
-    use crate::ai::moves::Move;
+    use engine_core::shogi::{PieceType, Square};
 
     /// Test concurrent probe and store operations using loom
     #[test]

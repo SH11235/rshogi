@@ -2,11 +2,14 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
-use super::board::Position;
-use super::evaluate::{Evaluator, MaterialEvaluator};
-use super::nnue::NNUEEvaluatorWrapper;
-use super::search::{SearchLimits, SearchResult, Searcher};
 use std::sync::{Arc, Mutex};
+
+use crate::{
+    evaluate::{Evaluator, MaterialEvaluator},
+    nnue::NNUEEvaluatorWrapper,
+    search::search_basic::{SearchLimits, SearchResult, Searcher},
+    Position,
+};
 
 /// Engine type selection
 #[derive(Clone, Copy, Debug)]
