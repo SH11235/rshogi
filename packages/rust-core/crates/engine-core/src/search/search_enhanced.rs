@@ -12,7 +12,7 @@ use super::tt::{NodeType, TranspositionTable};
 use crate::evaluate::Evaluator;
 use crate::shogi::Move;
 use crate::zobrist::ZOBRIST;
-use crate::{Color, MovePicker, Position};
+use crate::{Color, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -357,13 +357,35 @@ impl EnhancedSearcher {
         let ply = pos.ply as i32;
 
         // Count pieces on board using cached bitboard
-        let total_pieces = pos.board.all_bb.count_ones();
+        let pieces_on_board = pos.board.all_bb.count_ones();
 
-        // Determine phase based on move count and piece count
+        // Count pieces in hands (important for Shogi)
+        let mut pieces_in_hands = 0u32;
+        for color in 0..2 {
+            for piece_type in 0..7 {
+                pieces_in_hands += pos.hands[color][piece_type] as u32;
+            }
+        }
+
+        // Total material count (should be close to 40 in Shogi)
+        let total_material = pieces_on_board + pieces_in_hands;
+
+        // Count major pieces (Rook and Bishop) for better endgame detection
+        let major_pieces = pos.board.piece_bb[Color::Black as usize][PieceType::Rook as usize]
+            .count_ones()
+            + pos.board.piece_bb[Color::Black as usize][PieceType::Bishop as usize].count_ones()
+            + pos.board.piece_bb[Color::White as usize][PieceType::Rook as usize].count_ones()
+            + pos.board.piece_bb[Color::White as usize][PieceType::Bishop as usize].count_ones();
+
+        // Determine phase based on move count and piece distribution
         if ply < 20 {
             GamePhase::Opening
-        } else if ply > 60 || total_pieces < 20 {
-            // End game if many moves or few pieces remain
+        } else if ply > 60 || (total_material < 25 && major_pieces == 0) {
+            // End game if:
+            // - Many moves have been played (ply > 60), OR
+            // - Total material is very low (< 25) AND all major pieces are gone
+            // Note: In Shogi with 40 initial pieces, < 25 means significant material loss
+            // The major pieces check prevents misclassifying active middle games
             GamePhase::EndGame
         } else {
             GamePhase::MiddleGame
@@ -1265,6 +1287,90 @@ mod tests {
         // Simulate end game (high ply count)
         pos.ply = 70;
         assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::EndGame);
+    }
+
+    #[test]
+    fn test_game_phase_with_pieces_in_hand() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let searcher = EnhancedSearcher::new(16, evaluator);
+
+        // Test case: Middle game with many pieces in hand
+        let mut pos = Position::empty();
+        pos.ply = 35; // Middle game by move count
+
+        // Set up a position with reduced board pieces but many in hand
+        // Place kings (required)
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+
+        // Add some pieces on board (15 pieces total)
+        for i in 0..5 {
+            pos.board
+                .put_piece(Square::new(i, 1), Piece::new(PieceType::Pawn, Color::White));
+            pos.board
+                .put_piece(Square::new(i, 7), Piece::new(PieceType::Pawn, Color::Black));
+        }
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::Lance, Color::White));
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::Lance, Color::Black));
+        pos.board
+            .put_piece(Square::new(7, 0), Piece::new(PieceType::Bishop, Color::White));
+
+        // Rebuild bitboards
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Add many pieces in hands (simulating active piece exchanges)
+        pos.hands[Color::Black as usize][6] = 3; // 3 pawns
+        pos.hands[Color::Black as usize][5] = 1; // 1 lance
+        pos.hands[Color::Black as usize][3] = 2; // 2 silvers
+        pos.hands[Color::Black as usize][2] = 1; // 1 gold
+
+        pos.hands[Color::White as usize][6] = 4; // 4 pawns
+        pos.hands[Color::White as usize][4] = 1; // 1 knight
+        pos.hands[Color::White as usize][3] = 1; // 1 silver
+        pos.hands[Color::White as usize][0] = 1; // 1 rook
+
+        // Should still be middle game despite few pieces on board
+        // because total material is high with pieces in hand
+        assert_eq!(
+            searcher.estimate_game_phase(&pos),
+            GamePhase::MiddleGame,
+            "Should be middle game when many pieces are in hand"
+        );
+
+        // Test true endgame: few pieces both on board and in hand
+        let mut endgame_pos = Position::empty();
+        endgame_pos.ply = 45;
+
+        // Minimal pieces on board
+        endgame_pos
+            .board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        endgame_pos
+            .board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        endgame_pos
+            .board
+            .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::White));
+        endgame_pos
+            .board
+            .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::Black));
+
+        // Very few pieces in hand
+        endgame_pos.hands[Color::Black as usize][6] = 1; // 1 pawn
+        endgame_pos.hands[Color::White as usize][6] = 1; // 1 pawn
+
+        endgame_pos.board.rebuild_occupancy_bitboards();
+
+        // Should be endgame with very low total material
+        assert_eq!(
+            searcher.estimate_game_phase(&endgame_pos),
+            GamePhase::EndGame,
+            "Should be endgame when total material is very low"
+        );
     }
 
     #[test]
