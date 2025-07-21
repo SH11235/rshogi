@@ -88,9 +88,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = Xoshiro256Plus::seed_from_u64(42);
 
     // Create directory if it doesn't exist
-    let test_data_dir = Path::new("test_data");
+    let test_data_dir = Path::new("../engine-core/tests/data");
     if !test_data_dir.exists() {
-        fs::create_dir(test_data_dir)?;
+        fs::create_dir_all(test_data_dir)?;
     }
 
     // Create feature transformer with small random weights
@@ -152,7 +152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     network.output_bias = rng.random_range(-100..=100);
 
     // Save to file
-    let output_path = "test_data/mock_nn.bin";
+    let output_path = "../engine-core/tests/data/mock_nn.bin";
     println!("Saving to {output_path}...");
     save_weights(output_path, &transformer, &network)?;
 
@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Compress the file using flate2
     println!("Compressing file...");
     let input_data = fs::read(output_path)?;
-    let compressed_path = "test_data/mock_nn.bin.gz";
+    let compressed_path = "../engine-core/tests/data/mock_nn.bin.gz";
     let compressed_file = fs::File::create(compressed_path)?;
     let mut encoder = flate2::write::GzEncoder::new(compressed_file, flate2::Compression::best());
     encoder.write_all(&input_data)?;
