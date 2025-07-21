@@ -990,16 +990,34 @@ impl EnhancedSearcher {
         pos.board.piece_on(to).is_some()
     }
 
-    /// Check if position has non-pawn material
+    /// Check if position has non-pawn material for null move pruning safety
+    /// Returns true if the side has pieces other than pawns (both on board and in hand)
+    /// This includes promoted pawns (tokin) as they are valuable material
+    #[inline]
     fn has_non_pawn_material(&self, pos: &Position, color: Color) -> bool {
-        let color_idx = color as usize;
-        // Check for pieces other than pawns in hand
-        pos.hands[color_idx][0] > 0 || // Rook
-        pos.hands[color_idx][1] > 0 || // Bishop
-        pos.hands[color_idx][2] > 0 || // Gold
-        pos.hands[color_idx][3] > 0 || // Silver
-        pos.hands[color_idx][4] > 0 || // Knight
-        pos.hands[color_idx][5] > 0 // Lance
+        let c = color as usize;
+
+        // Check pieces in hand (excluding pawns) - indices 0..6 are non-pawn pieces
+        if pos.hands[c][0..6].iter().any(|&n| n > 0) {
+            return true;
+        }
+
+        // Check pieces on board
+        use crate::shogi::PieceType;
+
+        // Calculate non-pawn material on board:
+        // 1. Start with all pieces of the color
+        // 2. Exclude king and pawn positions
+        // 3. Add back promoted pawns (tokin) as they count as material
+        let pawn_bb = pos.board.piece_bb[c][PieceType::Pawn as usize];
+        let king_bb = pos.board.piece_bb[c][PieceType::King as usize];
+        let promoted_bb = pos.board.promoted_bb;
+
+        let non_pawn_board = pos.board.occupied_bb[c]
+            & !(king_bb | pawn_bb)  // Exclude king and all pawns
+            | (pawn_bb & promoted_bb); // Add back promoted pawns (tokin)
+
+        !non_pawn_board.is_empty()
     }
 
     /// Do null move (returns previous side to move)
@@ -1073,7 +1091,11 @@ impl Drop for EnhancedSearcher {
 
 #[cfg(test)]
 mod tests {
-    use crate::{evaluate::MaterialEvaluator, shogi::MoveList, MoveGen, Square};
+    use crate::{
+        evaluate::MaterialEvaluator,
+        shogi::{Color, MoveList, Piece, PieceType},
+        MoveGen, Square,
+    };
 
     use super::*;
 
@@ -1526,6 +1548,126 @@ mod tests {
         if tt_move != pv_move {
             let second = move_picker2.next_move();
             assert_eq!(second, tt_move, "TT move should be second at root");
+        }
+    }
+
+    #[test]
+    fn test_has_non_pawn_material() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let searcher = EnhancedSearcher::new(16, evaluator);
+
+        // Test case 1: King + pawns only -> false
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(4, 6), Piece::new(PieceType::Pawn, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 2), Piece::new(PieceType::Pawn, Color::White));
+
+            assert!(!searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 2: King + pawns + tokin (promoted pawn) -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(4, 6), Piece::new(PieceType::Pawn, Color::Black));
+
+            // Place promoted pawn (tokin)
+            let sq = Square::new(3, 3);
+            pos.board.put_piece(sq, Piece::new(PieceType::Pawn, Color::Black));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 3: King + pawns + bishop in hand -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(4, 6), Piece::new(PieceType::Pawn, Color::Black));
+
+            // Add bishop to hand
+            pos.hands[Color::Black as usize][1] = 1; // Bishop
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 4: No pieces in hand, rook on board -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(1, 7), Piece::new(PieceType::Rook, Color::Black));
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 5: King + pawns + dragon (promoted rook) -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+
+            // Place promoted rook (dragon)
+            let sq = Square::new(1, 1);
+            pos.board.put_piece(sq, Piece::new(PieceType::Rook, Color::Black));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+        }
+
+        // Test case 6: King + pawns + horse (promoted bishop) -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+
+            // Place promoted bishop (horse)
+            let sq = Square::new(2, 2);
+            pos.board.put_piece(sq, Piece::new(PieceType::Bishop, Color::White));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 7: King + pawns + promoted silver/knight/lance -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+
+            // Place promoted silver
+            let sq = Square::new(5, 5);
+            pos.board.put_piece(sq, Piece::new(PieceType::Silver, Color::Black));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
         }
     }
 }
