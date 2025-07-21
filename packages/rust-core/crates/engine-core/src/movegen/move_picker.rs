@@ -11,8 +11,6 @@ use crate::search::search_enhanced::SearchStack;
 use crate::shogi::{Move, MoveList, ATTACK_TABLES};
 use crate::{Bitboard, Color, History, MoveGen, PieceType, Position, Square};
 
-use std::sync::Arc;
-
 /// Scored move for ordering
 #[derive(Clone, Copy, Debug)]
 struct ScoredMove {
@@ -68,7 +66,7 @@ enum MovePickerStage {
 }
 
 /// Move picker for efficient move ordering
-pub struct MovePicker {
+pub struct MovePicker<'a> {
     /// Current position
     pos: Position,
     /// TT move
@@ -76,7 +74,7 @@ pub struct MovePicker {
     /// PV move (from previous iteration)
     pv_move: Option<Move>,
     /// History heuristics
-    history: Arc<History>,
+    history: &'a History,
     /// Search stack entry
     stack: SearchStack,
     /// Current stage
@@ -94,13 +92,13 @@ pub struct MovePicker {
     skip_quiets: bool,
 }
 
-impl MovePicker {
+impl<'a> MovePicker<'a> {
     /// Create new move picker for main search
     pub fn new(
         pos: &Position,
         tt_move: Option<Move>,
         pv_move: Option<Move>,
-        history: &Arc<History>,
+        history: &'a History,
         stack: &SearchStack,
         ply: usize,
     ) -> Self {
@@ -123,7 +121,7 @@ impl MovePicker {
             pos: pos.clone(),
             tt_move,
             pv_move: validated_pv_move,
-            history: Arc::clone(history),
+            history,
             stack: stack.clone(),
             stage,
             moves: Vec::new(),
@@ -142,7 +140,7 @@ impl MovePicker {
     pub fn new_quiescence(
         pos: &Position,
         tt_move: Option<Move>,
-        history: &Arc<History>,
+        history: &'a History,
         stack: &SearchStack,
         ply: usize,
     ) -> Self {
@@ -616,7 +614,7 @@ mod tests {
     #[test]
     fn test_move_picker_stages() {
         let pos = Position::startpos();
-        let history = Arc::new(History::new());
+        let history = History::new();
         let stack = SearchStack::default();
 
         // Use a known legal move from starting position
@@ -647,7 +645,7 @@ mod tests {
     #[test]
     fn test_quiescence_picker() {
         let pos = Position::startpos();
-        let history = Arc::new(History::new());
+        let history = History::new();
         let stack = SearchStack::default();
 
         let mut picker = MovePicker::new_quiescence(&pos, None, &history, &stack, 1);
@@ -676,7 +674,7 @@ mod tests {
             pos.do_move(*mv);
         }
 
-        let history = Arc::new(History::new());
+        let history = History::new();
         let stack = SearchStack::default();
         let picker = MovePicker::new(&pos, None, None, &history, &stack, 1);
 
@@ -708,7 +706,7 @@ mod tests {
             pos.do_move(*mv);
         }
 
-        let history = Arc::new(History::new());
+        let history = History::new();
         let stack = SearchStack::default();
         let mut picker = MovePicker::new(&pos, None, None, &history, &stack, 1);
 
@@ -730,7 +728,7 @@ mod tests {
     #[test]
     fn test_killer_moves() {
         let pos = Position::startpos();
-        let history = Arc::new(History::new());
+        let history = History::new();
         let mut stack = SearchStack::default();
 
         // Set killer moves (using legal moves from starting position)
