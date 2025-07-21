@@ -1,0 +1,15 @@
+[package]
+name = "engine-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "engine-cli"
+path = "src/main.rs"
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+anyhow = { workspace = true }
+log = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
