@@ -143,7 +143,6 @@ mod search_integration_tests {
     #[test]
     fn test_see_move_ordering_consistency() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = EnhancedSearcher::new(16, evaluator);
 
         // Position where move ordering matters significantly
         let pos = Position::from_sfen(
@@ -156,6 +155,8 @@ mod search_integration_tests {
         let mut scores = Vec::new();
 
         for _ in 0..3 {
+            // Create a fresh searcher for each iteration to ensure no TT pollution
+            let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
             let (_best_move, score) = searcher.search(&mut pos.clone(), 6, None, Some(50_000));
 
             scores.push(score);
