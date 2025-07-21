@@ -242,8 +242,19 @@ impl Default for SearchParams {
         let mut lmr_reductions = [[0; 64]; 64];
         for (depth_idx, depth_row) in lmr_reductions.iter_mut().enumerate().skip(1) {
             for (move_idx, reduction) in depth_row.iter_mut().enumerate().skip(1) {
-                *reduction =
-                    (0.75 + (depth_idx as f64).ln() * (move_idx as f64).ln() / 2.25) as i32;
+                let val = 0.75 + (depth_idx as f64).ln() * (move_idx as f64).ln() / 2.25;
+                *reduction = val as i32;
+
+                // Ensure minimum reduction of 1 ply
+                if *reduction < 1 {
+                    *reduction = 1;
+                }
+
+                // Ensure reduction doesn't exceed depth
+                // For very low depths, ensure we maintain the minimum
+                if *reduction >= depth_idx as i32 {
+                    *reduction = (depth_idx as i32).saturating_sub(1).max(1);
+                }
             }
         }
 
@@ -1549,6 +1560,56 @@ mod tests {
             let second = move_picker2.next_move();
             assert_eq!(second, tt_move, "TT move should be second at root");
         }
+    }
+
+    #[test]
+    fn test_lmr_minimum_reduction() {
+        let params = SearchParams::default();
+
+        // Verify all LMR table entries are within valid range
+        for d in 1..64 {
+            for m in 1..64 {
+                if d == 1 {
+                    // Special case: depth=1 cannot have reduction >= 1 and < 1
+                    // In practice, LMR is not used at depth=1 anyway
+                    assert!(
+                        params.lmr_reductions[d][m] <= 1,
+                        "LMR reduction at depth=1 should be 0 or 1, but was {}",
+                        params.lmr_reductions[d][m]
+                    );
+                } else {
+                    assert!(
+                        params.lmr_reductions[d][m] >= 1,
+                        "LMR reduction at [{}][{}] should be at least 1, but was {}",
+                        d,
+                        m,
+                        params.lmr_reductions[d][m]
+                    );
+                    assert!(
+                        params.lmr_reductions[d][m] < d as i32,
+                        "LMR reduction at [{}][{}] should be less than depth {}, but was {}",
+                        d,
+                        m,
+                        d,
+                        params.lmr_reductions[d][m]
+                    );
+                }
+            }
+        }
+
+        // Test specific edge cases
+        // Note: [0][*] and [*][0] entries are not initialized (remain 0) as they are never used
+        assert_eq!(
+            params.lmr_reductions[1][1], 1,
+            "Minimum depth and move should have reduction of 1"
+        );
+        assert_eq!(params.lmr_reductions[2][1], 1, "Low move count should have reduction of 1");
+        assert_eq!(params.lmr_reductions[1][2], 1, "Low depth should have reduction of 1");
+
+        // Verify that unused entries are indeed 0
+        assert_eq!(params.lmr_reductions[0][0], 0, "[0][0] should remain uninitialized");
+        assert_eq!(params.lmr_reductions[0][1], 0, "[0][1] should remain uninitialized");
+        assert_eq!(params.lmr_reductions[1][0], 0, "[1][0] should remain uninitialized");
     }
 
     #[test]
