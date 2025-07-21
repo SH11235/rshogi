@@ -756,10 +756,16 @@ impl EnhancedSearcher {
             None
         };
 
-        // Use MovePicker for efficient move ordering
-        let history_arc = Arc::new(self.history.clone());
-        let mut move_picker =
-            MovePicker::new(pos, tt_move, pv_move, &history_arc, &stack[ctx.ply], ctx.ply);
+        // Collect moves using MovePicker (separate scope for self.history borrow)
+        let moves_to_search = {
+            let mut move_picker =
+                MovePicker::new(pos, tt_move, pv_move, &self.history, &stack[ctx.ply], ctx.ply);
+            let mut moves = Vec::new();
+            while let Some(mv) = move_picker.next_move() {
+                moves.push(mv);
+            }
+            moves
+        };
 
         let mut best_score = -INFINITY;
         let mut best_move = None;
@@ -767,7 +773,7 @@ impl EnhancedSearcher {
         let mut quiets_tried = Vec::new();
 
         // Search moves
-        while let Some(mv) = move_picker.next_move() {
+        for mv in moves_to_search {
             // Late move pruning
             if !stack[ctx.ply].in_check
                 && moves_searched >= (self.params.late_move_count)(ctx.depth)
@@ -972,11 +978,19 @@ impl EnhancedSearcher {
         // Use MovePicker for captures only
         let tt_hit = self.tt.probe(pos.hash);
         let tt_move = tt_hit.as_ref().and_then(|e| e.get_move());
-        let history_arc = Arc::new(self.history.clone());
-        let mut move_picker =
-            MovePicker::new_quiescence(pos, tt_move, &history_arc, &stack[ply], ply);
 
-        while let Some(mv) = move_picker.next_move() {
+        // Collect moves using MovePicker (separate scope for self.history borrow)
+        let moves_to_search = {
+            let mut move_picker =
+                MovePicker::new_quiescence(pos, tt_move, &self.history, &stack[ply], ply);
+            let mut moves = Vec::new();
+            while let Some(mv) = move_picker.next_move() {
+                moves.push(mv);
+            }
+            moves
+        };
+
+        for mv in moves_to_search {
             let undo = pos.do_move(mv);
             let score = -self.quiescence(pos, -beta, -alpha, ply + 1, stack);
             pos.undo_move(mv, undo);
@@ -1529,10 +1543,10 @@ mod tests {
         // Now test that PV move is returned in correct order by MovePicker
         let tt_move = None; // Simulate no TT move
         let pv_move = searcher.pv.get_pv_move(0);
-        let history_arc = Arc::new(History::new());
+        let history = History::new();
         let stack = SearchStack::default();
 
-        let mut move_picker = MovePicker::new(&test_pos, tt_move, pv_move, &history_arc, &stack, 0);
+        let mut move_picker = MovePicker::new(&test_pos, tt_move, pv_move, &history, &stack, 0);
 
         // First move should be the PV move
         let first_move = move_picker.next_move();
@@ -1549,8 +1563,7 @@ mod tests {
 
         assert!(tt_move.is_some(), "Should find at least one move different from PV");
 
-        let mut move_picker2 =
-            MovePicker::new(&test_pos, tt_move, pv_move, &history_arc, &stack, 0);
+        let mut move_picker2 = MovePicker::new(&test_pos, tt_move, pv_move, &history, &stack, 0);
 
         // At root node (ply=0), PV move should come first if it exists
         let first = move_picker2.next_move();
