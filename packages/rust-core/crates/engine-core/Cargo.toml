@@ -1,0 +1,27 @@
+[package]
+name = "engine-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Loom feature for parallel safety testing (not available on WASM)
+loom = ["dep:loom"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+flate2 = "1.0"
+lazy_static = "1.4"
+rand = { workspace = true }
+rand_xoshiro = { workspace = true }
+smallvec = "1.15"
+
+# Loom is only available for non-WASM targets
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+loom = { version = "0.7", features = ["checkpoint"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.6", features = ["html_reports"] }
+serde_yaml = "0.9"

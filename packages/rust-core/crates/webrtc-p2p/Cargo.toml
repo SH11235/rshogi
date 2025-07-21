@@ -1,0 +1,40 @@
+[package]
+name = "webrtc-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# wasm-bindgen 用 desktop向けなど通常のbuildもする場合は "rlib" も追加
+crate-type = ["cdylib"]
+
+
+[dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
+    "console",
+    "CustomEvent",
+    "CustomEventInit",
+    "Window",
+    "Location",
+    "RtcPeerConnection",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcPeerConnectionIceEvent",
+    "RtcIceCandidate",
+    "RtcSessionDescription",
+    "RtcSessionDescriptionInit",
+    "RtcSdpType",
+    "RtcDataChannelState",
+    "RtcIceConnectionState",
+    "RtcSignalingState",
+    "MessageEvent",
+    "Performance",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+log = { workspace = true }
+base64 = "0.22.1"
+futures = "0.3.31"
