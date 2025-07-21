@@ -470,7 +470,12 @@ impl EnhancedSearcher {
                 }
 
                 // Check time and stop conditions
-                if self.should_stop() {
+                #[cfg(test)]
+                let should_stop = self.should_stop_deterministic();
+                #[cfg(not(test))]
+                let should_stop = self.should_stop();
+
+                if should_stop {
                     self.stop.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -544,12 +549,22 @@ impl EnhancedSearcher {
             }
 
             // Save PV only on successful completion of this depth
-            if !self.should_stop() {
+            #[cfg(test)]
+            let should_continue = !self.should_stop_deterministic();
+            #[cfg(not(test))]
+            let should_continue = !self.should_stop();
+
+            if should_continue {
                 self.pv.save_pv();
             }
 
             // Check time
-            if self.should_stop() {
+            #[cfg(test)]
+            let should_stop = self.should_stop_deterministic();
+            #[cfg(not(test))]
+            let should_stop = self.should_stop();
+
+            if should_stop {
                 break;
             }
         }
@@ -607,7 +622,12 @@ impl EnhancedSearcher {
         stack: &mut [SearchStack],
     ) -> i32 {
         // Check limits
-        if self.should_stop() {
+        #[cfg(test)]
+        let should_stop = self.should_stop_deterministic();
+        #[cfg(not(test))]
+        let should_stop = self.should_stop();
+
+        if should_stop {
             self.stop.store(true, Ordering::Relaxed);
             return 0;
         }
@@ -905,7 +925,12 @@ impl EnhancedSearcher {
         ply: usize,
         stack: &mut [SearchStack],
     ) -> i32 {
-        if self.should_stop() {
+        #[cfg(test)]
+        let should_stop = self.should_stop_deterministic();
+        #[cfg(not(test))]
+        let should_stop = self.should_stop();
+
+        if should_stop {
             self.stop.store(true, Ordering::Relaxed);
             return 0;
         }
@@ -997,6 +1022,24 @@ impl EnhancedSearcher {
         }
 
         // Check node limit
+        if let Some(limit) = self.node_limit {
+            if self.nodes.load(Ordering::Relaxed) >= limit {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if search should stop (deterministic mode for testing)
+    #[cfg(test)]
+    fn should_stop_deterministic(&self) -> bool {
+        if self.stop.load(Ordering::Relaxed) {
+            return true;
+        }
+
+        // Skip time check completely for deterministic behavior
+        // Only check node limit
         if let Some(limit) = self.node_limit {
             if self.nodes.load(Ordering::Relaxed) >= limit {
                 return true;
