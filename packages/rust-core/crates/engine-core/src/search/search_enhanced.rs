@@ -34,6 +34,13 @@ const MATE_SCORE: i32 = 28000;
 /// Draw score
 const DRAW_SCORE: i32 = 0;
 
+/// Maximum number of aspiration window retries before falling back to full window
+#[cfg(test)]
+const ASPIRATION_RETRY_LIMIT: u32 = 4;
+
+/// Time pressure threshold: remaining time < elapsed time * threshold
+const TIME_PRESSURE_THRESHOLD: f64 = 0.1;
+
 /// Game phase enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
@@ -289,7 +296,7 @@ impl Default for SearchParams {
                 // 深さが深いほど大きな窓幅を許容
                 (800 + 40 * depth).min(2000)
             },
-            time_pressure_threshold: 0.1, // 残り時間が経過時間の10%未満で時間圧迫
+            time_pressure_threshold: TIME_PRESSURE_THRESHOLD,
         }
     }
 }
@@ -1209,7 +1216,7 @@ mod tests {
                 // （delta: 初期値 → 2倍 → 4倍 → 8倍 → フルウィンドウ）
                 if depth >= 2 {
                     assert!(
-                        searcher.stats.aspiration_failures[depth_idx] <= 4,
+                        searcher.stats.aspiration_failures[depth_idx] <= ASPIRATION_RETRY_LIMIT,
                         "Depth {}: Too many aspiration failures ({})",
                         depth,
                         searcher.stats.aspiration_failures[depth_idx]
