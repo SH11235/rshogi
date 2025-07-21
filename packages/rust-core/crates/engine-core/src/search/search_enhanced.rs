@@ -290,7 +290,7 @@ pub struct SearchStats {
 /// Enhanced searcher with advanced techniques
 pub struct EnhancedSearcher {
     /// Transposition table
-    tt: Arc<TranspositionTable>,
+    tt: TranspositionTable,
     /// History tables
     history: History,
     /// Search parameters
@@ -318,7 +318,7 @@ impl EnhancedSearcher {
     /// Create new enhanced searcher
     pub fn new(tt_size_mb: usize, evaluator: Arc<dyn Evaluator + Send + Sync>) -> Self {
         EnhancedSearcher {
-            tt: Arc::new(TranspositionTable::new(tt_size_mb)),
+            tt: TranspositionTable::new(tt_size_mb),
             history: History::new(),
             params: SearchParams::default(),
             nodes: AtomicU64::new(0),
@@ -398,7 +398,7 @@ impl EnhancedSearcher {
         }
 
         // New search generation
-        Arc::get_mut(&mut self.tt).unwrap().new_search();
+        self.tt.new_search();
 
         let mut stack = vec![SearchStack::default(); MAX_PLY + 10];
         let mut best_move = None;
