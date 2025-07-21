@@ -21,8 +21,8 @@ fi
 echo "📝 Checking Rust formatting..."
 
 # Format each crate individually
-CRATES=("crates/engine-core" "crates/engine-wasm" "crates/tools" "crates/webrtc-p2p")
-for crate_dir in "${CRATES[@]}"; do
+CRATES=$(find crates -name "Cargo.toml" -exec dirname {} \;)
+for crate_dir in $CRATES; do
     if [ -d "$crate_dir" ]; then
         echo "  Formatting $crate_dir..."
         if ! cargo fmt --manifest-path "$crate_dir/Cargo.toml" -- --check; then
