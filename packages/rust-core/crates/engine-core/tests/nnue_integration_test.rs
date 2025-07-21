@@ -65,8 +65,8 @@ fn test_load_nnue_file() {
     use std::path::Path;
 
     // Decompress the mock NNUE file
-    let compressed_path = "test_data/mock_nn.bin.gz";
-    let decompressed_path = "test_data/nn.bin";
+    let compressed_path = "../../test_data/mock_nn.bin.gz";
+    let decompressed_path = "../../test_data/nn.bin";
 
     // Check if compressed file exists
     if !Path::new(compressed_path).exists() {
@@ -121,8 +121,8 @@ fn test_nnue_evaluation_with_mock_weights() {
     use std::path::Path;
 
     // Decompress the mock NNUE file
-    let compressed_path = "test_data/mock_nn.bin.gz";
-    let decompressed_path = "test_data/nn_eval_test.bin";
+    let compressed_path = "../../test_data/mock_nn.bin.gz";
+    let decompressed_path = "../../test_data/nn_eval_test.bin";
 
     if !Path::new(compressed_path).exists() {
         panic!("Mock NNUE file not found. Run 'cargo run --bin create_mock_nnue' first.");
