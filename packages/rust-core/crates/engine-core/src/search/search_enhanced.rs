@@ -621,6 +621,12 @@ impl EnhancedSearcher {
         mut ctx: SearchContext,
         stack: &mut [SearchStack],
     ) -> i32 {
+        // Store original alpha/beta for node type determination
+        // During search, ctx.alpha may be updated when we find better moves
+        // But for correct node type classification, we need the original bounds
+        let alpha_orig = ctx.alpha;
+        let beta_orig = ctx.beta;
+
         // Check limits
         #[cfg(test)]
         let should_stop = self.should_stop_deterministic();
@@ -883,9 +889,11 @@ impl EnhancedSearcher {
         }
 
         // Store in transposition table
-        let node_type = if best_score >= ctx.beta {
+        // Use original alpha/beta for node type determination
+        // to correctly identify the node type even after alpha updates
+        let node_type = if best_score >= beta_orig {
             NodeType::LowerBound
-        } else if best_score <= ctx.alpha {
+        } else if best_score <= alpha_orig {
             NodeType::UpperBound
         } else {
             NodeType::Exact
