@@ -164,6 +164,14 @@ impl PVTable {
             // and indices 1..=child_len for the child PV
             #[allow(clippy::int_plus_one)]
             if child_len > 0 && child_len + 1 <= MAX_PLY {
+                // Safety check: ensure we don't exceed array bounds when copying child PV
+                // We access first_half[ply][1..=child_len], where ply is the current row
+                // and child_len is the number of moves to copy from the child PV
+                debug_assert!(
+                    ply + 1 + child_len <= MAX_PLY,
+                    "PV copy would exceed MAX_PLY: ply={ply}, child_len={child_len}, MAX_PLY={MAX_PLY}"
+                );
+
                 // Use split_at_mut to avoid mutable borrow conflict
                 let (first_half, second_half) = self.line.split_at_mut(ply + 1);
                 first_half[ply][1..=child_len].copy_from_slice(&second_half[0][0..child_len]);
