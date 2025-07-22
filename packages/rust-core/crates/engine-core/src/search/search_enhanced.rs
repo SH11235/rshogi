@@ -432,22 +432,17 @@ impl EnhancedSearcher {
             crate::time_management::TimeControl::Infinite => None,
             _ => {
                 let game_phase = self.estimate_game_phase(pos);
-                Some(TimeManager::new(
-                    &limits,
-                    pos.side_to_move,
-                    pos.ply as u32,
-                    game_phase,
-                ))
+                Some(TimeManager::new(&limits, pos.side_to_move, pos.ply as u32, game_phase))
             }
         };
-        
+
         // Extract max depth (default to 127 if not specified)
         let max_depth = limits.depth.map(|d| d as i32).unwrap_or(MAX_DEPTH);
-        
+
         // Call internal search implementation
         self.search_internal(pos, max_depth)
     }
-    
+
     /// Search position with iterative deepening (legacy interface)
     pub fn search(
         &mut self,
@@ -470,16 +465,12 @@ impl EnhancedSearcher {
             nodes: node_limit,
             time_parameters: None,
         };
-        
+
         self.search_with_limits(pos, limits)
     }
-    
+
     /// Internal search implementation
-    fn search_internal(
-        &mut self,
-        pos: &mut Position,
-        max_depth: i32,
-    ) -> (Option<Move>, i32) {
+    fn search_internal(&mut self, pos: &mut Position, max_depth: i32) -> (Option<Move>, i32) {
         // Reset search state
         self.nodes.store(0, Ordering::Relaxed);
         self.stop.store(false, Ordering::Relaxed);
@@ -963,7 +954,7 @@ impl EnhancedSearcher {
 
                     // Update PV
                     self.pv.update(ctx.ply, mv);
-                    
+
                     // Notify TimeManager of PV change
                     if ctx.ply == 0 && score < ctx.beta {
                         if let Some(ref tm) = self.time_manager {
