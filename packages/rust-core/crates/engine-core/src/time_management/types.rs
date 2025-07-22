@@ -3,7 +3,7 @@
 use super::TimeParameters;
 
 /// Time control settings for a game
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum TimeControl {
     /// Fischer time control: base time + increment per move
     Fischer {
@@ -16,10 +16,19 @@ pub enum TimeControl {
     /// Fixed nodes per move
     FixedNodes { nodes: u64 },
     /// Byoyomi (Japanese overtime)
+    ///
+    /// Note: This represents the initial time control settings only.
+    /// The actual remaining periods are tracked internally by TimeManager
+    /// and exposed via TimeInfo::byoyomi_info.
+    ///
+    /// # Fields
+    /// - `main_time_ms`: Initial main time in milliseconds
+    /// - `byoyomi_ms`: Time allocated per byoyomi period
+    /// - `periods`: Initial number of byoyomi periods
     Byoyomi {
         main_time_ms: u64, // Main time
         byoyomi_ms: u64,   // Time per period
-        periods: u32,      // Number of periods
+        periods: u32,      // Initial number of periods (immutable)
     },
     /// No time limit
     Infinite,
@@ -50,7 +59,7 @@ impl Default for SearchLimits {
 }
 
 /// Time information snapshot (read-only)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TimeInfo {
     pub elapsed_ms: u64,
     pub soft_limit_ms: u64,
@@ -60,8 +69,16 @@ pub struct TimeInfo {
     pub byoyomi_info: Option<ByoyomiInfo>,
 }
 
-/// Byoyomi-specific information
-#[derive(Debug, Clone)]
+/// Byoyomi-specific runtime information
+///
+/// This represents the current state of byoyomi time control,
+/// as opposed to TimeControl::Byoyomi which contains initial settings.
+///
+/// # Fields
+/// - `in_byoyomi`: Whether currently in byoyomi (main time exhausted)
+/// - `periods_left`: Number of byoyomi periods remaining
+/// - `current_period_ms`: Time remaining in current period
+#[derive(Debug, Clone, Copy)]
 pub struct ByoyomiInfo {
     pub in_byoyomi: bool,
     pub periods_left: u32,
