@@ -41,6 +41,12 @@ const ASPIRATION_RETRY_LIMIT: u32 = 4;
 /// Time pressure threshold: remaining time < elapsed time * threshold
 const TIME_PRESSURE_THRESHOLD: f64 = 0.1;
 
+/// Number of piece types that can be in hand (excluding King)
+const NUM_HAND_PIECE_TYPES: usize = 7;
+
+/// Number of colors (Black and White)
+const NUM_COLORS: usize = 2;
+
 /// Game phase enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
@@ -368,8 +374,8 @@ impl EnhancedSearcher {
 
         // Count pieces in hands (important for Shogi)
         let mut pieces_in_hands = 0u32;
-        for color in 0..2 {
-            for piece_type in 0..7 {
+        for color in 0..NUM_COLORS {
+            for piece_type in 0..NUM_HAND_PIECE_TYPES {
                 pieces_in_hands += pos.hands[color][piece_type] as u32;
             }
         }
