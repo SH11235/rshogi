@@ -16,10 +16,19 @@ pub enum TimeControl {
     /// Fixed nodes per move
     FixedNodes { nodes: u64 },
     /// Byoyomi (Japanese overtime)
+    /// 
+    /// Note: This represents the initial time control settings only.
+    /// The actual remaining periods are tracked internally by TimeManager
+    /// and exposed via TimeInfo::byoyomi_info.
+    /// 
+    /// # Fields
+    /// - `main_time_ms`: Initial main time in milliseconds
+    /// - `byoyomi_ms`: Time allocated per byoyomi period
+    /// - `periods`: Initial number of byoyomi periods
     Byoyomi {
         main_time_ms: u64, // Main time
-        byoyomi_ms: u64,   // Time per period
-        periods: u32,      // Number of periods
+        byoyomi_ms: u64,   // Time per period  
+        periods: u32,      // Initial number of periods (immutable)
     },
     /// No time limit
     Infinite,
@@ -60,7 +69,15 @@ pub struct TimeInfo {
     pub byoyomi_info: Option<ByoyomiInfo>,
 }
 
-/// Byoyomi-specific information
+/// Byoyomi-specific runtime information
+/// 
+/// This represents the current state of byoyomi time control,
+/// as opposed to TimeControl::Byoyomi which contains initial settings.
+/// 
+/// # Fields
+/// - `in_byoyomi`: Whether currently in byoyomi (main time exhausted)
+/// - `periods_left`: Number of byoyomi periods remaining
+/// - `current_period_ms`: Time remaining in current period
 #[derive(Debug, Clone)]
 pub struct ByoyomiInfo {
     pub in_byoyomi: bool,

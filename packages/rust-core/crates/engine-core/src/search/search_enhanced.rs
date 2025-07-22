@@ -11,6 +11,7 @@ use super::history::History;
 use super::tt::{NodeType, TranspositionTable};
 use crate::evaluate::Evaluator;
 use crate::shogi::Move;
+use crate::time_management::{SearchLimits, TimeManager};
 use crate::zobrist::ZOBRIST;
 use crate::{Color, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
@@ -331,9 +332,9 @@ pub struct EnhancedSearcher {
     nodes: AtomicU64,
     /// Stop flag
     stop: AtomicBool,
-    /// Time limit
+    /// Time limit (deprecated - use time_manager instead)
     time_limit: Option<Instant>,
-    /// Node limit
+    /// Node limit (deprecated - use time_manager instead)
     node_limit: Option<u64>,
     /// Search start time
     start_time: Instant,
@@ -341,6 +342,8 @@ pub struct EnhancedSearcher {
     evaluator: Arc<dyn Evaluator + Send + Sync>,
     /// Principal variation table
     pv: PVTable,
+    /// Time manager for sophisticated time control
+    time_manager: Option<TimeManager>,
     /// Search statistics (for testing)
     #[cfg(test)]
     pub stats: SearchStats,
@@ -360,6 +363,7 @@ impl EnhancedSearcher {
             start_time: Instant::now(),
             evaluator,
             pv: PVTable::new(),
+            time_manager: None,
             #[cfg(test)]
             stats: SearchStats::default(),
         }
@@ -417,7 +421,34 @@ impl EnhancedSearcher {
         self.pv.get_pv()
     }
 
-    /// Search position with iterative deepening
+    /// Search position with new SearchLimits interface
+    pub fn search_with_limits(
+        &mut self,
+        pos: &mut Position,
+        limits: SearchLimits,
+    ) -> (Option<Move>, i32) {
+        // Create time manager if time control is specified
+        self.time_manager = match &limits.time_control {
+            crate::time_management::TimeControl::Infinite => None,
+            _ => {
+                let game_phase = self.estimate_game_phase(pos);
+                Some(TimeManager::new(
+                    &limits,
+                    pos.side_to_move,
+                    pos.ply as u32,
+                    game_phase,
+                ))
+            }
+        };
+        
+        // Extract max depth (default to 127 if not specified)
+        let max_depth = limits.depth.map(|d| d as i32).unwrap_or(MAX_DEPTH);
+        
+        // Call internal search implementation
+        self.search_internal(pos, max_depth)
+    }
+    
+    /// Search position with iterative deepening (legacy interface)
     pub fn search(
         &mut self,
         pos: &mut Position,
@@ -425,12 +456,35 @@ impl EnhancedSearcher {
         time_limit: Option<Duration>,
         node_limit: Option<u64>,
     ) -> (Option<Move>, i32) {
+        // Convert legacy parameters to SearchLimits
+        let limits = SearchLimits {
+            time_control: match (time_limit, node_limit) {
+                (Some(duration), _) => crate::time_management::TimeControl::FixedTime {
+                    ms_per_move: duration.as_millis() as u64,
+                },
+                (None, Some(nodes)) => crate::time_management::TimeControl::FixedNodes { nodes },
+                _ => crate::time_management::TimeControl::Infinite,
+            },
+            moves_to_go: None,
+            depth: Some(max_depth as u32),
+            nodes: node_limit,
+            time_parameters: None,
+        };
+        
+        self.search_with_limits(pos, limits)
+    }
+    
+    /// Internal search implementation
+    fn search_internal(
+        &mut self,
+        pos: &mut Position,
+        max_depth: i32,
+    ) -> (Option<Move>, i32) {
         // Reset search state
         self.nodes.store(0, Ordering::Relaxed);
         self.stop.store(false, Ordering::Relaxed);
         self.start_time = Instant::now();
-        self.time_limit = time_limit.map(|d| self.start_time + d);
-        self.node_limit = node_limit;
+        // Time and node limits are now managed by TimeManager
         self.history.clear_all();
 
         #[cfg(test)]
@@ -909,6 +963,13 @@ impl EnhancedSearcher {
 
                     // Update PV
                     self.pv.update(ctx.ply, mv);
+                    
+                    // Notify TimeManager of PV change
+                    if ctx.ply == 0 && score < ctx.beta {
+                        if let Some(ref tm) = self.time_manager {
+                            tm.on_pv_change(ctx.depth as u32);
+                        }
+                    }
 
                     if score >= ctx.beta {
                         // Update history for good quiet move
@@ -1108,17 +1169,23 @@ impl EnhancedSearcher {
             return true;
         }
 
-        // Check time limit
-        if let Some(limit) = self.time_limit {
-            if Instant::now() >= limit {
+        // Use TimeManager if available
+        if let Some(ref tm) = self.time_manager {
+            let nodes = self.nodes.load(Ordering::Relaxed);
+            if tm.should_stop(nodes) {
                 return true;
             }
-        }
-
-        // Check node limit
-        if let Some(limit) = self.node_limit {
-            if self.nodes.load(Ordering::Relaxed) >= limit {
-                return true;
+        } else {
+            // Fallback to legacy time/node limits
+            if let Some(limit) = self.time_limit {
+                if Instant::now() >= limit {
+                    return true;
+                }
+            }
+            if let Some(limit) = self.node_limit {
+                if self.nodes.load(Ordering::Relaxed) >= limit {
+                    return true;
+                }
             }
         }
 
@@ -1133,7 +1200,8 @@ impl EnhancedSearcher {
         }
 
         // Skip time check completely for deterministic behavior
-        // Only check node limit
+        // For TimeManager, we can't easily check if it's FixedNodes without exposing internals
+        // So in test mode, we rely on the legacy node_limit field
         if let Some(limit) = self.node_limit {
             if self.nodes.load(Ordering::Relaxed) >= limit {
                 return true;

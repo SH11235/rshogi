@@ -116,7 +116,6 @@ fn calculate_byoyomi_time(
 
 /// Estimate remaining moves in the game
 fn estimate_moves_remaining(ply: u32) -> u32 {
-    const AVERAGE_GAME_LENGTH: u32 = 120;
     let moves_played = ply / 2;
 
     // Use a curve based on typical game progression
