@@ -33,6 +33,7 @@ struct TimeManagerInner {
     // === Immutable after initialization ===
     time_control: TimeControl,
     side_to_move: Color,
+    #[allow(dead_code)] // May be used in future for advanced time management
     start_ply: u32,
     params: TimeParameters,
 
@@ -43,6 +44,7 @@ struct TimeManagerInner {
     // Limits (Atomic for lock-free access)
     soft_limit_ms: AtomicU64,
     hard_limit_ms: AtomicU64,
+    #[allow(dead_code)] // Reserved for dynamic overhead adjustment
     overhead_ms: AtomicU64,
 
     // Search state
@@ -58,25 +60,16 @@ struct TimeManagerInner {
 }
 
 /// Byoyomi (Japanese overtime) state management
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ByoyomiState {
     periods_left: u32,
     current_period_ms: u64,
 }
 
-impl Default for ByoyomiState {
-    fn default() -> Self {
-        Self {
-            periods_left: 0,
-            current_period_ms: 0,
-        }
-    }
-}
-
 impl TimeManager {
     /// Create a new time manager for a search
     pub fn new(limits: &SearchLimits, side: Color, ply: u32, game_phase: GamePhase) -> Self {
-        let params = limits.time_parameters.clone().unwrap_or_else(TimeParameters::default);
+        let params = limits.time_parameters.clone().unwrap_or_default();
 
         // Calculate initial time allocation
         let (soft_ms, hard_ms) = calculate_time_allocation(
@@ -183,6 +176,13 @@ impl TimeManager {
     }
 
     /// Update remaining time after move (for Fischer/Byoyomi)
+    /// 
+    /// For Byoyomi time control, this method manages period consumption:
+    /// - If time_spent_ms > byoyomi_ms, one period is consumed
+    /// - If all periods are consumed, sets stop flag for time forfeit
+    /// 
+    /// Note: The original TimeControl settings remain unchanged.
+    /// Current state is tracked internally and exposed via get_time_info().
     pub fn finish_move(&self, _color: Color, time_spent_ms: u64) {
         match &self.inner.time_control {
             TimeControl::Byoyomi { byoyomi_ms, .. } => {
