@@ -12,7 +12,7 @@ use super::tt::{NodeType, TranspositionTable};
 use crate::evaluate::Evaluator;
 use crate::shogi::Move;
 use crate::zobrist::ZOBRIST;
-use crate::{Color, MovePicker, Position};
+use crate::{Color, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,6 +33,19 @@ const MATE_SCORE: i32 = 28000;
 
 /// Draw score
 const DRAW_SCORE: i32 = 0;
+
+/// Maximum number of aspiration window retries before falling back to full window
+#[cfg(test)]
+const ASPIRATION_RETRY_LIMIT: u32 = 4;
+
+/// Time pressure threshold: remaining time < elapsed time * threshold
+const TIME_PRESSURE_THRESHOLD: f64 = 0.1;
+
+/// Number of piece types that can be in hand (excluding King)
+const NUM_HAND_PIECE_TYPES: usize = 7;
+
+/// Number of colors (Black and White)
+const NUM_COLORS: usize = 2;
 
 /// Game phase enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +177,14 @@ impl PVTable {
             // and indices 1..=child_len for the child PV
             #[allow(clippy::int_plus_one)]
             if child_len > 0 && child_len + 1 <= MAX_PLY {
+                // Safety check: ensure we don't exceed array bounds when copying child PV
+                // We access first_half[ply][1..=child_len], where ply is the current row
+                // and child_len is the number of moves to copy from the child PV
+                debug_assert!(
+                    ply + 1 + child_len <= MAX_PLY,
+                    "PV copy would exceed MAX_PLY: ply={ply}, child_len={child_len}, MAX_PLY={MAX_PLY}"
+                );
+
                 // Use split_at_mut to avoid mutable borrow conflict
                 let (first_half, second_half) = self.line.split_at_mut(ply + 1);
                 first_half[ply][1..=child_len].copy_from_slice(&second_half[0][0..child_len]);
@@ -242,8 +263,19 @@ impl Default for SearchParams {
         let mut lmr_reductions = [[0; 64]; 64];
         for (depth_idx, depth_row) in lmr_reductions.iter_mut().enumerate().skip(1) {
             for (move_idx, reduction) in depth_row.iter_mut().enumerate().skip(1) {
-                *reduction =
-                    (0.75 + (depth_idx as f64).ln() * (move_idx as f64).ln() / 2.25) as i32;
+                let val = 0.75 + (depth_idx as f64).ln() * (move_idx as f64).ln() / 2.25;
+                *reduction = val as i32;
+
+                // Ensure minimum reduction of 1 ply
+                if *reduction < 1 {
+                    *reduction = 1;
+                }
+
+                // Ensure reduction doesn't exceed depth
+                // For very low depths, ensure we maintain the minimum
+                if *reduction >= depth_idx as i32 {
+                    *reduction = (depth_idx as i32).saturating_sub(1).max(1);
+                }
             }
         }
 
@@ -270,7 +302,7 @@ impl Default for SearchParams {
                 // 深さが深いほど大きな窓幅を許容
                 (800 + 40 * depth).min(2000)
             },
-            time_pressure_threshold: 0.1, // 残り時間が経過時間の10%未満で時間圧迫
+            time_pressure_threshold: TIME_PRESSURE_THRESHOLD,
         }
     }
 }
@@ -338,13 +370,35 @@ impl EnhancedSearcher {
         let ply = pos.ply as i32;
 
         // Count pieces on board using cached bitboard
-        let total_pieces = pos.board.all_bb.count_ones();
+        let pieces_on_board = pos.board.all_bb.count_ones();
 
-        // Determine phase based on move count and piece count
+        // Count pieces in hands (important for Shogi)
+        let mut pieces_in_hands = 0u32;
+        for color in 0..NUM_COLORS {
+            for piece_type in 0..NUM_HAND_PIECE_TYPES {
+                pieces_in_hands += pos.hands[color][piece_type] as u32;
+            }
+        }
+
+        // Total material count (should be close to 40 in Shogi)
+        let total_material = pieces_on_board + pieces_in_hands;
+
+        // Count major pieces (Rook and Bishop) for better endgame detection
+        let major_pieces = pos.board.piece_bb[Color::Black as usize][PieceType::Rook as usize]
+            .count_ones()
+            + pos.board.piece_bb[Color::Black as usize][PieceType::Bishop as usize].count_ones()
+            + pos.board.piece_bb[Color::White as usize][PieceType::Rook as usize].count_ones()
+            + pos.board.piece_bb[Color::White as usize][PieceType::Bishop as usize].count_ones();
+
+        // Determine phase based on move count and piece distribution
         if ply < 20 {
             GamePhase::Opening
-        } else if ply > 60 || total_pieces < 20 {
-            // End game if many moves or few pieces remain
+        } else if ply > 60 || (total_material < 25 && major_pieces == 0) {
+            // End game if:
+            // - Many moves have been played (ply > 60), OR
+            // - Total material is very low (< 25) AND all major pieces are gone
+            // Note: In Shogi with 40 initial pieces, < 25 means significant material loss
+            // The major pieces check prevents misclassifying active middle games
             GamePhase::EndGame
         } else {
             GamePhase::MiddleGame
@@ -621,6 +675,12 @@ impl EnhancedSearcher {
         mut ctx: SearchContext,
         stack: &mut [SearchStack],
     ) -> i32 {
+        // Store original alpha/beta for node type determination
+        // During search, ctx.alpha may be updated when we find better moves
+        // But for correct node type classification, we need the original bounds
+        let alpha_orig = ctx.alpha;
+        let beta_orig = ctx.beta;
+
         // Check limits
         #[cfg(test)]
         let should_stop = self.should_stop_deterministic();
@@ -739,10 +799,16 @@ impl EnhancedSearcher {
             None
         };
 
-        // Use MovePicker for efficient move ordering
-        let history_arc = Arc::new(self.history.clone());
-        let mut move_picker =
-            MovePicker::new(pos, tt_move, pv_move, &history_arc, &stack[ctx.ply], ctx.ply);
+        // Collect moves using MovePicker (separate scope for self.history borrow)
+        let moves_to_search = {
+            let mut move_picker =
+                MovePicker::new(pos, tt_move, pv_move, &self.history, &stack[ctx.ply], ctx.ply);
+            let mut moves = Vec::new();
+            while let Some(mv) = move_picker.next_move() {
+                moves.push(mv);
+            }
+            moves
+        };
 
         let mut best_score = -INFINITY;
         let mut best_move = None;
@@ -750,7 +816,7 @@ impl EnhancedSearcher {
         let mut quiets_tried = Vec::new();
 
         // Search moves
-        while let Some(mv) = move_picker.next_move() {
+        for mv in moves_to_search {
             // Late move pruning
             if !stack[ctx.ply].in_check
                 && moves_searched >= (self.params.late_move_count)(ctx.depth)
@@ -883,9 +949,11 @@ impl EnhancedSearcher {
         }
 
         // Store in transposition table
-        let node_type = if best_score >= ctx.beta {
+        // Use original alpha/beta for node type determination
+        // to correctly identify the node type even after alpha updates
+        let node_type = if best_score >= beta_orig {
             NodeType::LowerBound
-        } else if best_score <= ctx.alpha {
+        } else if best_score <= alpha_orig {
             NodeType::UpperBound
         } else {
             NodeType::Exact
@@ -953,11 +1021,19 @@ impl EnhancedSearcher {
         // Use MovePicker for captures only
         let tt_hit = self.tt.probe(pos.hash);
         let tt_move = tt_hit.as_ref().and_then(|e| e.get_move());
-        let history_arc = Arc::new(self.history.clone());
-        let mut move_picker =
-            MovePicker::new_quiescence(pos, tt_move, &history_arc, &stack[ply], ply);
 
-        while let Some(mv) = move_picker.next_move() {
+        // Collect moves using MovePicker (separate scope for self.history borrow)
+        let moves_to_search = {
+            let mut move_picker =
+                MovePicker::new_quiescence(pos, tt_move, &self.history, &stack[ply], ply);
+            let mut moves = Vec::new();
+            while let Some(mv) = move_picker.next_move() {
+                moves.push(mv);
+            }
+            moves
+        };
+
+        for mv in moves_to_search {
             let undo = pos.do_move(mv);
             let score = -self.quiescence(pos, -beta, -alpha, ply + 1, stack);
             pos.undo_move(mv, undo);
@@ -982,16 +1058,34 @@ impl EnhancedSearcher {
         pos.board.piece_on(to).is_some()
     }
 
-    /// Check if position has non-pawn material
+    /// Check if position has non-pawn material for null move pruning safety
+    /// Returns true if the side has pieces other than pawns (both on board and in hand)
+    /// This includes promoted pawns (tokin) as they are valuable material
+    #[inline]
     fn has_non_pawn_material(&self, pos: &Position, color: Color) -> bool {
-        let color_idx = color as usize;
-        // Check for pieces other than pawns in hand
-        pos.hands[color_idx][0] > 0 || // Rook
-        pos.hands[color_idx][1] > 0 || // Bishop
-        pos.hands[color_idx][2] > 0 || // Gold
-        pos.hands[color_idx][3] > 0 || // Silver
-        pos.hands[color_idx][4] > 0 || // Knight
-        pos.hands[color_idx][5] > 0 // Lance
+        let c = color as usize;
+
+        // Check pieces in hand (excluding pawns) - indices 0..6 are non-pawn pieces
+        if pos.hands[c][0..6].iter().any(|&n| n > 0) {
+            return true;
+        }
+
+        // Check pieces on board
+        use crate::shogi::PieceType;
+
+        // Calculate non-pawn material on board:
+        // 1. Start with all pieces of the color
+        // 2. Exclude king and pawn positions
+        // 3. Add back promoted pawns (tokin) as they count as material
+        let pawn_bb = pos.board.piece_bb[c][PieceType::Pawn as usize];
+        let king_bb = pos.board.piece_bb[c][PieceType::King as usize];
+        let promoted_bb = pos.board.promoted_bb;
+
+        let non_pawn_board = pos.board.occupied_bb[c]
+            & !(king_bb | pawn_bb)  // Exclude king and all pawns
+            | (pawn_bb & promoted_bb); // Add back promoted pawns (tokin)
+
+        !non_pawn_board.is_empty()
     }
 
     /// Do null move (returns previous side to move)
@@ -1065,7 +1159,11 @@ impl Drop for EnhancedSearcher {
 
 #[cfg(test)]
 mod tests {
-    use crate::{evaluate::MaterialEvaluator, shogi::MoveList, MoveGen, Square};
+    use crate::{
+        evaluate::MaterialEvaluator,
+        shogi::{Color, MoveList, Piece, PieceType},
+        MoveGen, Square,
+    };
 
     use super::*;
 
@@ -1124,7 +1222,7 @@ mod tests {
                 // （delta: 初期値 → 2倍 → 4倍 → 8倍 → フルウィンドウ）
                 if depth >= 2 {
                     assert!(
-                        searcher.stats.aspiration_failures[depth_idx] <= 4,
+                        searcher.stats.aspiration_failures[depth_idx] <= ASPIRATION_RETRY_LIMIT,
                         "Depth {}: Too many aspiration failures ({})",
                         depth,
                         searcher.stats.aspiration_failures[depth_idx]
@@ -1202,6 +1300,90 @@ mod tests {
         // Simulate end game (high ply count)
         pos.ply = 70;
         assert_eq!(searcher.estimate_game_phase(&pos), GamePhase::EndGame);
+    }
+
+    #[test]
+    fn test_game_phase_with_pieces_in_hand() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let searcher = EnhancedSearcher::new(16, evaluator);
+
+        // Test case: Middle game with many pieces in hand
+        let mut pos = Position::empty();
+        pos.ply = 35; // Middle game by move count
+
+        // Set up a position with reduced board pieces but many in hand
+        // Place kings (required)
+        pos.board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+
+        // Add some pieces on board (15 pieces total)
+        for i in 0..5 {
+            pos.board
+                .put_piece(Square::new(i, 1), Piece::new(PieceType::Pawn, Color::White));
+            pos.board
+                .put_piece(Square::new(i, 7), Piece::new(PieceType::Pawn, Color::Black));
+        }
+        pos.board
+            .put_piece(Square::new(0, 0), Piece::new(PieceType::Lance, Color::White));
+        pos.board
+            .put_piece(Square::new(8, 8), Piece::new(PieceType::Lance, Color::Black));
+        pos.board
+            .put_piece(Square::new(7, 0), Piece::new(PieceType::Bishop, Color::White));
+
+        // Rebuild bitboards
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Add many pieces in hands (simulating active piece exchanges)
+        pos.hands[Color::Black as usize][6] = 3; // 3 pawns
+        pos.hands[Color::Black as usize][5] = 1; // 1 lance
+        pos.hands[Color::Black as usize][3] = 2; // 2 silvers
+        pos.hands[Color::Black as usize][2] = 1; // 1 gold
+
+        pos.hands[Color::White as usize][6] = 4; // 4 pawns
+        pos.hands[Color::White as usize][4] = 1; // 1 knight
+        pos.hands[Color::White as usize][3] = 1; // 1 silver
+        pos.hands[Color::White as usize][0] = 1; // 1 rook
+
+        // Should still be middle game despite few pieces on board
+        // because total material is high with pieces in hand
+        assert_eq!(
+            searcher.estimate_game_phase(&pos),
+            GamePhase::MiddleGame,
+            "Should be middle game when many pieces are in hand"
+        );
+
+        // Test true endgame: few pieces both on board and in hand
+        let mut endgame_pos = Position::empty();
+        endgame_pos.ply = 45;
+
+        // Minimal pieces on board
+        endgame_pos
+            .board
+            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        endgame_pos
+            .board
+            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        endgame_pos
+            .board
+            .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::White));
+        endgame_pos
+            .board
+            .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::Black));
+
+        // Very few pieces in hand
+        endgame_pos.hands[Color::Black as usize][6] = 1; // 1 pawn
+        endgame_pos.hands[Color::White as usize][6] = 1; // 1 pawn
+
+        endgame_pos.board.rebuild_occupancy_bitboards();
+
+        // Should be endgame with very low total material
+        assert_eq!(
+            searcher.estimate_game_phase(&endgame_pos),
+            GamePhase::EndGame,
+            "Should be endgame when total material is very low"
+        );
     }
 
     #[test]
@@ -1488,10 +1670,10 @@ mod tests {
         // Now test that PV move is returned in correct order by MovePicker
         let tt_move = None; // Simulate no TT move
         let pv_move = searcher.pv.get_pv_move(0);
-        let history_arc = Arc::new(History::new());
+        let history = History::new();
         let stack = SearchStack::default();
 
-        let mut move_picker = MovePicker::new(&test_pos, tt_move, pv_move, &history_arc, &stack, 0);
+        let mut move_picker = MovePicker::new(&test_pos, tt_move, pv_move, &history, &stack, 0);
 
         // First move should be the PV move
         let first_move = move_picker.next_move();
@@ -1508,8 +1690,7 @@ mod tests {
 
         assert!(tt_move.is_some(), "Should find at least one move different from PV");
 
-        let mut move_picker2 =
-            MovePicker::new(&test_pos, tt_move, pv_move, &history_arc, &stack, 0);
+        let mut move_picker2 = MovePicker::new(&test_pos, tt_move, pv_move, &history, &stack, 0);
 
         // At root node (ply=0), PV move should come first if it exists
         let first = move_picker2.next_move();
@@ -1518,6 +1699,176 @@ mod tests {
         if tt_move != pv_move {
             let second = move_picker2.next_move();
             assert_eq!(second, tt_move, "TT move should be second at root");
+        }
+    }
+
+    #[test]
+    fn test_lmr_minimum_reduction() {
+        let params = SearchParams::default();
+
+        // Verify all LMR table entries are within valid range
+        for d in 1..64 {
+            for m in 1..64 {
+                if d == 1 {
+                    // Special case: depth=1 cannot have reduction >= 1 and < 1
+                    // In practice, LMR is not used at depth=1 anyway
+                    assert!(
+                        params.lmr_reductions[d][m] <= 1,
+                        "LMR reduction at depth=1 should be 0 or 1, but was {}",
+                        params.lmr_reductions[d][m]
+                    );
+                } else {
+                    assert!(
+                        params.lmr_reductions[d][m] >= 1,
+                        "LMR reduction at [{}][{}] should be at least 1, but was {}",
+                        d,
+                        m,
+                        params.lmr_reductions[d][m]
+                    );
+                    assert!(
+                        params.lmr_reductions[d][m] < d as i32,
+                        "LMR reduction at [{}][{}] should be less than depth {}, but was {}",
+                        d,
+                        m,
+                        d,
+                        params.lmr_reductions[d][m]
+                    );
+                }
+            }
+        }
+
+        // Test specific edge cases
+        // Note: [0][*] and [*][0] entries are not initialized (remain 0) as they are never used
+        assert_eq!(
+            params.lmr_reductions[1][1], 1,
+            "Minimum depth and move should have reduction of 1"
+        );
+        assert_eq!(params.lmr_reductions[2][1], 1, "Low move count should have reduction of 1");
+        assert_eq!(params.lmr_reductions[1][2], 1, "Low depth should have reduction of 1");
+
+        // Verify that unused entries are indeed 0
+        assert_eq!(params.lmr_reductions[0][0], 0, "[0][0] should remain uninitialized");
+        assert_eq!(params.lmr_reductions[0][1], 0, "[0][1] should remain uninitialized");
+        assert_eq!(params.lmr_reductions[1][0], 0, "[1][0] should remain uninitialized");
+    }
+
+    #[test]
+    fn test_has_non_pawn_material() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let searcher = EnhancedSearcher::new(16, evaluator);
+
+        // Test case 1: King + pawns only -> false
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(4, 6), Piece::new(PieceType::Pawn, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 2), Piece::new(PieceType::Pawn, Color::White));
+
+            assert!(!searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 2: King + pawns + tokin (promoted pawn) -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(4, 6), Piece::new(PieceType::Pawn, Color::Black));
+
+            // Place promoted pawn (tokin)
+            let sq = Square::new(3, 3);
+            pos.board.put_piece(sq, Piece::new(PieceType::Pawn, Color::Black));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 3: King + pawns + bishop in hand -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(4, 6), Piece::new(PieceType::Pawn, Color::Black));
+
+            // Add bishop to hand
+            pos.hands[Color::Black as usize][1] = 1; // Bishop
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 4: No pieces in hand, rook on board -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            pos.board
+                .put_piece(Square::new(1, 7), Piece::new(PieceType::Rook, Color::Black));
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+            assert!(!searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 5: King + pawns + dragon (promoted rook) -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+
+            // Place promoted rook (dragon)
+            let sq = Square::new(1, 1);
+            pos.board.put_piece(sq, Piece::new(PieceType::Rook, Color::Black));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
+        }
+
+        // Test case 6: King + pawns + horse (promoted bishop) -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+
+            // Place promoted bishop (horse)
+            let sq = Square::new(2, 2);
+            pos.board.put_piece(sq, Piece::new(PieceType::Bishop, Color::White));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::White));
+        }
+
+        // Test case 7: King + pawns + promoted silver/knight/lance -> true
+        {
+            let mut pos = Position::empty();
+            pos.board
+                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            pos.board
+                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+
+            // Place promoted silver
+            let sq = Square::new(5, 5);
+            pos.board.put_piece(sq, Piece::new(PieceType::Silver, Color::Black));
+            pos.board.promoted_bb.set(sq);
+
+            assert!(searcher.has_non_pawn_material(&pos, Color::Black));
         }
     }
 }
