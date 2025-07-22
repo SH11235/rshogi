@@ -4,6 +4,15 @@
 //! - Time allocation for different time control modes
 //! - Dynamic time adjustment based on position complexity
 //! - Search termination decisions based on time constraints
+//!
+//! # Byoyomi State Management
+//! 
+//! For Byoyomi time control, the initial settings are immutable in `TimeControl::Byoyomi`,
+//! while the runtime state (remaining periods) is tracked internally in `ByoyomiState`.
+//! This separation ensures:
+//! - TimeControl remains a pure configuration type
+//! - State changes don't affect the original settings
+//! - Current state is accessible via `TimeInfo::byoyomi_info`
 
 use parking_lot::Mutex;
 use std::sync::{
@@ -60,10 +69,14 @@ struct TimeManagerInner {
 }
 
 /// Byoyomi (Japanese overtime) state management
+/// 
+/// This struct tracks the runtime state of byoyomi time control,
+/// separate from the immutable configuration in TimeControl::Byoyomi.
 #[derive(Debug, Clone, Default)]
 struct ByoyomiState {
     periods_left: u32,
     current_period_ms: u64,
+    in_byoyomi: bool,  // Whether main time is exhausted
 }
 
 impl TimeManager {
@@ -86,10 +99,11 @@ impl TimeManager {
             TimeControl::Byoyomi {
                 periods,
                 byoyomi_ms,
-                ..
+                main_time_ms,
             } => ByoyomiState {
                 periods_left: *periods,
                 current_period_ms: *byoyomi_ms,
+                in_byoyomi: *main_time_ms == 0,  // Start in byoyomi if no main time
             },
             _ => ByoyomiState::default(),
         };
@@ -185,23 +199,33 @@ impl TimeManager {
     /// Current state is tracked internally and exposed via get_time_info().
     pub fn finish_move(&self, _color: Color, time_spent_ms: u64) {
         match &self.inner.time_control {
-            TimeControl::Byoyomi { byoyomi_ms, .. } => {
+            TimeControl::Byoyomi { byoyomi_ms, main_time_ms, .. } => {
                 let mut state = self.inner.byoyomi_state.lock();
 
-                // Check if we're in byoyomi
-                if state.current_period_ms > 0 {
+                if !state.in_byoyomi {
+                    // Still in main time
+                    // Note: Actual main time tracking is handled by GUI
+                    // Here we only check if we should transition to byoyomi
+                    // This would typically be called when main_time_ms reaches 0
+                    if *main_time_ms == 0 {
+                        state.in_byoyomi = true;
+                    }
+                } else {
+                    // In byoyomi
                     if time_spent_ms > *byoyomi_ms {
                         // Consumed one period
                         state.periods_left = state.periods_left.saturating_sub(1);
-                        state.current_period_ms = *byoyomi_ms;
-
+                        
                         if state.periods_left == 0 {
                             // Time forfeit - set stop flag
                             self.inner.stop_flag.store(true, Ordering::Release);
+                        } else {
+                            // Reset to next period
+                            state.current_period_ms = *byoyomi_ms;
                         }
                     } else {
-                        // Still within period
-                        state.current_period_ms = *byoyomi_ms;
+                        // Still within period - time remaining for next move
+                        state.current_period_ms = byoyomi_ms.saturating_sub(time_spent_ms);
                     }
                 }
             }
@@ -229,7 +253,7 @@ impl TimeManager {
             TimeControl::Byoyomi { .. } => {
                 let state = self.inner.byoyomi_state.lock();
                 Some(ByoyomiInfo {
-                    in_byoyomi: state.current_period_ms > 0,
+                    in_byoyomi: state.in_byoyomi,
                     periods_left: state.periods_left,
                     current_period_ms: state.current_period_ms,
                 })
@@ -254,6 +278,20 @@ impl TimeManager {
             // For now, just clear the infinite time
             self.inner.soft_limit_ms.store(1000, Ordering::Relaxed);
             self.inner.hard_limit_ms.store(2000, Ordering::Relaxed);
+        }
+    }
+    
+    /// Get byoyomi-specific information
+    /// 
+    /// Returns None if not using byoyomi time control.
+    /// Returns Some((periods_left, current_period_ms, in_byoyomi)) for byoyomi.
+    pub fn get_byoyomi_state(&self) -> Option<(u32, u64, bool)> {
+        match &self.inner.time_control {
+            TimeControl::Byoyomi { .. } => {
+                let state = self.inner.byoyomi_state.lock();
+                Some((state.periods_left, state.current_period_ms, state.in_byoyomi))
+            }
+            _ => None,
         }
     }
 
@@ -283,7 +321,8 @@ impl TimeManager {
             }
             TimeControl::Byoyomi { .. } => {
                 let state = self.inner.byoyomi_state.lock();
-                state.current_period_ms < self.inner.params.critical_byoyomi_ms
+                // Critical if in byoyomi and low on period time
+                state.in_byoyomi && state.current_period_ms < self.inner.params.critical_byoyomi_ms
             }
             TimeControl::FixedTime { .. } => {
                 // Check for overrun
