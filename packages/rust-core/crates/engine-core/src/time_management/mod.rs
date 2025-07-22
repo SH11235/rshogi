@@ -286,15 +286,50 @@ impl TimeManager {
     }
 
     /// Handle ponder hit (convert ponder to normal search)
-    pub fn ponder_hit(&self) {
-        if matches!(self.inner.time_control, TimeControl::Ponder) {
-            // TODO: Implement proper ponder hit handling
-            // - Recalculate time limits based on actual remaining time
-            // - Consider time already spent during pondering
-            // - Update soft/hard limits appropriately
-            // For now, just set conservative temporary limits
-            self.inner.soft_limit_ms.store(1000, Ordering::Relaxed);
-            self.inner.hard_limit_ms.store(2000, Ordering::Relaxed);
+    ///
+    /// This method should be called when a ponder search becomes a real search
+    /// because the opponent played the expected move.
+    ///
+    /// # Arguments
+    /// - `new_limits`: Updated search limits with actual time control
+    /// - `time_already_spent_ms`: Time already spent during pondering
+    ///
+    /// # TODO
+    /// Current implementation is a placeholder. Full implementation requires:
+    /// - Integration with USI protocol for time updates
+    /// - Proper handling of different time control modes
+    /// - Adjustment for time already spent
+    pub fn ponder_hit(&self, new_limits: Option<&SearchLimits>, time_already_spent_ms: u64) {
+        if !matches!(self.inner.time_control, TimeControl::Ponder) {
+            return;
+        }
+
+        if let Some(limits) = new_limits {
+            // Calculate new time allocation based on updated limits
+            let params = limits.time_parameters.unwrap_or_default();
+            let (soft_ms, hard_ms) = calculate_time_allocation(
+                &limits.time_control,
+                self.inner.side_to_move,
+                self.inner.start_ply,
+                limits.moves_to_go,
+                GamePhase::MiddleGame, // TODO: Get actual game phase
+                &params,
+            );
+
+            // Adjust for time already spent
+            let adjusted_soft = soft_ms.saturating_sub(time_already_spent_ms);
+            let adjusted_hard = hard_ms.saturating_sub(time_already_spent_ms);
+
+            // Update limits atomically
+            self.inner.soft_limit_ms.store(adjusted_soft.max(100), Ordering::Release);
+            self.inner.hard_limit_ms.store(adjusted_hard.max(200), Ordering::Release);
+
+            // TODO: Update time_control to reflect actual mode
+            // This requires making time_control mutable or redesigning the structure
+        } else {
+            // Fallback: Set conservative limits if no new limits provided
+            self.inner.soft_limit_ms.store(1000, Ordering::Release);
+            self.inner.hard_limit_ms.store(2000, Ordering::Release);
         }
     }
 
