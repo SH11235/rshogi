@@ -3,7 +3,7 @@
 use super::TimeParameters;
 
 /// Time control settings for a game
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum TimeControl {
     /// Fischer time control: base time + increment per move
     Fischer {
@@ -37,7 +37,7 @@ pub enum TimeControl {
 }
 
 /// Search limits combining time control with other constraints
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct SearchLimits {
     pub time_control: TimeControl,
     pub moves_to_go: Option<u32>, // Moves until next time control
@@ -59,7 +59,7 @@ impl Default for SearchLimits {
 }
 
 /// Time information snapshot (read-only)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TimeInfo {
     pub elapsed_ms: u64,
     pub soft_limit_ms: u64,
@@ -78,7 +78,7 @@ pub struct TimeInfo {
 /// - `in_byoyomi`: Whether currently in byoyomi (main time exhausted)
 /// - `periods_left`: Number of byoyomi periods remaining
 /// - `current_period_ms`: Time remaining in current period
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ByoyomiInfo {
     pub in_byoyomi: bool,
     pub periods_left: u32,
