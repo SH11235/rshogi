@@ -1,14 +1,15 @@
-
 # 将棋エンジン インターフェース & 時間管理 要件書
-*版: 2025-07-16*
+*版: 2025-07-22 rev2 (Phase‑2)*
+
+---
 
 ## 0. 目的
-**2 つのアダプタ構成** を採用し、最小限の実装コストで将来の拡張性を確保する。
 
-1. **CLI アダプタ** ― **USI** プロトコルを話し、既存 GUI・ベンチマーク・大会サーバと接続可能にする。  
-2. **GUI アダプタ** ― **RPC / WebSocket API** を公開し、独自フロントエンドから柔軟にエンジンを操作できるようにする。
+* **2 アダプタ構成** で **最小実装コスト** と **将来拡張性** を両立する  
+  1. **CLI アダプタ** … **USI 1.2** を話し、大会サーバや市販 GUI と接続  
+  2. **WASM アダプタ** … **JS API / Web Worker** で Web／PWA／Tauri から直接呼び出す  
 
-両アダプタは共通の Core ライブラリクレートの上に薄く載せる。
+> **注:** GUI RPC アダプタ（gRPC / WebSocket）は *Phase‑3* で検討。
 
 ---
 
@@ -16,91 +17,87 @@
 
 ```mermaid
 graph TD
-    subgraph Core
-        A[shogi_engine_core] --> |public API| B(TimeManager)
-        A --> C(Searcher)
-        A --> D(Position / MoveGen)
-    end
-    subgraph Adapters
-        E[CLI USI Adapter] --> A
-        F[GUI RPC Adapter] --> A
-    end
+  subgraph Core
+    A[shogi_engine_core]
+    A -->|public API| B(TimeManager)
+  end
+  subgraph Adapters
+    C[CLI USI Adapter] --> A
+    D[WASM Adapter] --> A
+  end
 ```
 
-* **Core (`shogi_engine_core`)**  
-  I/O やスレッドに依存しない **純粋ライブラリ** とする。  
-* **Adapters**  
-  プロトコル変換のみを担当する **薄いバイナリ (`main.rs`)**。
+* **Core (`shogi_engine_core`)** – I/O 非依存の **純粋ライブラリ** (`no_std` ではないが OS 依存を避ける)  
+* **Adapters** – プロトコル変換のみを担当する **薄いバイナリ** (`main.rs`)  
 
 ---
 
-## 2. Core ライブラリ API（crate `shogi_engine_core`）
+## 2. Core ライブラリ API （crate `shogi_engine_core`）
 
 | 関数 / 構造体 | 役割 |
 |---------------|------|
-| `Engine::new(cfg)` | エンジン生成。`TimeManager`・TT サイズ・スレッド数を注入 |
+| `Engine::new(cfg)` | TT サイズ・スレッド数・`TimeManager` 実装を注入 |
 | `Engine::set_position(fen, moves)` | 内部 `Position` を設定 |
-| `Engine::go(limit: SearchLimits) -> SearchHandle` | 反復深化を非同期で開始 |
+| `Engine::go(limits) -> SearchHandle` | **キャンセル安全**に反復深化を非同期開始 |
 | `SearchHandle::best_move()` | 探索終了までブロックし、PV・統計を返す |
-| `Engine::stop()` | 現在の探索を停止 |
-| `struct SearchLimits` | USI の制限項目をミラー（`time`, `inc`, `depth`, `nodes`, `movetime`, `infinite`, `ponder`） |
+| `Engine::stop()` | 現行探索を停止（`AtomicBool` フラグ） |
+| `struct SearchLimits` | USI `time`/`inc` 等をミラー。`builder()` で拡張しやすく |
 
-Core は **Send + Sync** とし、アダプタ側で好きなランタイム (`tokio` など) を使えるようにする。
+* すべて **`Send + Sync + 'static`** を満たす  
+* ログやプロファイルはアダプタ側で実装可能とする
 
 ---
 
-## 3. CLI USI アダプタ（crate `shogi_engine_cli`）
+## 3. CLI USI アダプタ （crate `engine_cli`）
 
 | 要件 | 詳細 |
 |------|------|
-| プロトコル対応 | USI 1.2 を完全実装：`usi`, `isready`, `setoption`, `usinewgame`, `position`, `go ...`, `stop`, `ponderhit`, `quit` |
-| I/O | **stdin / stdout** 行単位。毎行 `flush()` |
-| オプション | `setoption name Hash size 256` などを Core に反映 |
-| 並列 | 探索は専用スレッドで。メインスレッドはコマンド受信 |
-| ログ | `info depth ... score ... nodes ... nps ... pv ...` を出力 |
-
-*非目標*: GUI ウィジェットやグラフィック、COOP/COEP 対応など。
+| プロトコル | **USI 1.2** 完全実装：`usi`, `isready`, `setoption`, `usinewgame`, `position`, `go`, `stop`, `ponderhit`, `quit` |
+| I/O | `stdin` / `stdout` 行単位 (`flush()` 必須) |
+| オプション | `setoption` → Core へ伝播；無効値はエラー |
+| 並列 | 探索専用スレッド；メインスレッドはコマンド受信 |
+| info 出力 | 深さ更新時 or 1 s 毎のどちらか早い方で `info depth … pv …` |
 
 ---
 
-## 4. GUI RPC アダプタ（crate `shogi_engine_rpc`）
+## 4. WASM アダプタ （crate `engine_wasm`）
 
 | 項目 | 要件 |
 |------|------|
-| トランスポート | **gRPC** (バイナリ) **または** **WebSocket + JSON**。feature flag で切替 |
-| API 面 | `POST /engine/new` → engine_id 取得<br>`POST /engine/{id}/position`<br>`POST /engine/{id}/go` (ストリームで PV 更新)<br>`POST /engine/{id}/stop`<br>`DELETE /engine/{id}` |
-| ストリーミング | 200 ms ごとに `depth`, `seldepth`, `pv`, `nps`, `nodes` を送信 |
-| バージョニング | `/v1` 名前空間、ハンドシェイクにセマンティックバージョン |
-| 認証 (将来) | トークンヘッダを受け取れるようにしておく（初期実装では任意） |
+| ターゲット | `wasm32-unknown-unknown` + **wasm‑bindgen** |
+| ビルド | `wasm-pack build -p engine-wasm --target web` |
+| JS API | `init() -> Promise<EngineHandle>`<br>`setPosition(fen, moves)`<br>`go(limits, onInfo) -> Promise<BestMove>`<br>`stop()` |
+| スレッド | **wasm‑bindgen‑rayon** + Web Workers / `SharedArrayBuffer`<br>環境が非隔離なら自動で 1 thread |
+| 時間取得 | JS shim の `performance.now()` を `TimeManager` へ注入 |
+| ログ | `onInfo({depth, score, nodes, nps, pv})` を ~200 ms 間隔で呼ぶ |
+| デバッグ | `console_error_panic_hook`, `wasm-logger` を組み込み |
 
 ---
 
-## 5. 時間管理モジュール（`time_management.rs`）
+## 5. 時間管理モジュール （`time_management.rs`）
 
-### 5.1 公開 API
 ```rust
 pub struct TimeManager;
+
 impl TimeManager {
     pub fn init(&mut self, limits: &SearchLimits, side: Color, ply: u32);
-    pub fn should_stop(&self) -> bool;
+    pub fn should_stop(&self) -> bool;          // 15 ms または 2_048 nodes 毎
     pub fn adjust_by_stability(&mut self, pv_changes: u32);
     pub fn force_stop(&self);
-    pub fn finish_move(&mut self); // 残り時間を更新
+    pub fn finish_move(&mut self);              // remain 更新
 }
 ```
 
-### 5.2 最低限の動作仕様
-1. **入力マッピング**  
-   – USI の各時間パラメータと RPC JSON を同じ構造体に取り込む。  
-2. **割り当て計算 (Lv‑2: フェーズ対応)**  
-   - `base = (remain / moves_left) + inc*0.8`  
-   - `factor = 1.2` (序盤) / `1.0` (中盤) / `0.8` (終盤)  
-   - オーバーヘッド 50 ms を引く  
-   - `hard_max = min(remain*0.8 , base*6)`  
-3. **停止判定頻度**  
-   - 2048 ノード毎 または 15 ms 毎に `should_stop()` を呼ぶ  
-4. **スレッド安全**  
-   - 全スレッド共通で `Arc<AtomicBool>` のストップフラグを使用  
+**割り当て計算（暫定式）**
+
+```
+base  = (remain / moves_left) + inc * 0.8
+factor = 1.2 (序盤) / 1.0 (中盤) / 0.8 (終盤)
+hard_max = max(base * 4, 1_000 ms).min(remain * 0.8)
+```
+
+* `Arc<AtomicBool>` を全スレッド共有  
+* Stop 判定は **メインスレッドのみがタイマ計測**し，他スレッドはフラグ監視
 
 ---
 
@@ -109,29 +106,28 @@ impl TimeManager {
 | ターゲット | コマンド | 生成物 |
 |------------|----------|--------|
 | Core ライブラリ | `cargo build -p shogi_engine_core --release` | `libshogi_engine_core.rlib` |
-| CLI USI バイナリ | `cargo build -p shogi_engine_cli --release` | `shogi_engine_cli` |
-| GUI RPC バイナリ | `cargo build -p shogi_engine_rpc --release --features ws` | `shogi_engine_rpc` |
-| WASM (任意) | `wasm-pack build -p shogi_engine_core --target web` | `pkg/engine_core_bg.wasm` |
+| CLI USI バイナリ | `cargo build -p engine_cli --release` | `shogi_engine_cli` |
+| WASM パッケージ | `wasm-pack build -p engine-wasm --target web` | `pkg/` (`.wasm`, `.js`) |
 
 ---
 
 ## 7. テストマトリクス
 
-| テスト | ツール | 合格基準 |
-|--------|-------|---------|
+| 種類 | ツール | 合格基準 |
+|------|-------|---------|
 | 単体: TimeManager | `cargo test -p shogi_engine_core time` | 全アサーション通過 |
-| 結合: USI | スクリプト stdin/stdout | `isready` 応答 < 200 ms |
-| 結合: RPC | `pytest + httpx` | `/go` が制限内に指し手返却 |
-| ストレス: マルチコア | `loom` + `cargo tarpaulin` | データ競合なし、Coverage ≥ 80 % |
-| 性能 | `bench_startpos --depth 12` | 1 スレッド NPS ≥ 1.5 M |
+| 結合: USI | Shell スクリプト | `isready` 応答 < 200 ms |
+| 結合: WASM | `wasm-bindgen-test --headless` | `go` が制限内に指し手返却 |
+| ストレス: 並列 | `loom` + `cargo tarpaulin` | データ競合なし、Coverage ≥ 80 % |
+| 性能 | `bench_startpos --depth 12` | 1 thread NPS ≥ 1.5 M |
 
 ---
 
-## 8. 非目標 (Phase 3 では扱わない)
+## 8. 非目標 (Phase‑2)
 
-* 豪華な GUI 描画や評価グラフ  
-* 自己対局フレームワーク（別クレートで提供予定）  
-* クラウド分散探索・クラスタリング
+* 豪華 GUI / 評価グラフ  
+* 自己対局フレームワーク（別クレート予定）  
+* クラスタリング・分散探索
 
 ---
 
@@ -139,4 +135,5 @@ impl TimeManager {
 
 | 日付 | 変更内容 |
 |------|---------|
-| 2025-07-16 | 2 アダプタ構成を前提とした初版作成 |
+| 2025‑07‑16 | 初版（CLI + GUI RPC） |
+| 2025‑07‑22 | **GUI RPC → WASM** へ置換，レビュー反映 |

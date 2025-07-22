@@ -4,6 +4,15 @@
 //! - Time allocation for different time control modes
 //! - Dynamic time adjustment based on position complexity
 //! - Search termination decisions based on time constraints
+//!
+//! # Byoyomi State Management
+//!
+//! For Byoyomi time control, the initial settings are immutable in `TimeControl::Byoyomi`,
+//! while the runtime state (remaining periods) is tracked internally in `ByoyomiState`.
+//! This separation ensures:
+//! - TimeControl remains a pure configuration type
+//! - State changes don't affect the original settings
+//! - Current state is accessible via `TimeInfo::byoyomi_info`
 
 use parking_lot::Mutex;
 use std::sync::{
@@ -33,6 +42,7 @@ struct TimeManagerInner {
     // === Immutable after initialization ===
     time_control: TimeControl,
     side_to_move: Color,
+    #[allow(dead_code)] // May be used in future for advanced time management
     start_ply: u32,
     params: TimeParameters,
 
@@ -43,6 +53,7 @@ struct TimeManagerInner {
     // Limits (Atomic for lock-free access)
     soft_limit_ms: AtomicU64,
     hard_limit_ms: AtomicU64,
+    #[allow(dead_code)] // Reserved for dynamic overhead adjustment
     overhead_ms: AtomicU64,
 
     // Search state
@@ -58,25 +69,20 @@ struct TimeManagerInner {
 }
 
 /// Byoyomi (Japanese overtime) state management
-#[derive(Debug, Clone)]
+///
+/// This struct tracks the runtime state of byoyomi time control,
+/// separate from the immutable configuration in TimeControl::Byoyomi.
+#[derive(Debug, Clone, Default)]
 struct ByoyomiState {
     periods_left: u32,
     current_period_ms: u64,
-}
-
-impl Default for ByoyomiState {
-    fn default() -> Self {
-        Self {
-            periods_left: 0,
-            current_period_ms: 0,
-        }
-    }
+    in_byoyomi: bool, // Whether main time is exhausted
 }
 
 impl TimeManager {
     /// Create a new time manager for a search
     pub fn new(limits: &SearchLimits, side: Color, ply: u32, game_phase: GamePhase) -> Self {
-        let params = limits.time_parameters.clone().unwrap_or_else(TimeParameters::default);
+        let params = limits.time_parameters.unwrap_or_default();
 
         // Calculate initial time allocation
         let (soft_ms, hard_ms) = calculate_time_allocation(
@@ -93,19 +99,20 @@ impl TimeManager {
             TimeControl::Byoyomi {
                 periods,
                 byoyomi_ms,
-                ..
+                main_time_ms,
             } => ByoyomiState {
                 periods_left: *periods,
                 current_period_ms: *byoyomi_ms,
+                in_byoyomi: *main_time_ms == 0, // Start in byoyomi if no main time
             },
             _ => ByoyomiState::default(),
         };
 
         let inner = Arc::new(TimeManagerInner {
-            time_control: limits.time_control.clone(),
+            time_control: limits.time_control,
             side_to_move: side,
             start_ply: ply,
-            params: params.clone(),
+            params,
             start_time: Mutex::new(Instant::now()),
             soft_limit_ms: AtomicU64::new(soft_ms),
             hard_limit_ms: AtomicU64::new(hard_ms),
@@ -183,25 +190,56 @@ impl TimeManager {
     }
 
     /// Update remaining time after move (for Fischer/Byoyomi)
-    pub fn finish_move(&self, _color: Color, time_spent_ms: u64) {
+    ///
+    /// For Byoyomi time control, this method manages period consumption:
+    /// - If time_spent_ms >= byoyomi_ms, periods are consumed
+    /// - Multiple periods can be consumed if time_spent_ms >> byoyomi_ms
+    /// - If all periods are consumed, sets stop flag for time forfeit
+    ///
+    /// # Arguments
+    /// - `time_spent_ms`: Time spent on this move
+    /// - `main_time_left_ms`: Remaining main time (for GUI-based transition to byoyomi)
+    ///
+    /// Note: The original TimeControl settings remain unchanged.
+    /// Current state is tracked internally and exposed via get_time_info().
+    pub fn finish_move(&self, time_spent_ms: u64, main_time_left_ms: Option<u64>) {
         match &self.inner.time_control {
             TimeControl::Byoyomi { byoyomi_ms, .. } => {
                 let mut state = self.inner.byoyomi_state.lock();
 
-                // Check if we're in byoyomi
-                if state.current_period_ms > 0 {
-                    if time_spent_ms > *byoyomi_ms {
-                        // Consumed one period
-                        state.periods_left = state.periods_left.saturating_sub(1);
-                        state.current_period_ms = *byoyomi_ms;
-
-                        if state.periods_left == 0 {
-                            // Time forfeit - set stop flag
-                            self.inner.stop_flag.store(true, Ordering::Release);
+                if !state.in_byoyomi {
+                    // Still in main time
+                    // Check if we should transition to byoyomi based on GUI's report
+                    if let Some(main_left) = main_time_left_ms {
+                        if main_left == 0 || time_spent_ms >= main_left {
+                            // Transition to byoyomi
+                            state.in_byoyomi = true;
+                            // If we overspent, consume from first byoyomi period
+                            if time_spent_ms > main_left {
+                                let overspent = time_spent_ms - main_left;
+                                state.current_period_ms = byoyomi_ms.saturating_sub(overspent);
+                            }
                         }
+                    }
+                } else {
+                    // In byoyomi - handle multiple period consumption
+                    let mut remaining_time = time_spent_ms;
+                    let mut current_ms = state.current_period_ms;
+
+                    // Consume periods while time exceeds current period
+                    while remaining_time >= current_ms && state.periods_left > 0 {
+                        remaining_time -= current_ms;
+                        state.periods_left = state.periods_left.saturating_sub(1);
+                        current_ms = *byoyomi_ms; // Reset to full period
+                    }
+
+                    if state.periods_left == 0 {
+                        // Time forfeit - set stop flag
+                        self.inner.stop_flag.store(true, Ordering::Release);
+                        state.current_period_ms = 0;
                     } else {
-                        // Still within period
-                        state.current_period_ms = *byoyomi_ms;
+                        // Set remaining time in current period
+                        state.current_period_ms = current_ms.saturating_sub(remaining_time);
                     }
                 }
             }
@@ -229,7 +267,7 @@ impl TimeManager {
             TimeControl::Byoyomi { .. } => {
                 let state = self.inner.byoyomi_state.lock();
                 Some(ByoyomiInfo {
-                    in_byoyomi: state.current_period_ms > 0,
+                    in_byoyomi: state.in_byoyomi,
                     periods_left: state.periods_left,
                     current_period_ms: state.current_period_ms,
                 })
@@ -248,12 +286,64 @@ impl TimeManager {
     }
 
     /// Handle ponder hit (convert ponder to normal search)
-    pub fn ponder_hit(&self) {
-        if matches!(self.inner.time_control, TimeControl::Ponder) {
-            // In real implementation, would recalculate time limits
-            // For now, just clear the infinite time
-            self.inner.soft_limit_ms.store(1000, Ordering::Relaxed);
-            self.inner.hard_limit_ms.store(2000, Ordering::Relaxed);
+    ///
+    /// This method should be called when a ponder search becomes a real search
+    /// because the opponent played the expected move.
+    ///
+    /// # Arguments
+    /// - `new_limits`: Updated search limits with actual time control
+    /// - `time_already_spent_ms`: Time already spent during pondering
+    ///
+    /// # TODO
+    /// Current implementation is a placeholder. Full implementation requires:
+    /// - Integration with USI protocol for time updates
+    /// - Proper handling of different time control modes
+    /// - Adjustment for time already spent
+    pub fn ponder_hit(&self, new_limits: Option<&SearchLimits>, time_already_spent_ms: u64) {
+        if !matches!(self.inner.time_control, TimeControl::Ponder) {
+            return;
+        }
+
+        if let Some(limits) = new_limits {
+            // Calculate new time allocation based on updated limits
+            let params = limits.time_parameters.unwrap_or_default();
+            let (soft_ms, hard_ms) = calculate_time_allocation(
+                &limits.time_control,
+                self.inner.side_to_move,
+                self.inner.start_ply,
+                limits.moves_to_go,
+                GamePhase::MiddleGame, // TODO: Get actual game phase
+                &params,
+            );
+
+            // Adjust for time already spent
+            let adjusted_soft = soft_ms.saturating_sub(time_already_spent_ms);
+            let adjusted_hard = hard_ms.saturating_sub(time_already_spent_ms);
+
+            // Update limits atomically
+            self.inner.soft_limit_ms.store(adjusted_soft.max(100), Ordering::Release);
+            self.inner.hard_limit_ms.store(adjusted_hard.max(200), Ordering::Release);
+
+            // TODO: Update time_control to reflect actual mode
+            // This requires making time_control mutable or redesigning the structure
+        } else {
+            // Fallback: Set conservative limits if no new limits provided
+            self.inner.soft_limit_ms.store(1000, Ordering::Release);
+            self.inner.hard_limit_ms.store(2000, Ordering::Release);
+        }
+    }
+
+    /// Get byoyomi-specific information
+    ///
+    /// Returns None if not using byoyomi time control.
+    /// Returns Some((periods_left, current_period_ms, in_byoyomi)) for byoyomi.
+    pub fn get_byoyomi_state(&self) -> Option<(u32, u64, bool)> {
+        match &self.inner.time_control {
+            TimeControl::Byoyomi { .. } => {
+                let state = self.inner.byoyomi_state.lock();
+                Some((state.periods_left, state.current_period_ms, state.in_byoyomi))
+            }
+            _ => None,
         }
     }
 
@@ -283,7 +373,8 @@ impl TimeManager {
             }
             TimeControl::Byoyomi { .. } => {
                 let state = self.inner.byoyomi_state.lock();
-                state.current_period_ms < self.inner.params.critical_byoyomi_ms
+                // Critical if in byoyomi and low on period time
+                state.in_byoyomi && state.current_period_ms < self.inner.params.critical_byoyomi_ms
             }
             TimeControl::FixedTime { .. } => {
                 // Check for overrun
@@ -333,5 +424,105 @@ mod tests {
         assert!(!tm.should_stop(0));
         tm.force_stop();
         assert!(tm.should_stop(0));
+    }
+
+    #[test]
+    fn test_byoyomi_exact_boundary() {
+        // Test exact boundary condition: time_spent == byoyomi_ms
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms: 1000,
+                periods: 3,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
+
+        // Spend exactly one period
+        tm.finish_move(1000, None);
+        let state = tm.get_byoyomi_state().unwrap();
+        assert_eq!(state.0, 2); // Should have 2 periods left
+        assert_eq!(state.1, 1000); // Should reset to full period
+        assert!(state.2); // Should be in byoyomi
+    }
+
+    #[test]
+    fn test_byoyomi_multiple_period_consumption() {
+        // Test consuming multiple periods in one move
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms: 1000,
+                periods: 5,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
+
+        // Spend 2.5 periods worth of time
+        tm.finish_move(2500, None);
+        let state = tm.get_byoyomi_state().unwrap();
+        assert_eq!(state.0, 3); // Should have consumed 2 periods, 3 left
+        assert_eq!(state.1, 500); // 500ms left in current period
+    }
+
+    #[test]
+    fn test_byoyomi_main_time_transition() {
+        // Test transition from main time to byoyomi
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 5000,
+                byoyomi_ms: 1000,
+                periods: 3,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
+
+        // Not in byoyomi initially
+        let state = tm.get_byoyomi_state().unwrap();
+        assert!(!state.2); // Should not be in byoyomi
+
+        // Transition to byoyomi when main time runs out
+        tm.finish_move(3000, Some(2000)); // 2s left, spent 3s
+        let state = tm.get_byoyomi_state().unwrap();
+        assert!(state.2); // Should now be in byoyomi
+        assert_eq!(state.0, 3); // All periods available
+        assert_eq!(state.1, 0); // Overspent by 1s, so 0ms left
+
+        // Another move that consumes a period
+        tm.finish_move(1500, None);
+        let state = tm.get_byoyomi_state().unwrap();
+        assert_eq!(state.0, 1); // Should have 1 period left (consumed 2)
+        assert_eq!(state.1, 500); // 500ms left in current period
+    }
+
+    #[test]
+    fn test_byoyomi_time_forfeit() {
+        // Test time forfeit when all periods consumed
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms: 1000,
+                periods: 2,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
+
+        // Consume all periods
+        tm.finish_move(2000, None); // Consume both periods
+
+        // Should trigger stop flag
+        assert!(tm.should_stop(0));
+
+        let state = tm.get_byoyomi_state().unwrap();
+        assert_eq!(state.0, 0); // No periods left
+        assert_eq!(state.1, 0); // No time left
     }
 }

@@ -1,7 +1,8 @@
 //! Tunable parameters for time management
 
 /// Time management tunable parameters
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(default)]
 pub struct TimeParameters {
     // Overhead
     pub overhead_ms: u64,             // Default: 50
