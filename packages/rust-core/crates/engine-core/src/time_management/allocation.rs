@@ -73,7 +73,7 @@ fn calculate_fischer_time(
     let increment_bonus = if params.increment_usage == 0.8 {
         (increment_ms * 8) / 10
     } else {
-        ((increment_ms as f64 * params.increment_usage) + 0.5) as u64  // Round to nearest
+        ((increment_ms as f64 * params.increment_usage) + 0.5) as u64 // Round to nearest
     };
     let base_ms = (remain_ms / moves_left as u64) + increment_bonus;
 
@@ -86,7 +86,8 @@ fn calculate_fischer_time(
     };
 
     let soft_ms = ((base_ms as f64 * phase_factor * params.soft_multiplier) + 0.5) as u64;
-    let hard_ms = (((soft_ms as f64 * params.hard_multiplier) + 0.5) as u64).min(remain_ms * 8 / 10); // Never use more than 80% of remaining time
+    let hard_ms =
+        (((soft_ms as f64 * params.hard_multiplier) + 0.5) as u64).min(remain_ms * 8 / 10); // Never use more than 80% of remaining time
 
     // Apply overhead
     let overhead = params.overhead_ms;
@@ -110,13 +111,13 @@ fn calculate_byoyomi_time(
     if main_time_ms > 0 {
         // Still in main time - treat like Fischer without increment
         // Conservative allocation: 20% soft, 50% hard
-        let soft = main_time_ms / 5;  // 20% = 1/5
-        let hard = main_time_ms / 2;  // 50% = 1/2
+        let soft = main_time_ms / 5; // 20% = 1/5
+        let hard = main_time_ms / 2; // 50% = 1/2
         (soft, hard)
     } else {
         // In byoyomi period
         // Use 80% of period as soft limit
-        let soft = (byoyomi_ms * 4) / 5;  // 80% = 4/5
+        let soft = (byoyomi_ms * 4) / 5; // 80% = 4/5
         let hard = byoyomi_ms;
         let overhead = params.overhead_ms;
         (soft.saturating_sub(overhead), hard.saturating_sub(overhead))
@@ -199,14 +200,14 @@ mod tests {
         assert_eq!(soft, 900 - params.overhead_ms); // 90% - overhead
         assert_eq!(hard, 1000 - params.overhead_ms);
     }
-    
+
     #[test]
     fn test_byoyomi_main_time() {
         let params = TimeParameters::default();
         let (soft, hard) = calculate_time_allocation(
             &TimeControl::Byoyomi {
-                main_time_ms: 10000,  // 10 seconds main time
-                byoyomi_ms: 30000,    // 30 seconds per period
+                main_time_ms: 10000, // 10 seconds main time
+                byoyomi_ms: 30000,   // 30 seconds per period
                 periods: 3,
             },
             Color::White,
@@ -215,19 +216,19 @@ mod tests {
             GamePhase::Opening,
             &params,
         );
-        
+
         // Conservative allocation during main time
-        assert_eq!(soft, 2000);  // 20% of 10000
-        assert_eq!(hard, 5000);  // 50% of 10000
+        assert_eq!(soft, 2000); // 20% of 10000
+        assert_eq!(hard, 5000); // 50% of 10000
     }
-    
+
     #[test]
     fn test_byoyomi_period() {
         let params = TimeParameters::default();
         let (soft, hard) = calculate_time_allocation(
             &TimeControl::Byoyomi {
-                main_time_ms: 0,      // No main time, already in byoyomi
-                byoyomi_ms: 30000,    // 30 seconds per period
+                main_time_ms: 0,   // No main time, already in byoyomi
+                byoyomi_ms: 30000, // 30 seconds per period
                 periods: 3,
             },
             Color::Black,
@@ -236,16 +237,16 @@ mod tests {
             GamePhase::EndGame,
             &params,
         );
-        
+
         // Should use 80% of period as soft limit
-        assert_eq!(soft, 24000 - params.overhead_ms);  // 80% of 30000 - overhead
-        assert_eq!(hard, 30000 - params.overhead_ms);  // Full period - overhead
+        assert_eq!(soft, 24000 - params.overhead_ms); // 80% of 30000 - overhead
+        assert_eq!(hard, 30000 - params.overhead_ms); // Full period - overhead
     }
-    
+
     #[test]
     fn test_integer_arithmetic_precision() {
         let params = TimeParameters::default();
-        
+
         // Test increment calculation with default 0.8 factor
         let (soft1, _) = calculate_time_allocation(
             &TimeControl::Fischer {
@@ -254,12 +255,12 @@ mod tests {
                 increment_ms: 1000,
             },
             Color::White,
-            60,  // Late game
-            Some(40),  // 40 moves to go
+            60,       // Late game
+            Some(40), // 40 moves to go
             GamePhase::MiddleGame,
             &params,
         );
-        
+
         // Verify integer arithmetic produces consistent results
         let (soft2, _) = calculate_time_allocation(
             &TimeControl::Fischer {
@@ -273,7 +274,7 @@ mod tests {
             GamePhase::MiddleGame,
             &params,
         );
-        
+
         assert_eq!(soft1, soft2, "Integer arithmetic should be deterministic");
     }
 }
