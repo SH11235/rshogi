@@ -135,6 +135,7 @@ mod tests {
             depth: 3,
             time: Some(Duration::from_secs(1)),
             nodes: None,
+            stop_flag: None,
         };
 
         let result = engine.search(&mut pos, limits);
@@ -151,6 +152,7 @@ mod tests {
             depth: 3,
             time: Some(Duration::from_secs(1)),
             nodes: None,
+            stop_flag: None,
         };
 
         let result = engine.search(&mut pos, limits);
@@ -176,6 +178,7 @@ mod tests {
             depth: 2,
             time: Some(Duration::from_millis(100)),
             nodes: None,
+            stop_flag: None,
         };
         let result = engine.search(&mut pos, limits);
         assert!(result.best_move.is_some());
@@ -205,6 +208,7 @@ mod tests {
                     depth: 2,
                     time: Some(Duration::from_millis(50)),
                     nodes: None,
+                    stop_flag: None,
                 };
 
                 // Each thread performs a search
