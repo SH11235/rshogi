@@ -3,7 +3,7 @@
 use super::TimeParameters;
 
 /// Time control settings for a game
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TimeControl {
     /// Fischer time control: base time + increment per move
     Fischer {
@@ -56,6 +56,17 @@ impl Default for SearchLimits {
             time_parameters: None,
         }
     }
+}
+
+/// Time state for move completion
+#[derive(Debug, Clone, Copy)]
+pub enum TimeState {
+    /// Still in main time with remaining milliseconds
+    Main { main_left_ms: u64 },
+    /// In byoyomi phase with remaining main time (0 for pure byoyomi)
+    Byoyomi { main_left_ms: u64 },
+    /// Non-byoyomi time controls (Fischer, FixedTime, etc.)
+    NonByoyomi,
 }
 
 /// Time information snapshot (read-only)

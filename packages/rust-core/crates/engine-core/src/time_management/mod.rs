@@ -28,14 +28,20 @@ mod allocation;
 mod parameters;
 mod types;
 
+#[cfg(test)]
+mod test_utils;
+
 pub use allocation::calculate_time_allocation;
 pub use parameters::TimeParameters;
-pub use types::{ByoyomiInfo, SearchLimits, TimeControl, TimeInfo};
+pub use types::{ByoyomiInfo, SearchLimits, TimeControl, TimeInfo, TimeState};
 
 /// Time manager coordinating all time-related decisions
 pub struct TimeManager {
     inner: Arc<TimeManagerInner>,
 }
+
+#[cfg(test)]
+pub use test_utils::{mock_advance_time, mock_current_ms, mock_now, mock_set_time};
 
 /// Internal state shared between threads
 struct TimeManagerInner {
@@ -109,7 +115,7 @@ impl TimeManager {
         };
 
         let inner = Arc::new(TimeManagerInner {
-            time_control: limits.time_control,
+            time_control: limits.time_control.clone(),
             side_to_move: side,
             start_ply: ply,
             params,
@@ -125,6 +131,23 @@ impl TimeManager {
         });
 
         Self { inner }
+    }
+
+    /// Create a new time manager with mock time for testing
+    #[cfg(test)]
+    fn new_with_mock_time(
+        limits: &SearchLimits,
+        side: Color,
+        ply: u32,
+        game_phase: GamePhase,
+    ) -> Self {
+        let tm = Self::new(limits, side, ply, game_phase);
+        // Replace start_time with mock time
+        {
+            let mut start_time = tm.inner.start_time.lock();
+            *start_time = mock_now();
+        } // MutexGuard is dropped here
+        tm
     }
 
     /// Check if search should stop (called frequently from search loop)
@@ -186,65 +209,91 @@ impl TimeManager {
     /// Get elapsed time since search start
     pub fn elapsed_ms(&self) -> u64 {
         let start = self.inner.start_time.lock();
-        start.elapsed().as_millis() as u64
+        #[cfg(test)]
+        {
+            // In test mode, use mock time
+            let now = mock_now();
+            now.duration_since(*start).as_millis() as u64
+        }
+        #[cfg(not(test))]
+        {
+            start.elapsed().as_millis() as u64
+        }
     }
 
-    /// Update remaining time after move (for Fischer/Byoyomi)
-    ///
-    /// For Byoyomi time control, this method manages period consumption:
-    /// - If time_spent_ms >= byoyomi_ms, periods are consumed
-    /// - Multiple periods can be consumed if time_spent_ms >> byoyomi_ms
-    /// - If all periods are consumed, sets stop flag for time forfeit
+    /// Update time after move completion (recommended API)
     ///
     /// # Arguments
     /// - `time_spent_ms`: Time spent on this move
-    /// - `main_time_left_ms`: Remaining main time (for GUI-based transition to byoyomi)
+    /// - `time_state`: Current time state (required for proper Byoyomi transition)
     ///
-    /// Note: The original TimeControl settings remain unchanged.
-    /// Current state is tracked internally and exposed via get_time_info().
-    pub fn finish_move(&self, time_spent_ms: u64, main_time_left_ms: Option<u64>) {
-        match &self.inner.time_control {
-            TimeControl::Byoyomi { byoyomi_ms, .. } => {
-                let mut state = self.inner.byoyomi_state.lock();
-
-                if !state.in_byoyomi {
-                    // Still in main time
-                    // Check if we should transition to byoyomi based on GUI's report
-                    if let Some(main_left) = main_time_left_ms {
-                        if main_left == 0 || time_spent_ms >= main_left {
-                            // Transition to byoyomi
-                            state.in_byoyomi = true;
-                            // If we overspent, consume from first byoyomi period
-                            if time_spent_ms > main_left {
-                                let overspent = time_spent_ms - main_left;
-                                state.current_period_ms = byoyomi_ms.saturating_sub(overspent);
-                            }
-                        }
-                    }
-                } else {
-                    // In byoyomi - handle multiple period consumption
-                    let mut remaining_time = time_spent_ms;
-                    let mut current_ms = state.current_period_ms;
-
-                    // Consume periods while time exceeds current period
-                    while remaining_time >= current_ms && state.periods_left > 0 {
-                        remaining_time -= current_ms;
-                        state.periods_left = state.periods_left.saturating_sub(1);
-                        current_ms = *byoyomi_ms; // Reset to full period
-                    }
-
-                    if state.periods_left == 0 {
-                        // Time forfeit - set stop flag
-                        self.inner.stop_flag.store(true, Ordering::Release);
-                        state.current_period_ms = 0;
-                    } else {
-                        // Set remaining time in current period
-                        state.current_period_ms = current_ms.saturating_sub(remaining_time);
-                    }
-                }
+    /// # Example
+    /// ```
+    /// // USI: go btime 150000 wtime 140000 byoyomi 10000
+    /// let time_state = TimeState::Main { main_left_ms: 150000 };
+    /// time_manager.update_after_move(2000, time_state);
+    /// ```
+    pub fn update_after_move(&self, time_spent_ms: u64, time_state: TimeState) {
+        match (&self.inner.time_control, time_state) {
+            (
+                TimeControl::Byoyomi { byoyomi_ms, .. },
+                TimeState::Main { main_left_ms } | TimeState::Byoyomi { main_left_ms },
+            ) => {
+                self.handle_byoyomi_update(time_spent_ms, Some(main_left_ms), *byoyomi_ms);
+            }
+            (TimeControl::Byoyomi { .. }, TimeState::NonByoyomi) => {
+                debug_assert!(false, "TimeState::NonByoyomi used with Byoyomi time control");
             }
             _ => {
                 // Fischer and other modes: time update handled by GUI
+            }
+        }
+    }
+
+    /// Internal helper for Byoyomi time updates
+    fn handle_byoyomi_update(
+        &self,
+        time_spent_ms: u64,
+        main_time_left_ms: Option<u64>,
+        byoyomi_ms: u64,
+    ) {
+        let mut state = self.inner.byoyomi_state.lock();
+
+        if !state.in_byoyomi {
+            // Still in main time
+            // Check if we should transition to byoyomi based on GUI's report
+            if let Some(main_left) = main_time_left_ms {
+                if main_left == 0 || time_spent_ms >= main_left {
+                    // Transition to byoyomi
+                    state.in_byoyomi = true;
+                    // If we overspent, handle it with the byoyomi period consumption logic
+                    if time_spent_ms > main_left {
+                        let overspent = time_spent_ms - main_left;
+                        // Drop the lock and recursively call to handle overspent time
+                        drop(state);
+                        self.handle_byoyomi_update(overspent, None, byoyomi_ms);
+                    }
+                }
+            }
+        } else {
+            // In byoyomi - handle multiple period consumption
+            let mut remaining_time = time_spent_ms;
+            let mut current_ms = state.current_period_ms;
+
+            // Consume periods while time exceeds current period
+            while remaining_time >= current_ms && state.periods_left > 0 {
+                remaining_time -= current_ms;
+                state.periods_left = state.periods_left.saturating_sub(1);
+                current_ms = byoyomi_ms; // Reset to full period
+            }
+
+            if state.periods_left == 0 {
+                // Time forfeit - set stop flag
+                self.inner.stop_flag.store(true, Ordering::Release);
+                state.current_period_ms = 0;
+            } else {
+                // Set remaining time in current period
+                state.current_period_ms = current_ms.saturating_sub(remaining_time);
             }
         }
     }
@@ -441,7 +490,7 @@ mod tests {
         let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
 
         // Spend exactly one period
-        tm.finish_move(1000, None);
+        tm.update_after_move(1000, TimeState::Byoyomi { main_left_ms: 0 });
         let state = tm.get_byoyomi_state().unwrap();
         assert_eq!(state.0, 2); // Should have 2 periods left
         assert_eq!(state.1, 1000); // Should reset to full period
@@ -463,7 +512,7 @@ mod tests {
         let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
 
         // Spend 2.5 periods worth of time
-        tm.finish_move(2500, None);
+        tm.update_after_move(2500, TimeState::Byoyomi { main_left_ms: 0 });
         let state = tm.get_byoyomi_state().unwrap();
         assert_eq!(state.0, 3); // Should have consumed 2 periods, 3 left
         assert_eq!(state.1, 500); // 500ms left in current period
@@ -488,17 +537,142 @@ mod tests {
         assert!(!state.2); // Should not be in byoyomi
 
         // Transition to byoyomi when main time runs out
-        tm.finish_move(3000, Some(2000)); // 2s left, spent 3s
+        tm.update_after_move(3000, TimeState::Main { main_left_ms: 2000 }); // 2s left, spent 3s
         let state = tm.get_byoyomi_state().unwrap();
         assert!(state.2); // Should now be in byoyomi
-        assert_eq!(state.0, 3); // All periods available
-        assert_eq!(state.1, 0); // Overspent by 1s, so 0ms left
+        assert_eq!(state.0, 2); // Overspent by 1s, so consumed 1 period
+        assert_eq!(state.1, 1000); // Full period remains after consuming the overspent period
 
         // Another move that consumes a period
-        tm.finish_move(1500, None);
+        tm.update_after_move(1500, TimeState::Byoyomi { main_left_ms: 0 });
         let state = tm.get_byoyomi_state().unwrap();
-        assert_eq!(state.0, 1); // Should have 1 period left (consumed 2)
+        assert_eq!(state.0, 1); // Should have 1 period left (consumed 1 from the 2 remaining)
         assert_eq!(state.1, 500); // 500ms left in current period
+    }
+
+    #[test]
+    fn test_pv_stability_with_mock_time() {
+        // Test PV stability tracking with MockClock
+        mock_set_time(0);
+
+        let limits = create_test_limits();
+        let tm = TimeManager::new_with_mock_time(&limits, Color::White, 0, GamePhase::Opening);
+
+        // Initial PV change
+        tm.on_pv_change(10);
+        assert!(!tm.is_pv_stable()); // Just changed
+
+        // Advance time but not enough for stability
+        mock_advance_time(50);
+        assert!(!tm.is_pv_stable()); // 50ms < 80ms base + 10*5ms = 130ms
+
+        // Advance past threshold
+        mock_advance_time(100); // Total 150ms
+        assert!(tm.is_pv_stable()); // 150ms > 130ms
+
+        // Another PV change at deeper depth
+        tm.on_pv_change(20);
+        assert!(!tm.is_pv_stable()); // Just changed again
+
+        // Deeper searches require more stability
+        mock_advance_time(150); // Need 80 + 20*5 = 180ms
+        assert!(!tm.is_pv_stable()); // 150ms < 180ms
+
+        mock_advance_time(50); // Total 200ms
+        assert!(tm.is_pv_stable()); // 200ms > 180ms
+    }
+
+    #[test]
+    fn test_time_pressure_calculation() {
+        mock_set_time(0);
+
+        let limits = SearchLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 1000 },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new_with_mock_time(&limits, Color::Black, 0, GamePhase::MiddleGame);
+
+        // Initially no pressure
+        let info = tm.get_time_info();
+        assert!(info.time_pressure < 0.1);
+
+        // Half way through
+        mock_advance_time(500);
+        let info = tm.get_time_info();
+        assert!((info.time_pressure - 0.5).abs() < 0.1);
+
+        // Near hard limit
+        mock_advance_time(450); // Total 950ms
+        let info = tm.get_time_info();
+        assert!(info.time_pressure > 0.9);
+    }
+
+    #[test]
+    fn test_emergency_stop_with_mock_time() {
+        mock_set_time(0);
+
+        // Test Fischer emergency stop
+        let limits = SearchLimits {
+            time_control: TimeControl::Fischer {
+                white_ms: 200, // Critical time
+                black_ms: 200,
+                increment_ms: 0,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new_with_mock_time(&limits, Color::White, 100, GamePhase::EndGame);
+        assert!(tm.is_time_critical()); // Should be critical immediately
+
+        // Test Byoyomi emergency stop
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms: 1000,
+                periods: 1,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new_with_mock_time(&limits, Color::Black, 80, GamePhase::EndGame);
+
+        // Use most of the period
+        tm.update_after_move(950, TimeState::Byoyomi { main_left_ms: 0 });
+        assert!(tm.is_time_critical()); // Only 50ms left < 80ms critical threshold
+    }
+
+    #[test]
+    fn test_soft_limit_extension() {
+        mock_set_time(0);
+
+        let limits = SearchLimits {
+            time_control: TimeControl::Fischer {
+                white_ms: 60000,
+                black_ms: 60000,
+                increment_ms: 1000,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new_with_mock_time(&limits, Color::White, 20, GamePhase::MiddleGame);
+        let info = tm.get_time_info();
+        let soft_limit = info.soft_limit_ms;
+
+        // Advance to soft limit
+        mock_advance_time(soft_limit);
+
+        // With unstable PV, should not stop
+        tm.on_pv_change(15);
+        assert!(!tm.should_stop(1000));
+
+        // Advance past soft limit but PV still unstable
+        mock_advance_time(50);
+        assert!(!tm.should_stop(2000)); // Should continue searching
+
+        // Make PV stable
+        mock_advance_time(200); // Well past stability threshold
+        assert!(tm.should_stop(3000)); // Now should stop
     }
 
     #[test]
@@ -516,7 +690,7 @@ mod tests {
         let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
 
         // Consume all periods
-        tm.finish_move(2000, None); // Consume both periods
+        tm.update_after_move(2000, TimeState::Byoyomi { main_left_ms: 0 }); // Consume both periods
 
         // Should trigger stop flag
         assert!(tm.should_stop(0));
@@ -524,5 +698,154 @@ mod tests {
         let state = tm.get_byoyomi_state().unwrap();
         assert_eq!(state.0, 0); // No periods left
         assert_eq!(state.1, 0); // No time left
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_byoyomi_transition_with_wrong_state() {
+        // Test that using wrong TimeState doesn't cause transition
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 5000,
+                byoyomi_ms: 1000,
+                periods: 3,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
+
+        // Using NonByoyomi state with Byoyomi time control
+        // This should not cause transition to byoyomi
+        tm.update_after_move(2000, TimeState::NonByoyomi);
+        tm.update_after_move(2000, TimeState::NonByoyomi);
+        tm.update_after_move(2000, TimeState::NonByoyomi); // Total 6s spent
+
+        let state = tm.get_byoyomi_state().unwrap();
+        assert!(!state.2); // Still not in byoyomi - wrong TimeState prevents transition
+    }
+
+    #[test]
+    fn test_byoyomi_proper_transition_with_new_api() {
+        // Test proper transition with new API
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 5000,
+                byoyomi_ms: 1000,
+                periods: 3,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
+
+        // First move: still in main time
+        tm.update_after_move(2000, TimeState::Main { main_left_ms: 3000 });
+        let state = tm.get_byoyomi_state().unwrap();
+        assert!(!state.2); // Still in main time
+
+        // Second move: transition to byoyomi
+        tm.update_after_move(3500, TimeState::Main { main_left_ms: 3000 });
+
+        let state = tm.get_byoyomi_state().unwrap();
+        assert!(state.2); // Now in byoyomi
+        assert_eq!(state.0, 3); // All periods still available
+        assert_eq!(state.1, 500); // 500ms left in first period (overspent by 500ms)
+    }
+
+    #[test]
+    fn test_byoyomi_transition_with_multiple_period_overspend() {
+        // Test transition from main time to byoyomi with overspend > 2 periods
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 1000,
+                byoyomi_ms: 1000,
+                periods: 5,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::EndGame);
+
+        // Overspend main time by 2.5 periods worth
+        tm.update_after_move(3500, TimeState::Main { main_left_ms: 1000 });
+
+        let state = tm.get_byoyomi_state().unwrap();
+        assert!(state.2); // In byoyomi
+        assert_eq!(state.0, 3); // Should have consumed 2 periods (2500ms), 3 left
+        assert_eq!(state.1, 500); // 500ms left in current period
+    }
+
+    #[test]
+    fn test_continuous_byoyomi_to_time_forfeit() {
+        // Test main=0 start → consume all periods → time forfeit
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 0, // Start in byoyomi
+                byoyomi_ms: 1000,
+                periods: 2,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::EndGame);
+
+        // Consume first period
+        tm.update_after_move(1200, TimeState::Byoyomi { main_left_ms: 0 });
+        assert!(!tm.should_stop(0));
+
+        let state = tm.get_byoyomi_state().unwrap();
+        assert_eq!(state.0, 1); // One period left
+        assert_eq!(state.1, 800); // 800ms left in current period
+
+        // Consume second period - time forfeit
+        tm.update_after_move(1500, TimeState::Byoyomi { main_left_ms: 0 });
+        assert!(tm.should_stop(0)); // Time forfeit
+
+        let state = tm.get_byoyomi_state().unwrap();
+        assert_eq!(state.0, 0); // No periods left
+        assert_eq!(state.1, 0); // No time left
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "TimeState::NonByoyomi used with Byoyomi")]
+    fn test_debug_assertion_on_wrong_time_state() {
+        // Test debug assertion fires on API misuse
+        let limits = SearchLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 5000,
+                byoyomi_ms: 1000,
+                periods: 3,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
+        tm.update_after_move(1000, TimeState::NonByoyomi); // Wrong state!
+    }
+
+    #[test]
+    fn test_new_api_with_various_time_controls() {
+        // Test that new API works correctly with non-byoyomi time controls
+        let fischer_limits = SearchLimits {
+            time_control: TimeControl::Fischer {
+                white_ms: 60000,
+                black_ms: 60000,
+                increment_ms: 1000,
+            },
+            ..Default::default()
+        };
+
+        let tm = TimeManager::new(&fischer_limits, Color::White, 0, GamePhase::Opening);
+        tm.update_after_move(2000, TimeState::NonByoyomi); // Should work fine
+
+        let fixed_limits = SearchLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 1000 },
+            ..Default::default()
+        };
+
+        let tm2 = TimeManager::new(&fixed_limits, Color::Black, 0, GamePhase::MiddleGame);
+        tm2.update_after_move(500, TimeState::NonByoyomi); // Should work fine
     }
 }
