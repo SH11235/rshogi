@@ -1,6 +1,9 @@
 //! Tunable parameters for time management
 
 /// Time management tunable parameters
+///
+/// This struct intentionally implements Copy trait for efficient passing.
+/// All fields should remain primitive types to maintain Copy semantics.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(default)]
 pub struct TimeParameters {
