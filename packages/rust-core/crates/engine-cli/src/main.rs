@@ -1,7 +1,11 @@
-// USI (Universal Shogi Interface) adapter - stub implementation
+// USI (Universal Shogi Interface) adapter
+
+mod usi;
 
 use anyhow::Result;
 use clap::Parser;
+use std::io::{self, BufRead};
+use usi::{parse_usi_command, send_response, UsiCommand, UsiResponse};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
