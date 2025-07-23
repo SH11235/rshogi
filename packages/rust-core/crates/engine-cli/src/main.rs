@@ -58,6 +58,58 @@ fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> 
     Ok(())
 }
 
+/// Pumps messages from worker thread until bestmove or termination
+/// Returns true if bestmove was sent, false otherwise
+fn pump_messages(
+    rx: &Receiver<WorkerMessage>,
+    stdout: &mut impl Write,
+    until_bestmove: bool,
+) -> Result<bool> {
+    let mut bestmove_sent = false;
+    
+    loop {
+        select! {
+            recv(rx) -> msg => {
+                match msg {
+                    Ok(WorkerMessage::Info(info)) => {
+                        send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
+                        stdout.flush()?;
+                    }
+                    Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
+                        send_response(UsiResponse::BestMove {
+                            best_move,
+                            ponder: ponder_move,
+                        });
+                        stdout.flush()?;
+                        bestmove_sent = true;
+                        if until_bestmove {
+                            break;  // Exit after bestmove if requested
+                        }
+                    }
+                    Ok(WorkerMessage::Finished) => {
+                        log::debug!("Worker thread finished");
+                        break;
+                    }
+                    Ok(WorkerMessage::Error(err)) => {
+                        send_response(UsiResponse::String(format!("info string Error: {err}")));
+                        stdout.flush()?;
+                        break;
+                    }
+                    Err(_) => {
+                        log::debug!("Channel disconnected");
+                        break;
+                    }
+                }
+            }
+            default(Duration::from_millis(10)) => {
+                // Just continue - this prevents blocking
+            }
+        }
+    }
+    
+    Ok(bestmove_sent)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -187,43 +239,8 @@ fn handle_command(
 
             *worker_handle = Some(handle);
 
-            // Process messages in a loop until bestmove is received
-            loop {
-                select! {
-                    recv(rx) -> msg => {
-                        match msg {
-                            Ok(WorkerMessage::Info(info)) => {
-                                send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
-                                stdout.flush()?;
-                            }
-                            Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
-                                send_response(UsiResponse::BestMove {
-                                    best_move,
-                                    ponder: ponder_move,
-                                });
-                                stdout.flush()?;
-                                break;  // Exit the loop after bestmove
-                            }
-                            Ok(WorkerMessage::Finished) => {
-                                log::debug!("Worker thread finished");
-                                break;  // Exit the loop when worker finishes
-                            }
-                            Ok(WorkerMessage::Error(err)) => {
-                                send_response(UsiResponse::String(format!("info string Error: {err}")));
-                                stdout.flush()?;
-                                break;  // Exit on error
-                            }
-                            Err(_) => {
-                                log::debug!("Channel disconnected");
-                                break;
-                            }
-                        }
-                    }
-                    default(Duration::from_millis(10)) => {
-                        // Just continue - this prevents blocking
-                    }
-                }
-            }
+            // Process messages until bestmove is received
+            pump_messages(&rx, stdout, true)?;
             
             // Join the worker thread after loop exits
             if let Some(handle) = worker_handle.take() {
@@ -235,41 +252,9 @@ fn handle_command(
             // Signal stop to worker thread
             stop_flag.store(true, Ordering::Release);
 
-            // Wait for bestmove from worker
+            // Wait for messages from worker (don't exit on bestmove)
             if worker_handle.is_some() {
-                loop {
-                    select! {
-                        recv(rx) -> msg => {
-                            match msg {
-                                Ok(WorkerMessage::Info(info)) => {
-                                    send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
-                                    stdout.flush()?;
-                                }
-                                Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
-                                    send_response(UsiResponse::BestMove {
-                                        best_move,
-                                        ponder: ponder_move,
-                                    });
-                                    stdout.flush()?;
-                                }
-                                Ok(WorkerMessage::Finished) => {
-                                    break;
-                                }
-                                Ok(WorkerMessage::Error(err)) => {
-                                    send_response(UsiResponse::String(format!("info string Error: {err}")));
-                                    stdout.flush()?;
-                                    break;
-                                }
-                                Err(_) => {
-                                    break;
-                                }
-                            }
-                        }
-                        default(Duration::from_millis(10)) => {
-                            // Continue waiting
-                        }
-                    }
-                }
+                pump_messages(&rx, stdout, false)?;
 
                 // Join the worker thread
                 if let Some(handle) = worker_handle.take() {
