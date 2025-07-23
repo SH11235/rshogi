@@ -86,6 +86,7 @@ fn benchmark_engine(engine: &Engine, mut pos: Position, name: &str) -> (f64, i32
         depth: 8,
         time: Some(Duration::from_secs(5)), // Longer time for more accurate measurement
         nodes: None,
+        stop_flag: None,
     };
 
     let start = Instant::now();

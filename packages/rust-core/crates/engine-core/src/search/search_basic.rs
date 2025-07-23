@@ -2,6 +2,7 @@
 //!
 //! Implements alpha-beta search with basic enhancements
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,7 @@ use crate::{MoveGen, Position};
 const INFINITY_SCORE: i32 = 30000;
 
 /// Search limits
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SearchLimits {
     /// Maximum search depth
     pub depth: u8,
@@ -21,6 +22,8 @@ pub struct SearchLimits {
     pub time: Option<Duration>,
     /// Maximum nodes to search
     pub nodes: Option<u64>,
+    /// Stop flag for interrupting search
+    pub stop_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Default for SearchLimits {
@@ -29,7 +32,19 @@ impl Default for SearchLimits {
             depth: 6,
             time: None,
             nodes: None,
+            stop_flag: None,
         }
+    }
+}
+
+impl std::fmt::Debug for SearchLimits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchLimits")
+            .field("depth", &self.depth)
+            .field("time", &self.time)
+            .field("nodes", &self.nodes)
+            .field("stop_flag", &self.stop_flag.is_some())
+            .finish()
     }
 }
 
@@ -130,8 +145,8 @@ impl<E: Evaluator> Searcher<E> {
     fn alpha_beta(&mut self, pos: &mut Position, depth: u8, mut alpha: i32, beta: i32) -> i32 {
         self.nodes += 1;
 
-        // Check limits
-        if self.should_stop() {
+        // Check limits (every 1024 nodes for efficiency)
+        if self.nodes & 1023 == 0 && self.should_stop() {
             return 0;
         }
 
@@ -204,6 +219,13 @@ impl<E: Evaluator> Searcher<E> {
 
     /// Check if search should stop
     fn should_stop(&self) -> bool {
+        // Check stop flag
+        if let Some(ref stop_flag) = self.limits.stop_flag {
+            if stop_flag.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+
         // Check node limit
         if let Some(max_nodes) = self.limits.nodes {
             if self.nodes >= max_nodes {
@@ -235,6 +257,7 @@ mod tests {
             depth: 3,
             time: Some(Duration::from_secs(1)),
             nodes: None,
+            stop_flag: None,
         };
 
         let evaluator = Arc::new(MaterialEvaluator);
@@ -252,7 +275,40 @@ mod tests {
     }
 
     #[test]
-    fn test_search_mate_in_one() {
-        // TODO: Create a mate-in-one position and verify the search finds it
+    fn test_search_with_stop_flag() {
+        use std::thread;
+        use std::time::Instant;
+        
+        let mut pos = Position::startpos();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let limits = SearchLimits {
+            depth: 10, // Deep search that would normally take a while
+            time: None,
+            nodes: None,
+            stop_flag: Some(stop_flag.clone()),
+        };
+
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
+        
+        // Set stop flag after a short delay
+        let stop_flag_clone = stop_flag.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            stop_flag_clone.store(true, Ordering::Relaxed);
+        });
+        
+        let start = Instant::now();
+        let result = searcher.search(&mut pos);
+        let elapsed = start.elapsed();
+        
+        // Should find a move (even if search was stopped)
+        assert!(result.best_move.is_some());
+        
+        // Should have stopped quickly (well before searching to depth 10)
+        assert!(elapsed < Duration::from_secs(1));
+        
+        // Should have searched relatively few nodes
+        assert!(result.stats.nodes < 1_000_000);
     }
 }

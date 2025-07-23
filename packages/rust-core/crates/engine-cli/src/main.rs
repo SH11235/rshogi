@@ -314,7 +314,7 @@ fn handle_command(
     while let Ok(msg) = rx.try_recv() {
         match msg {
             WorkerMessage::Info(info) => {
-                send_response(UsiResponse::String(info.to_usi_string()));
+                send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
             }
             WorkerMessage::BestMove {
                 best_move,
