@@ -52,7 +52,11 @@ fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> 
                 send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
                 stdout.flush()?;
             }
-            _ => {} // Ignore other messages
+            WorkerMessage::Error(err) => {
+                send_response(UsiResponse::String(format!("info string Error: {}", err)));
+                stdout.flush()?;
+            }
+            WorkerMessage::Finished => {} // Ignore finished message in drain
         }
     }
     Ok(())

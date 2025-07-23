@@ -32,12 +32,16 @@ pub struct SearchInfo {
 impl SearchInfo {
     /// Convert to USI info string
     pub fn to_usi_string(&self) -> String {
-        let mut parts = vec![
-            format!("depth {}", self.depth),
-            format!("score cp {}", self.score),
-            format!("time {}", self.time),
-            format!("nodes {}", self.nodes),
-        ];
+        let mut parts = vec![];
+        
+        // Only include depth if it's greater than 0
+        if self.depth > 0 {
+            parts.push(format!("depth {}", self.depth));
+        }
+        
+        parts.push(format!("score cp {}", self.score));
+        parts.push(format!("time {}", self.time));
+        parts.push(format!("nodes {}", self.nodes));
 
         if !self.pv.is_empty() {
             parts.push("pv".to_string());
@@ -199,7 +203,7 @@ impl EngineAdapter {
             let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
             let info = SearchInfo {
                 depth: depth as u32,
-                time: elapsed.as_millis() as u64,
+                time: elapsed.as_millis().max(1) as u64,  // Ensure at least 1ms
                 nodes,
                 pv: pv_str,
                 score,
@@ -223,7 +227,7 @@ impl EngineAdapter {
         // Send final info
         let info = SearchInfo {
             depth: search_depth as u32, // Use the saved search depth
-            time: result.stats.elapsed.as_millis() as u64,
+            time: result.stats.elapsed.as_millis().max(1) as u64,  // Ensure at least 1ms
             nodes: result.stats.nodes,
             pv: vec![best_move_str.clone()],
             score: result.score,
