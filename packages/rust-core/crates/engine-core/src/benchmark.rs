@@ -103,6 +103,7 @@ fn benchmark_search() -> (u64, u64, Duration) {
             time: Some(Duration::from_secs(5)),
             nodes: None,
             stop_flag: None,
+            info_callback: None,
         };
 
         let evaluator = Arc::new(MaterialEvaluator);

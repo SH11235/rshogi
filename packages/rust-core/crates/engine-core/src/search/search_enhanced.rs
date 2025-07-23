@@ -1168,9 +1168,9 @@ impl EnhancedSearcher {
             return true;
         }
 
-        // Check external stop flag
+        // Check external stop flag (use Acquire to pair with Release in GUI thread)
         if let Some(ref external_stop) = self.external_stop {
-            if external_stop.load(Ordering::Relaxed) {
+            if external_stop.load(Ordering::Acquire) {
                 return true;
             }
         }
@@ -1205,9 +1205,9 @@ impl EnhancedSearcher {
             return true;
         }
 
-        // Check external stop flag
+        // Check external stop flag (use Acquire to pair with Release in GUI thread)
         if let Some(ref external_stop) = self.external_stop {
-            if external_stop.load(Ordering::Relaxed) {
+            if external_stop.load(Ordering::Acquire) {
                 return true;
             }
         }
@@ -1268,32 +1268,32 @@ mod tests {
     fn test_search_with_external_stop_flag() {
         use std::thread;
         use std::time::Instant;
-        
+
         let evaluator = Arc::new(MaterialEvaluator);
         let mut searcher = EnhancedSearcher::new(16, evaluator);
         let mut pos = Position::startpos();
-        
+
         // Set up external stop flag
         let stop_flag = Arc::new(AtomicBool::new(false));
         searcher.set_stop_flag(stop_flag.clone());
-        
+
         // Set stop flag after a short delay (give time to find at least one move)
         let stop_flag_clone = stop_flag.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(50)); // Slightly longer to ensure depth 1 completes
-            stop_flag_clone.store(true, Ordering::Relaxed);
+            stop_flag_clone.store(true, Ordering::Release);
         });
-        
+
         let start = Instant::now();
         let (best_move, _score) = searcher.search(&mut pos, 10, None, None); // Deep search
         let elapsed = start.elapsed();
-        
+
         // Should find a move (even if search was stopped)
         assert!(best_move.is_some());
-        
+
         // Should have stopped quickly (well before searching to depth 10)
         assert!(elapsed < Duration::from_secs(1));
-        
+
         // Should have searched relatively few nodes
         assert!(searcher.nodes.load(Ordering::Relaxed) < 1_000_000);
     }
