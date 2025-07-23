@@ -162,7 +162,8 @@ impl EngineAdapter {
         let mut position = self.position.clone().ok_or_else(|| anyhow!("No position set"))?;
 
         // Convert GoParams to BasicSearchLimits
-        let limits = convert_go_params(&params)?;
+        let mut limits = convert_go_params(&params)?;
+        limits.stop_flag = Some(stop_flag.clone());
         let search_depth = limits.depth; // Save depth before move
 
         log::debug!(
@@ -172,10 +173,9 @@ impl EngineAdapter {
             limits.nodes
         );
 
-        // TODO: Hook up info callback and stop flag properly
+        // TODO: Hook up info callback properly
         // For now, we'll do a simple search without real-time info
         let _info_callback = info_callback;
-        let _stop_flag = stop_flag;
 
         // Run search
         log::debug!("Starting engine search...");

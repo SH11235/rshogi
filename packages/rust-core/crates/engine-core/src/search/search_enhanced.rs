@@ -332,6 +332,8 @@ pub struct EnhancedSearcher {
     nodes: AtomicU64,
     /// Stop flag
     stop: AtomicBool,
+    /// External stop flag (from USI)
+    external_stop: Option<Arc<AtomicBool>>,
     /// Time limit (deprecated - use time_manager instead)
     time_limit: Option<Instant>,
     /// Node limit (deprecated - use time_manager instead)
@@ -358,6 +360,7 @@ impl EnhancedSearcher {
             params: SearchParams::default(),
             nodes: AtomicU64::new(0),
             stop: AtomicBool::new(false),
+            external_stop: None,
             time_limit: None,
             node_limit: None,
             start_time: Instant::now(),
@@ -419,6 +422,11 @@ impl EnhancedSearcher {
     /// Get current principal variation
     pub fn principal_variation(&self) -> &[Move] {
         self.pv.get_pv()
+    }
+
+    /// Set external stop flag
+    pub fn set_stop_flag(&mut self, stop_flag: Arc<AtomicBool>) {
+        self.external_stop = Some(stop_flag);
     }
 
     /// Search position with new SearchLimits interface
@@ -1160,6 +1168,13 @@ impl EnhancedSearcher {
             return true;
         }
 
+        // Check external stop flag
+        if let Some(ref external_stop) = self.external_stop {
+            if external_stop.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+
         // Use TimeManager if available
         if let Some(ref tm) = self.time_manager {
             let nodes = self.nodes.load(Ordering::Relaxed);
@@ -1188,6 +1203,13 @@ impl EnhancedSearcher {
     fn should_stop_deterministic(&self) -> bool {
         if self.stop.load(Ordering::Relaxed) {
             return true;
+        }
+
+        // Check external stop flag
+        if let Some(ref external_stop) = self.external_stop {
+            if external_stop.load(Ordering::Relaxed) {
+                return true;
+            }
         }
 
         // Skip time check completely for deterministic behavior
@@ -1240,6 +1262,40 @@ mod tests {
 
         // Test margins
         assert!((params.futility_margin)(1) > 0);
+    }
+
+    #[test]
+    fn test_search_with_external_stop_flag() {
+        use std::thread;
+        use std::time::Instant;
+        
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+        
+        // Set up external stop flag
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        searcher.set_stop_flag(stop_flag.clone());
+        
+        // Set stop flag after a short delay (give time to find at least one move)
+        let stop_flag_clone = stop_flag.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50)); // Slightly longer to ensure depth 1 completes
+            stop_flag_clone.store(true, Ordering::Relaxed);
+        });
+        
+        let start = Instant::now();
+        let (best_move, _score) = searcher.search(&mut pos, 10, None, None); // Deep search
+        let elapsed = start.elapsed();
+        
+        // Should find a move (even if search was stopped)
+        assert!(best_move.is_some());
+        
+        // Should have stopped quickly (well before searching to depth 10)
+        assert!(elapsed < Duration::from_secs(1));
+        
+        // Should have searched relatively few nodes
+        assert!(searcher.nodes.load(Ordering::Relaxed) < 1_000_000);
     }
 
     #[test]
