@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use engine_core::movegen::MoveGen;
 use engine_core::shogi::{Move, MoveList, Position};
 use engine_core::usi::{move_to_usi, parse_sfen, parse_usi_move, position_to_sfen};
+use log::debug;
 
 /// Convert a list of USI move strings to Move objects
 pub fn parse_moves(move_strings: &[String]) -> Result<Vec<Move>> {
@@ -52,7 +53,7 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
 
         if !is_legal {
             // Additional debugging
-            eprintln!(
+            debug!(
                 "Parsed move details: from={:?}, to={:?}, drop={}, promote={}",
                 mv.from(),
                 mv.to(),
@@ -66,7 +67,7 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
                 if legal_mv.from() == mv.from() {
                     found_from_square = true;
                     if legal_mv.to() == mv.to() {
-                        eprintln!(
+                        debug!(
                             "Found similar legal move: from={:?}, to={:?}, drop={}, promote={}",
                             legal_mv.from(),
                             legal_mv.to(),
@@ -77,11 +78,11 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
                 }
             }
             if !found_from_square {
-                eprintln!("No legal moves found from square {:?}", mv.from());
+                debug!("No legal moves found from square {:?}", mv.from());
                 // Show first few moves from nearby squares
-                eprintln!("First 10 legal moves:");
+                debug!("First 10 legal moves:");
                 for (i, &legal_mv) in legal_moves.as_slice().iter().take(10).enumerate() {
-                    eprintln!("  {}: from={:?}, to={:?}", i, legal_mv.from(), legal_mv.to());
+                    debug!("  {}: from={:?}, to={:?}", i, legal_mv.from(), legal_mv.to());
                 }
             }
             return Err(anyhow!(

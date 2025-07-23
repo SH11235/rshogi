@@ -4,6 +4,7 @@
 
 use super::features::{FeatureTransformer, FE_END};
 use super::network::Network;
+use log::debug;
 use std::error::Error;
 use std::fs::File;
 use std::io::Read;
@@ -77,7 +78,7 @@ impl WeightReader {
 
         // Debug output for header information
         #[cfg(debug_assertions)]
-        eprintln!(
+        debug!(
             "NNUE Header: magic={:?}, version={}, size={} bytes",
             std::str::from_utf8(&header.magic).unwrap_or("???"),
             header.version,

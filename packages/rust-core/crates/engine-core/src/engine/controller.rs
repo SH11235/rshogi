@@ -2,6 +2,7 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
+use log::error;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -175,7 +176,7 @@ impl Evaluator for NNUEEvaluatorProxy {
         let guard = match self.evaluator.lock() {
             Ok(g) => g,
             Err(_) => {
-                eprintln!("Failed to acquire NNUE evaluator lock");
+                error!("Failed to acquire NNUE evaluator lock");
                 return 0;
             }
         };
@@ -183,7 +184,7 @@ impl Evaluator for NNUEEvaluatorProxy {
         match guard.as_ref() {
             Some(evaluator) => evaluator.evaluate(pos),
             None => {
-                eprintln!("NNUE evaluator not initialized");
+                error!("NNUE evaluator not initialized");
                 0
             }
         }

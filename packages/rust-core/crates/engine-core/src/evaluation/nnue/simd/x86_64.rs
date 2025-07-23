@@ -5,6 +5,9 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(test)]
+use log::debug;
+
 /// Apply an affine transformation **(AVX2)** to a tile of `input`.
 ///
 /// * `input`  : 1-D vector of length **`input_dim`** (i8)
@@ -790,7 +793,7 @@ mod tests {
     #[test]
     fn test_avx2_affine_transform() {
         if !is_x86_feature_detected!("avx2") {
-            eprintln!("AVX2 not available, skipping test");
+            debug!("AVX2 not available, skipping test");
             return;
         }
 
@@ -812,7 +815,7 @@ mod tests {
     #[test]
     fn test_sse41_affine_transform() {
         if !is_x86_feature_detected!("sse4.1") {
-            eprintln!("SSE4.1 not available, skipping test");
+            debug!("SSE4.1 not available, skipping test");
             return;
         }
 
@@ -834,7 +837,7 @@ mod tests {
     #[test]
     fn test_avx2_clipped_relu() {
         if !is_x86_feature_detected!("avx2") {
-            eprintln!("AVX2 not available, skipping test");
+            debug!("AVX2 not available, skipping test");
             return;
         }
 
@@ -851,7 +854,7 @@ mod tests {
     #[test]
     fn test_sse41_clipped_relu() {
         if !is_x86_feature_detected!("sse4.1") {
-            eprintln!("SSE4.1 not available, skipping test");
+            debug!("SSE4.1 not available, skipping test");
             return;
         }
 
@@ -868,7 +871,7 @@ mod tests {
     #[test]
     fn test_avx2_update_accumulator() {
         if !is_x86_feature_detected!("avx2") {
-            eprintln!("AVX2 not available, skipping test");
+            debug!("AVX2 not available, skipping test");
             return;
         }
 
@@ -900,7 +903,7 @@ mod tests {
     #[test]
     fn test_sse41_update_accumulator() {
         if !is_x86_feature_detected!("sse4.1") {
-            eprintln!("SSE4.1 not available, skipping test");
+            debug!("SSE4.1 not available, skipping test");
             return;
         }
 
@@ -922,7 +925,7 @@ mod tests {
     #[test]
     fn test_transform_features_alignment() {
         if !is_x86_feature_detected!("avx2") {
-            eprintln!("AVX2 not available, skipping test");
+            debug!("AVX2 not available, skipping test");
             return;
         }
 
@@ -951,7 +954,7 @@ mod tests {
     #[test]
     fn test_transform_features_sse41() {
         if !is_x86_feature_detected!("sse4.1") {
-            eprintln!("SSE4.1 not available, skipping test");
+            debug!("SSE4.1 not available, skipping test");
             return;
         }
 
@@ -1025,7 +1028,7 @@ mod tests {
     fn boundary_conditions_avx2() {
         // ── 1. AVX2 が無い環境ではスキップ ──────────────────────────────
         if !is_x86_feature_detected!("avx2") {
-            eprintln!("AVX2 not available, skipping test");
+            debug!("AVX2 not available, skipping test");
             return;
         }
 
