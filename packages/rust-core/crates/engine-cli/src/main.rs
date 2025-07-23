@@ -224,6 +224,11 @@ fn handle_command(
                     }
                 }
             }
+            
+            // Join the worker thread after loop exits
+            if let Some(handle) = worker_handle.take() {
+                let _ = handle.join();
+            }
         }
 
         UsiCommand::Stop => {
