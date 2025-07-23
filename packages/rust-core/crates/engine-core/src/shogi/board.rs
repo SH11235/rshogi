@@ -750,11 +750,9 @@ impl Position {
         pos
     }
 
-    /// Create position from SFEN string (simplified for testing)
-    pub fn from_sfen(_sfen: &str) -> Result<Position, String> {
-        // For now, return startpos for any SFEN
-        // Full SFEN parsing would be implemented here
-        Ok(Position::startpos())
+    /// Create position from SFEN string
+    pub fn from_sfen(sfen: &str) -> Result<Position, String> {
+        crate::usi::parse_sfen(sfen).map_err(|e| e.to_string())
     }
 
     /// Compute Zobrist hash

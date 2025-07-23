@@ -84,15 +84,15 @@ impl fmt::Display for UsiResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             UsiResponse::Id { name, author } => {
-                writeln!(f, "id name {}", name)?;
-                write!(f, "id author {}", author)
+                writeln!(f, "id name {name}")?;
+                write!(f, "id author {author}")
             }
             UsiResponse::UsiOk => write!(f, "usiok"),
             UsiResponse::ReadyOk => write!(f, "readyok"),
             UsiResponse::BestMove { best_move, ponder } => {
-                write!(f, "bestmove {}", best_move)?;
+                write!(f, "bestmove {best_move}")?;
                 if let Some(ponder_move) = ponder {
-                    write!(f, " ponder {}", ponder_move)?;
+                    write!(f, " ponder {ponder_move}")?;
                 }
                 Ok(())
             }
@@ -102,11 +102,11 @@ impl fmt::Display for UsiResponse {
                     // Skip empty info output to avoid trailing space
                     Ok(())
                 } else {
-                    write!(f, "info {}", info_str)
+                    write!(f, "info {info_str}")
                 }
             }
-            UsiResponse::Option(opt) => write!(f, "{}", opt),
-            UsiResponse::String(msg) => write!(f, "info string {}", msg),
+            UsiResponse::Option(opt) => write!(f, "{opt}"),
+            UsiResponse::String(msg) => write!(f, "info string {msg}"),
         }
     }
 }
@@ -116,46 +116,46 @@ impl fmt::Display for SearchInfo {
         let mut parts = Vec::new();
 
         if let Some(depth) = self.depth {
-            parts.push(format!("depth {}", depth));
+            parts.push(format!("depth {depth}"));
         }
 
         if let Some(seldepth) = self.seldepth {
-            parts.push(format!("seldepth {}", seldepth));
+            parts.push(format!("seldepth {seldepth}"));
         }
 
         if let Some(time) = self.time {
-            parts.push(format!("time {}", time));
+            parts.push(format!("time {time}"));
         }
 
         if let Some(nodes) = self.nodes {
-            parts.push(format!("nodes {}", nodes));
+            parts.push(format!("nodes {nodes}"));
         }
 
         if let Some(score) = self.score {
             match score {
-                Score::Cp(cp) => parts.push(format!("score cp {}", cp)),
-                Score::Mate(mate) => parts.push(format!("score mate {}", mate)),
+                Score::Cp(cp) => parts.push(format!("score cp {cp}")),
+                Score::Mate(mate) => parts.push(format!("score mate {mate}")),
             }
         }
 
         if let Some(multipv) = self.multipv {
-            parts.push(format!("multipv {}", multipv));
+            parts.push(format!("multipv {multipv}"));
         }
 
         if let Some(currmove) = &self.currmove {
-            parts.push(format!("currmove {}", currmove));
+            parts.push(format!("currmove {currmove}"));
         }
 
         if let Some(nps) = self.nps {
-            parts.push(format!("nps {}", nps));
+            parts.push(format!("nps {nps}"));
         }
 
         if let Some(hashfull) = self.hashfull {
-            parts.push(format!("hashfull {}", hashfull));
+            parts.push(format!("hashfull {hashfull}"));
         }
 
         if let Some(tbhits) = self.tbhits {
-            parts.push(format!("tbhits {}", tbhits));
+            parts.push(format!("tbhits {tbhits}"));
         }
 
         if !self.pv.is_empty() {
@@ -164,7 +164,7 @@ impl fmt::Display for SearchInfo {
         }
 
         if let Some(string) = &self.string {
-            parts.push(format!("string {}", string));
+            parts.push(format!("string {string}"));
         }
 
         write!(f, "{}", parts.join(" "))
@@ -173,7 +173,7 @@ impl fmt::Display for SearchInfo {
 
 /// Helper to send USI response to stdout
 pub fn send_response(response: UsiResponse) {
-    println!("{}", response);
+    println!("{response}");
 }
 
 /// Helper to send info string message

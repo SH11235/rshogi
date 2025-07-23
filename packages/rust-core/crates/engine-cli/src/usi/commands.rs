@@ -174,8 +174,7 @@ impl EngineOption {
                 )
             }
             OptionType::Combo { default, values } => {
-                let vars =
-                    values.iter().map(|v| format!("var {}", v)).collect::<Vec<_>>().join(" ");
+                let vars = values.iter().map(|v| format!("var {v}")).collect::<Vec<_>>().join(" ");
                 format!("option name {} type combo default {} {}", self.name, default, vars)
             }
             OptionType::Button => {
