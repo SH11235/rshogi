@@ -6,6 +6,7 @@ use crate::{
     shogi::{piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES},
     Color, Piece, PieceType, Position, Square,
 };
+use log::{error, warn};
 
 /// Maximum pieces in hand for each type (indexed as in hands array)
 const MAX_HAND_PIECES: [u8; 7] = [
@@ -41,12 +42,12 @@ impl BonaPiece {
             (PieceType::Rook, true) => 972,   // Dragon
             (PieceType::King, _) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[NNUE] Warning: Attempted to create BonaPiece for King");
+                warn!("[NNUE] Attempted to create BonaPiece for King");
                 return None;
             }
             (PieceType::Gold, true) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[NNUE] Warning: Attempted to create BonaPiece for promoted Gold");
+                warn!("[NNUE] Attempted to create BonaPiece for promoted Gold");
                 return None;
             }
         };
@@ -165,10 +166,7 @@ impl ActiveFeatures {
     fn push(&mut self, feature: usize) {
         if self.count >= MAX_ACTIVE_FEATURES {
             #[cfg(debug_assertions)]
-            eprintln!(
-                "[NNUE] Warning: Active features overflow, count={}, skipping feature",
-                self.count
-            );
+            warn!("[NNUE] Active features overflow, count={}, skipping feature", self.count);
             return;
         }
         self.features[self.count] = feature;
@@ -239,7 +237,7 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
                     }
                     Err(_e) => {
                         #[cfg(debug_assertions)]
-                        eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
+                        error!("[NNUE] Error creating BonaPiece from hand: {_e}");
                     }
                 }
             }
