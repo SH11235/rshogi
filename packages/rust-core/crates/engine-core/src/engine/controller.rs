@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    evaluate::{Evaluator, MaterialEvaluator},
-    nnue::NNUEEvaluatorWrapper,
+    evaluation::evaluate::{Evaluator, MaterialEvaluator},
+    evaluation::nnue::NNUEEvaluatorWrapper,
     search::search_basic::{SearchLimits, SearchResult, Searcher},
     Position,
 };
