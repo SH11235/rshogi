@@ -6,7 +6,7 @@ use log::warn;
 
 /// Parse USI command from input line
 pub fn parse_usi_command(line: &str) -> Result<UsiCommand> {
-    let parts: Vec<&str> = line.trim().split_whitespace().collect();
+    let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.is_empty() {
         return Err(anyhow!("Empty command"));
     }

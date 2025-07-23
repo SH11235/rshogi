@@ -41,6 +41,18 @@ pub const HAND_PIECE_TYPES: [PieceType; 7] = [
     PieceType::Pawn,   // index 6
 ];
 
+/// Maximum number of each piece type that can be in hand
+/// Indexed by hand array index (same order as HAND_PIECE_TYPES)
+pub const MAX_HAND_PIECES: [u8; 7] = [
+    2,  // Rook: max 2
+    2,  // Bishop: max 2
+    4,  // Gold: max 4
+    4,  // Silver: max 4
+    4,  // Knight: max 4
+    4,  // Lance: max 4
+    18, // Pawn: max 18
+];
+
 /// Convert PieceType to its standard index (0-7)
 #[inline]
 pub const fn piece_type_to_index(pt: PieceType) -> usize {
