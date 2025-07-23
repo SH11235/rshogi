@@ -13,8 +13,10 @@ use crate::{MoveGen, Position};
 /// Infinity score for search bounds
 const INFINITY_SCORE: i32 = 30000;
 
+/// Info callback type
+pub type InfoCallback = Box<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send>;
+
 /// Search limits
-#[derive(Clone)]
 pub struct SearchLimits {
     /// Maximum search depth
     pub depth: u8,
@@ -24,6 +26,8 @@ pub struct SearchLimits {
     pub nodes: Option<u64>,
     /// Stop flag for interrupting search
     pub stop_flag: Option<Arc<AtomicBool>>,
+    /// Info callback for search progress
+    pub info_callback: Option<InfoCallback>,
 }
 
 impl Default for SearchLimits {
@@ -33,6 +37,7 @@ impl Default for SearchLimits {
             time: None,
             nodes: None,
             stop_flag: None,
+            info_callback: None,
         }
     }
 }
@@ -44,6 +49,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("time", &self.time)
             .field("nodes", &self.nodes)
             .field("stop_flag", &self.stop_flag.is_some())
+            .field("info_callback", &self.info_callback.is_some())
             .finish()
     }
 }
@@ -105,14 +111,31 @@ impl<E: Evaluator> Searcher<E> {
         let mut best_score = -INFINITY_SCORE;
 
         // If no move is found during iterative deepening, we need a fallback
-        // Generate all legal moves first as a fallback
+        // Generate all legal moves and evaluate them at depth 0 for better quality
         let mut gen = MoveGen::new();
         let mut legal_moves = MoveList::new();
         gen.generate_all(pos, &mut legal_moves);
 
-        // If there are legal moves, use the first one as a fallback
+        // Evaluate all moves at depth 0 (quiescence search) to select the best fallback
         if !legal_moves.is_empty() {
-            best_move = Some(legal_moves[0]);
+            let mut fallback_score = -INFINITY_SCORE;
+            for &mv in legal_moves.as_slice() {
+                // Try the move
+                let undo_info = pos.do_move(mv);
+
+                // Evaluate position after move (negated for opponent's perspective)
+                let score = -self.quiesce(pos, -INFINITY_SCORE, INFINITY_SCORE, 0);
+
+                // Undo move
+                pos.undo_move(mv, undo_info);
+
+                // Update best fallback move
+                if score > fallback_score {
+                    fallback_score = score;
+                    best_move = Some(mv);
+                    best_score = score;
+                }
+            }
         }
 
         // Iterative deepening
@@ -127,6 +150,12 @@ impl<E: Evaluator> Searcher<E> {
             best_score = score;
             if !self.pv[0].is_empty() {
                 best_move = Some(self.pv[0][0]);
+            }
+
+            // Call info callback if provided
+            if let Some(ref callback) = self.limits.info_callback {
+                let elapsed = self.start_time.elapsed();
+                callback(depth, score, self.nodes, elapsed, &self.pv[0]);
             }
         }
 
@@ -217,11 +246,68 @@ impl<E: Evaluator> Searcher<E> {
         best_score
     }
 
+    /// Quiescence search - evaluates captures to avoid horizon effect
+    fn quiesce(&mut self, pos: &mut Position, mut alpha: i32, beta: i32, ply: u8) -> i32 {
+        self.nodes += 1;
+
+        // Check search limits
+        if self.should_stop() {
+            return 0;
+        }
+
+        // Stand pat - evaluate current position
+        let stand_pat = self.evaluator.evaluate(pos);
+
+        // If we're already better than beta, we can return
+        if stand_pat >= beta {
+            return stand_pat;
+        }
+
+        // Update alpha if stand pat is better
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+
+        // Depth limit for quiescence search
+        if ply >= 4 {
+            return stand_pat;
+        }
+
+        // Generate only capture moves
+        let mut gen = MoveGen::new();
+        let mut moves = MoveList::new();
+        gen.generate_captures(pos, &mut moves);
+
+        // Search captures
+        for &mv in moves.as_slice() {
+            // Make move
+            let undo_info = pos.do_move(mv);
+
+            // Recursive quiescence search
+            let score = -self.quiesce(pos, -beta, -alpha, ply + 1);
+
+            // Undo move
+            pos.undo_move(mv, undo_info);
+
+            // Update best score
+            if score > alpha {
+                alpha = score;
+
+                // Beta cutoff
+                if score >= beta {
+                    break;
+                }
+            }
+        }
+
+        alpha
+    }
+
     /// Check if search should stop
     fn should_stop(&self) -> bool {
-        // Check stop flag
+        // Check stop flag (use Acquire to pair with Release in GUI thread)
         if let Some(ref stop_flag) = self.limits.stop_flag {
-            if stop_flag.load(Ordering::Relaxed) {
+            if stop_flag.load(Ordering::Acquire) {
                 return true;
             }
         }
@@ -258,6 +344,7 @@ mod tests {
             time: Some(Duration::from_secs(1)),
             nodes: None,
             stop_flag: None,
+            info_callback: None,
         };
 
         let evaluator = Arc::new(MaterialEvaluator);
@@ -278,7 +365,7 @@ mod tests {
     fn test_search_with_stop_flag() {
         use std::thread;
         use std::time::Instant;
-        
+
         let mut pos = Position::startpos();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let limits = SearchLimits {
@@ -286,29 +373,66 @@ mod tests {
             time: None,
             nodes: None,
             stop_flag: Some(stop_flag.clone()),
+            info_callback: None,
         };
 
         let evaluator = Arc::new(MaterialEvaluator);
         let mut searcher = Searcher::new(limits, evaluator);
-        
+
         // Set stop flag after a short delay
         let stop_flag_clone = stop_flag.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(10));
-            stop_flag_clone.store(true, Ordering::Relaxed);
+            stop_flag_clone.store(true, Ordering::Release);
         });
-        
+
         let start = Instant::now();
         let result = searcher.search(&mut pos);
         let elapsed = start.elapsed();
-        
+
         // Should find a move (even if search was stopped)
         assert!(result.best_move.is_some());
-        
+
         // Should have stopped quickly (well before searching to depth 10)
         assert!(elapsed < Duration::from_secs(1));
-        
+
         // Should have searched relatively few nodes
         assert!(result.stats.nodes < 1_000_000);
+    }
+
+    #[test]
+    fn test_fallback_move_quality() {
+        let mut pos = Position::startpos();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let limits = SearchLimits {
+            depth: 5,
+            time: None,
+            nodes: None,
+            stop_flag: Some(stop_flag.clone()),
+            info_callback: None,
+        };
+
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
+
+        // Set stop flag immediately to force fallback
+        stop_flag.store(true, Ordering::Release);
+
+        let result = searcher.search(&mut pos);
+
+        // Should find a move even when stopped immediately
+        assert!(result.best_move.is_some());
+
+        // The fallback move should be reasonable (not just the first legal move)
+        // In the starting position, good moves include advancing pawns or developing pieces
+        let _best_move = result.best_move.unwrap();
+
+        // Score should be based on depth-0 evaluation, not just -INFINITY
+        assert!(result.score > -INFINITY_SCORE);
+        assert!(result.score < INFINITY_SCORE);
+
+        // Should have evaluated all legal moves (20 in starting position)
+        // Plus captures in quiescence search
+        assert!(result.stats.nodes >= 20);
     }
 }
