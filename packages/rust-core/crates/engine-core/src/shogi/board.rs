@@ -4,6 +4,7 @@
 
 use crate::shogi::ATTACK_TABLES;
 use crate::zobrist::ZOBRIST;
+use log::warn;
 
 use super::moves::Move;
 use super::piece_constants::{
@@ -549,8 +550,8 @@ impl Board {
         #[cfg(debug_assertions)]
         {
             if king_sq.is_none() {
-                eprintln!("Warning: No king found for {color:?}");
-                eprintln!("Board state: all_bb has {} pieces", self.all_bb.count_ones());
+                warn!("No king found for {color:?}");
+                warn!("Board state: all_bb has {} pieces", self.all_bb.count_ones());
             }
             // Verify there's only one king
             if !bb.is_empty() {
