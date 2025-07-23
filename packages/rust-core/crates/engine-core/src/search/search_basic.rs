@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::evaluate::Evaluator;
+use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::{Move, MoveList};
 use crate::{MoveGen, Position};
 

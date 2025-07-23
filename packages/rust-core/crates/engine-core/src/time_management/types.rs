@@ -76,7 +76,11 @@ pub struct TimeInfo {
     pub soft_limit_ms: u64,
     pub hard_limit_ms: u64,
     pub nodes_searched: u64,
-    pub time_pressure: f32, // 0.0 = plenty of time, 1.0 = critical
+    /// Time pressure indicator: 0.0 = plenty of time, 1.0 = critical
+    ///
+    /// During ponder mode or infinite search (hard_limit == u64::MAX),
+    /// this will always return 0.0 as there is no time pressure.
+    pub time_pressure: f32,
     pub byoyomi_info: Option<ByoyomiInfo>,
 }
 

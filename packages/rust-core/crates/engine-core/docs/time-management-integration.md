@@ -357,6 +357,154 @@ After migration, test these scenarios:
 
 See the test examples earlier in this guide.
 
+## Ponder Mode Integration
+
+### Overview
+
+Ponder mode allows the engine to think on the opponent's time by predicting their move. When the predicted move is played (ponder hit), the search continues with proper time management.
+
+### Creating a Ponder Search
+
+Use the `new_ponder` method to create a TimeManager for pondering:
+
+```rust
+use engine_core::time_management::*;
+
+// Prepare the actual time control for when ponder hit occurs
+let actual_limits = SearchLimits {
+    time_control: TimeControl::Fischer {
+        white_ms: 60000,
+        black_ms: 50000,
+        increment_ms: 1000,
+    },
+    ..Default::default()
+};
+
+// Create TimeManager in ponder mode
+let tm = TimeManager::new_ponder(
+    &actual_limits,          // Pending time control
+    Color::White,            // Side to move
+    20,                      // Current ply
+    GamePhase::MiddleGame    // Game phase
+);
+
+// Start search - will run indefinitely until ponder hit or stop
+engine.search_with_time_manager(tm);
+```
+
+### Handling Ponder Hit
+
+When the opponent plays the expected move:
+
+```rust
+// Time already spent pondering (in milliseconds)
+let ponder_time_ms = tm.elapsed_ms();
+
+// Option 1: Use the pending time control
+tm.ponder_hit(None, ponder_time_ms);
+
+// Option 2: Provide updated time information
+let updated_limits = SearchLimits {
+    time_control: TimeControl::Fischer {
+        white_ms: 58000,  // Updated after opponent's move
+        black_ms: 48000,
+        increment_ms: 1000,
+    },
+    moves_to_go: Some(30),  // Additional info
+    ..Default::default()
+};
+tm.ponder_hit(Some(&updated_limits), ponder_time_ms);
+```
+
+### USI Protocol Example
+
+```
+// Start position
+position startpos moves 7g7f 3c3d
+
+// Start pondering (predict opponent plays 8c8d)
+position startpos moves 7g7f 3c3d 8c8d
+go ponder
+
+// If opponent plays the expected move
+ponderhit
+
+// If opponent plays a different move
+stop
+position startpos moves 7g7f 3c3d 2b8h+
+go btime 58000 wtime 48000 byoyomi 10000
+```
+
+### Implementation Example
+
+```rust
+impl UsiEngine {
+    fn handle_go(&mut self, params: &GoParams) {
+        if params.ponder {
+            // Create ponder search
+            let limits = self.create_search_limits_from_params(params);
+            let tm = TimeManager::new_ponder(
+                &limits,
+                self.position.side_to_move(),
+                self.position.ply(),
+                self.estimate_game_phase()
+            );
+            
+            self.current_search = Some(SearchHandle {
+                time_manager: tm,
+                is_ponder: true,
+            });
+            
+            // Start search in background
+            self.start_search();
+        } else {
+            // Normal search
+            // ...
+        }
+    }
+    
+    fn handle_ponderhit(&mut self) {
+        if let Some(ref search) = self.current_search {
+            if search.is_ponder {
+                let elapsed = search.time_manager.elapsed_ms();
+                
+                // Convert ponder to normal search
+                search.time_manager.ponder_hit(None, elapsed);
+                search.is_ponder = false;
+                
+                // Search continues with proper time management
+            }
+        }
+    }
+}
+```
+
+### Important Notes
+
+1. **Force Stop**: Even during ponder, `force_stop()` will immediately halt the search
+2. **Time Tracking**: The start time is preserved from ponder start, so `elapsed_ms()` includes all pondering time
+3. **Minimum Time**: After ponder hit, at least 100ms soft / 200ms hard limits are guaranteed
+4. **No Recursive Ponder**: Only one level of pondering is supported
+
+### Testing Ponder Mode
+
+```rust
+#[test]
+fn test_ponder_behavior() {
+    let limits = create_test_limits();
+    let tm = TimeManager::new_ponder(&limits, Color::White, 0, GamePhase::Opening);
+    
+    // During ponder
+    assert!(tm.is_pondering());
+    assert!(!tm.should_stop(1000000));  // Won't stop on time
+    
+    // After ponder hit
+    tm.ponder_hit(None, 5000);
+    assert!(!tm.is_pondering());
+    // Now normal time management applies
+}
+```
+
 ## Summary
 
 1. Always track current remaining main time for Byoyomi
@@ -364,3 +512,5 @@ See the test examples earlier in this guide.
 3. Test transition scenarios thoroughly
 4. Watch for debug assertions during development
 5. Migrate to new API for better maintainability
+6. Use `new_ponder` for ponder mode searches
+7. Call `ponder_hit` when predicted move is played
