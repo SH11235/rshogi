@@ -87,6 +87,15 @@ impl EngineAdapter {
             EngineOption::spin("USI_Hash", 16, 1, 1024),
             EngineOption::spin("Threads", 1, 1, 256),
             EngineOption::check("USI_Ponder", true),
+            EngineOption::combo(
+                "EngineType",
+                "Material".to_string(),
+                vec![
+                    "Material".to_string(),
+                    "Nnue".to_string(),
+                    "Enhanced".to_string(),
+                ],
+            ),
         ];
     }
 
@@ -132,6 +141,17 @@ impl EngineAdapter {
                     self.ponder = val.to_lowercase() == "true";
                 }
             }
+            "EngineType" => {
+                if let Some(val) = value {
+                    let engine_type = match val {
+                        "Material" => EngineType::Material,
+                        "Nnue" => EngineType::Nnue,
+                        "Enhanced" => EngineType::Enhanced,
+                        _ => return Err(anyhow!("Invalid engine type: {}", val)),
+                    };
+                    self.engine.set_engine_type(engine_type);
+                }
+            }
             _ => {
                 return Err(anyhow!("Unknown option: {}", name));
             }
@@ -155,15 +175,14 @@ impl EngineAdapter {
         &mut self,
         params: GoParams,
         stop_flag: Arc<AtomicBool>,
-        info_callback: Box<dyn Fn(SearchInfo) + Send>,
+        info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<(String, Option<String>)> {
         log::debug!("Starting search with params: {params:?}");
 
         let mut position = self.position.clone().ok_or_else(|| anyhow!("No position set"))?;
 
         // Convert GoParams to BasicSearchLimits
-        let mut limits = convert_go_params(&params)?;
-        limits.stop_flag = Some(stop_flag.clone());
+        let mut limits = convert_go_params(&params, Some(stop_flag.clone()))?;
         let search_depth = limits.depth; // Save depth before move
 
         log::debug!(
@@ -173,9 +192,20 @@ impl EngineAdapter {
             limits.nodes
         );
 
-        // TODO: Hook up info callback properly
-        // For now, we'll do a simple search without real-time info
-        let _info_callback = info_callback;
+        // Set up info callback using Arc to share between closures
+        let info_callback_arc = Arc::new(info_callback);
+        let info_callback_clone = info_callback_arc.clone();
+        limits.info_callback = Some(Box::new(move |depth, score, nodes, elapsed, pv| {
+            let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
+            let info = SearchInfo {
+                depth: depth as u32,
+                time: elapsed.as_millis() as u64,
+                nodes,
+                pv: pv_str,
+                score,
+            };
+            info_callback_clone(info);
+        }));
 
         // Run search
         log::debug!("Starting engine search...");
@@ -198,7 +228,7 @@ impl EngineAdapter {
             pv: vec![best_move_str.clone()],
             score: result.score,
         };
-        _info_callback(info);
+        info_callback_arc(info);
 
         // No ponder move for now
         Ok((best_move_str, None))
@@ -206,8 +236,12 @@ impl EngineAdapter {
 }
 
 /// Convert USI go parameters to basic search limits
-fn convert_go_params(params: &GoParams) -> Result<BasicSearchLimits> {
+fn convert_go_params(
+    params: &GoParams,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<BasicSearchLimits> {
     let mut limits = BasicSearchLimits::default();
+    limits.stop_flag = stop_flag;
 
     // Set depth limit
     if let Some(depth) = params.depth {
