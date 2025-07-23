@@ -9,7 +9,7 @@
 
 use super::history::History;
 use super::tt::{NodeType, TranspositionTable};
-use crate::evaluate::Evaluator;
+use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::Move;
 use crate::time_management::{SearchLimits, TimeManager};
 use crate::zobrist::ZOBRIST;

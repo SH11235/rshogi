@@ -3,7 +3,7 @@
 use super::TimeParameters;
 
 /// Time control settings for a game
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TimeControl {
     /// Fischer time control: base time + increment per move
     Fischer {
@@ -58,6 +58,17 @@ impl Default for SearchLimits {
     }
 }
 
+/// Time state for move completion
+#[derive(Debug, Clone, Copy)]
+pub enum TimeState {
+    /// Still in main time with remaining milliseconds
+    Main { main_left_ms: u64 },
+    /// In byoyomi phase with remaining main time (0 for pure byoyomi)
+    Byoyomi { main_left_ms: u64 },
+    /// Non-byoyomi time controls (Fischer, FixedTime, etc.)
+    NonByoyomi,
+}
+
 /// Time information snapshot (read-only)
 #[derive(Debug, Clone, Copy)]
 pub struct TimeInfo {
@@ -65,7 +76,11 @@ pub struct TimeInfo {
     pub soft_limit_ms: u64,
     pub hard_limit_ms: u64,
     pub nodes_searched: u64,
-    pub time_pressure: f32, // 0.0 = plenty of time, 1.0 = critical
+    /// Time pressure indicator: 0.0 = plenty of time, 1.0 = critical
+    ///
+    /// During ponder mode or infinite search (hard_limit == u64::MAX),
+    /// this will always return 0.0 as there is no time pressure.
+    pub time_pressure: f32,
     pub byoyomi_info: Option<ByoyomiInfo>,
 }
 
