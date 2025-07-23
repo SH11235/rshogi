@@ -66,7 +66,7 @@ fn pump_messages(
     until_bestmove: bool,
 ) -> Result<bool> {
     let mut bestmove_sent = false;
-    
+
     loop {
         select! {
             recv(rx) -> msg => {
@@ -106,7 +106,7 @@ fn pump_messages(
             }
         }
     }
-    
+
     Ok(bestmove_sent)
 }
 
@@ -240,8 +240,8 @@ fn handle_command(
             *worker_handle = Some(handle);
 
             // Process messages until bestmove is received
-            pump_messages(&rx, stdout, true)?;
-            
+            pump_messages(rx, stdout, true)?;
+
             // Join the worker thread after loop exits
             if let Some(handle) = worker_handle.take() {
                 let _ = handle.join();
@@ -254,7 +254,7 @@ fn handle_command(
 
             // Wait for messages from worker (don't exit on bestmove)
             if worker_handle.is_some() {
-                pump_messages(&rx, stdout, false)?;
+                pump_messages(rx, stdout, false)?;
 
                 // Join the worker thread
                 if let Some(handle) = worker_handle.take() {

@@ -441,7 +441,7 @@ mod tests {
         let stop_flag1 = Arc::new(AtomicBool::new(false));
         let stop_flag2 = Arc::new(AtomicBool::new(false));
         let stop_flag1_clone = stop_flag1.clone();
-        
+
         let limits1 = SearchLimits {
             depth: 10,
             time: Some(Duration::from_secs(5)),
@@ -449,7 +449,7 @@ mod tests {
             stop_flag: Some(stop_flag1),
             info_callback: None,
         };
-        
+
         let limits2 = SearchLimits {
             depth: 10,
             time: Some(Duration::from_secs(5)),
@@ -457,7 +457,7 @@ mod tests {
             stop_flag: Some(stop_flag1_clone), // Same flag as limits1
             info_callback: None,
         };
-        
+
         let limits3 = SearchLimits {
             depth: 10,
             time: Some(Duration::from_secs(5)),
@@ -465,7 +465,7 @@ mod tests {
             stop_flag: Some(stop_flag2), // Different flag
             info_callback: None,
         };
-        
+
         let limits4 = SearchLimits {
             depth: 10,
             time: None,
@@ -473,17 +473,17 @@ mod tests {
             stop_flag: None,
             info_callback: None,
         };
-        
-        println!("limits1: {:?}", limits1);
-        println!("limits2: {:?}", limits2);
-        println!("limits3: {:?}", limits3);
-        println!("limits4: {:?}", limits4);
-        
+
+        println!("limits1: {limits1:?}");
+        println!("limits2: {limits2:?}");
+        println!("limits3: {limits3:?}");
+        println!("limits4: {limits4:?}");
+
         // Verify that same stop_flag shows same pointer
-        let debug1 = format!("{:?}", limits1);
-        let debug2 = format!("{:?}", limits2);
-        let debug3 = format!("{:?}", limits3);
-        
+        let debug1 = format!("{limits1:?}");
+        let debug2 = format!("{limits2:?}");
+        let debug3 = format!("{limits3:?}");
+
         // Extract pointer addresses from debug strings
         if let (Some(ptr1), Some(ptr2)) = (
             debug1.find("stop_flag: Some(").and_then(|idx| {
@@ -493,11 +493,11 @@ mod tests {
             debug2.find("stop_flag: Some(").and_then(|idx| {
                 let start = idx + "stop_flag: Some(".len();
                 debug2[start..].find(")").map(|end| &debug2[start..start + end])
-            })
+            }),
         ) {
             assert_eq!(ptr1, ptr2, "Same stop_flag should show same pointer");
         }
-        
+
         // Verify that different stop_flag shows different pointer
         if let (Some(ptr1), Some(ptr3)) = (
             debug1.find("stop_flag: Some(").and_then(|idx| {
@@ -507,7 +507,7 @@ mod tests {
             debug3.find("stop_flag: Some(").and_then(|idx| {
                 let start = idx + "stop_flag: Some(".len();
                 debug3[start..].find(")").map(|end| &debug3[start..start + end])
-            })
+            }),
         ) {
             assert_ne!(ptr1, ptr3, "Different stop_flags should show different pointers");
         }
