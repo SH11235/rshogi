@@ -61,6 +61,8 @@ jobs:
         cargo install cargo-tarpaulin || true
     
     - name: Run tests with coverage
+      env:
+        RUST_MIN_STACK: 8388608
       run: |
         cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out Xml
     
