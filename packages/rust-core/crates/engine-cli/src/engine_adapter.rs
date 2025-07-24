@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use engine_core::{
     engine::controller::{Engine, EngineType},
-    search::limits::SearchLimits,
+    search::{constants::DEFAULT_SEARCH_DEPTH, limits::SearchLimits},
     shogi::Position,
 };
 use std::sync::atomic::AtomicBool;
@@ -184,7 +184,7 @@ impl EngineAdapter {
 
         // Apply go parameters
         let limits = apply_go_params(builder, &params)?;
-        let search_depth = limits.depth.unwrap_or(6) as u8; // Save depth before move
+        let search_depth = limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as u8; // Save depth before move
 
         log::debug!(
             "Search limits: depth={:?}, time={:?}, nodes={:?}",
