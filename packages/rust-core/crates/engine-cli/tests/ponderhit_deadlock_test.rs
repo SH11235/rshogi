@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 fn spawn_engine() -> std::process::Child {
     Command::new("cargo")
-        .args(&["run", "--bin", "engine-cli"])
+        .args(["run", "--bin", "engine-cli"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -14,7 +14,7 @@ fn spawn_engine() -> std::process::Child {
 }
 
 fn send_command(stdin: &mut std::process::ChildStdin, cmd: &str) {
-    writeln!(stdin, "{}", cmd).expect("Failed to write command");
+    writeln!(stdin, "{cmd}").expect("Failed to write command");
     stdin.flush().expect("Failed to flush stdin");
 }
 
@@ -33,17 +33,17 @@ fn read_until_pattern(
             Ok(_) => {
                 let line = buffer.trim();
                 if !line.is_empty() {
-                    println!("Engine: {}", line);
+                    println!("Engine: {line}");
                     if line.contains(pattern) {
                         return Ok(line.to_string());
                     }
                 }
             }
-            Err(e) => return Err(format!("Read error: {}", e)),
+            Err(e) => return Err(format!("Read error: {e}")),
         }
     }
 
-    Err(format!("Timeout waiting for pattern: {}", pattern))
+    Err(format!("Timeout waiting for pattern: {pattern}"))
 }
 
 #[test]
@@ -77,8 +77,7 @@ fn test_ponderhit_no_deadlock() {
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_millis(100),
-        "PonderHit took too long to process: {:?}, possible deadlock",
-        elapsed
+        "PonderHit took too long to process: {elapsed:?}, possible deadlock"
     );
 
     // Give some time for the search to continue
@@ -111,7 +110,7 @@ fn test_rapid_ponderhit_sequence() {
 
     // Test multiple rapid ponderhit scenarios
     for i in 0..3 {
-        println!("--- Iteration {} ---", i);
+        println!("--- Iteration {i} ---");
 
         // Set position
         send_command(stdin, "position startpos");
@@ -130,10 +129,7 @@ fn test_rapid_ponderhit_sequence() {
 
             assert!(
                 elapsed < Duration::from_millis(50),
-                "PonderHit {} in iteration {} took too long: {:?}",
-                j,
-                i,
-                elapsed
+                "PonderHit {j} in iteration {i} took too long: {elapsed:?}"
             );
 
             thread::sleep(Duration::from_millis(5));
@@ -142,7 +138,7 @@ fn test_rapid_ponderhit_sequence() {
         // Stop and get result
         send_command(stdin, "stop");
         let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(1));
-        assert!(result.is_ok(), "No bestmove in iteration {}", i);
+        assert!(result.is_ok(), "No bestmove in iteration {i}");
     }
 
     // Cleanup
