@@ -142,6 +142,37 @@ pub fn move_to_usi(mv: &Move) -> String {
     }
 }
 
+/// Parse count from hands string at given position
+fn parse_count(chars: &[char], start: usize) -> Result<(u8, usize), UsiParseError> {
+    let mut i = start;
+    let mut count = 0u8;
+
+    // If no digit, default count is 1
+    if i >= chars.len() || !chars[i].is_ascii_digit() {
+        return Ok((1, i));
+    }
+
+    // Parse consecutive digits
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        count = count.saturating_mul(10).saturating_add(chars[i].to_digit(10).unwrap() as u8);
+        i += 1;
+    }
+
+    Ok((count, i))
+}
+
+/// Parse piece type and color from hands character
+fn parse_piece_type_and_color(ch: char) -> Result<(usize, usize), UsiParseError> {
+    let color = if ch.is_uppercase() { 0 } else { 1 };
+    let piece_type = parse_usi_piece_type(ch)
+        .map_err(|_| UsiParseError::InvalidHandsFormat(format!("Unknown piece in hands: {ch}")))?;
+    let hand_idx = piece_type_to_hand_index(piece_type).map_err(|_| {
+        UsiParseError::InvalidHandsFormat(format!("Invalid piece type for hand: {piece_type:?}"))
+    })?;
+
+    Ok((color, hand_idx))
+}
+
 /// Parse hands from SFEN format (e.g., "2P3l4n" or "-")
 fn parse_hands(hands_str: &str) -> Result<[[u8; 7]; 2], UsiParseError> {
     let mut hands = [[0u8; 7]; 2];
@@ -154,33 +185,16 @@ fn parse_hands(hands_str: &str) -> Result<[[u8; 7]; 2], UsiParseError> {
     let mut i = 0;
 
     while i < chars.len() {
-        // Parse count (default is 1)
-        let mut count = 1u8;
-        if i < chars.len() && chars[i].is_ascii_digit() {
-            count = 0;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                count =
-                    count.saturating_mul(10).saturating_add(chars[i].to_digit(10).unwrap() as u8);
-                i += 1;
-            }
-        }
+        // Parse count
+        let (count, next_i) = parse_count(&chars, i)?;
+        i = next_i;
 
         if i >= chars.len() {
             return Err(UsiParseError::InvalidHandsFormat(hands_str.to_string()));
         }
 
-        // Parse piece type
-        let piece_char = chars[i];
-        let color = if piece_char.is_uppercase() { 0 } else { 1 }; // 0=Black, 1=White
-        let piece_type = parse_usi_piece_type(piece_char).map_err(|_| {
-            UsiParseError::InvalidHandsFormat(format!("Unknown piece in hands: {piece_char}"))
-        })?;
-
-        let hand_idx = piece_type_to_hand_index(piece_type).map_err(|_| {
-            UsiParseError::InvalidHandsFormat(format!(
-                "Invalid piece type for hand: {piece_type:?}"
-            ))
-        })?;
+        // Parse piece type and color
+        let (color, hand_idx) = parse_piece_type_and_color(chars[i])?;
 
         // Accumulate pieces and clip to maximum possible count
         let max_pieces = MAX_HAND_PIECES[hand_idx];
@@ -702,5 +716,87 @@ mod tests {
         let piece = pos.board.piece_on(Square::new(8, 6)).unwrap();
         assert_eq!(piece.piece_type, PieceType::Pawn);
         assert_eq!(piece.color, Color::Black);
+    }
+
+    #[test]
+    fn test_parse_count() {
+        // Test single digit count
+        let chars: Vec<char> = "2P".chars().collect();
+        let (count, next_i) = parse_count(&chars, 0).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(next_i, 1);
+
+        // Test multi-digit count
+        let chars: Vec<char> = "18P".chars().collect();
+        let (count, next_i) = parse_count(&chars, 0).unwrap();
+        assert_eq!(count, 18);
+        assert_eq!(next_i, 2);
+
+        // Test no digit (default count 1)
+        let chars: Vec<char> = "P".chars().collect();
+        let (count, next_i) = parse_count(&chars, 0).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(next_i, 0);
+
+        // Test empty
+        let chars: Vec<char> = vec![];
+        let (count, next_i) = parse_count(&chars, 0).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(next_i, 0);
+
+        // Test saturation on overflow
+        let chars: Vec<char> = "999".chars().collect();
+        let (count, next_i) = parse_count(&chars, 0).unwrap();
+        assert_eq!(count, 255); // u8::MAX due to saturation
+        assert_eq!(next_i, 3);
+    }
+
+    #[test]
+    fn test_parse_piece_type_and_color() {
+        // Test Black pieces (uppercase)
+        let (color, hand_idx) = parse_piece_type_and_color('P').unwrap();
+        assert_eq!(color, 0); // Black
+        assert_eq!(hand_idx, 6); // Pawn index
+
+        let (color, hand_idx) = parse_piece_type_and_color('R').unwrap();
+        assert_eq!(color, 0); // Black
+        assert_eq!(hand_idx, 0); // Rook index
+
+        let (color, hand_idx) = parse_piece_type_and_color('G').unwrap();
+        assert_eq!(color, 0); // Black
+        assert_eq!(hand_idx, 2); // Gold index
+
+        // Test White pieces (lowercase)
+        let (color, hand_idx) = parse_piece_type_and_color('p').unwrap();
+        assert_eq!(color, 1); // White
+        assert_eq!(hand_idx, 6); // Pawn index
+
+        let (color, hand_idx) = parse_piece_type_and_color('b').unwrap();
+        assert_eq!(color, 1); // White
+        assert_eq!(hand_idx, 1); // Bishop index
+
+        let (color, hand_idx) = parse_piece_type_and_color('n').unwrap();
+        assert_eq!(color, 1); // White
+        assert_eq!(hand_idx, 4); // Knight index
+
+        // Test invalid piece
+        let err = parse_piece_type_and_color('X').unwrap_err();
+        match err {
+            UsiParseError::InvalidHandsFormat(msg) => {
+                assert!(msg.contains("Unknown piece in hands: X"));
+            }
+            _ => panic!("Expected InvalidHandsFormat error"),
+        }
+
+        // Test invalid piece type for hand (King cannot be in hand)
+        // Note: This is handled by parse_usi_piece_type, which accepts 'K',
+        // but piece_type_to_hand_index should reject it
+        let err = parse_piece_type_and_color('K').unwrap_err();
+        match err {
+            UsiParseError::InvalidHandsFormat(msg) => {
+                assert!(msg.contains("Invalid piece type for hand"));
+            }
+            _ => panic!("Expected InvalidHandsFormat error"),
+        }
     }
 }
