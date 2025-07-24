@@ -178,7 +178,7 @@ pub fn send_response(response: UsiResponse) {
 
 /// Helper to send info string message
 pub fn send_info_string(message: impl Into<String>) {
-    println!("info string {}", message.into());
+    send_response(UsiResponse::String(message.into()));
 }
 
 #[cfg(test)]

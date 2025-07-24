@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use usi::{parse_usi_command, send_response, UsiCommand, UsiResponse};
+use usi::{parse_usi_command, send_info_string, send_response, UsiCommand, UsiResponse};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -55,7 +55,7 @@ fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> 
                 stdout.flush()?;
             }
             WorkerMessage::Error(err) => {
-                send_response(UsiResponse::String(format!("info string Error: {err}")));
+                send_info_string(format!("Error: {err}"));
                 stdout.flush()?;
             }
             WorkerMessage::Finished => {} // Ignore finished message in drain
@@ -99,7 +99,7 @@ fn pump_messages(
                         break;
                     }
                     Ok(WorkerMessage::Error(err)) => {
-                        send_response(UsiResponse::String(format!("info string Error: {err}")));
+                        send_info_string(format!("Error: {err}"));
                         stdout.flush()?;
                         break;
                     }
@@ -262,7 +262,7 @@ fn main() -> Result<()> {
                         log::debug!("Worker thread finished");
                     }
                     Ok(WorkerMessage::Error(err)) => {
-                        send_response(UsiResponse::String(format!("info string Error: {err}")));
+                        send_info_string(format!("Error: {err}"));
                         stdout.flush()?;
                     }
                     Err(_) => {
