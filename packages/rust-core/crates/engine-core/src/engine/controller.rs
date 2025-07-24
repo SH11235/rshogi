@@ -257,21 +257,6 @@ impl Engine {
             }
         }
     }
-
-    /// Handle ponder hit (transition from ponder to normal search)
-    ///
-    /// This method is called when a ponder search becomes a real search
-    /// because the opponent played the expected move.
-    ///
-    /// # Arguments
-    /// - `time_already_spent_ms`: Time already spent during pondering in milliseconds
-    pub fn ponder_hit(&self, time_already_spent_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(tm) = self.active_time_manager.lock().unwrap().as_ref() {
-            // TimeManager will handle the transition internally
-            tm.ponder_hit(None, time_already_spent_ms);
-        }
-        Ok(())
-    }
 }
 
 /// Proxy evaluator for thread-safe NNUE access

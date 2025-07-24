@@ -19,6 +19,8 @@ pub struct SearchLimits {
     pub stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress (temporarily kept for compatibility)
     pub info_callback: Option<InfoCallback>,
+    /// Ponder hit flag for converting ponder search to normal search
+    pub ponder_hit_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Default for SearchLimits {
@@ -31,6 +33,7 @@ impl Default for SearchLimits {
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
+            ponder_hit_flag: None,
         }
     }
 }
@@ -91,6 +94,7 @@ pub struct SearchLimitsBuilder {
     time_parameters: Option<TimeParameters>,
     stop_flag: Option<Arc<AtomicBool>>,
     info_callback: Option<InfoCallback>,
+    ponder_hit_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -103,6 +107,7 @@ impl Default for SearchLimitsBuilder {
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
+            ponder_hit_flag: None,
         }
     }
 }
@@ -202,6 +207,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set ponder hit flag
+    pub fn ponder_hit_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.ponder_hit_flag = Some(flag);
+        self
+    }
+
     /// Build SearchLimits
     ///
     /// Validates the configuration and builds the SearchLimits.
@@ -231,6 +242,7 @@ impl SearchLimitsBuilder {
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
+            ponder_hit_flag: self.ponder_hit_flag,
         }
     }
 }
@@ -253,6 +265,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             time_parameters: tm.time_parameters,
             stop_flag: None,
             info_callback: None,
+            ponder_hit_flag: None,
         }
     }
 }
@@ -285,6 +298,7 @@ impl Clone for SearchLimits {
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag.clone(),
             info_callback: None, // Cannot clone function pointers
+            ponder_hit_flag: self.ponder_hit_flag.clone(),
         }
     }
 }
