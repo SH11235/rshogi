@@ -6,12 +6,13 @@ mod usi;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
-use engine_adapter::{EngineAdapter, SearchInfo};
+use engine_adapter::EngineAdapter;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use usi::output::SearchInfo;
 use usi::{parse_usi_command, send_info_string, send_response, UsiCommand, UsiResponse};
 
 #[derive(Parser, Debug)]
@@ -51,7 +52,7 @@ fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> 
                 stdout.flush()?;
             }
             WorkerMessage::Info(info) => {
-                send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
+                send_response(UsiResponse::Info(info));
                 stdout.flush()?;
             }
             WorkerMessage::Error(err) => {
@@ -80,7 +81,7 @@ fn pump_messages(
             recv(rx) -> msg => {
                 match msg {
                     Ok(WorkerMessage::Info(info)) => {
-                        send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
+                        send_response(UsiResponse::Info(info));
                         stdout.flush()?;
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
@@ -247,7 +248,7 @@ fn main() -> Result<()> {
             recv(worker_rx) -> msg => {
                 match msg {
                     Ok(WorkerMessage::Info(info)) => {
-                        send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
+                        send_response(UsiResponse::Info(info));
                         stdout.flush()?;
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {

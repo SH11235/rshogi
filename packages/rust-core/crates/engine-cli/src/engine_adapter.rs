@@ -12,45 +12,8 @@ use engine_core::{
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use crate::usi::output::{Score, SearchInfo};
 use crate::usi::{create_position, EngineOption, GameResult, GoParams};
-
-/// Search information for USI output
-#[derive(Debug, Clone)]
-pub struct SearchInfo {
-    /// Search depth
-    pub depth: u32,
-    /// Time elapsed in milliseconds
-    pub time: u64,
-    /// Nodes searched
-    pub nodes: u64,
-    /// Principal variation
-    pub pv: Vec<String>,
-    /// Score in centipawns
-    pub score: i32,
-}
-
-impl SearchInfo {
-    /// Convert to USI info string
-    pub fn to_usi_string(&self) -> String {
-        let mut parts = vec![];
-
-        // Only include depth if it's greater than 0
-        if self.depth > 0 {
-            parts.push(format!("depth {}", self.depth));
-        }
-
-        parts.push(format!("score cp {}", self.score));
-        parts.push(format!("time {}", self.time));
-        parts.push(format!("nodes {}", self.nodes));
-
-        if !self.pv.is_empty() {
-            parts.push("pv".to_string());
-            parts.extend(self.pv.clone());
-        }
-
-        parts.join(" ")
-    }
-}
 
 /// Engine adapter that bridges USI protocol with engine-core
 pub struct EngineAdapter {
@@ -208,11 +171,12 @@ impl EngineAdapter {
         limits.info_callback = Some(Box::new(move |depth, score, nodes, elapsed, pv| {
             let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
             let info = SearchInfo {
-                depth: depth as u32,
-                time: elapsed.as_millis().max(1) as u64, // Ensure at least 1ms
-                nodes,
+                depth: Some(depth as u32),
+                time: Some(elapsed.as_millis().max(1) as u64), // Ensure at least 1ms
+                nodes: Some(nodes),
                 pv: pv_str,
-                score,
+                score: Some(Score::Cp(score)),
+                ..Default::default()
             };
             info_callback_clone(info);
         }));
@@ -232,11 +196,12 @@ impl EngineAdapter {
 
         // Send final info
         let info = SearchInfo {
-            depth: search_depth as u32, // Use the saved search depth
-            time: result.stats.elapsed.as_millis().max(1) as u64, // Ensure at least 1ms
-            nodes: result.stats.nodes,
+            depth: Some(search_depth as u32), // Use the saved search depth
+            time: Some(result.stats.elapsed.as_millis().max(1) as u64), // Ensure at least 1ms
+            nodes: Some(result.stats.nodes),
             pv: vec![best_move_str.clone()],
-            score: result.score,
+            score: Some(Score::Cp(result.score)),
+            ..Default::default()
         };
         info_callback_arc(info);
 
