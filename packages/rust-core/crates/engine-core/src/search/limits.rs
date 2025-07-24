@@ -407,6 +407,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(
         expected = "SearchLimitsBuilder validation failed: FixedNodes (100000) and nodes field (50000) must match when both are set"
     )]
