@@ -23,6 +23,8 @@ fn test_search_respects_fixed_time() {
         time: Some(Duration::from_millis(100)),
         depth: 10, // Max depth
         nodes: None,
+        stop_flag: None,
+        info_callback: None,
     };
 
     let start = Instant::now();
@@ -52,6 +54,8 @@ fn test_search_respects_node_limit() {
         time: None,
         depth: 10, // Max depth
         nodes: Some(10000),
+        stop_flag: None,
+        info_callback: None,
     };
 
     let result = engine.search(&mut position, limits);
@@ -114,6 +118,8 @@ fn test_search_with_depth_limit() {
         time: None,
         depth: 5,
         nodes: None,
+        stop_flag: None,
+        info_callback: None,
     };
 
     let result = engine.search(&mut position, limits);

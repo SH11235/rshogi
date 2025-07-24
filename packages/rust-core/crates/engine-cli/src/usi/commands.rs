@@ -94,6 +94,7 @@ impl fmt::Display for GameResult {
 
 /// Engine option types
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum OptionType {
     Check {
         default: bool,

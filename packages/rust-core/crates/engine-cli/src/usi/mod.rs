@@ -11,6 +11,7 @@ pub use output::{send_response, UsiResponse};
 pub use parser::parse_usi_command;
 
 /// Standard engine options
+#[allow(dead_code)]
 pub fn default_options() -> Vec<EngineOption> {
     vec![
         EngineOption::spin("USI_Hash", 16, 1, 1024),
