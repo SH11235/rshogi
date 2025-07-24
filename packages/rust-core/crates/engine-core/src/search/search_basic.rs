@@ -118,6 +118,14 @@ impl<E: Evaluator> Searcher<E> {
 
         // Evaluate all moves at depth 0 (quiescence search) to select the best fallback
         if !legal_moves.is_empty() {
+            // If stop flag is set immediately, at least return the first legal move with evaluation
+            if self.should_stop() && best_move.is_none() {
+                best_move = Some(legal_moves.as_slice()[0]);
+                // Evaluate the position after this move
+                let undo_info = pos.do_move(legal_moves.as_slice()[0]);
+                best_score = -self.evaluator.evaluate(pos);
+                pos.undo_move(legal_moves.as_slice()[0], undo_info);
+            }
             let mut fallback_score = -INFINITY_SCORE;
             for &mv in legal_moves.as_slice() {
                 // Check if we should stop before evaluating each move
