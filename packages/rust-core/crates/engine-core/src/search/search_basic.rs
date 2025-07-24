@@ -43,6 +43,18 @@ impl Default for SearchLimits {
     }
 }
 
+impl Clone for SearchLimits {
+    fn clone(&self) -> Self {
+        Self {
+            depth: self.depth,
+            time: self.time,
+            nodes: self.nodes,
+            stop_flag: self.stop_flag.clone(),
+            info_callback: None, // Cannot clone function pointers
+        }
+    }
+}
+
 impl std::fmt::Debug for SearchLimits {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SearchLimits")
