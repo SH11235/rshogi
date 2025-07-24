@@ -102,7 +102,7 @@ fn benchmark_search() -> (u64, u64, Duration) {
         let limits = SearchLimits::builder().depth(8).fixed_time_ms(5000).build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits.into(), evaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
         let mut pos_clone = pos.clone();
         let result = searcher.search(&mut pos_clone);
 

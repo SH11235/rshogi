@@ -64,14 +64,14 @@ impl Engine {
     pub fn search(&self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
         match self.engine_type {
             EngineType::Material => {
-                let mut searcher = Searcher::new(limits.into(), self.material_evaluator.clone());
+                let mut searcher = Searcher::new(limits, self.material_evaluator.clone());
                 searcher.search(pos)
             }
             EngineType::Nnue => {
                 let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
                     evaluator: self.nnue_evaluator.clone(),
                 });
-                let mut searcher = Searcher::new(limits.into(), nnue_proxy);
+                let mut searcher = Searcher::new(limits, nnue_proxy);
                 searcher.search(pos)
             }
             EngineType::Enhanced => {
