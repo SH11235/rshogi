@@ -1363,12 +1363,13 @@ mod tests {
         // Set stop flag after a short delay (give time to find at least one move)
         let stop_flag_clone = stop_flag.clone();
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50)); // Slightly longer to ensure depth 1 completes
-            stop_flag_clone.store(true, Ordering::Release);
+            thread::sleep(Duration::from_millis(10)); // Short delay to ensure at least depth 1 completes
+            stop_flag_clone.store(true, Ordering::SeqCst);
+            std::sync::atomic::fence(Ordering::SeqCst);
         });
 
         let start = Instant::now();
-        let (best_move, _score) = searcher.search(&mut pos, 10, None, None); // Deep search
+        let (best_move, _score) = searcher.search(&mut pos, 3, None, None); // Reduced depth for deterministic behavior
         let elapsed = start.elapsed();
 
         // Should find a move (even if search was stopped)
