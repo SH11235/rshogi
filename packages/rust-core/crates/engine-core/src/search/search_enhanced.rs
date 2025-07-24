@@ -126,8 +126,13 @@ impl PVTable {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let pv = searcher.principal_variation();
+    /// # use engine_core::shogi::Move;
+    /// # // This is a conceptual example showing how to use the PV table
+    /// # // In practice, you would get this from your search instance
+    /// # fn example_usage(pv_table: &engine_core::search::search_enhanced::PVTable) {
+    /// let pv: &[Move] = pv_table.get_pv();
     /// let pv_copy: Vec<Move> = pv.to_vec(); // Clone if needed across searches
+    /// # }
     /// ```
     pub fn get_pv(&self) -> &[Move] {
         let len = self.len[0] as usize;
@@ -332,6 +337,8 @@ pub struct EnhancedSearcher {
     /// Search statistics (for testing)
     #[cfg(test)]
     pub stats: SearchStats,
+    /// Ponder hit flag (shared with engine adapter)
+    ponder_hit_flag: Option<Arc<AtomicBool>>,
 }
 
 impl EnhancedSearcher {
@@ -354,6 +361,7 @@ impl EnhancedSearcher {
             current_depth: AtomicU8::new(0),
             #[cfg(test)]
             stats: SearchStats::default(),
+            ponder_hit_flag: None,
         }
     }
 
@@ -449,6 +457,11 @@ impl EnhancedSearcher {
         // Set stop flag if provided
         if let Some(stop_flag) = &limits.stop_flag {
             self.external_stop = Some(stop_flag.clone());
+        }
+
+        // Set ponder hit flag if provided
+        if let Some(ponder_hit_flag) = &limits.ponder_hit_flag {
+            self.ponder_hit_flag = Some(ponder_hit_flag.clone());
         }
 
         // Create time manager if time control is specified
@@ -1281,6 +1294,18 @@ impl EnhancedSearcher {
         if let Some(ref external_stop) = self.external_stop {
             if external_stop.load(Ordering::Acquire) {
                 return true;
+            }
+        }
+
+        // Check ponder hit flag
+        if let Some(ref flag) = self.ponder_hit_flag {
+            if flag.swap(false, Ordering::Acquire) {
+                // Ponder hit detected - notify TimeManager
+                if let Some(ref tm) = self.time_manager {
+                    let elapsed = self.start_time.elapsed().as_millis() as u64;
+                    tm.ponder_hit(None, elapsed);
+                }
+                // Don't stop search, just convert from ponder to normal search
             }
         }
 
