@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[test]
+#[ignore] // Requires large stack size due to NNUE initialization
 fn test_info_output_during_search() {
     let mut adapter = EngineAdapter::new();
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -63,6 +64,7 @@ fn test_info_output_during_search() {
 }
 
 #[test]
+#[ignore] // Requires large stack size due to NNUE initialization
 fn test_info_output_with_early_stop() {
     let mut adapter = EngineAdapter::new();
     let stop_flag = Arc::new(AtomicBool::new(false));

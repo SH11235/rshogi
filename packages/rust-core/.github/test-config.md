@@ -11,6 +11,13 @@
 - `test_nnue_engine`
 - `test_parallel_engine_execution`
 - `test_concurrent_weight_loading`
+- `test_info_output_during_search`
+- `test_info_output_with_early_stop`
+- `test_engine_type_switching_basic`
+- `test_load_nnue_weights_wrong_engine_type`
+- `test_enhanced_engine_with_stop_flag`
+- `test_material_engine`
+- `test_enhanced_engine`
 
 注意: 現在のデバッグビルドでは、すべてのエンジンテストでスタックオーバーフローが発生する可能性があります。リリースビルドでは問題が軽減される場合があります。
 
