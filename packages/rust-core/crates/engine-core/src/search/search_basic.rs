@@ -18,6 +18,10 @@ use super::types::{InfoCallback, SearchResult, SearchStats};
 // InfoCallback is now imported from super::types
 
 /// Search limits
+#[deprecated(
+    since = "0.2.0",
+    note = "Use unified search::limits::SearchLimits instead"
+)]
 pub struct SearchLimits {
     /// Maximum search depth
     pub depth: u8,
@@ -83,18 +87,38 @@ pub struct Searcher<E: Evaluator> {
     pv: Vec<Vec<Move>>,
     /// Evaluation function
     evaluator: Arc<E>,
+    /// Stop flag for interrupting search
+    stop_flag: Option<Arc<AtomicBool>>,
+    /// Info callback for search progress
+    info_callback: Option<InfoCallback>,
 }
 
 impl<E: Evaluator> Searcher<E> {
     /// Create new searcher with limits and evaluator
-    pub fn new(limits: SearchLimits, evaluator: Arc<E>) -> Self {
+    pub fn new(mut limits: SearchLimits, evaluator: Arc<E>) -> Self {
+        // Extract stop_flag and info_callback from limits
+        let stop_flag = limits.stop_flag.take();
+        let info_callback = limits.info_callback.take();
+
         Searcher {
             limits,
             start_time: Instant::now(),
             nodes: 0,
             pv: vec![vec![]; 128], // Max depth 128
             evaluator,
+            stop_flag,
+            info_callback,
         }
+    }
+
+    /// Set stop flag
+    pub fn set_stop_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.stop_flag = Some(flag);
+    }
+
+    /// Set info callback
+    pub fn set_info_callback(&mut self, callback: InfoCallback) {
+        self.info_callback = Some(callback);
     }
 
     /// Increment node count and check if search should stop
@@ -204,7 +228,7 @@ impl<E: Evaluator> Searcher<E> {
             }
 
             // Call info callback if provided
-            if let Some(ref callback) = self.limits.info_callback {
+            if let Some(ref callback) = self.info_callback {
                 let elapsed = self.start_time.elapsed();
                 callback(depth, score, self.nodes, elapsed, &self.pv[0]);
             }
@@ -382,7 +406,7 @@ impl<E: Evaluator> Searcher<E> {
     /// Check if search should stop
     fn should_stop(&self) -> bool {
         // Check stop flag (use Acquire to pair with Release in GUI thread)
-        if let Some(ref stop_flag) = self.limits.stop_flag {
+        if let Some(ref stop_flag) = self.stop_flag {
             if stop_flag.load(Ordering::Acquire) {
                 return true;
             }
