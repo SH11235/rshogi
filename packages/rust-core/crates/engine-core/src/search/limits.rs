@@ -72,6 +72,10 @@ impl SearchLimits {
 }
 
 /// Builder for SearchLimits
+///
+/// The builder follows the "last write wins" principle for time control settings.
+/// For example, calling `fixed_time_ms(1000).fixed_nodes(10000)` will result in
+/// `FixedNodes` time control, overwriting the previous `FixedTime` setting.
 pub struct SearchLimitsBuilder {
     time_control: TimeControl,
     moves_to_go: Option<u32>,
@@ -192,17 +196,18 @@ impl SearchLimitsBuilder {
     /// Build SearchLimits
     ///
     /// Validates the configuration and builds the SearchLimits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if both FixedNodes time control and nodes field are set with different values.
     pub fn build(self) -> SearchLimits {
         // Validate that FixedNodes and nodes field don't conflict
-        #[cfg(debug_assertions)]
-        {
-            if let TimeControl::FixedNodes { nodes: fixed } = &self.time_control {
-                if let Some(node_limit) = self.nodes {
-                    debug_assert_eq!(
-                        *fixed, node_limit,
-                        "FixedNodes ({fixed}) and nodes field ({node_limit}) should match when both are set"
-                    );
-                }
+        if let TimeControl::FixedNodes { nodes: fixed } = &self.time_control {
+            if let Some(node_limit) = self.nodes {
+                assert_eq!(
+                    *fixed, node_limit,
+                    "FixedNodes ({fixed}) and nodes field ({node_limit}) should match when both are set"
+                );
             }
         }
 
@@ -285,7 +290,11 @@ impl From<SearchLimits> for crate::time_management::SearchLimits {
     }
 }
 
-// Manual Clone implementation for SearchLimits (info_callback is not cloneable)
+/// Manual Clone implementation for SearchLimits
+///
+/// Note: `info_callback` is not cloneable and will always be `None` in the cloned instance.
+/// This is by design as function pointers cannot be cloned. Users who need to preserve
+/// the callback should set it explicitly on the cloned instance.
 impl Clone for SearchLimits {
     fn clone(&self) -> Self {
         Self {
@@ -300,7 +309,10 @@ impl Clone for SearchLimits {
     }
 }
 
-// Manual Debug implementation for SearchLimits
+/// Manual Debug implementation for SearchLimits
+///
+/// Shows whether `stop_flag` and `info_callback` are present (Some/None)
+/// without displaying their actual values for cleaner output.
 impl std::fmt::Debug for SearchLimits {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SearchLimits")
@@ -464,12 +476,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(
         expected = "FixedNodes (100000) and nodes field (50000) should match when both are set"
     )]
     fn test_build_validation_mismatch() {
-        // This should panic in debug mode when FixedNodes and nodes field differ
+        // This should panic when FixedNodes and nodes field differ
         let _limits = SearchLimits::builder()
             .fixed_nodes(100000)
             .nodes(50000) // Different value - should trigger assertion
