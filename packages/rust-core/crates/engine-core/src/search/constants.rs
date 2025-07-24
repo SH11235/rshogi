@@ -40,17 +40,17 @@ mod tests {
         // Ensure mate score is below infinity
         assert!(MATE_SCORE < SEARCH_INF);
         assert!(MATE_SCORE >= SEARCH_INF - 2000); // Leave room for mate distances
-        
+
         // Ensure sentinel value is outside valid range
         assert!(SEARCH_INTERRUPTED > SEARCH_INF);
-        
+
         // Ensure MAX_PLY fits in u8 for efficient storage
         assert!(MAX_PLY <= u8::MAX as usize);
-        
+
         // Ensure draw score is neutral
         assert_eq!(DRAW_SCORE, 0);
     }
-    
+
     #[test]
     fn test_mate_distance_range() {
         // Ensure we can represent all mate distances
