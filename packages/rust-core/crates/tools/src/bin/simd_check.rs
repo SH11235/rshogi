@@ -37,6 +37,8 @@ fn main() {
             depth: 5,
             time: Some(Duration::from_millis(100)),
             nodes: None,
+            stop_flag: None,
+            info_callback: None,
         };
 
         let result = engine.search(&mut pos, limits);
@@ -58,6 +60,8 @@ fn main() {
                 depth: 5,
                 time: Some(Duration::from_millis(100)),
                 nodes: None,
+                stop_flag: None,
+                info_callback: None,
             };
 
             let result = engine.search(&mut pos, limits);

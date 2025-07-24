@@ -46,6 +46,7 @@ use crate::{Color, Position};
 use super::evaluate::Evaluator;
 use accumulator::Accumulator;
 use error::{NNUEError, NNUEResult};
+use log::warn;
 use network::Network;
 use std::error::Error;
 use std::sync::Arc;
@@ -199,7 +200,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
             None => {
                 // This should never happen in normal usage - accumulator stack should always have at least one entry
                 #[cfg(debug_assertions)]
-                eprintln!("[NNUE] Warning: Empty accumulator stack in evaluation, returning 0");
+                warn!("[NNUE] Empty accumulator stack in evaluation, returning 0");
 
                 // Return 0 evaluation as fallback
                 // In production, this error is silent to avoid performance impact

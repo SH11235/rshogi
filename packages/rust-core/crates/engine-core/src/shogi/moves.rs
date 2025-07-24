@@ -221,11 +221,9 @@ impl Move {
         self.captured_piece_type().is_some()
     }
 
-    /// Create move from USI string (simplified for testing)
-    pub fn from_usi(_usi: &str) -> Result<Self, String> {
-        // For now, return a dummy move
-        // Full USI parsing would be implemented here
-        Ok(Move::normal(Square::new(0, 0), Square::new(1, 1), false))
+    /// Create move from USI string
+    pub fn from_usi(usi: &str) -> Result<Self, String> {
+        crate::usi::parse_usi_move(usi).map_err(|e| e.to_string())
     }
 }
 
@@ -340,8 +338,8 @@ mod tests {
 
     #[test]
     fn test_normal_move() {
-        let from = Square::new(2, 6);
-        let to = Square::new(2, 5);
+        let from = Square::new(2, 2);
+        let to = Square::new(2, 3);
         let m = Move::normal(from, to, false);
 
         assert_eq!(m.from(), Some(from));
@@ -376,11 +374,13 @@ mod tests {
 
     #[test]
     fn test_move_display() {
-        let m1 = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
-        assert_eq!(m1.to_string(), "7g7f");
+        // With Black=top coordinate system:
+        // Black pieces at ranks 0-2, White at ranks 6-8
+        let m1 = Move::normal(Square::new(2, 2), Square::new(2, 3), false);
+        assert_eq!(m1.to_string(), "7c7d");
 
-        let m2 = Move::normal(Square::new(2, 2), Square::new(2, 1), true);
-        assert_eq!(m2.to_string(), "7c7b+");
+        let m2 = Move::normal(Square::new(2, 6), Square::new(2, 7), true);
+        assert_eq!(m2.to_string(), "7g7h+");
 
         let m3 = Move::drop(PieceType::Pawn, Square::new(4, 4));
         assert_eq!(m3.to_string(), "Pawn*5e");
@@ -391,7 +391,7 @@ mod tests {
         let mut list = MoveList::new();
         assert!(list.is_empty());
 
-        list.push(Move::normal(Square::new(2, 6), Square::new(2, 5), false));
+        list.push(Move::normal(Square::new(2, 2), Square::new(2, 3), false));
         list.push(Move::drop(PieceType::Pawn, Square::new(4, 4)));
 
         assert_eq!(list.len(), 2);
@@ -399,7 +399,7 @@ mod tests {
 
         // Test indexing
         let m0 = list[0];
-        assert_eq!(m0.to(), Square::new(2, 5));
+        assert_eq!(m0.to(), Square::new(2, 3));
 
         // Test iteration
         let moves: Vec<Move> = list.into_iter().collect();
@@ -632,8 +632,8 @@ mod tests {
     #[test]
     fn test_move_with_piece_type() {
         // Test normal_with_piece API
-        let from = Square::new(2, 6);
-        let to = Square::new(2, 5);
+        let from = Square::new(2, 2);
+        let to = Square::new(2, 3);
 
         // Test without capture
         let m1 = Move::normal_with_piece(from, to, false, PieceType::Pawn, None);
@@ -664,14 +664,14 @@ mod tests {
     #[test]
     fn test_backward_compatibility() {
         // Test that old Move::normal creates moves with unknown piece type
-        let m = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
+        let m = Move::normal(Square::new(2, 2), Square::new(2, 3), false);
         assert_eq!(m.piece_type(), None); // Unknown piece type
         assert_eq!(m.captured_piece_type(), None);
 
         // Test u16 compatibility (loses piece type info)
         let m_with_type = Move::normal_with_piece(
-            Square::new(2, 6),
-            Square::new(2, 5),
+            Square::new(2, 2),
+            Square::new(2, 3),
             false,
             PieceType::Pawn,
             Some(PieceType::Gold),
@@ -680,8 +680,8 @@ mod tests {
         let u16_decoded = Move::from_u16(u16_encoded);
 
         // Basic move info preserved
-        assert_eq!(u16_decoded.from(), Some(Square::new(2, 6)));
-        assert_eq!(u16_decoded.to(), Square::new(2, 5));
+        assert_eq!(u16_decoded.from(), Some(Square::new(2, 2)));
+        assert_eq!(u16_decoded.to(), Square::new(2, 3));
         assert!(!u16_decoded.is_promote());
 
         // But piece type info is lost
