@@ -36,7 +36,16 @@ fn test_info_output_during_search() {
         ..Default::default()
     };
 
-    let result = adapter.search(params, stop_flag, info_callback);
+    // Take engine and prepare search
+    let mut engine = adapter.take_engine().unwrap();
+    let (position, limits, _ponder_hit_flag) =
+        adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+
+    // Execute search
+    let result = EngineAdapter::execute_search_static(&mut engine, position, limits, info_callback);
+
+    // Return engine
+    adapter.return_engine(engine);
     assert!(result.is_ok());
 
     // Check we received multiple info messages
@@ -97,7 +106,16 @@ fn test_info_output_with_early_stop() {
         ..Default::default()
     };
 
-    let result = adapter.search(params, stop_flag, info_callback);
+    // Take engine and prepare search
+    let mut engine = adapter.take_engine().unwrap();
+    let (position, limits, _ponder_hit_flag) =
+        adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+
+    // Execute search
+    let result = EngineAdapter::execute_search_static(&mut engine, position, limits, info_callback);
+
+    // Return engine
+    adapter.return_engine(engine);
     assert!(result.is_ok());
 
     let messages = info_messages.lock().unwrap();
