@@ -115,6 +115,8 @@ fn test_nnue_performance() {
         depth: 4,
         time: Some(Duration::from_millis(100)),
         nodes: None,
+        stop_flag: None,
+        info_callback: None,
     };
 
     let start = Instant::now();

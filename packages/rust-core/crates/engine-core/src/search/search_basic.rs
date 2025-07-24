@@ -120,6 +120,15 @@ impl<E: Evaluator> Searcher<E> {
         if !legal_moves.is_empty() {
             let mut fallback_score = -INFINITY_SCORE;
             for &mv in legal_moves.as_slice() {
+                // Check if we should stop before evaluating each move
+                if self.should_stop() {
+                    // If we haven't found any move yet, use the first legal move
+                    if best_move.is_none() {
+                        best_move = Some(legal_moves.as_slice()[0]);
+                    }
+                    break;
+                }
+
                 // Try the move
                 let undo_info = pos.do_move(mv);
 
