@@ -7,25 +7,8 @@ use std::time::{Duration, Instant};
 
 /// Helper to spawn engine process
 fn spawn_engine() -> std::process::Child {
-    // In GitHub Actions, we should use the built binary directly
-    let program = if std::env::var("CI").is_ok() {
-        // In CI, use the built binary
-        std::env::current_exe()
-            .map(|p| p.parent().unwrap().join("engine-cli").to_string_lossy().to_string())
-            .unwrap_or_else(|_| "cargo".to_string())
-    } else {
-        "cargo".to_string()
-    };
-
-    let mut cmd = if program == "cargo" {
-        let mut c = Command::new("cargo");
-        c.args(["run", "--bin", "engine-cli", "--"]);
-        c
-    } else {
-        Command::new(&program)
-    };
-
-    cmd.stdin(Stdio::piped())
+    Command::new(env!("CARGO_BIN_EXE_engine-cli"))
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped()) // Capture stderr for debugging
         .spawn()
