@@ -7,7 +7,7 @@ pub mod parser;
 
 pub use commands::{EngineOption, GameResult, GoParams, UsiCommand};
 pub use conversion::create_position;
-pub use output::{send_response, UsiResponse};
+pub use output::{send_info_string, send_response, UsiResponse};
 pub use parser::parse_usi_command;
 
 /// Standard engine options
