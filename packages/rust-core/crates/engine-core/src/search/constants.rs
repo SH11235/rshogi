@@ -17,6 +17,9 @@ pub const SEARCH_INTERRUPTED: i32 = SEARCH_INF + 1;
 /// Used for PV table size and mate distance pruning
 pub const MAX_PLY: usize = 127;
 
+/// Default search depth when not specified
+pub const DEFAULT_SEARCH_DEPTH: u8 = 6;
+
 /// Maximum additional plies for quiescence search
 /// Limits the depth of capture-only search to avoid explosion
 pub const QUIESCE_MAX_PLY: u8 = 4;

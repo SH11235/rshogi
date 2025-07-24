@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::constants::DEFAULT_SEARCH_DEPTH;
 use super::types::InfoCallback;
 
 /// Unified search limits combining time control with other constraints
@@ -54,6 +55,9 @@ impl SearchLimits {
     }
 
     /// Get node limit
+    ///
+    /// Returns the node limit for the search. If time_control is FixedNodes,
+    /// that value takes precedence over the nodes field.
     pub fn node_limit(&self) -> Option<u64> {
         match &self.time_control {
             TimeControl::FixedNodes { nodes } => Some(*nodes),
@@ -63,7 +67,7 @@ impl SearchLimits {
 
     /// Get depth limit (u8 for basic search compatibility)
     pub fn depth_limit_u8(&self) -> u8 {
-        self.depth.map(|d| d.min(255) as u8).unwrap_or(6)
+        self.depth.map(|d| d.min(255) as u8).unwrap_or(DEFAULT_SEARCH_DEPTH)
     }
 }
 
@@ -106,6 +110,9 @@ impl SearchLimitsBuilder {
     }
 
     /// Set fixed nodes per move
+    ///
+    /// This sets the time_control to FixedNodes, which takes precedence
+    /// over the nodes field when determining the node limit.
     pub fn fixed_nodes(mut self, nodes: u64) -> Self {
         self.time_control = TimeControl::FixedNodes { nodes };
         self
@@ -117,6 +124,38 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set Fischer time control
+    pub fn fischer(mut self, white_ms: u64, black_ms: u64, increment_ms: u64) -> Self {
+        self.time_control = TimeControl::Fischer {
+            white_ms,
+            black_ms,
+            increment_ms,
+        };
+        self
+    }
+
+    /// Set Byoyomi time control
+    pub fn byoyomi(mut self, main_time_ms: u64, byoyomi_ms: u64, periods: u32) -> Self {
+        self.time_control = TimeControl::Byoyomi {
+            main_time_ms,
+            byoyomi_ms,
+            periods,
+        };
+        self
+    }
+
+    /// Set Ponder mode
+    pub fn ponder(mut self) -> Self {
+        self.time_control = TimeControl::Ponder;
+        self
+    }
+
+    /// Set Infinite time control
+    pub fn infinite(mut self) -> Self {
+        self.time_control = TimeControl::Infinite;
+        self
+    }
+
     /// Set moves to go
     pub fn moves_to_go(mut self, moves: u32) -> Self {
         self.moves_to_go = Some(moves);
@@ -124,6 +163,9 @@ impl SearchLimitsBuilder {
     }
 
     /// Set node limit (in addition to time control)
+    ///
+    /// This sets a node limit that is used when time_control is not FixedNodes.
+    /// If time_control is FixedNodes, that value takes precedence.
     pub fn nodes(mut self, nodes: u64) -> Self {
         self.nodes = Some(nodes);
         self
@@ -148,7 +190,22 @@ impl SearchLimitsBuilder {
     }
 
     /// Build SearchLimits
+    ///
+    /// Validates the configuration and builds the SearchLimits.
     pub fn build(self) -> SearchLimits {
+        // Validate that FixedNodes and nodes field don't conflict
+        #[cfg(debug_assertions)]
+        {
+            if let TimeControl::FixedNodes { nodes: fixed } = &self.time_control {
+                if let Some(node_limit) = self.nodes {
+                    debug_assert_eq!(
+                        *fixed, node_limit,
+                        "FixedNodes ({fixed}) and nodes field ({node_limit}) should match when both are set"
+                    );
+                }
+            }
+        }
+
         SearchLimits {
             time_control: self.time_control,
             moves_to_go: self.moves_to_go,
@@ -164,9 +221,12 @@ impl SearchLimitsBuilder {
 /// Convert from basic search limits (for compatibility)
 impl From<super::search_basic::SearchLimits> for SearchLimits {
     fn from(basic: super::search_basic::SearchLimits) -> Self {
-        let mut builder = SearchLimits::builder()
-            .depth(basic.depth as u32)
-            .nodes(basic.nodes.unwrap_or(0));
+        let mut builder = SearchLimits::builder().depth(basic.depth as u32);
+
+        // Only set nodes if actually specified
+        if let Some(nodes) = basic.nodes {
+            builder = builder.nodes(nodes);
+        }
 
         if let Some(time) = basic.time {
             builder = builder.fixed_time_ms(time.as_millis() as u64);
@@ -225,72 +285,6 @@ impl From<SearchLimits> for crate::time_management::SearchLimits {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_builder_basic_usage() {
-        let limits = SearchLimits::builder().depth(10).fixed_time_ms(1000).nodes(50000).build();
-
-        assert_eq!(limits.depth, Some(10));
-        assert_eq!(limits.node_limit(), Some(50000));
-        assert_eq!(limits.time_limit(), Some(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn test_conversion_from_basic() {
-        let basic = super::super::search_basic::SearchLimits {
-            depth: 8,
-            time: Some(Duration::from_millis(500)),
-            nodes: Some(10000),
-            stop_flag: None,
-            info_callback: None,
-        };
-
-        let unified: SearchLimits = basic.into();
-        assert_eq!(unified.depth, Some(8));
-        assert_eq!(unified.node_limit(), Some(10000));
-        assert_eq!(unified.time_limit(), Some(Duration::from_millis(500)));
-    }
-
-    #[test]
-    fn test_conversion_roundtrip() {
-        let original_basic = super::super::search_basic::SearchLimits {
-            depth: 6,
-            time: Some(Duration::from_millis(1500)),
-            nodes: Some(20000),
-            stop_flag: None,
-            info_callback: None,
-        };
-
-        let unified: SearchLimits = original_basic.clone().into();
-        let back_to_basic: super::super::search_basic::SearchLimits = unified.into();
-
-        assert_eq!(back_to_basic.depth, original_basic.depth);
-        assert_eq!(back_to_basic.time, original_basic.time);
-        assert_eq!(back_to_basic.nodes, original_basic.nodes);
-    }
-
-    #[test]
-    fn test_fixed_nodes_time_control() {
-        let limits = SearchLimits::builder().fixed_nodes(100000).depth(12).build();
-
-        assert_eq!(limits.node_limit(), Some(100000));
-        assert_eq!(limits.time_limit(), None);
-        assert_eq!(limits.depth, Some(12));
-    }
-
-    #[test]
-    fn test_infinite_time_control() {
-        let limits = SearchLimits::builder().time_control(TimeControl::Infinite).depth(20).build();
-
-        assert_eq!(limits.time_limit(), None);
-        assert_eq!(limits.node_limit(), None);
-        assert_eq!(limits.depth, Some(20));
-    }
-}
-
 // Manual Clone implementation for SearchLimits (info_callback is not cloneable)
 impl Clone for SearchLimits {
     fn clone(&self) -> Self {
@@ -318,5 +312,167 @@ impl std::fmt::Debug for SearchLimits {
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builder_basic_usage() {
+        let limits = SearchLimits::builder().depth(10).fixed_time_ms(1000).nodes(50000).build();
+
+        assert_eq!(limits.depth, Some(10));
+        assert_eq!(limits.node_limit(), Some(50000));
+        assert_eq!(limits.time_limit(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_conversion_from_basic() {
+        #[allow(deprecated)]
+        let basic = super::super::search_basic::SearchLimits {
+            depth: 8,
+            time: Some(Duration::from_millis(500)),
+            nodes: Some(10000),
+            stop_flag: None,
+            info_callback: None,
+        };
+
+        let unified: SearchLimits = basic.into();
+        assert_eq!(unified.depth, Some(8));
+        assert_eq!(unified.node_limit(), Some(10000));
+        assert_eq!(unified.time_limit(), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn test_conversion_roundtrip() {
+        #[allow(deprecated)]
+        let original_basic = super::super::search_basic::SearchLimits {
+            depth: 6,
+            time: Some(Duration::from_millis(1500)),
+            nodes: Some(20000),
+            stop_flag: None,
+            info_callback: None,
+        };
+
+        let unified: SearchLimits = original_basic.clone().into();
+        #[allow(deprecated)]
+        let back_to_basic: super::super::search_basic::SearchLimits = unified.into();
+
+        assert_eq!(back_to_basic.depth, original_basic.depth);
+        assert_eq!(back_to_basic.time, original_basic.time);
+        assert_eq!(back_to_basic.nodes, original_basic.nodes);
+    }
+
+    #[test]
+    fn test_fixed_nodes_time_control() {
+        let limits = SearchLimits::builder().fixed_nodes(100000).depth(12).build();
+
+        assert_eq!(limits.node_limit(), Some(100000));
+        assert_eq!(limits.time_limit(), None);
+        assert_eq!(limits.depth, Some(12));
+    }
+
+    #[test]
+    fn test_infinite_time_control() {
+        let limits = SearchLimits::builder().time_control(TimeControl::Infinite).depth(20).build();
+
+        assert_eq!(limits.time_limit(), None);
+        assert_eq!(limits.node_limit(), None);
+        assert_eq!(limits.depth, Some(20));
+    }
+
+    #[test]
+    fn test_fischer_time_control() {
+        let limits = SearchLimits::builder().fischer(300000, 300000, 2000).depth(15).build();
+
+        match limits.time_control {
+            TimeControl::Fischer {
+                white_ms,
+                black_ms,
+                increment_ms,
+            } => {
+                assert_eq!(white_ms, 300000);
+                assert_eq!(black_ms, 300000);
+                assert_eq!(increment_ms, 2000);
+            }
+            _ => panic!("Expected Fischer time control"),
+        }
+    }
+
+    #[test]
+    fn test_byoyomi_time_control() {
+        let limits = SearchLimits::builder().byoyomi(600000, 30000, 1).build();
+
+        match limits.time_control {
+            TimeControl::Byoyomi {
+                main_time_ms,
+                byoyomi_ms,
+                periods,
+            } => {
+                assert_eq!(main_time_ms, 600000);
+                assert_eq!(byoyomi_ms, 30000);
+                assert_eq!(periods, 1);
+            }
+            _ => panic!("Expected Byoyomi time control"),
+        }
+    }
+
+    #[test]
+    fn test_node_limit_precedence() {
+        // FixedNodes takes precedence
+        let limits = SearchLimits::builder().fixed_nodes(100000).build();
+
+        assert_eq!(limits.node_limit(), Some(100000));
+
+        // nodes field is used when not FixedNodes
+        let limits2 = SearchLimits::builder().fixed_time_ms(1000).nodes(50000).build();
+
+        assert_eq!(limits2.node_limit(), Some(50000));
+
+        // When both are set with same value, it should be OK
+        let limits3 = SearchLimits::builder()
+            .fixed_nodes(100000)
+            .nodes(100000) // Same value
+            .build();
+
+        assert_eq!(limits3.node_limit(), Some(100000));
+    }
+
+    #[test]
+    fn test_basic_conversion_no_nodes() {
+        #[allow(deprecated)]
+        let basic = super::super::search_basic::SearchLimits {
+            depth: 8,
+            time: Some(Duration::from_millis(500)),
+            nodes: None,
+            stop_flag: None,
+            info_callback: None,
+        };
+
+        let unified: SearchLimits = basic.into();
+        assert_eq!(unified.depth, Some(8));
+        assert_eq!(unified.node_limit(), None);
+        assert_eq!(unified.time_limit(), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn test_default_depth() {
+        let limits = SearchLimits::default();
+        assert_eq!(limits.depth_limit_u8(), DEFAULT_SEARCH_DEPTH);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(
+        expected = "FixedNodes (100000) and nodes field (50000) should match when both are set"
+    )]
+    fn test_build_validation_mismatch() {
+        // This should panic in debug mode when FixedNodes and nodes field differ
+        let _limits = SearchLimits::builder()
+            .fixed_nodes(100000)
+            .nodes(50000) // Different value - should trigger assertion
+            .build();
     }
 }
