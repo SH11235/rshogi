@@ -226,9 +226,9 @@ impl SearchLimitsBuilder {
 // Conversion from/to basic search limits removed
 // Basic search now uses unified SearchLimits directly
 
-/// Convert from time_management SearchLimits
-impl From<crate::time_management::SearchLimits> for SearchLimits {
-    fn from(tm: crate::time_management::SearchLimits) -> Self {
+/// Convert from time_management TimeLimits
+impl From<crate::time_management::TimeLimits> for SearchLimits {
+    fn from(tm: crate::time_management::TimeLimits) -> Self {
         SearchLimits {
             time_control: tm.time_control,
             moves_to_go: tm.moves_to_go,
@@ -241,10 +241,10 @@ impl From<crate::time_management::SearchLimits> for SearchLimits {
     }
 }
 
-/// Convert to time_management SearchLimits
-impl From<SearchLimits> for crate::time_management::SearchLimits {
+/// Convert to time_management TimeLimits
+impl From<SearchLimits> for crate::time_management::TimeLimits {
     fn from(unified: SearchLimits) -> Self {
-        crate::time_management::SearchLimits {
+        crate::time_management::TimeLimits {
             time_control: unified.time_control,
             moves_to_go: unified.moves_to_go,
             depth: unified.depth,
