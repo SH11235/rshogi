@@ -62,7 +62,8 @@ fn test_search_respects_node_limit() {
 
     // Should return a valid move
     assert!(result.best_move.is_some());
-    assert!(result.score != 0); // Should have evaluated
+    // Score should be meaningful (not 0) since we use stand-pat evaluation
+    assert!(result.score != 0, "Score: {}, Nodes: {}", result.score, result.stats.nodes);
 
     // Nodes searched should be close to limit (allow some overhead)
     assert!(
@@ -215,6 +216,198 @@ fn test_emergency_time_management() {
     let info = tm.get_time_info();
     assert!(info.soft_limit_ms <= 50, "Emergency allocation should be minimal");
     assert!(info.hard_limit_ms <= 100, "Emergency hard limit should be small");
+}
+
+/// Test that enhanced search respects fixed time limits
+#[test]
+fn test_enhanced_search_respects_fixed_time() {
+    let engine = Engine::new(EngineType::Enhanced);
+    let mut position = Position::from_sfen(INITIAL_SFEN).unwrap();
+
+    // Search with 100ms time limit
+    let limits = CoreSearchLimits {
+        time: Some(Duration::from_millis(100)),
+        depth: 10, // Max depth
+        nodes: None,
+        stop_flag: None,
+        info_callback: None,
+    };
+
+    let start = Instant::now();
+    let result = engine.search(&mut position, limits);
+    let elapsed = start.elapsed();
+
+    // Should complete within reasonable time (allow 50ms buffer for overhead)
+    assert!(
+        elapsed.as_millis() <= 150,
+        "Enhanced search took {}ms, expected <= 150ms",
+        elapsed.as_millis()
+    );
+
+    // Should return a valid move
+    assert!(result.best_move.is_some());
+    assert!(result.score != 0); // Should have evaluated
+}
+
+/// Test that enhanced search respects node limits
+#[test]
+fn test_enhanced_search_respects_node_limit() {
+    let engine = Engine::new(EngineType::Enhanced);
+    let mut position = Position::from_sfen(INITIAL_SFEN).unwrap();
+
+    // Search with node limit
+    let limits = CoreSearchLimits {
+        time: None,
+        depth: 10, // Max depth
+        nodes: Some(10000),
+        stop_flag: None,
+        info_callback: None,
+    };
+
+    let result = engine.search(&mut position, limits);
+
+    // Should return a valid move
+    assert!(result.best_move.is_some());
+    // Score should be meaningful (not 0)
+    assert!(
+        result.score != 0,
+        "Enhanced score: {}, Nodes: {}",
+        result.score,
+        result.stats.nodes
+    );
+
+    // Nodes searched should be close to limit (allow some overhead)
+    assert!(
+        result.stats.nodes <= 11000,
+        "Enhanced searched {} nodes, expected <= 11000",
+        result.stats.nodes
+    );
+}
+
+/// Test enhanced search with depth limit
+#[test]
+fn test_enhanced_search_with_depth_limit() {
+    let engine = Engine::new(EngineType::Enhanced);
+    let mut position = Position::from_sfen(INITIAL_SFEN).unwrap();
+
+    // Search with depth limit
+    let limits = CoreSearchLimits {
+        time: None,
+        depth: 5,
+        nodes: None,
+        stop_flag: None,
+        info_callback: None,
+    };
+
+    let result = engine.search(&mut position, limits);
+
+    // Should have search result
+    assert!(result.best_move.is_some());
+    assert!(result.score != 0); // Should have evaluated
+                                // PV should not exceed depth limit
+    assert!(result.stats.pv.len() <= 5);
+}
+
+/// Test enhanced search with stop flag
+#[test]
+fn test_enhanced_search_with_stop_flag() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::thread;
+
+    let engine = Engine::new(EngineType::Enhanced);
+    let mut position = Position::from_sfen(INITIAL_SFEN).unwrap();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let limits = CoreSearchLimits {
+        time: None,
+        depth: 10, // Deep search
+        nodes: None,
+        stop_flag: Some(stop_flag.clone()),
+        info_callback: None,
+    };
+
+    // Set stop flag after short delay
+    let stop_flag_clone = stop_flag.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(10));
+        stop_flag_clone.store(true, std::sync::atomic::Ordering::Release);
+    });
+
+    let start = Instant::now();
+    let result = engine.search(&mut position, limits);
+    let elapsed = start.elapsed();
+
+    // Should find a move (even if search was stopped)
+    assert!(result.best_move.is_some());
+
+    // Should have stopped quickly
+    assert!(elapsed < Duration::from_secs(1));
+
+    // Should have searched relatively few nodes
+    assert!(result.stats.nodes < 1_000_000);
+}
+
+/// Test enhanced search fallback behavior (immediate stop)
+#[test]
+fn test_enhanced_search_fallback_move_quality() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let engine = Engine::new(EngineType::Enhanced);
+    let mut position = Position::from_sfen(INITIAL_SFEN).unwrap();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let limits = CoreSearchLimits {
+        time: None,
+        depth: 5,
+        nodes: None,
+        stop_flag: Some(stop_flag.clone()),
+        info_callback: None,
+    };
+
+    // Set stop flag immediately to force fallback
+    stop_flag.store(true, std::sync::atomic::Ordering::Release);
+
+    let result = engine.search(&mut position, limits);
+
+    // Should find a move even when stopped immediately
+    assert!(result.best_move.is_some());
+
+    // Score should be reasonable (not just 0 or -INFINITY)
+    assert!(result.score > -30000);
+    assert!(result.score < 30000);
+
+    // Should have evaluated at least some positions
+    assert!(result.stats.nodes >= 1, "Enhanced should have evaluated at least one position");
+}
+
+/// Test enhanced search time allocation by phase
+#[test]
+fn test_enhanced_search_time_allocation() {
+    let engine = Engine::new(EngineType::Enhanced);
+    let mut position = Position::from_sfen(INITIAL_SFEN).unwrap();
+
+    // Test that search allocates reasonable time
+    let limits = CoreSearchLimits {
+        time: Some(Duration::from_millis(500)),
+        depth: 10,
+        nodes: None,
+        stop_flag: None,
+        info_callback: None,
+    };
+
+    let start = Instant::now();
+    let result = engine.search(&mut position, limits);
+    let elapsed = start.elapsed();
+
+    // Should use reasonable portion of available time
+    assert!(elapsed.as_millis() >= 50, "Should use at least some time");
+    assert!(elapsed.as_millis() <= 550, "Should not exceed time limit by much");
+
+    // Should return meaningful result
+    assert!(result.best_move.is_some());
+    assert!(result.score != 0);
 }
 
 /// Test time management with moves_to_go

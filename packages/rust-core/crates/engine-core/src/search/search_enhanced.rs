@@ -436,6 +436,30 @@ impl EnhancedSearcher {
         pos: &mut Position,
         limits: SearchLimits,
     ) -> (Option<Move>, i32) {
+        // Initialize start time
+        self.start_time = Instant::now();
+
+        // Safety margin for time control (40ms)
+        const SAFETY_MARGIN_MS: u64 = 40;
+
+        // Set legacy time/node limits for fallback in should_stop()
+        match &limits.time_control {
+            crate::time_management::TimeControl::FixedTime { ms_per_move } => {
+                // Set time limit with safety margin
+                let time_ms = ms_per_move.saturating_sub(SAFETY_MARGIN_MS);
+                self.time_limit = Some(self.start_time + Duration::from_millis(time_ms));
+                self.node_limit = None;
+            }
+            crate::time_management::TimeControl::FixedNodes { nodes } => {
+                self.time_limit = None;
+                self.node_limit = Some(*nodes);
+            }
+            _ => {
+                self.time_limit = None;
+                self.node_limit = limits.nodes;
+            }
+        }
+
         // Create time manager if time control is specified
         self.time_manager = match &limits.time_control {
             crate::time_management::TimeControl::Infinite => None,
@@ -683,6 +707,12 @@ impl EnhancedSearcher {
             let mut moves = MoveList::new();
             move_gen.generate_all(pos, &mut moves);
             if !moves.is_empty() {
+                // Count at least one node for fallback evaluation
+                self.nodes.fetch_add(1, Ordering::Relaxed);
+
+                // Try to evaluate the first move if we have time
+                let evaluator = self.evaluator.clone();
+                best_score = evaluator.evaluate(pos);
                 best_move = Some(moves[0]);
             }
         }
