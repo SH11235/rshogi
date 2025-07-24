@@ -10,14 +10,9 @@ use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::{Move, MoveList};
 use crate::{MoveGen, Position};
 
-/// Infinity score for search bounds
-const INFINITY_SCORE: i32 = 32000;
+use super::constants::*;
 
-/// Special value to indicate search was interrupted (sentinel value)
-const SEARCH_INTERRUPTED: i32 = INFINITY_SCORE + 1;
-
-/// Maximum depth for quiescence search
-const QUIESCE_MAX_PLY: u8 = 4;
+// Constants are now imported from super::constants
 
 /// Info callback type
 pub type InfoCallback = Box<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send>;
@@ -125,7 +120,7 @@ impl<E: Evaluator> Searcher<E> {
         self.nodes = 0;
 
         let mut best_move = None;
-        let mut best_score = -INFINITY_SCORE;
+        let mut best_score = -SEARCH_INF;
 
         // If no move is found during iterative deepening, we need a fallback
         // Generate all legal moves and evaluate them at depth 0 for better quality
@@ -137,7 +132,7 @@ impl<E: Evaluator> Searcher<E> {
         if !legal_moves.is_empty() {
             // If stop flag is set immediately, at least evaluate the first few moves quickly
             // This ensures the test case where stop is immediate still gets reasonable results
-            let mut fallback_score = -INFINITY_SCORE;
+            let mut fallback_score = -SEARCH_INF;
             let moves_to_evaluate = if self.should_stop() {
                 // When stopped immediately, still evaluate at least first move for quality
                 1.min(legal_moves.len())
@@ -163,7 +158,7 @@ impl<E: Evaluator> Searcher<E> {
                 let undo_info = pos.do_move(mv);
 
                 // Evaluate position after move (negated for opponent's perspective)
-                let score = -self.quiesce(pos, -INFINITY_SCORE, INFINITY_SCORE, 0);
+                let score = -self.quiesce(pos, -SEARCH_INF, SEARCH_INF, 0);
 
                 // Undo move
                 pos.undo_move(mv, undo_info);
@@ -191,7 +186,7 @@ impl<E: Evaluator> Searcher<E> {
 
         // Iterative deepening
         for depth in 1..=self.limits.depth {
-            let score = self.alpha_beta(pos, depth, -INFINITY_SCORE, INFINITY_SCORE, 0);
+            let score = self.alpha_beta(pos, depth, -SEARCH_INF, SEARCH_INF, 0);
 
             // Handle interruption
             if score == SEARCH_INTERRUPTED {
@@ -205,7 +200,7 @@ impl<E: Evaluator> Searcher<E> {
 
             // Update best score (only for valid completions)
             // Don't overwrite non-zero fallback score with 0
-            if score != 0 || best_score == -INFINITY_SCORE {
+            if score != 0 || best_score == -SEARCH_INF {
                 best_score = score;
                 if !self.pv[0].is_empty() {
                     best_move = Some(self.pv[0][0]);
@@ -261,14 +256,14 @@ impl<E: Evaluator> Searcher<E> {
         if moves.is_empty() {
             if pos.in_check() {
                 // Checkmate - return negative score
-                return -INFINITY_SCORE + ply as i32;
+                return -SEARCH_INF + ply as i32;
             } else {
                 // Stalemate (shouldn't happen in shogi)
                 return 0;
             }
         }
 
-        let mut best_score = -INFINITY_SCORE;
+        let mut best_score = -SEARCH_INF;
 
         // Search all moves
         for &mv in moves.as_slice() {
@@ -511,8 +506,8 @@ mod tests {
         let _best_move = result.best_move.unwrap();
 
         // Score should be based on depth-0 evaluation, not just -INFINITY
-        assert!(result.score > -INFINITY_SCORE);
-        assert!(result.score < INFINITY_SCORE);
+        assert!(result.score > -SEARCH_INF);
+        assert!(result.score < SEARCH_INF);
 
         // When stopped immediately, we should have at least evaluated the fallback move
         // The actual node count depends on when exactly the stop flag is checked
