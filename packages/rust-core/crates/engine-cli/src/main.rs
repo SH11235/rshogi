@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
+use engine_core::engine::controller::Engine;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,8 +24,47 @@ struct Args {
     debug: bool,
 }
 
+/// Guard to ensure engine is returned on drop (for panic safety)
+struct EngineReturnGuard {
+    engine: Option<Engine>,
+    tx: Sender<WorkerMessage>,
+}
+
+impl EngineReturnGuard {
+    fn new(engine: Engine, tx: Sender<WorkerMessage>) -> Self {
+        Self {
+            engine: Some(engine),
+            tx,
+        }
+    }
+}
+
+impl std::ops::Deref for EngineReturnGuard {
+    type Target = Engine;
+
+    fn deref(&self) -> &Self::Target {
+        self.engine.as_ref().expect("Engine already taken")
+    }
+}
+
+impl std::ops::DerefMut for EngineReturnGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.engine.as_mut().expect("Engine already taken")
+    }
+}
+
+impl Drop for EngineReturnGuard {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            log::debug!("EngineReturnGuard: returning engine");
+            if let Err(e) = self.tx.try_send(WorkerMessage::EngineReturn(engine)) {
+                log::warn!("Failed to return engine through channel: {e:?}");
+            }
+        }
+    }
+}
+
 /// Messages from worker thread to main thread
-#[derive(Debug, Clone)]
 enum WorkerMessage {
     Info(SearchInfo),
     BestMove {
@@ -33,6 +73,7 @@ enum WorkerMessage {
     },
     Finished, // Thread finished successfully
     Error(String),
+    EngineReturn(Engine), // Return the engine after search
 }
 
 /// Wait for any ongoing search to complete
@@ -84,6 +125,7 @@ fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> 
                 }
             }
             WorkerMessage::Finished => {} // Ignore finished message in drain
+            WorkerMessage::EngineReturn(_) => {} // Ignore engine return in drain
         }
     }
     Ok(())
@@ -136,6 +178,10 @@ fn pump_messages(
                             return Err(e.into());
                         }
                         break;
+                    }
+                    Ok(WorkerMessage::EngineReturn(_)) => {
+                        // EngineReturn is handled in the main loop, not in test utilities
+                        log::debug!("EngineReturn message in pump_messages (unexpected)");
                     }
                     Err(_) => {
                         log::debug!("Channel disconnected");
@@ -222,7 +268,7 @@ fn main() -> Result<()> {
         );
     }
 
-    log::info!("USI Engine starting...");
+    log::info!("Shogi USI Engine starting (version 1.0)");
 
     // Create communication channels
     let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
@@ -251,7 +297,7 @@ fn main() -> Result<()> {
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => {
-                        log::debug!("Processing command: {cmd:?}");
+                        log::debug!("USI command received: {cmd:?}");
 
                         // Check if it's quit command
                         if matches!(cmd, UsiCommand::Quit) {
@@ -296,10 +342,30 @@ fn main() -> Result<()> {
                             eprintln!("Failed to flush stdout after sending best move: {e}");
                             return Err(e.into());
                         }
-                        searching = false;
                     }
                     Ok(WorkerMessage::Finished) => {
                         log::debug!("Worker thread finished");
+                        searching = false;
+
+                        // Drain any remaining Info messages in the queue
+                        while let Ok(msg) = worker_rx.try_recv() {
+                            match msg {
+                                WorkerMessage::Info(info) => {
+                                    send_response(UsiResponse::Info(info));
+                                    if let Err(e) = stdout.flush() {
+                                        log::debug!("Failed to flush stdout while draining info: {e}");
+                                        // Continue draining even if flush fails
+                                    }
+                                }
+                                _ => {
+                                    // Other message types shouldn't be in queue after Finished
+                                    // If they are, it indicates an error condition, so we break
+                                    log::debug!("Unexpected message type after Finished: {:?}",
+                                               std::any::type_name_of_val(&msg));
+                                    break;
+                                }
+                            }
+                        }
                     }
                     Ok(WorkerMessage::Error(err)) => {
                         send_info_string(format!("Error: {err}"));
@@ -307,6 +373,11 @@ fn main() -> Result<()> {
                             eprintln!("Failed to flush stdout after sending error: {e}");
                             return Err(e.into());
                         }
+                    }
+                    Ok(WorkerMessage::EngineReturn(returned_engine)) => {
+                        log::debug!("Engine returned from worker");
+                        let mut adapter = engine.lock().unwrap();
+                        adapter.return_engine(returned_engine);
                     }
                     Err(_) => {
                         log::debug!("Worker channel closed");
@@ -446,10 +517,11 @@ fn handle_command(
         }
 
         UsiCommand::PonderHit => {
-            // Convert ponder search to normal search
+            // Handle ponder hit
             let mut engine = engine.lock().unwrap();
-            if let Err(e) = engine.ponder_hit() {
-                log::warn!("Ponder hit error: {e}");
+            match engine.ponder_hit() {
+                Ok(()) => log::debug!("Ponder hit successfully processed"),
+                Err(e) => log::debug!("Ponder hit ignored: {e}"),
             }
         }
 
@@ -478,12 +550,12 @@ fn handle_command(
 
 /// Worker thread function for search
 fn search_worker(
-    engine: Arc<Mutex<EngineAdapter>>,
+    engine_adapter: Arc<Mutex<EngineAdapter>>,
     params: usi::GoParams,
     stop_flag: Arc<AtomicBool>,
     tx: Sender<WorkerMessage>,
 ) {
-    log::debug!("Search worker started with params: {params:?}");
+    log::debug!("Search worker thread started");
 
     // Set up info callback
     let tx_info = tx.clone();
@@ -491,15 +563,65 @@ fn search_worker(
         let _ = tx_info.send(WorkerMessage::Info(info));
     };
 
-    // Run search
-    let result = {
-        let mut engine = engine.lock().unwrap();
-        engine.search(params, stop_flag.clone(), Box::new(info_callback))
-    };
+    // Take engine out and prepare search
+    let was_ponder = params.ponder;
+    let (engine, position, limits, ponder_hit_flag) = {
+        let mut adapter = engine_adapter.lock().unwrap();
+        match adapter.take_engine() {
+            Ok(engine) => {
+                match adapter.prepare_search(&params, stop_flag.clone()) {
+                    Ok((pos, lim, flag)) => (engine, pos, lim, flag),
+                    Err(e) => {
+                        // Return engine and send error
+                        adapter.return_engine(engine);
+                        log::error!("Search preparation error: {e}");
+                        let _ = tx.send(WorkerMessage::Error(e.to_string()));
+                        let _ = tx.send(WorkerMessage::BestMove {
+                            best_move: "resign".to_string(),
+                            ponder_move: None,
+                        });
+                        let _ = tx.send(WorkerMessage::Finished);
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to take engine: {e}");
+                let _ = tx.send(WorkerMessage::Error(e.to_string()));
+                let _ = tx.send(WorkerMessage::BestMove {
+                    best_move: "resign".to_string(),
+                    ponder_move: None,
+                });
+                let _ = tx.send(WorkerMessage::Finished);
+                return;
+            }
+        }
+    }; // Lock released here
 
-    // Send result
+    // Explicitly drop ponder_hit_flag (it's used internally by the engine)
+    drop(ponder_hit_flag);
+
+    // Wrap engine in guard for panic safety
+    let mut engine_guard = EngineReturnGuard::new(engine, tx.clone());
+
+    // Execute search without holding the lock
+    let result = EngineAdapter::execute_search_static(
+        &mut engine_guard,
+        position,
+        limits,
+        Box::new(info_callback),
+    );
+
+    // Handle result
     match result {
         Ok((best_move, ponder_move)) => {
+            // Clean up ponder state if needed
+            {
+                let mut adapter = engine_adapter.lock().unwrap();
+                adapter.cleanup_after_search(was_ponder);
+            }
+
+            // Send best move
             let _ = tx.send(WorkerMessage::BestMove {
                 best_move,
                 ponder_move,
@@ -507,7 +629,15 @@ fn search_worker(
         }
         Err(e) => {
             log::error!("Search error: {e}");
-            // Even on error, send a fallback bestmove to satisfy USI protocol
+            // Engine will be returned automatically by EngineReturnGuard::drop
+
+            // Clean up ponder state if needed
+            {
+                let mut adapter = engine_adapter.lock().unwrap();
+                adapter.cleanup_after_search(was_ponder);
+            }
+
+            // Send error and resign
             if stop_flag.load(Ordering::Acquire) {
                 // Stopped by user - send resign
                 let _ = tx.send(WorkerMessage::BestMove {

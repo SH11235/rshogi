@@ -31,7 +31,9 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
     } else if let Some(sfen_str) = sfen {
         parse_sfen(sfen_str).map_err(|e| anyhow!(e))?
     } else {
-        return Err(anyhow!("Must specify either startpos or sfen"));
+        return Err(anyhow!(
+            "Position command must specify either 'startpos' or 'sfen <fen_string>'"
+        ));
     };
 
     // Apply moves with validation
