@@ -36,8 +36,8 @@ fn to_usi_score(raw_score: i32) -> Score {
 
 /// Engine adapter that bridges USI protocol with engine-core
 pub struct EngineAdapter {
-    /// The underlying engine
-    engine: Engine,
+    /// The underlying engine (wrapped in Option for temporary ownership transfer)
+    engine: Option<Engine>,
     /// Current position
     position: Option<Position>,
     /// Engine options
@@ -72,10 +72,31 @@ impl Default for EngineAdapter {
 }
 
 impl EngineAdapter {
+    /// Get a reference to the internal engine
+    #[allow(dead_code)]
+    pub fn engine(&self) -> Option<&Engine> {
+        self.engine.as_ref()
+    }
+
+    /// Take the engine out for exclusive use (for search operations)
+    pub fn take_engine(&mut self) -> Result<Engine> {
+        self.engine
+            .take()
+            .ok_or_else(|| anyhow!("Engine is currently in use (probably searching)"))
+    }
+
+    /// Return the engine after use
+    pub fn return_engine(&mut self, engine: Engine) {
+        if self.engine.is_some() {
+            log::warn!("Engine returned while another engine instance exists");
+        }
+        self.engine = Some(engine);
+    }
+
     /// Create a new engine adapter
     pub fn new() -> Self {
         let mut adapter = Self {
-            engine: Engine::new(EngineType::Material), // Start with simplest for compatibility
+            engine: Some(Engine::new(EngineType::Material)), // Start with simplest for compatibility
             position: None,
             options: Vec::new(),
             hash_size: 16,
@@ -140,14 +161,19 @@ impl EngineAdapter {
         match name {
             "USI_Hash" => {
                 if let Some(val) = value {
-                    self.hash_size =
-                        val.parse::<usize>().map_err(|_| anyhow!("Invalid hash size: '{}'. Must be a number between 1 and 1024", val))?;
+                    self.hash_size = val.parse::<usize>().map_err(|_| {
+                        anyhow!("Invalid hash size: '{}'. Must be a number between 1 and 1024", val)
+                    })?;
                 }
             }
             "Threads" => {
                 if let Some(val) = value {
-                    self.threads =
-                        val.parse::<usize>().map_err(|_| anyhow!("Invalid thread count: '{}'. Must be a number between 1 and 256", val))?;
+                    self.threads = val.parse::<usize>().map_err(|_| {
+                        anyhow!(
+                            "Invalid thread count: '{}'. Must be a number between 1 and 256",
+                            val
+                        )
+                    })?;
                 }
             }
             "USI_Ponder" => {
@@ -164,7 +190,11 @@ impl EngineAdapter {
                         "EnhancedNnue" => EngineType::EnhancedNnue,
                         _ => return Err(anyhow!("Invalid engine type: '{}'. Valid values are: Material, Nnue, Enhanced, EnhancedNnue", val)),
                     };
-                    self.engine.set_engine_type(engine_type);
+                    if let Some(ref mut engine) = self.engine {
+                        engine.set_engine_type(engine_type);
+                    } else {
+                        return Err(anyhow!("Engine is currently in use"));
+                    }
                 }
             }
             _ => {
@@ -198,21 +228,25 @@ impl EngineAdapter {
         self.clear_ponder_state();
     }
 
-    /// Search for best move
+    /// Search for best move (legacy method - kept for compatibility during migration)
+    #[allow(dead_code)]
     pub fn search(
         &mut self,
         params: GoParams,
         stop_flag: Arc<AtomicBool>,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<(String, Option<String>)> {
-        log::info!("Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
+        log::info!(
+            "Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
             if params.ponder { "ponder" } else { "normal" },
             params.depth,
             params.movetime.or(params.btime.or(params.wtime)),
             params.nodes
         );
 
-        let mut position = self.position.clone().ok_or_else(|| anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first"))?;
+        let mut position = self.position.clone().ok_or_else(|| {
+            anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first")
+        })?;
 
         // Set up info callback using Arc to share between closures
         let info_callback_arc = Arc::new(info_callback);
@@ -274,8 +308,10 @@ impl EngineAdapter {
         );
 
         // Run search
-        let result = self.engine.search(&mut position, limits);
-        log::info!("Search completed - depth:{} nodes:{} time:{}ms",
+        let engine = self.engine.as_ref().ok_or_else(|| anyhow!("Engine is currently in use"))?;
+        let result = engine.search(&mut position, limits);
+        log::info!(
+            "Search completed - depth:{} nodes:{} time:{}ms",
             result.stats.depth,
             result.stats.nodes,
             result.stats.elapsed.as_millis()
@@ -291,7 +327,9 @@ impl EngineAdapter {
         }
 
         // Get best move
-        let best_move = result.best_move.ok_or_else(|| anyhow!("No legal moves available in this position (checkmate or stalemate)"))?;
+        let best_move = result.best_move.ok_or_else(|| {
+            anyhow!("No legal moves available in this position (checkmate or stalemate)")
+        })?;
 
         // Convert move to USI format
         let best_move_str = engine_core::usi::move_to_usi(&best_move);
@@ -343,6 +381,145 @@ impl EngineAdapter {
         self.ponder_state.ponder_move = None;
         self.ponder_state.ponder_start_time = None;
         self.active_ponder_hit_flag = None;
+    }
+
+    /// Prepare search data and return necessary components
+    /// This allows releasing the mutex lock before the actual search
+    pub fn prepare_search(
+        &mut self,
+        params: &GoParams,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Result<(Position, SearchLimits, Option<Arc<AtomicBool>>)> {
+        log::info!(
+            "Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
+            if params.ponder { "ponder" } else { "normal" },
+            params.depth,
+            params.movetime.or(params.btime.or(params.wtime)),
+            params.nodes
+        );
+
+        // Get position
+        let position = self.position.clone().ok_or_else(|| {
+            anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first")
+        })?;
+
+        // Update ponder state and create flag if needed
+        let ponder_hit_flag = if params.ponder {
+            self.ponder_state.is_pondering = true;
+            self.ponder_state.ponder_start_time = Some(std::time::Instant::now());
+            let flag = Arc::new(AtomicBool::new(false));
+            self.active_ponder_hit_flag = Some(flag.clone());
+            log::debug!("Ponder mode activated with shared flag");
+            Some(flag)
+        } else {
+            self.clear_ponder_state();
+            None
+        };
+
+        // Create SearchLimits
+        let mut builder = SearchLimits::builder();
+
+        // Set stop flag
+        builder = builder.stop_flag(stop_flag);
+
+        // Set ponder hit flag if available
+        if let Some(ref flag) = ponder_hit_flag {
+            builder = builder.ponder_hit_flag(flag.clone());
+        }
+
+        // Apply go parameters
+        let limits = apply_go_params(builder, params, &position)?;
+
+        Ok((position, limits, ponder_hit_flag))
+    }
+
+    /// Execute search with prepared data and return USI result
+    /// This takes a mutable reference to avoid ownership transfer
+    pub fn execute_search_static(
+        engine: &mut Engine,
+        mut position: Position,
+        limits: SearchLimits,
+        info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
+    ) -> Result<(String, Option<String>)> {
+        // Set up info callback
+        let info_callback_arc = Arc::new(info_callback);
+        let info_callback_clone = info_callback_arc.clone();
+        type InfoCallbackType = Arc<
+            dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync,
+        >;
+        let info_callback_inner: InfoCallbackType =
+            Arc::new(move |depth, score, nodes, elapsed, pv| {
+                let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
+                let score_enum = to_usi_score(score);
+
+                let info = SearchInfo {
+                    depth: Some(depth as u32),
+                    time: Some(elapsed.as_millis().max(1) as u64),
+                    nodes: Some(nodes),
+                    pv: pv_str,
+                    score: Some(score_enum),
+                    ..Default::default()
+                };
+                (*info_callback_clone)(info);
+            });
+
+        // Create a new SearchLimits with info_callback added
+        // We can't add it in prepare_search because the callback is created here
+        // This is not shadowing - we're creating a new instance with the callback
+        let limits = SearchLimits {
+            info_callback: Some(info_callback_inner),
+            ..limits
+        };
+
+        // Execute search
+        let result = engine.search(&mut position, limits);
+        log::info!(
+            "Search completed - depth:{} nodes:{} time:{}ms",
+            result.stats.depth,
+            result.stats.nodes,
+            result.stats.elapsed.as_millis()
+        );
+
+        // Get best move
+        let best_move = result.best_move.ok_or_else(|| {
+            anyhow!("No legal moves available in this position (checkmate or stalemate)")
+        })?;
+
+        // Convert move to USI format
+        let best_move_str = engine_core::usi::move_to_usi(&best_move);
+        log::info!("Best move: {} (score: {:?})", best_move_str, result.score);
+
+        // Send final info
+        let score = to_usi_score(result.score);
+        let depth = if result.stats.depth == 0 {
+            log::warn!("SearchStats.depth is 0, this should not happen. Using 1 as fallback.");
+            1
+        } else {
+            result.stats.depth
+        };
+
+        let info = SearchInfo {
+            depth: Some(depth as u32),
+            time: Some(result.stats.elapsed.as_millis().max(1) as u64),
+            nodes: Some(result.stats.nodes),
+            pv: vec![best_move_str.clone()],
+            score: Some(score),
+            ..Default::default()
+        };
+        (*info_callback_arc)(info);
+
+        // For now, no ponder move generation
+        Ok((best_move_str, None))
+    }
+
+    /// Clean up after search completion
+    pub fn cleanup_after_search(&mut self, was_ponder: bool) {
+        if was_ponder {
+            self.active_ponder_hit_flag = None;
+            if self.ponder_state.is_pondering {
+                self.ponder_state.is_pondering = false;
+            }
+        }
     }
 }
 
