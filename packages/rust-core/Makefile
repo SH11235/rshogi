@@ -1,88 +1,62 @@
-.PHONY: build build-dev test clean check-all build-bins build-bin-convert build-bin-verify convert-opening-books-parallel
+.PHONY: build build-dev test test-all test-large-stack clean check-all format format-check lint check audit outdated unused-deps install-dev-tools
 
-# Default target
+# Default WASM build (legacy support - builds src/)
 build:
 	wasm-pack build --target web --out-dir pkg
 	mkdir -p ../web/src/wasm
 	cp pkg/* ../web/src/wasm/
 
+# Development WASM build (legacy support - builds src/)
 build-dev:
 	wasm-pack build --dev --target web --out-dir pkg
 	mkdir -p ../web/src/wasm
 	cp pkg/* ../web/src/wasm/
 
-# Run all tests (unit and integration)
+# Run all tests in workspace
 test:
-	@echo "Running unit tests..."
-	cargo test --lib
-	@echo "\nRunning integration tests..."
-	@for test in $$(find tests -name "*.rs" -type f | grep -v "/data/" | xargs -n1 basename | sed 's/.rs$$//'); do \
-		echo "\n=== Running $$test ==="; \
-		cargo test --test $$test || true; \
-	done
+	@echo "Running all workspace tests..."
+	cargo test --workspace
 
-# Run unit tests only
-test-unit:
-	cargo test --lib
+# Run all tests including large stack tests
+test-all:
+	@echo "Running all tests including large stack tests..."
+	RUST_MIN_STACK=8388608 cargo test --workspace -- --include-ignored
 
-# Run all integration tests (individually to see all results)
-test-integration:
-	@echo "Running integration tests..."
-	@for test in $$(find tests -name "*.rs" -type f | grep -v "/data/" | xargs -n1 basename | sed 's/.rs$$//'); do \
-		echo "\n=== Running $$test ==="; \
-		cargo test --test $$test || true; \
-	done
+# Run only large stack tests
+test-large-stack:
+	@echo "Running large stack tests..."
+	RUST_MIN_STACK=8388608 cargo test --workspace -- --ignored
 
-# Run specific integration test
-test-integration-binary:
-	cargo test --test binary_converter_test
+# Run tests in release mode (recommended for CI)
+test-release:
+	@echo "Running tests in release mode..."
+	cargo test --workspace --release
 
-test-integration-data-structures:
-	cargo test --test data_structures_test
-
-test-integration-integration:
-	cargo test --test integration_test
-
-test-integration-move-encoder:
-	cargo test --test move_encoder_test
-
-test-integration-position-filter:
-	cargo test --test position_filter_test
-
-test-integration-position-hasher:
-	cargo test --test position_hasher_test
-
-test-integration-sfen-parser:
-	cargo test --test sfen_parser_test
-
-test-wasm:
-	wasm-pack test --chrome --headless
-
-test-wasm-firefox:
-	wasm-pack test --firefox --headless
-
+# Format code
 format:
-	cargo fmt
+	cargo fmt --all
 
+# Check formatting
 format-check:
-	cargo fmt -- --check
+	cargo fmt --all -- --check
 
+# Run clippy linter
 lint:
-	cargo clippy -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
+# Check code without building
 check:
-	cargo check
+	cargo check --workspace --all-targets
 
 # Run all quality checks
-check-all: format-check lint check test
+check-all: format-check lint check test-release
 	@echo "✅ All quality checks passed!"
 
-# Install additional development tools
-install-dev-tools:
-	cargo install cargo-audit
-	cargo install cargo-outdated
-	cargo install cargo-machete
-	@echo "✅ Development tools installed!"
+# Clean build artifacts
+clean:
+	cargo clean
+	rm -rf pkg
+	rm -rf ../web/src/wasm/*
 
 # Security audit
 audit:
@@ -96,79 +70,73 @@ outdated:
 unused-deps:
 	cargo machete
 
-clean:
-	cargo clean
-	rm -rf pkg
-	rm -rf ../web/src/wasm/*
+# Install additional development tools
+install-dev-tools:
+	cargo install cargo-audit
+	cargo install cargo-outdated
+	cargo install cargo-machete
+	cargo install wasm-pack
+	@echo "✅ Development tools installed!"
 
-# Build release binaries
-build-bins:
-	cargo build --release --bins
+# --- Engine/USI specific targets ---
 
-build-bin-convert:
-	cargo build --release --bin convert_opening_book
+# Build USI engine
+build-engine:
+	cargo build --release -p engine-cli
 
-build-bin-verify:
-	cargo build --release --bin verify_opening_book
+# Run USI engine
+run-engine:
+	cargo run --release -p engine-cli
 
-# Generate opening book files
-generate-openings:
-	./scripts/generate-and-copy-openings.sh
+# --- Tools specific targets ---
 
-# Convert opening book from SFEN to binary format
-convert-opening-book: build-bin-convert
-	./target/release/convert_opening_book user_book1.db converted_openings/opening_book_web.binz
+# Build all tools
+build-tools:
+	cargo build --release -p tools
 
-# Convert opening books in parallel with different configurations
-convert-opening-books-parallel: build-bin-convert
-	@echo "Converting opening books in parallel..."
-	@mkdir -p converted_openings
-	./target/release/convert_opening_book \
-		--input user_book1.db \
-		--output converted_openings/opening_book_web.binz \
-		--max-moves 50 \
-		--min-depth 5 \
-		--min-eval=-500 \
-		--max-eval=500 \
-		--compress \
-		--validate & \
-	./target/release/convert_opening_book \
-		--input user_book1.db \
-		--output converted_openings/opening_book_full.binz \
-		--max-moves 999999 \
-		--min-depth 0 \
-		--min-eval=-99999 \
-		--max-eval=99999 \
-		--compress \
-		--progress-interval 100000 & \
-	./target/release/convert_opening_book \
-		--input user_book1.db \
-		--output converted_openings/opening_book_early.binz \
-		--max-moves 20 \
-		--min-depth 8 \
-		--min-eval=-300 \
-		--max-eval=300 \
-		--compress & \
-	./target/release/convert_opening_book \
-		--input user_book1.db \
-		--output converted_openings/opening_book_tournament.binz \
-		--max-moves 100 \
-		--min-depth 10 \
-		--min-eval=-200 \
-		--max-eval=200 \
-		--compress \
-		--validate & \
-	wait
-	@echo "✅ All opening book conversions completed!"
+# Convert opening book
+convert-opening-book:
+	cargo run --release -p tools --bin convert_opening_book -- $(ARGS)
 
-# Verify opening book binary files
-verify-opening-book: build-bin-verify
-	./target/release/verify_opening_book converted_openings/opening_book_web.binz
+# Verify opening book
+verify-opening-book:
+	cargo run --release -p tools --bin verify_opening_book -- $(ARGS)
 
-# Show help for convert tool
-convert-opening-book-help:
-	cargo run --bin convert_opening_book -- --help
+# Run NNUE benchmark
+nnue-benchmark:
+	cargo run --release -p tools --bin nnue_benchmark
 
-# Show help for verify tool
-verify-opening-book-help:
-	cargo run --bin verify_opening_book -- --help
+# Run shogi benchmark
+shogi-benchmark:
+	cargo run --release -p tools --bin shogi_benchmark
+
+# --- Help ---
+help:
+	@echo "Available targets:"
+	@echo "  build          - Build WASM (legacy src/)"
+	@echo "  build-dev      - Build WASM in dev mode (legacy src/)"
+	@echo "  test           - Run all workspace tests"
+	@echo "  test-release   - Run tests in release mode (recommended)"
+	@echo "  test-all       - Run all tests including ignored ones"
+	@echo "  test-large-stack - Run only large stack tests"
+	@echo "  format         - Format code"
+	@echo "  format-check   - Check code formatting"
+	@echo "  lint           - Run clippy linter"
+	@echo "  check          - Check code without building"
+	@echo "  check-all      - Run all quality checks"
+	@echo "  clean          - Clean build artifacts"
+	@echo "  audit          - Run security audit"
+	@echo "  outdated       - Check for outdated dependencies"
+	@echo "  unused-deps    - Find unused dependencies"
+	@echo "  install-dev-tools - Install development tools"
+	@echo ""
+	@echo "Engine targets:"
+	@echo "  build-engine   - Build USI engine"
+	@echo "  run-engine     - Run USI engine"
+	@echo ""
+	@echo "Tools targets:"
+	@echo "  build-tools    - Build all tools"
+	@echo "  convert-opening-book ARGS=<args> - Convert opening book"
+	@echo "  verify-opening-book ARGS=<args>  - Verify opening book"
+	@echo "  nnue-benchmark - Run NNUE benchmark"
+	@echo "  shogi-benchmark - Run shogi benchmark"

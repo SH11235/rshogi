@@ -10,6 +10,9 @@ This package contains the WebAssembly (WASM) implementation for advanced Shogi f
 - 🔍 Mate search algorithm implementation
 - 📚 Opening book with binary format support
 - 🎯 High-performance position hashing and move encoding
+- 🤖 USI protocol engine with multiple search/evaluation modes
+- 🧠 NNUE evaluation function support
+- ⚡ Enhanced search with advanced pruning techniques
 
 ## Prerequisites
 
@@ -21,27 +24,62 @@ This package contains the WebAssembly (WASM) implementation for advanced Shogi f
 ## Project Structure
 
 ```
-src/
-├── lib.rs                    # Main library entry point
-├── simple_webrtc.rs         # WebRTC implementation
-├── mate_search.rs           # Mate search algorithm
-├── opening_book/            # Opening book module
-│   ├── mod.rs              # Module exports
-│   ├── binary_converter.rs  # Binary format conversion
-│   ├── data_structures.rs   # Core data types
-│   ├── move_encoder.rs      # Move encoding/decoding
-│   ├── position_filter.rs   # Position filtering logic
-│   ├── position_hasher.rs   # Position hashing
-│   └── sfen_parser.rs       # SFEN format parsing
-└── opening_book_reader.rs   # Opening book reader interface
+crates/
+├── engine-core/             # Core engine implementation
+│   ├── search/             # Search algorithms (basic & enhanced)
+│   ├── evaluation/         # Evaluation functions (material & NNUE)
+│   └── time_management/    # Time control
+├── engine-cli/              # USI protocol command-line interface
+├── engine-wasm/            # WebAssembly bindings
+└── webrtc-p2p/             # WebRTC communication
+
+src/                         # Legacy WASM modules
+├── lib.rs                   # Main library entry point
+├── simple_webrtc.rs        # WebRTC implementation
+├── mate_search.rs          # Mate search algorithm
+├── opening_book/           # Opening book module
+│   ├── mod.rs             # Module exports
+│   ├── binary_converter.rs # Binary format conversion
+│   ├── data_structures.rs  # Core data types
+│   ├── move_encoder.rs     # Move encoding/decoding
+│   ├── position_filter.rs  # Position filtering logic
+│   ├── position_hasher.rs  # Position hashing
+│   └── sfen_parser.rs      # SFEN format parsing
+└── opening_book_reader.rs  # Opening book reader interface
 ```
 
 ## Documentation
 
+- [Engine Types Guide](docs/engine-types-guide.md) - エンジンタイプの選択ガイド（推奨: EnhancedNnue）
 - [Performance Documentation](docs/performance/) - ベンチマーク、プロファイリング、性能分析
 - [Development Guide](docs/development/) - TDD開発ガイド、テスト戦略
 - [Implementation Docs](docs/implementation/) - 実装詳細
 - [Reference](docs/reference/) - フォーマット仕様など
+
+## USI Engine Usage
+
+### Quick Start
+```bash
+# Build and run the USI engine
+cargo build --release --bin engine-cli
+./target/release/engine-cli
+
+# Set to strongest mode (EnhancedNnue)
+setoption name EngineType value EnhancedNnue
+
+# Basic commands
+usi
+isready
+position startpos
+go movetime 1000
+quit
+```
+
+### Engine Types
+- **EnhancedNnue** (推奨): 最強 - 高度な探索 + NNUE評価
+- **Nnue**: 高速分析用
+- **Enhanced**: 省メモリ環境用
+- **Material**: デバッグ用
 
 ## Building
 
