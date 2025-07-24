@@ -3,13 +3,13 @@
 #[cfg(all(feature = "loom", not(target_arch = "wasm32")))]
 mod loom_tests {
     use engine_core::search::GamePhase;
-    use engine_core::time_management::{SearchLimits, TimeControl, TimeManager, TimeState};
+    use engine_core::time_management::{TimeControl, TimeLimits, TimeManager, TimeState};
     use engine_core::Color;
     use loom::sync::Arc;
     use loom::thread;
 
     fn create_test_manager() -> Arc<TimeManager> {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -116,7 +116,7 @@ mod loom_tests {
     #[test]
     fn test_concurrent_byoyomi_updates() {
         loom::model(|| {
-            let limits = SearchLimits {
+            let limits = TimeLimits {
                 time_control: TimeControl::Byoyomi {
                     main_time_ms: 0,
                     byoyomi_ms: 1000,

@@ -7,12 +7,13 @@
 //! - History Heuristics
 //! - Transposition Table
 
+use super::constants::*;
 use super::history::History;
 use super::tt::{NodeType, TranspositionTable};
 use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::Move;
 use crate::shogi::MoveList;
-use crate::time_management::{SearchLimits, TimeManager};
+use crate::time_management::{TimeLimits, TimeManager};
 use crate::zobrist::ZOBRIST;
 use crate::{Color, MoveGen, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
@@ -20,28 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Maximum search depth
-#[allow(dead_code)]
-const MAX_DEPTH: i32 = 127;
-
-/// Maximum ply from root
-const MAX_PLY: usize = 127;
-
-/// Infinity score for search bounds
-const INFINITY: i32 = 30000;
-
-/// Mate score threshold
-const MATE_SCORE: i32 = 28000;
-
-/// Draw score
-const DRAW_SCORE: i32 = 0;
-
-/// Maximum number of aspiration window retries before falling back to full window
-#[cfg(test)]
-const ASPIRATION_RETRY_LIMIT: u32 = 4;
-
-/// Time pressure threshold: remaining time < elapsed time * threshold
-const TIME_PRESSURE_THRESHOLD: f64 = 0.1;
+// Most constants are now imported from super::constants
+// Only define constants specific to enhanced search
 
 /// Number of piece types that can be in hand (excluding King)
 const NUM_HAND_PIECE_TYPES: usize = 7;
@@ -415,8 +396,8 @@ impl EnhancedSearcher {
 
     /// Update aspiration window bounds based on delta and center score
     fn update_aspiration_window(&self, delta: i32, center: i32) -> (i32, i32) {
-        let alpha = (center - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32);
-        let beta = (center + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32);
+        let alpha = (center - delta).max(-SEARCH_INF).max(-MATE_SCORE + MAX_PLY as i32);
+        let beta = (center + delta).min(SEARCH_INF).min(MATE_SCORE - MAX_PLY as i32);
         (alpha, beta)
     }
 
@@ -434,7 +415,7 @@ impl EnhancedSearcher {
     pub fn search_with_limits(
         &mut self,
         pos: &mut Position,
-        limits: SearchLimits,
+        limits: super::limits::SearchLimits,
     ) -> (Option<Move>, i32) {
         // Initialize start time
         self.start_time = Instant::now();
@@ -465,12 +446,13 @@ impl EnhancedSearcher {
             crate::time_management::TimeControl::Infinite => None,
             _ => {
                 let game_phase = self.estimate_game_phase(pos);
-                Some(TimeManager::new(&limits, pos.side_to_move, pos.ply as u32, game_phase))
+                let time_limits: TimeLimits = limits.clone().into();
+                Some(TimeManager::new(&time_limits, pos.side_to_move, pos.ply as u32, game_phase))
             }
         };
 
         // Extract max depth (default to 127 if not specified)
-        let max_depth = limits.depth.map(|d| d as i32).unwrap_or(MAX_DEPTH);
+        let max_depth = limits.depth.map(|d| d as i32).unwrap_or(MAX_PLY as i32);
 
         // Call internal search implementation
         self.search_internal(pos, max_depth)
@@ -484,8 +466,8 @@ impl EnhancedSearcher {
         time_limit: Option<Duration>,
         node_limit: Option<u64>,
     ) -> (Option<Move>, i32) {
-        // Convert legacy parameters to SearchLimits
-        let limits = SearchLimits {
+        // Convert legacy parameters to TimeLimits
+        let limits = TimeLimits {
             time_control: match (time_limit, node_limit) {
                 (Some(duration), _) => crate::time_management::TimeControl::FixedTime {
                     ms_per_move: duration.as_millis() as u64,
@@ -499,7 +481,7 @@ impl EnhancedSearcher {
             time_parameters: None,
         };
 
-        self.search_with_limits(pos, limits)
+        self.search_with_limits(pos, limits.into())
     }
 
     /// Internal search implementation
@@ -534,8 +516,8 @@ impl EnhancedSearcher {
 
         let mut stack = vec![SearchStack::default(); MAX_PLY + 10];
         let mut best_move = None;
-        let mut best_score = -INFINITY;
-        let mut last_root_score = -INFINITY; // 前回の反復深化で確定したスコア
+        let mut best_score = -SEARCH_INF;
+        let mut last_root_score = -SEARCH_INF; // 前回の反復深化で確定したスコア
 
         // Iterative deepening
         for depth in 1..=max_depth {
@@ -559,14 +541,14 @@ impl EnhancedSearcher {
             // Aspiration Windows設定（フェーズを考慮）
             let mut delta = (self.params.initial_window)(depth, phase);
             let mut alpha = if depth == 1 {
-                -INFINITY
+                -SEARCH_INF
             } else {
-                (prev_score - delta).max(-INFINITY).max(-MATE_SCORE + MAX_PLY as i32)
+                (prev_score - delta).max(-SEARCH_INF).max(-MATE_SCORE + MAX_PLY as i32)
             };
             let mut beta = if depth == 1 {
-                INFINITY
+                SEARCH_INF
             } else {
-                (prev_score + delta).min(INFINITY).min(MATE_SCORE - MAX_PLY as i32)
+                (prev_score + delta).min(SEARCH_INF).min(MATE_SCORE - MAX_PLY as i32)
             };
 
             let mut score;
@@ -647,8 +629,8 @@ impl EnhancedSearcher {
 
                 // 安全装置: deltaが最大値を超えたらフルウィンドウ
                 if delta >= (self.params.max_aspiration_delta)(depth) {
-                    alpha = -INFINITY;
-                    beta = INFINITY;
+                    alpha = -SEARCH_INF;
+                    beta = SEARCH_INF;
                 }
 
                 // 時間制限が厳しい場合は即座にフルウィンドウへ
@@ -658,8 +640,8 @@ impl EnhancedSearcher {
                     if remaining.as_secs_f64()
                         < elapsed.as_secs_f64() * self.params.time_pressure_threshold
                     {
-                        alpha = -INFINITY;
-                        beta = INFINITY;
+                        alpha = -SEARCH_INF;
+                        beta = SEARCH_INF;
                     }
                 }
             }
@@ -846,7 +828,7 @@ impl EnhancedSearcher {
 
         // Static evaluation
         let static_eval = if stack[ctx.ply].in_check {
-            -INFINITY
+            -SEARCH_INF
         } else if tt_hit.is_some() {
             tt_eval
         } else {
@@ -904,7 +886,7 @@ impl EnhancedSearcher {
             moves
         };
 
-        let mut best_score = -INFINITY;
+        let mut best_score = -SEARCH_INF;
         let mut best_move = None;
         let mut moves_searched = 0;
         let mut quiets_tried = Vec::new();
@@ -1108,7 +1090,7 @@ impl EnhancedSearcher {
 
         // Stand pat
         let stand_pat = if stack[ply].in_check {
-            -INFINITY
+            -SEARCH_INF
         } else {
             self.evaluator.evaluate(pos)
         };
