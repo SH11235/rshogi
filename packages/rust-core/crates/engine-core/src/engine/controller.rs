@@ -10,7 +10,7 @@ use crate::{
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::search_basic::Searcher,
     search::search_enhanced::EnhancedSearcher,
-    search::{SearchLimits, SearchResult, SearchStats},
+    search::{constants::DEFAULT_SEARCH_DEPTH, SearchLimits, SearchResult, SearchStats},
     Position,
 };
 
@@ -92,7 +92,7 @@ impl Engine {
                     // Run enhanced search
                     let (best_move, score) = enhanced_searcher.search(
                         pos,
-                        limits.depth.unwrap_or(6) as i32,
+                        limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as i32,
                         limits.time_limit(),
                         limits.node_limit(),
                     );
@@ -114,7 +114,7 @@ impl Engine {
                             nodes,
                             elapsed,
                             pv,
-                            depth: limits.depth.unwrap_or(6) as u8,
+                            depth: limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as u8,
                             ..Default::default()
                         },
                     }
