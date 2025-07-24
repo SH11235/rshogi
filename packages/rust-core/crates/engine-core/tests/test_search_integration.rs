@@ -264,17 +264,15 @@ mod search_integration_tests {
         let total_moves = stats.total_moves;
 
         println!("SEE Pruning Statistics:");
-        println!("  Total moves: {}", total_moves);
-        println!("  SEE pruned: {}", see_pruned);
+        println!("  Total moves: {total_moves}");
+        println!("  SEE pruned: {see_pruned}");
         println!("  Prune rate: {:.2}%", (see_pruned as f64 / total_moves as f64) * 100.0);
 
         // In positions with bad captures, pruning should be significant
         // Use integer arithmetic to avoid floating point comparison issues
         assert!(
             see_pruned * 10 >= total_moves,
-            "Should prune at least 10% of moves (pruned: {}, total: {})",
-            see_pruned,
-            total_moves
+            "Should prune at least 10% of moves (pruned: {see_pruned}, total: {total_moves})"
         );
     }
 
