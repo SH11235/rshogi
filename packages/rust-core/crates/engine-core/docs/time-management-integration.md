@@ -26,7 +26,7 @@ The `finish_move` method has been **removed** as of version 1.0.0. You must use 
 Use the `update_after_move` method with `TimeState` enum for type safety:
 
 ```rust
-use engine_core::time_management::{TimeManager, TimeState, SearchLimits, TimeControl};
+use engine_core::time_management::{TimeManager, TimeState, TimeLimits, TimeControl};
 
 // After each move, update time based on current state
 match current_time_control {
@@ -60,7 +60,7 @@ There is now only one API for time updates: `update_after_move`. This ensures ty
 ```rust
 use engine_core::time_management::*;
 
-fn handle_go_command(params: &UsiGoParams) -> SearchLimits {
+fn handle_go_command(params: &UsiGoParams) -> TimeLimits {
     // Parse time control from USI parameters
     let time_control = if let Some(byoyomi_ms) = params.byoyomi {
         // Determine current main time based on side to move
@@ -85,7 +85,7 @@ fn handle_go_command(params: &UsiGoParams) -> SearchLimits {
         TimeControl::Infinite
     };
     
-    SearchLimits {
+    TimeLimits {
         time_control,
         moves_to_go: params.movestogo,
         depth: params.depth.map(|d| d as u32),
