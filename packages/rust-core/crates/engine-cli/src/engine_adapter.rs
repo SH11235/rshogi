@@ -21,7 +21,9 @@ fn to_usi_score(raw_score: i32) -> Score {
     if raw_score.abs() >= MATE_SCORE - MAX_PLY as i32 {
         // It's a mate score - calculate mate distance
         let mate_in_half = MATE_SCORE - raw_score.abs();
-        let mate_in = (mate_in_half + 1) / 2; // +1 for off-by-one prevention
+        // Calculate mate in moves (1 move = 2 plies)
+        // Use max(1) to avoid "mate 0" (some GUIs prefer "mate 1" for immediate mate)
+        let mate_in = ((mate_in_half + 1) / 2).max(1);
         if raw_score > 0 {
             Score::Mate(mate_in)
         } else {
@@ -341,7 +343,22 @@ fn apply_go_params(
 ) -> Result<SearchLimits> {
     // Set depth limit
     if let Some(depth) = params.depth {
-        builder = builder.depth(depth);
+        // Ensure minimum depth of 1 to prevent "no search" scenario
+        let safe_depth = if depth == 0 {
+            log::warn!("Depth 0 is not supported, using minimum depth of 1");
+            1
+        } else {
+            depth
+        };
+        
+        // Clamp depth to MAX_PLY to prevent array bounds violation
+        let clamped_depth = safe_depth.min(MAX_PLY as u32);
+        if safe_depth != clamped_depth {
+            log::warn!(
+                "Depth {safe_depth} exceeds maximum supported depth {MAX_PLY}, clamping to {clamped_depth}"
+            );
+        }
+        builder = builder.depth(clamped_depth);
     }
 
     // Set node limit
@@ -606,6 +623,36 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_go_params_depth_zero() {
+        let params = GoParams {
+            depth: Some(0),
+            infinite: true,
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        // Depth 0 should be raised to 1
+        assert_eq!(limits.depth, Some(1));
+    }
+
+    #[test]
+    fn test_apply_go_params_depth_exceeds_max_ply() {
+        let params = GoParams {
+            depth: Some(200), // Exceeds MAX_PLY (127)
+            infinite: true,
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        // Depth should be clamped to MAX_PLY
+        assert_eq!(limits.depth, Some(MAX_PLY as u32));
+    }
+
+    #[test]
     fn test_apply_go_params_priority_ponder_over_infinite() {
         let params = GoParams {
             ponder: true,
@@ -621,5 +668,59 @@ mod tests {
             TimeControl::Ponder => {}
             _ => panic!("Expected Ponder to take priority"),
         }
+    }
+
+    #[test]
+    fn test_ponder_state_transitions() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut adapter = EngineAdapter::new();
+        
+        // Initialize position
+        adapter
+            .set_position(true, None, &[])
+            .expect("Failed to set position");
+
+        // Initially not pondering
+        assert!(!adapter.ponder_state.is_pondering);
+        assert!(adapter.ponder_state.ponder_move.is_none());
+        assert!(adapter.ponder_state.ponder_start_time.is_none());
+
+        // Start ponder search
+        let params = GoParams {
+            ponder: true,
+            infinite: true,
+            ..Default::default()
+        };
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let info_callback = Box::new(|_: SearchInfo| {});
+        
+        // Search should set ponder state
+        let _ = adapter.search(params, stop_flag.clone(), info_callback);
+        
+        assert!(adapter.ponder_state.is_pondering);
+        assert!(adapter.ponder_state.ponder_start_time.is_some());
+
+        // Ponder hit should clear ponder state
+        let result = adapter.ponder_hit();
+        assert!(result.is_ok());
+        assert!(!adapter.ponder_state.is_pondering);
+        assert!(adapter.ponder_state.ponder_start_time.is_none());
+
+        // Non-ponder search should also clear ponder state
+        adapter.ponder_state.is_pondering = true;
+        adapter.ponder_state.ponder_start_time = Some(std::time::Instant::now());
+        
+        let params = GoParams {
+            ponder: false,
+            infinite: true,
+            ..Default::default()
+        };
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let info_callback = Box::new(|_: SearchInfo| {});
+        
+        let _ = adapter.search(params, stop_flag, info_callback);
+        
+        assert!(!adapter.ponder_state.is_pondering);
     }
 }
