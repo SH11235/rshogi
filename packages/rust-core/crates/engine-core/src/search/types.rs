@@ -1,10 +1,11 @@
 //! Common types for search algorithms
 
 use crate::shogi::Move;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Info callback type for search progress reporting
-pub type InfoCallback = Box<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send>;
+pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send + Sync>;
 
 /// Search statistics
 #[derive(Clone, Debug, Default)]

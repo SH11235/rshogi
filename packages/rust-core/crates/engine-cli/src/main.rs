@@ -35,6 +35,21 @@ enum WorkerMessage {
     Error(String),
 }
 
+/// Wait for any ongoing search to complete
+fn wait_for_search_completion(
+    searching: &mut bool,
+    stop_flag: &Arc<AtomicBool>,
+    worker_handle: &mut Option<JoinHandle<()>>,
+) {
+    if *searching {
+        stop_flag.store(true, Ordering::Release);
+        if let Some(handle) = worker_handle.take() {
+            let _ = handle.join();
+        }
+        *searching = false;
+    }
+}
+
 /// Drain remaining messages from worker thread
 #[cfg(test)]
 #[allow(dead_code)]
@@ -371,18 +386,16 @@ fn handle_command(
             sfen,
             moves,
         } => {
+            // Wait for any ongoing search to complete before updating position
+            wait_for_search_completion(searching, stop_flag, worker_handle);
+
             let mut engine = engine.lock().unwrap();
             engine.set_position(startpos, sfen.as_deref(), &moves)?;
         }
 
         UsiCommand::Go(params) => {
             // Stop any ongoing search
-            if *searching {
-                stop_flag.store(true, Ordering::Release);
-                if let Some(handle) = worker_handle.take() {
-                    let _ = handle.join();
-                }
-            }
+            wait_for_search_completion(searching, stop_flag, worker_handle);
 
             // Reset stop flag
             stop_flag.store(false, Ordering::Release);
@@ -435,7 +448,9 @@ fn handle_command(
         UsiCommand::PonderHit => {
             // Convert ponder search to normal search
             let mut engine = engine.lock().unwrap();
-            engine.ponder_hit();
+            if let Err(e) = engine.ponder_hit() {
+                log::warn!("Ponder hit error: {e}");
+            }
         }
 
         UsiCommand::SetOption { name, value } => {

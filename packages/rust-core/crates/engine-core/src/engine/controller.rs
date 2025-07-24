@@ -10,7 +10,8 @@ use crate::{
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::search_basic::Searcher,
     search::search_enhanced::EnhancedSearcher,
-    search::{constants::DEFAULT_SEARCH_DEPTH, SearchLimits, SearchResult, SearchStats},
+    search::{SearchLimits, SearchResult, SearchStats},
+    time_management::TimeManager,
     Position,
 };
 
@@ -74,6 +75,7 @@ pub struct Engine {
     material_evaluator: Arc<MaterialEvaluator>,
     nnue_evaluator: Arc<Mutex<Option<NNUEEvaluatorWrapper>>>,
     enhanced_searcher: Arc<Mutex<Option<EnhancedSearcher>>>,
+    active_time_manager: Arc<Mutex<Option<Arc<TimeManager>>>>,
 }
 
 impl Engine {
@@ -108,6 +110,7 @@ impl Engine {
             material_evaluator,
             nnue_evaluator,
             enhanced_searcher,
+            active_time_manager: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -126,52 +129,73 @@ impl Engine {
                 searcher.search(pos)
             }
             EngineType::Enhanced | EngineType::EnhancedNnue => {
-                let mut enhanced_guard = self
-                    .enhanced_searcher
-                    .lock()
-                    .expect("Failed to acquire enhanced searcher lock");
+                // Record start time
+                let start_time = std::time::Instant::now();
 
-                if let Some(enhanced_searcher) = enhanced_guard.as_mut() {
-                    // Set stop flag if provided
-                    if let Some(stop_flag) = &limits.stop_flag {
-                        enhanced_searcher.set_stop_flag(stop_flag.clone());
+                // Set up callback to capture TimeManager when created
+                {
+                    let time_slot = self.active_time_manager.clone();
+                    let mut enhanced_guard = self
+                        .enhanced_searcher
+                        .lock()
+                        .expect("Failed to acquire enhanced searcher lock");
+
+                    if let Some(enhanced_searcher) = enhanced_guard.as_mut() {
+                        // Set callback to capture TimeManager
+                        enhanced_searcher.set_time_manager_callback(move |tm: Arc<TimeManager>| {
+                            *time_slot.lock().unwrap() = Some(tm);
+                        });
                     }
+                } // Guard is dropped here
 
-                    // Record start time
-                    let start_time = std::time::Instant::now();
+                // Run search (re-lock for search execution)
+                let (best_move, score, nodes, pv, actual_depth) = {
+                    let mut enhanced_guard = self
+                        .enhanced_searcher
+                        .lock()
+                        .expect("Failed to acquire enhanced searcher lock");
 
-                    // Run enhanced search
-                    let (best_move, score) = enhanced_searcher.search(
-                        pos,
-                        limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as i32,
-                        limits.time_limit(),
-                        limits.node_limit(),
-                    );
+                    if let Some(enhanced_searcher) = enhanced_guard.as_mut() {
+                        // Run enhanced search with limits (this creates TimeManager internally)
+                        let (best_move, score) =
+                            enhanced_searcher.search_with_limits(pos, limits.clone());
 
-                    // Calculate elapsed time
-                    let elapsed = start_time.elapsed();
+                        // Get nodes count
+                        let nodes = enhanced_searcher.nodes();
 
-                    // Get nodes count
-                    let nodes = enhanced_searcher.nodes();
+                        // Get principal variation
+                        let pv = enhanced_searcher.principal_variation().to_vec();
 
-                    // Get principal variation
-                    let pv = enhanced_searcher.principal_variation().to_vec();
+                        // Get actual search depth
+                        let actual_depth = enhanced_searcher.current_depth();
 
-                    // Convert to SearchResult
-                    SearchResult {
-                        best_move,
-                        score,
-                        stats: SearchStats {
-                            nodes,
-                            elapsed,
-                            pv,
-                            depth: limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as u8,
-                            ..Default::default()
-                        },
+                        (best_move, score, nodes, pv, actual_depth)
+                    } else {
+                        // Should not happen if engine type is Enhanced
+                        panic!("Enhanced searcher not initialized for Enhanced engine type");
                     }
-                } else {
-                    // Should not happen if engine type is Enhanced
-                    panic!("Enhanced searcher not initialized for Enhanced engine type");
+                }; // Guard is dropped here
+
+                // Clear TimeManager reference after search completes (only for non-ponder searches)
+                // Keep the reference during ponder mode for potential ponder_hit
+                if !matches!(limits.time_control, crate::time_management::TimeControl::Ponder) {
+                    self.active_time_manager.lock().unwrap().take();
+                }
+
+                // Calculate elapsed time
+                let elapsed = start_time.elapsed();
+
+                // Convert to SearchResult
+                SearchResult {
+                    best_move,
+                    score,
+                    stats: SearchStats {
+                        nodes,
+                        elapsed,
+                        pv,
+                        depth: actual_depth,
+                        ..Default::default()
+                    },
                 }
             }
         }
@@ -232,6 +256,21 @@ impl Engine {
                 // Material evaluator is always available
             }
         }
+    }
+
+    /// Handle ponder hit (transition from ponder to normal search)
+    ///
+    /// This method is called when a ponder search becomes a real search
+    /// because the opponent played the expected move.
+    ///
+    /// # Arguments
+    /// - `time_already_spent_ms`: Time already spent during pondering in milliseconds
+    pub fn ponder_hit(&self, time_already_spent_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(tm) = self.active_time_manager.lock().unwrap().as_ref() {
+            // TimeManager will handle the transition internally
+            tm.ponder_hit(None, time_already_spent_ms);
+        }
+        Ok(())
     }
 }
 
