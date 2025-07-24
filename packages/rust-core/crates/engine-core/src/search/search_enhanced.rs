@@ -159,7 +159,7 @@ impl PVTable {
             if child_len > 0 && child_len < MAX_PLY {
                 // Safety check: ensure we don't exceed array bounds
                 debug_assert!(
-                    1 + child_len <= MAX_PLY,
+                    child_len < MAX_PLY,
                     "PV copy would exceed MAX_PLY: child_len={child_len}, MAX_PLY={MAX_PLY}"
                 );
 
