@@ -56,37 +56,28 @@ jobs:
         run: cargo test --release
 
   test-large-stack:
-    name: Test (Large Stack)
+    name: Test (Large Stack) - Release Mode
     runs-on: ubuntu-latest
     continue-on-error: true
-    strategy:
-      matrix:
-        include:
-          - name: "Debug with Large Stack"
-            command: "RUST_MIN_STACK=8388608 cargo test -- --ignored"
-          - name: "Release Mode"
-            command: "cargo test --release -- --ignored"
+    env:
+      RUST_MIN_STACK: 8388608
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/rust-core
-      - name: Run ${{ matrix.name }}
+          key: rust-cache-large-stack
+      - name: Run ignored tests in release mode
         run: |
-          echo "Running tests that require large stack size..."
-          echo "Test configuration: ${{ matrix.name }}"
-          echo "These tests include:"
-          echo "- NNUE engine initialization tests"
-          echo "- Enhanced engine tests"
-          echo "- Engine type switching tests"
-          echo ""
-          ${{ matrix.command }} || true
-      - name: List ignored tests
+          echo "Running large stack tests in release mode..."
+          echo "These tests require NNUE or Enhanced engine initialization"
+          cargo test --release -- --ignored --nocapture
+      - name: Summary
         if: always()
         run: |
-          echo "Ignored tests in this repository:"
-          grep -r "#\[ignore\]" --include="*.rs" . | grep -B1 "fn test_" | grep "fn test_" | sed 's/.*fn /- /' | sed 's/(.*$//' | sort | uniq || true
+          echo "## Large Stack Test Summary"
+          echo "Total ignored tests: $(grep -r "#\[ignore\]" --include="*.rs" . | grep -B1 "fn test_" | wc -l)"
 
   wasm-build:
     name: WASM Build
@@ -112,4 +103,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-audit
       - name: Run security audit
-        run: cargo audit
+        run: cargo audit --deny warnings

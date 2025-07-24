@@ -30,6 +30,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable]
@@ -46,13 +47,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/rust-core
+          key: ${{ matrix.os }}-rust-${{ matrix.rust }}-large-stack
       
       - name: Set stack size
         id: stack
         shell: bash
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "size=${{ github.event.inputs.stack_size }}" >> $GITHUB_OUTPUT
+            # Ensure numeric value with fallback
+            SIZE=${{ github.event.inputs.stack_size || env.DEFAULT_STACK_SIZE }}
+            echo "size=$SIZE" >> $GITHUB_OUTPUT
           else
             echo "size=${{ env.DEFAULT_STACK_SIZE }}" >> $GITHUB_OUTPUT
           fi
@@ -83,11 +87,17 @@ jobs:
       
       - name: Test Summary
         if: always()
+        shell: bash
         run: |
-          echo "## Test Summary for ${{ matrix.os }} - Rust ${{ matrix.rust }}"
-          echo ""
-          echo "### Ignored tests that were run:"
-          grep -r "#\[ignore\]" --include="*.rs" . | grep -A1 "#\[ignore\]" | grep "fn test_" | sed 's/.*fn /- /' | sed 's/(.*$//' | sort | uniq || true
+          echo "## Test Summary for ${{ matrix.os }} - Rust ${{ matrix.rust }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- Stack size: ${{ steps.stack.outputs.size }} bytes" >> $GITHUB_STEP_SUMMARY
+          echo "- Platform: ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Rust: ${{ matrix.rust }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Ignored tests that were run:" >> $GITHUB_STEP_SUMMARY
+          cargo test -- --list --ignored 2>/dev/null | grep "test::" | sed 's/test::/- /' | sed 's/:.*$//' >> $GITHUB_STEP_SUMMARY || echo "Unable to list ignored tests" >> $GITHUB_STEP_SUMMARY
 
   benchmark-stack-requirements:
     name: Benchmark Stack Requirements
