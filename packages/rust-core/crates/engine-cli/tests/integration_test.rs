@@ -35,12 +35,12 @@ fn spawn_engine() -> std::process::Child {
 /// Helper to send command to engine
 fn send_command(stdin: &mut impl Write, command: &str) {
     if let Err(e) = writeln!(stdin, "{command}") {
-        eprintln!("Failed to write command '{}': {}", command, e);
-        panic!("Failed to write command: {}", e);
+        eprintln!("Failed to write command '{command}': {e}");
+        panic!("Failed to write command: {e}");
     }
     if let Err(e) = stdin.flush() {
-        eprintln!("Failed to flush stdin after command '{}': {}", command, e);
-        panic!("Failed to flush stdin: {}", e);
+        eprintln!("Failed to flush stdin after command '{command}': {e}");
+        panic!("Failed to flush stdin: {e}");
     }
 }
 
@@ -246,13 +246,13 @@ fn test_ponder_sequence() {
     // Check if engine process started successfully
     match engine.try_wait() {
         Ok(Some(status)) => {
-            panic!("Engine exited immediately with status: {:?}", status);
+            panic!("Engine exited immediately with status: {status:?}");
         }
         Ok(None) => {
             // Process is still running, good
         }
         Err(e) => {
-            panic!("Failed to check engine status: {}", e);
+            panic!("Failed to check engine status: {e}");
         }
     }
 
@@ -297,7 +297,7 @@ fn test_ponder_sequence() {
         }
         Err(e) => {
             // If no bestmove, try stopping manually
-            eprintln!("No bestmove received after ponderhit, trying stop command. Error: {}", e);
+            eprintln!("No bestmove received after ponderhit, trying stop command. Error: {e}");
             send_command(stdin, "stop");
             let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(2));
             assert!(stop_result.is_ok(), "No bestmove after stop. Original error: {e}");
