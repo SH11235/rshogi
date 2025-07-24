@@ -157,6 +157,11 @@ impl<E: Evaluator> Searcher<E> {
                 // Use stand-pat evaluation instead of arbitrary 0
                 best_score = self.evaluator.evaluate(pos);
             }
+
+            // Mark that we at least completed depth 0 evaluation
+            if best_move.is_some() && search_depth == 0 {
+                search_depth = 1; // We evaluated at quiescence level, report as depth 1
+            }
         }
 
         // Iterative deepening

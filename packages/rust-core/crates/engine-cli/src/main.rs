@@ -436,7 +436,7 @@ fn handle_command(
             // Convert ponder search to normal search
             let mut engine = engine.lock().unwrap();
             if let Err(e) = engine.ponder_hit() {
-                log::warn!("Ponder hit error: {}", e);
+                log::warn!("Ponder hit error: {e}");
             }
         }
 

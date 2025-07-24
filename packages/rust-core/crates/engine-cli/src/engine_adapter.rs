@@ -6,7 +6,8 @@
 use anyhow::{anyhow, Result};
 use engine_core::{
     engine::controller::{Engine, EngineType},
-    search::{constants::DEFAULT_SEARCH_DEPTH, limits::SearchLimits},
+    search::constants::{MATE_SCORE, MAX_PLY},
+    search::limits::SearchLimits,
     shogi::Position,
 };
 use std::sync::atomic::AtomicBool;
@@ -14,6 +15,22 @@ use std::sync::Arc;
 
 use crate::usi::output::{Score, SearchInfo};
 use crate::usi::{create_position, EngineOption, GameResult, GoParams};
+
+/// Convert raw engine score to USI score format (Cp or Mate)
+fn to_usi_score(raw_score: i32) -> Score {
+    if raw_score.abs() >= MATE_SCORE - MAX_PLY as i32 {
+        // It's a mate score - calculate mate distance
+        let mate_in_half = MATE_SCORE - raw_score.abs();
+        let mate_in = (mate_in_half + 1) / 2; // +1 for off-by-one prevention
+        if raw_score > 0 {
+            Score::Mate(mate_in)
+        } else {
+            Score::Mate(-mate_in)
+        }
+    } else {
+        Score::Cp(raw_score)
+    }
+}
 
 /// Engine adapter that bridges USI protocol with engine-core
 pub struct EngineAdapter {
@@ -40,9 +57,7 @@ struct PonderState {
     is_pondering: bool,
     /// The move we're pondering on (opponent's expected move)
     ponder_move: Option<String>,
-    /// Original time limits before ponder mode
-    original_limits: Option<GoParams>,
-    /// Time spent pondering in milliseconds
+    /// Time when pondering started
     ponder_start_time: Option<std::time::Instant>,
 }
 
@@ -108,10 +123,10 @@ impl EngineAdapter {
         moves: &[String],
     ) -> Result<()> {
         self.position = Some(create_position(startpos, sfen, moves)?);
-        
+
         // Clear ponder state when position changes
         self.clear_ponder_state();
-        
+
         Ok(())
     }
 
@@ -167,22 +182,29 @@ impl EngineAdapter {
             0
         };
 
-        log::debug!("Ponder hit after {} ms", time_spent_ms);
+        log::debug!("Ponder hit after {time_spent_ms} ms");
 
-        // Clear ponder state
-        self.clear_ponder_state();
-
-        // Note: The actual time adjustment is handled by TimeManager in the search
-        // which was created with ponder mode and will be notified via ponder_hit()
-
-        Ok()
+        // Notify engine about ponder hit first
+        // Only clear ponder state if engine successfully handles ponder_hit
+        match self.engine.ponder_hit(time_spent_ms) {
+            Ok(()) => {
+                // Success - clear ponder state
+                self.clear_ponder_state();
+                Ok(())
+            }
+            Err(e) => {
+                // Failed - keep ponder state intact
+                log::warn!("ponder_hit failed: {e}");
+                Err(anyhow!("Engine ponder_hit failed: {}", e))
+            }
+        }
     }
 
     /// Handle game over
     pub fn game_over(&mut self, _result: GameResult) {
         // Clear position and prepare for new game
         self.position = None;
-        
+
         // Clear ponder state
         self.clear_ponder_state();
     }
@@ -201,28 +223,28 @@ impl EngineAdapter {
         // Set up info callback using Arc to share between closures
         let info_callback_arc = Arc::new(info_callback);
         let info_callback_clone = info_callback_arc.clone();
-        type InfoCallbackType =
-            Box<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send>;
-        let info_callback_box: InfoCallbackType =
-            Box::new(move |depth, score, nodes, elapsed, pv| {
+        type InfoCallbackType = Arc<
+            dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync,
+        >;
+        let info_callback_arc_inner: InfoCallbackType =
+            Arc::new(move |depth, score, nodes, elapsed, pv| {
                 let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
+                let score_enum = to_usi_score(score);
+
                 let info = SearchInfo {
                     depth: Some(depth as u32),
                     time: Some(elapsed.as_millis().max(1) as u64), // Ensure at least 1ms
                     nodes: Some(nodes),
                     pv: pv_str,
-                    score: Some(Score::Cp(score)),
+                    score: Some(score_enum),
                     ..Default::default()
                 };
-                info_callback_clone(info);
+                (*info_callback_clone)(info);
             });
 
         // Update ponder state based on search type
         if params.ponder {
             self.ponder_state.is_pondering = true;
-            // Note: original_limits is reserved for future use
-            // when we need to restore time limits after ponder hit
-            self.ponder_state.original_limits = Some(params.clone());
             self.ponder_state.ponder_start_time = Some(std::time::Instant::now());
         } else {
             // New non-ponder search clears any existing ponder state
@@ -236,11 +258,10 @@ impl EngineAdapter {
         builder = builder.stop_flag(stop_flag.clone());
 
         // Set info callback
-        builder = builder.info_callback(info_callback_box);
+        builder = builder.info_callback(info_callback_arc_inner);
 
         // Apply go parameters with position info
         let limits = apply_go_params(builder, &params, &position)?;
-        let search_depth = limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as u8; // Save depth before move
 
         log::debug!(
             "Search limits: time_control={:?}, depth={:?}, nodes={:?}, moves_to_go={:?}",
@@ -264,18 +285,28 @@ impl EngineAdapter {
         log::debug!("Best move: {best_move_str}");
 
         // Send final info
+        let score = to_usi_score(result.score);
+
+        // Validate depth (should never be 0 after proper searcher fix)
+        let depth = if result.stats.depth == 0 {
+            log::warn!("SearchStats.depth is 0, this should not happen. Using 1 as fallback.");
+            1
+        } else {
+            result.stats.depth
+        };
+
         let info = SearchInfo {
-            depth: Some(search_depth as u32), // Use the saved search depth
+            depth: Some(depth as u32), // Use the validated search depth
             time: Some(result.stats.elapsed.as_millis().max(1) as u64), // Ensure at least 1ms
             nodes: Some(result.stats.nodes),
             pv: vec![best_move_str.clone()],
-            score: Some(Score::Cp(result.score)),
+            score: Some(score),
             ..Default::default()
         };
-        info_callback_arc(info);
+        (*info_callback_arc)(info);
 
         // Generate ponder move if pondering is enabled and this isn't a ponder search
-        let ponder_move = if self.ponder && !params.ponder {
+        let ponder_move: Option<String> = if self.ponder && !params.ponder {
             // Try to get the next move from PV or generate a simple prediction
             // For now, we'll return None - full implementation would analyze the position
             // after making the best move to find the most likely response
@@ -297,7 +328,6 @@ impl EngineAdapter {
         self.ponder_state.is_pondering = false;
         self.ponder_state.ponder_move = None;
         self.ponder_state.ponder_start_time = None;
-        self.ponder_state.original_limits = None;
     }
 }
 
@@ -346,7 +376,7 @@ fn apply_go_params(
             let white_inc = params.winc.unwrap_or(0);
 
             // Use the increment for the current side
-            let increment = match position.side_to_move() {
+            let increment = match position.side_to_move {
                 engine_core::shogi::Color::Black => black_inc,
                 engine_core::shogi::Color::White => white_inc,
             };
@@ -355,7 +385,7 @@ fn apply_go_params(
             builder = builder.fischer(black_time, white_time, increment);
         } else {
             // True byoyomi time control
-            let main_time = match position.side_to_move() {
+            let main_time = match position.side_to_move {
                 engine_core::shogi::Color::Black => params.btime.unwrap_or(0),
                 engine_core::shogi::Color::White => params.wtime.unwrap_or(0),
             };
@@ -371,7 +401,7 @@ fn apply_go_params(
         let white_inc = params.winc.unwrap_or(0);
 
         // Use the increment for the current side
-        let increment = match position.side_to_move() {
+        let increment = match position.side_to_move {
             engine_core::shogi::Color::Black => black_inc,
             engine_core::shogi::Color::White => white_inc,
         };
@@ -394,7 +424,7 @@ mod tests {
     use engine_core::time_management::TimeControl;
 
     fn create_test_position() -> Position {
-        Position::default()
+        Position::startpos()
     }
 
     #[test]
