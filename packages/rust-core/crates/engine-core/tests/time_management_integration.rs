@@ -2,7 +2,7 @@
 
 use engine_core::{
     engine::controller::{Engine, EngineType},
-    search::{search_basic::SearchLimits as CoreSearchLimits, GamePhase},
+    search::{search_basic::SearchLimits as CoreSearchLimits, GamePhase, SEARCH_INF},
     shogi::Position,
     time_management::{SearchLimits, TimeControl, TimeState},
     Color,
@@ -375,8 +375,8 @@ fn test_enhanced_search_fallback_move_quality() {
     assert!(result.best_move.is_some());
 
     // Score should be reasonable (not just 0 or -INFINITY)
-    assert!(result.score > -30000);
-    assert!(result.score < 30000);
+    assert!(result.score > -SEARCH_INF);
+    assert!(result.score < SEARCH_INF);
 
     // Should have evaluated at least some positions
     assert!(result.stats.nodes >= 1, "Enhanced should have evaluated at least one position");
