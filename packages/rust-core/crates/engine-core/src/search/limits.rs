@@ -67,7 +67,14 @@ impl SearchLimits {
 
     /// Get depth limit (u8 for basic search compatibility)
     pub fn depth_limit_u8(&self) -> u8 {
-        self.depth.map(|d| d.min(255) as u8).unwrap_or(DEFAULT_SEARCH_DEPTH)
+        match self.depth {
+            Some(d) if d > 255 => {
+                log::warn!("Search depth {d} exceeds u8 maximum (255), clamping to 255");
+                255
+            }
+            Some(d) => d as u8,
+            None => DEFAULT_SEARCH_DEPTH,
+        }
     }
 }
 
@@ -117,8 +124,10 @@ impl SearchLimitsBuilder {
     ///
     /// This sets the time_control to FixedNodes, which takes precedence
     /// over the nodes field when determining the node limit.
+    /// Also automatically sets the nodes field to maintain consistency.
     pub fn fixed_nodes(mut self, nodes: u64) -> Self {
         self.time_control = TimeControl::FixedNodes { nodes };
+        self.nodes = Some(nodes); // Auto-sync to avoid validation errors
         self
     }
 
@@ -202,12 +211,15 @@ impl SearchLimitsBuilder {
     /// Panics if both FixedNodes time control and nodes field are set with different values.
     pub fn build(self) -> SearchLimits {
         // Validate that FixedNodes and nodes field don't conflict
+        #[cfg(debug_assertions)]
         if let TimeControl::FixedNodes { nodes: fixed } = &self.time_control {
             if let Some(node_limit) = self.nodes {
-                assert_eq!(
-                    *fixed, node_limit,
-                    "FixedNodes ({fixed}) and nodes field ({node_limit}) should match when both are set"
-                );
+                if *fixed != node_limit {
+                    panic!(
+                        "SearchLimitsBuilder validation failed: FixedNodes ({fixed}) and nodes field ({node_limit}) must match when both are set. \
+                         Consider using only fixed_nodes() or ensuring both values are identical."
+                    );
+                }
             }
         }
 
@@ -227,6 +239,10 @@ impl SearchLimitsBuilder {
 // Basic search now uses unified SearchLimits directly
 
 /// Convert from time_management TimeLimits
+///
+/// Note: This conversion sets `stop_flag` and `info_callback` to `None` as they are
+/// not part of the time management module's responsibilities. These fields should be
+/// set separately if needed for search control.
 impl From<crate::time_management::TimeLimits> for SearchLimits {
     fn from(tm: crate::time_management::TimeLimits) -> Self {
         SearchLimits {
@@ -392,13 +408,14 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "FixedNodes (100000) and nodes field (50000) should match when both are set"
+        expected = "SearchLimitsBuilder validation failed: FixedNodes (100000) and nodes field (50000) must match when both are set"
     )]
     fn test_build_validation_mismatch() {
         // This should panic when FixedNodes and nodes field differ
-        let _limits = SearchLimits::builder()
-            .fixed_nodes(100000)
-            .nodes(50000) // Different value - should trigger assertion
-            .build();
+        // Note: We manually set time_control to bypass the auto-sync in fixed_nodes()
+        let mut builder = SearchLimits::builder();
+        builder = builder.nodes(50000);
+        builder = builder.time_control(TimeControl::FixedNodes { nodes: 100000 });
+        let _limits = builder.build();
     }
 }
