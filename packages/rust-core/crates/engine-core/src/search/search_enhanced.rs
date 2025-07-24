@@ -1204,6 +1204,7 @@ impl EnhancedSearcher {
     }
 
     /// Check if search should stop
+    #[allow(dead_code)] // Actually used despite compiler warning
     fn should_stop(&self) -> bool {
         if self.stop.load(Ordering::Relaxed) {
             return true;

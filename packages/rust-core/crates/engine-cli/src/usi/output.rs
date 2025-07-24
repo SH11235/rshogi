@@ -77,6 +77,8 @@ pub enum Score {
     Cp(i32),
 
     /// Mate in N moves (positive = winning, negative = losing)
+    /// TODO: Implement mate detection and use this variant
+    #[allow(dead_code)]
     Mate(i32),
 }
 
