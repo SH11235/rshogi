@@ -23,19 +23,20 @@ fn test_engine_compiles_and_runs() {
 
 #[test]
 fn test_search_info_formatting() {
-    use engine_cli::engine_adapter::SearchInfo;
+    use engine_cli::usi::output::{Score, SearchInfo};
 
-    // Test that depth 0 is not shown
+    // Test that depth 0 is not shown (now depth None is used instead)
     let info = SearchInfo {
-        depth: 0,
-        time: 100,
-        nodes: 1000,
+        depth: None,
+        time: Some(100),
+        nodes: Some(1000),
         pv: vec!["7g7f".to_string()],
-        score: 50,
+        score: Some(Score::Cp(50)),
+        ..Default::default()
     };
 
-    let output = info.to_usi_string();
-    assert!(!output.contains("depth 0"));
+    let output = info.to_string();
+    assert!(!output.contains("depth"));
     assert!(output.contains("score cp 50"));
     assert!(output.contains("time 100"));
     assert!(output.contains("nodes 1000"));
@@ -43,20 +44,21 @@ fn test_search_info_formatting() {
 
     // Test that depth > 0 is shown
     let info = SearchInfo {
-        depth: 5,
-        time: 100,
-        nodes: 1000,
+        depth: Some(5),
+        time: Some(100),
+        nodes: Some(1000),
         pv: vec!["7g7f".to_string()],
-        score: 50,
+        score: Some(Score::Cp(50)),
+        ..Default::default()
     };
 
-    let output = info.to_usi_string();
+    let output = info.to_string();
     assert!(output.contains("depth 5"));
 }
 
 #[test]
 fn test_time_minimum_value() {
-    use engine_cli::engine_adapter::SearchInfo;
+    use engine_cli::usi::output::{Score, SearchInfo};
     use std::time::Duration;
 
     // Simulate very short elapsed time
@@ -67,13 +69,14 @@ fn test_time_minimum_value() {
 
     // Test in SearchInfo context
     let info = SearchInfo {
-        depth: 1,
-        time: time_ms,
-        nodes: 10,
+        depth: Some(1),
+        time: Some(time_ms),
+        nodes: Some(10),
         pv: vec![],
-        score: 0,
+        score: Some(Score::Cp(0)),
+        ..Default::default()
     };
 
-    let output = info.to_usi_string();
+    let output = info.to_string();
     assert!(output.contains("time 1"));
 }

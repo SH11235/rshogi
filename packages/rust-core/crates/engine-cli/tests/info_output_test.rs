@@ -1,6 +1,7 @@
 //! Test for info output during search
 
-use engine_cli::engine_adapter::{EngineAdapter, SearchInfo};
+use engine_cli::engine_adapter::EngineAdapter;
+use engine_cli::usi::output::SearchInfo;
 use engine_cli::usi::GoParams;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ fn test_info_output_during_search() {
 
     let info_callback = Box::new(move |info: SearchInfo| {
         println!(
-            "Info received: depth={}, time={}, nodes={}, score={}",
+            "Info received: depth={:?}, time={:?}, nodes={:?}, score={:?}",
             info.depth, info.time, info.nodes, info.score
         );
         info_messages_clone.lock().unwrap().push(info);
@@ -46,14 +47,18 @@ fn test_info_output_during_search() {
 
     // Check depths are increasing
     for i in 0..messages.len() - 1 {
-        if messages[i].depth > 0 && messages[i + 1].depth > 0 {
-            assert!(messages[i].depth <= messages[i + 1].depth, "Depths should be non-decreasing");
+        if let (Some(d1), Some(d2)) = (messages[i].depth, messages[i + 1].depth) {
+            if d1 > 0 && d2 > 0 {
+                assert!(d1 <= d2, "Depths should be non-decreasing");
+            }
         }
     }
 
     // Check time is increasing
     for i in 0..messages.len() - 1 {
-        assert!(messages[i].time <= messages[i + 1].time, "Time should be non-decreasing");
+        if let (Some(t1), Some(t2)) = (messages[i].time, messages[i + 1].time) {
+            assert!(t1 <= t2, "Time should be non-decreasing");
+        }
     }
 }
 
@@ -71,8 +76,8 @@ fn test_info_output_with_early_stop() {
     let info_messages_clone = info_messages.clone();
 
     let info_callback = Box::new(move |info: SearchInfo| {
-        let depth = info.depth;
-        println!("Info: depth={}, time={}, nodes={}", depth, info.time, info.nodes);
+        let depth = info.depth.unwrap_or(0);
+        println!("Info: depth={}, time={:?}, nodes={:?}", depth, info.time, info.nodes);
         info_messages_clone.lock().unwrap().push(info);
 
         // Stop after depth 3
@@ -99,7 +104,7 @@ fn test_info_output_with_early_stop() {
     // Should have info for depths 1, 2, 3, and possibly 4 before stop
     // The final message may show the requested depth (10) but with early termination
     let intermediate_depths: Vec<u32> =
-        messages.iter().filter(|m| m.depth <= 4).map(|m| m.depth).collect();
+        messages.iter().filter_map(|m| m.depth).filter(|&d| d <= 4).collect();
 
     println!("Intermediate depths: {intermediate_depths:?}");
     assert!(!intermediate_depths.is_empty(), "Should have intermediate depth info");
