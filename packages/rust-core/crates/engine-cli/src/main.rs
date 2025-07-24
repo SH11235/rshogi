@@ -49,15 +49,24 @@ fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> 
                     best_move,
                     ponder: ponder_move,
                 });
-                stdout.flush()?;
+                if let Err(e) = stdout.flush() {
+                    eprintln!("Failed to flush stdout after sending best move: {e}");
+                    return Err(e.into());
+                }
             }
             WorkerMessage::Info(info) => {
                 send_response(UsiResponse::Info(info));
-                stdout.flush()?;
+                if let Err(e) = stdout.flush() {
+                    eprintln!("Failed to flush stdout after sending info: {e}");
+                    return Err(e.into());
+                }
             }
             WorkerMessage::Error(err) => {
                 send_info_string(format!("Error: {err}"));
-                stdout.flush()?;
+                if let Err(e) = stdout.flush() {
+                    eprintln!("Failed to flush stdout after sending error: {e}");
+                    return Err(e.into());
+                }
             }
             WorkerMessage::Finished => {} // Ignore finished message in drain
         }
@@ -82,14 +91,20 @@ fn pump_messages(
                 match msg {
                     Ok(WorkerMessage::Info(info)) => {
                         send_response(UsiResponse::Info(info));
-                        stdout.flush()?;
+                        if let Err(e) = stdout.flush() {
+                            eprintln!("Failed to flush stdout after sending info: {e}");
+                            return Err(e.into());
+                        }
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
                         send_response(UsiResponse::BestMove {
                             best_move,
                             ponder: ponder_move,
                         });
-                        stdout.flush()?;
+                        if let Err(e) = stdout.flush() {
+                            eprintln!("Failed to flush stdout after sending best move: {e}");
+                            return Err(e.into());
+                        }
                         bestmove_sent = true;
                         if until_bestmove {
                             break;  // Exit after bestmove if requested
@@ -101,7 +116,10 @@ fn pump_messages(
                     }
                     Ok(WorkerMessage::Error(err)) => {
                         send_info_string(format!("Error: {err}"));
-                        stdout.flush()?;
+                        if let Err(e) = stdout.flush() {
+                            eprintln!("Failed to flush stdout after sending error: {e}");
+                            return Err(e.into());
+                        }
                         break;
                     }
                     Err(_) => {
@@ -249,14 +267,20 @@ fn main() -> Result<()> {
                 match msg {
                     Ok(WorkerMessage::Info(info)) => {
                         send_response(UsiResponse::Info(info));
-                        stdout.flush()?;
+                        if let Err(e) = stdout.flush() {
+                            eprintln!("Failed to flush stdout after sending info: {e}");
+                            return Err(e.into());
+                        }
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
                         send_response(UsiResponse::BestMove {
                             best_move,
                             ponder: ponder_move,
                         });
-                        stdout.flush()?;
+                        if let Err(e) = stdout.flush() {
+                            eprintln!("Failed to flush stdout after sending best move: {e}");
+                            return Err(e.into());
+                        }
                         searching = false;
                     }
                     Ok(WorkerMessage::Finished) => {
@@ -264,7 +288,10 @@ fn main() -> Result<()> {
                     }
                     Ok(WorkerMessage::Error(err)) => {
                         send_info_string(format!("Error: {err}"));
-                        stdout.flush()?;
+                        if let Err(e) = stdout.flush() {
+                            eprintln!("Failed to flush stdout after sending error: {e}");
+                            return Err(e.into());
+                        }
                     }
                     Err(_) => {
                         log::debug!("Worker channel closed");
@@ -320,7 +347,10 @@ fn handle_command(
             }
 
             send_response(UsiResponse::UsiOk);
-            stdout.flush()?;
+            if let Err(e) = stdout.flush() {
+                eprintln!("Failed to flush stdout after sending uciok: {e}");
+                return Err(e.into());
+            }
         }
 
         UsiCommand::IsReady => {
@@ -330,7 +360,10 @@ fn handle_command(
                 engine.initialize()?;
             }
             send_response(UsiResponse::ReadyOk);
-            stdout.flush()?;
+            if let Err(e) = stdout.flush() {
+                eprintln!("Failed to flush stdout after sending readyok: {e}");
+                return Err(e.into());
+            }
         }
 
         UsiCommand::Position {
@@ -392,7 +425,10 @@ fn handle_command(
                     best_move: "resign".to_string(),
                     ponder: None,
                 });
-                stdout.flush()?;
+                if let Err(e) = stdout.flush() {
+                    eprintln!("Failed to flush stdout after sending resign: {e}");
+                    return Err(e.into());
+                }
             }
         }
 
