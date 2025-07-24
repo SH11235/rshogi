@@ -6,7 +6,7 @@
 use anyhow::{anyhow, Result};
 use engine_core::{
     engine::controller::{Engine, EngineType},
-    search::search_basic::SearchLimits as BasicSearchLimits,
+    search::limits::SearchLimits,
     shogi::Position,
 };
 use std::sync::atomic::AtomicBool;
@@ -154,32 +154,44 @@ impl EngineAdapter {
 
         let mut position = self.position.clone().ok_or_else(|| anyhow!("No position set"))?;
 
-        // Convert GoParams to BasicSearchLimits
-        let mut limits = convert_go_params(&params, Some(stop_flag.clone()))?;
-        let search_depth = limits.depth; // Save depth before move
-
-        log::debug!(
-            "Search limits: depth={}, time={:?}, nodes={:?}",
-            limits.depth,
-            limits.time,
-            limits.nodes
-        );
-
         // Set up info callback using Arc to share between closures
         let info_callback_arc = Arc::new(info_callback);
         let info_callback_clone = info_callback_arc.clone();
-        limits.info_callback = Some(Box::new(move |depth, score, nodes, elapsed, pv| {
-            let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
-            let info = SearchInfo {
-                depth: Some(depth as u32),
-                time: Some(elapsed.as_millis().max(1) as u64), // Ensure at least 1ms
-                nodes: Some(nodes),
-                pv: pv_str,
-                score: Some(Score::Cp(score)),
-                ..Default::default()
-            };
-            info_callback_clone(info);
-        }));
+        type InfoCallbackType =
+            Box<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send>;
+        let info_callback_box: InfoCallbackType =
+            Box::new(move |depth, score, nodes, elapsed, pv| {
+                let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
+                let info = SearchInfo {
+                    depth: Some(depth as u32),
+                    time: Some(elapsed.as_millis().max(1) as u64), // Ensure at least 1ms
+                    nodes: Some(nodes),
+                    pv: pv_str,
+                    score: Some(Score::Cp(score)),
+                    ..Default::default()
+                };
+                info_callback_clone(info);
+            });
+
+        // Convert GoParams to SearchLimits with info callback
+        let mut builder = SearchLimits::builder();
+
+        // Set stop flag
+        builder = builder.stop_flag(stop_flag.clone());
+
+        // Set info callback
+        builder = builder.info_callback(info_callback_box);
+
+        // Apply go parameters
+        let limits = apply_go_params(builder, &params)?;
+        let search_depth = limits.depth.unwrap_or(6) as u8; // Save depth before move
+
+        log::debug!(
+            "Search limits: depth={:?}, time={:?}, nodes={:?}",
+            limits.depth,
+            limits.time_limit(),
+            limits.node_limit()
+        );
 
         // Run search
         log::debug!("Starting engine search...");
@@ -211,35 +223,29 @@ impl EngineAdapter {
 }
 
 /// Convert USI go parameters to basic search limits
-fn convert_go_params(
+fn apply_go_params(
+    mut builder: engine_core::search::limits::SearchLimitsBuilder,
     params: &GoParams,
-    stop_flag: Option<Arc<AtomicBool>>,
-) -> Result<BasicSearchLimits> {
-    let mut limits = BasicSearchLimits {
-        stop_flag,
-        ..Default::default()
-    };
-
+) -> Result<SearchLimits> {
     // Set depth limit
     if let Some(depth) = params.depth {
-        limits.depth = depth.min(255) as u8; // Clamp to u8 range
+        builder = builder.depth(depth);
     }
 
     // Set node limit
     if let Some(nodes) = params.nodes {
-        limits.nodes = Some(nodes);
+        builder = builder.nodes(nodes);
     }
 
     // Set time limit
     if let Some(movetime) = params.movetime {
-        limits.time = Some(std::time::Duration::from_millis(movetime));
+        builder = builder.fixed_time_ms(movetime);
     } else if params.infinite {
-        // No time limit
-        limits.time = None;
+        // No time limit - already default
     } else {
         // Default to 5 seconds if no time specified
-        limits.time = Some(std::time::Duration::from_secs(5));
+        builder = builder.fixed_time_ms(5000);
     }
 
-    Ok(limits)
+    Ok(builder.build())
 }
