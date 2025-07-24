@@ -216,3 +216,43 @@ fn test_multiple_stop_commands() {
     send_command(stdin, "quit");
     let _ = engine.wait();
 }
+
+#[test]
+fn test_ponder_sequence() {
+    let mut engine = spawn_engine();
+    let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
+    let stdout = engine.stdout.as_mut().expect("Failed to get stdout");
+    let mut reader = BufReader::new(stdout);
+
+    // Initialize
+    send_command(stdin, "usi");
+    let _ = read_until_pattern(&mut reader, "usiok", Duration::from_secs(2));
+    send_command(stdin, "isready");
+    let _ = read_until_pattern(&mut reader, "readyok", Duration::from_secs(2));
+
+    // Set position
+    send_command(stdin, "position startpos moves 7g7f 3c3d");
+
+    // Start ponder search
+    send_command(stdin, "go ponder");
+
+    // Give it some time to start pondering
+    thread::sleep(Duration::from_millis(100));
+
+    // Send ponder hit (opponent played expected move)
+    send_command(stdin, "ponderhit");
+
+    // Give it some time to continue searching
+    thread::sleep(Duration::from_millis(100));
+
+    // Stop the search
+    send_command(stdin, "stop");
+
+    // Should get bestmove
+    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(1));
+    assert!(result.is_ok(), "No bestmove after ponder sequence");
+
+    // Cleanup
+    send_command(stdin, "quit");
+    let _ = engine.wait();
+}

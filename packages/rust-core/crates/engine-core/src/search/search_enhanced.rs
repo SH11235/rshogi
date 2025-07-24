@@ -17,7 +17,7 @@ use crate::time_management::{TimeLimits, TimeManager};
 use crate::zobrist::ZOBRIST;
 use crate::{Color, MoveGen, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -324,7 +324,11 @@ pub struct EnhancedSearcher {
     /// Principal variation table
     pv: PVTable,
     /// Time manager for sophisticated time control
-    time_manager: Option<TimeManager>,
+    time_manager: Option<Arc<TimeManager>>,
+    /// Callback for time manager registration
+    time_manager_callback: Option<Arc<dyn Fn(Arc<TimeManager>) + Send + Sync>>,
+    /// Current search depth (actual depth reached in iterative deepening)
+    current_depth: AtomicU8,
     /// Search statistics (for testing)
     #[cfg(test)]
     pub stats: SearchStats,
@@ -346,6 +350,8 @@ impl EnhancedSearcher {
             evaluator,
             pv: PVTable::new(),
             time_manager: None,
+            time_manager_callback: None,
+            current_depth: AtomicU8::new(0),
             #[cfg(test)]
             stats: SearchStats::default(),
         }
@@ -420,7 +426,9 @@ impl EnhancedSearcher {
         // Safety margin for time control (40ms)
         const SAFETY_MARGIN_MS: u64 = 40;
 
-        // Set legacy time/node limits for fallback in should_stop()
+        // DEPRECATED: Set legacy time/node limits for backward compatibility
+        // TODO: Remove these fields once TimeManager is fully adopted
+        // Currently only used as fallback when TimeManager is not available (Infinite mode)
         match &limits.time_control {
             crate::time_management::TimeControl::FixedTime { ms_per_move } => {
                 // Set time limit with safety margin
@@ -438,15 +446,30 @@ impl EnhancedSearcher {
             }
         }
 
+        // Set stop flag if provided
+        if let Some(stop_flag) = &limits.stop_flag {
+            self.external_stop = Some(stop_flag.clone());
+        }
+
         // Create time manager if time control is specified
         self.time_manager = match &limits.time_control {
             crate::time_management::TimeControl::Infinite => None,
             _ => {
                 let game_phase = self.estimate_game_phase(pos);
                 let time_limits: TimeLimits = limits.clone().into();
-                Some(TimeManager::new(&time_limits, pos.side_to_move, pos.ply as u32, game_phase))
+                Some(Arc::new(TimeManager::new(
+                    &time_limits,
+                    pos.side_to_move,
+                    pos.ply as u32,
+                    game_phase,
+                )))
             }
         };
+
+        // Notify callback if TimeManager was created
+        if let (Some(cb), Some(tm_ref)) = (&self.time_manager_callback, &self.time_manager) {
+            cb(tm_ref.clone());
+        }
 
         // Extract max depth (default to 127 if not specified)
         let max_depth = limits.depth.map(|d| d as i32).unwrap_or(MAX_PLY as i32);
@@ -486,6 +509,7 @@ impl EnhancedSearcher {
         // Reset search state
         self.nodes.store(0, Ordering::Relaxed);
         self.stop.store(false, Ordering::Relaxed);
+        self.current_depth.store(0, Ordering::Relaxed);
         self.start_time = Instant::now();
         // Time and node limits are now managed by TimeManager
         self.history.clear_all();
@@ -675,6 +699,8 @@ impl EnhancedSearcher {
 
             if should_continue {
                 self.pv.save_pv();
+                // Update current depth only after successfully completing this depth
+                self.current_depth.store(depth as u8, Ordering::Relaxed);
             }
 
             // Check time
@@ -1310,6 +1336,24 @@ impl EnhancedSearcher {
     /// Get node count for testing
     pub fn nodes(&self) -> u64 {
         self.nodes.load(Ordering::Relaxed)
+    }
+
+    /// Get time manager reference if available
+    pub fn time_manager(&self) -> Option<Arc<TimeManager>> {
+        self.time_manager.clone()
+    }
+
+    /// Set callback to be notified when TimeManager is created
+    pub fn set_time_manager_callback<F>(&mut self, cb: F)
+    where
+        F: Fn(Arc<TimeManager>) + Send + Sync + 'static,
+    {
+        self.time_manager_callback = Some(Arc::new(cb));
+    }
+
+    /// Get the current search depth (actual depth reached)
+    pub fn current_depth(&self) -> u8 {
+        self.current_depth.load(Ordering::Relaxed)
     }
 }
 
