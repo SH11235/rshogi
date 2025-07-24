@@ -250,8 +250,10 @@ fn convert_go_params(
     params: &GoParams,
     stop_flag: Option<Arc<AtomicBool>>,
 ) -> Result<BasicSearchLimits> {
-    let mut limits = BasicSearchLimits::default();
-    limits.stop_flag = stop_flag;
+    let mut limits = BasicSearchLimits {
+        stop_flag,
+        ..Default::default()
+    };
 
     // Set depth limit
     if let Some(depth) = params.depth {

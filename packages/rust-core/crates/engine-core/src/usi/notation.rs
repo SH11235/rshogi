@@ -101,8 +101,8 @@ pub fn parse_usi_move(s: &str) -> Result<Move, UsiParseError> {
     }
 
     // Normal move or promotion
-    let (move_str, promote) = if s.ends_with('+') {
-        (&s[..s.len() - 1], true)
+    let (move_str, promote) = if let Some(stripped) = s.strip_suffix('+') {
+        (stripped, true)
     } else {
         (s, false)
     };
