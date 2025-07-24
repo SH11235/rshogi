@@ -9,14 +9,14 @@ wasm_bindgen_test_configure!(run_in_browser);
 mod wasm_tests {
     use super::*;
     use engine_core::search::GamePhase;
-    use engine_core::time_management::{SearchLimits, TimeControl, TimeManager, TimeState};
+    use engine_core::time_management::{TimeControl, TimeLimits, TimeManager, TimeState};
     use engine_core::Color;
     use js_sys::Date;
 
     /// Test basic TimeManager creation in WASM
     #[wasm_bindgen_test]
     fn test_time_manager_creation_wasm() {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -36,7 +36,7 @@ mod wasm_tests {
     /// Test time measurement using JS Date API
     #[wasm_bindgen_test]
     fn test_elapsed_time_wasm() {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::FixedTime { ms_per_move: 1000 },
             ..Default::default()
         };
@@ -59,7 +59,7 @@ mod wasm_tests {
     /// Test Byoyomi time control in WASM
     #[wasm_bindgen_test]
     fn test_byoyomi_wasm() {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 0,
                 byoyomi_ms: 1000,
@@ -86,7 +86,7 @@ mod wasm_tests {
     /// Test node-based stopping in WASM
     #[wasm_bindgen_test]
     fn test_node_limit_wasm() {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::FixedNodes { nodes: 10000 },
             ..Default::default()
         };
@@ -105,7 +105,7 @@ mod wasm_tests {
     /// Test force stop functionality in WASM
     #[wasm_bindgen_test]
     fn test_force_stop_wasm() {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Infinite,
             ..Default::default()
         };
@@ -125,7 +125,7 @@ mod wasm_tests {
     /// Test PV change tracking in WASM
     #[wasm_bindgen_test]
     fn test_pv_change_wasm() {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 30000,
                 black_ms: 30000,
@@ -149,7 +149,7 @@ mod wasm_tests {
     /// Test time pressure calculation in WASM
     #[wasm_bindgen_test]
     fn test_time_pressure_wasm() {
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 1000, // Very low time
                 black_ms: 1000,
@@ -172,7 +172,7 @@ mod wasm_tests {
         // This test verifies that our Instant usage is compatible with WASM
         // In WASM, std::time::Instant is implemented using performance.now()
 
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::FixedTime { ms_per_move: 500 },
             ..Default::default()
         };

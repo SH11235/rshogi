@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
-    search::search_basic::{SearchLimits, SearchResult, Searcher},
+    search::search_basic::Searcher,
     search::search_enhanced::EnhancedSearcher,
+    search::{constants::DEFAULT_SEARCH_DEPTH, SearchLimits, SearchResult, SearchStats},
     Position,
 };
 
@@ -91,9 +92,9 @@ impl Engine {
                     // Run enhanced search
                     let (best_move, score) = enhanced_searcher.search(
                         pos,
-                        limits.depth as i32,
-                        limits.time,
-                        limits.nodes,
+                        limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as i32,
+                        limits.time_limit(),
+                        limits.node_limit(),
                     );
 
                     // Calculate elapsed time
@@ -109,7 +110,13 @@ impl Engine {
                     SearchResult {
                         best_move,
                         score,
-                        stats: crate::search::search_basic::SearchStats { nodes, elapsed, pv },
+                        stats: SearchStats {
+                            nodes,
+                            elapsed,
+                            pv,
+                            depth: limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as u8,
+                            ..Default::default()
+                        },
                     }
                 } else {
                     // Should not happen if engine type is Enhanced
@@ -203,13 +210,7 @@ mod tests {
     fn test_material_engine() {
         let mut pos = Position::startpos();
         let engine = Engine::new(EngineType::Material);
-        let limits = SearchLimits {
-            depth: 3,
-            time: Some(Duration::from_secs(1)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).build();
 
         let result = engine.search(&mut pos, limits);
 
@@ -221,13 +222,7 @@ mod tests {
     fn test_nnue_engine() {
         let mut pos = Position::startpos();
         let engine = Engine::new(EngineType::Nnue);
-        let limits = SearchLimits {
-            depth: 3,
-            time: Some(Duration::from_secs(1)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).build();
 
         let result = engine.search(&mut pos, limits);
 
@@ -239,13 +234,7 @@ mod tests {
     fn test_enhanced_engine() {
         let mut pos = Position::startpos();
         let engine = Engine::new(EngineType::Enhanced);
-        let limits = SearchLimits {
-            depth: 3,
-            time: Some(Duration::from_secs(1)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).build();
 
         let result = engine.search(&mut pos, limits);
 
@@ -267,13 +256,11 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let mut pos_mut = pos_clone;
-            let limits = SearchLimits {
-                depth: 10,
-                time: Some(Duration::from_secs(10)),
-                nodes: None,
-                stop_flag: Some(stop_flag_clone),
-                info_callback: None,
-            };
+            let limits = SearchLimits::builder()
+                .depth(10)
+                .fixed_time_ms(10000)
+                .stop_flag(stop_flag_clone)
+                .build();
             engine_clone.search(&mut pos_mut, limits)
         });
 
@@ -302,13 +289,7 @@ mod tests {
 
         // Can still search
         let mut pos = Position::startpos();
-        let limits = SearchLimits {
-            depth: 2,
-            time: Some(Duration::from_millis(100)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = SearchLimits::builder().depth(2).fixed_time_ms(100).build();
         let result = engine.search(&mut pos, limits);
         assert!(result.best_move.is_some());
 
@@ -317,13 +298,7 @@ mod tests {
         assert!(matches!(engine.engine_type, EngineType::Enhanced));
 
         // Can search with Enhanced engine
-        let limits2 = SearchLimits {
-            depth: 2,
-            time: Some(Duration::from_millis(100)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits2 = SearchLimits::builder().depth(2).fixed_time_ms(100).build();
         let result = engine.search(&mut pos, limits2);
         assert!(result.best_move.is_some());
     }
@@ -348,13 +323,7 @@ mod tests {
             let engine_clone = engine.clone();
             let handle = thread::spawn(move || {
                 let mut pos = Position::startpos();
-                let limits = SearchLimits {
-                    depth: 2,
-                    time: Some(Duration::from_millis(50)),
-                    nodes: None,
-                    stop_flag: None,
-                    info_callback: None,
-                };
+                let limits = SearchLimits::builder().depth(2).fixed_time_ms(50).build();
 
                 // Each thread performs a search
                 let result = engine_clone.search(&mut pos, limits);

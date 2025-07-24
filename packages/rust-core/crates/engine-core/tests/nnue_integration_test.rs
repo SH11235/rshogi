@@ -1,12 +1,10 @@
 //! Integration tests for NNUE evaluation
 
-use std::time::Duration;
-
 use engine_core::{
     engine::controller::{Engine, EngineType},
     evaluate::Evaluator,
     nnue::{weights::load_weights, NNUEEvaluatorWrapper},
-    search::search_basic::SearchLimits,
+    search::SearchLimits,
     Color, Piece, PieceType, Position, Square,
 };
 
@@ -15,13 +13,7 @@ fn test_nnue_engine_basic() {
     let mut pos = Position::startpos();
     let engine = Engine::new(EngineType::Nnue);
 
-    let limits = SearchLimits {
-        depth: 3,
-        time: Some(Duration::from_secs(1)),
-        nodes: Some(10000),
-        stop_flag: None,
-        info_callback: None,
-    };
+    let limits = SearchLimits::builder().depth(3).fixed_time_ms(1000).nodes(10000).build();
 
     let result = engine.search(&mut pos, limits);
 
@@ -39,24 +31,12 @@ fn test_nnue_vs_material_comparison() {
 
     // Test with material evaluator
     let material_engine = Engine::new(EngineType::Material);
-    let limits = SearchLimits {
-        depth: 4,
-        time: Some(Duration::from_secs(1)),
-        nodes: None,
-        stop_flag: None,
-        info_callback: None,
-    };
+    let limits = SearchLimits::builder().depth(4).fixed_time_ms(1000).build();
     let material_result = material_engine.search(&mut pos, limits);
 
     // Test with NNUE evaluator
     let nnue_engine = Engine::new(EngineType::Nnue);
-    let limits2 = SearchLimits {
-        depth: 4,
-        time: Some(Duration::from_secs(1)),
-        nodes: None,
-        stop_flag: None,
-        info_callback: None,
-    };
+    let limits2 = SearchLimits::builder().depth(4).fixed_time_ms(1000).build();
     let nnue_result = nnue_engine.search(&mut pos, limits2);
 
     println!(
