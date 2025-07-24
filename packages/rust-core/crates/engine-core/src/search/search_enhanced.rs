@@ -125,7 +125,7 @@ impl PVTable {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,ignore
     /// let pv = searcher.principal_variation();
     /// let pv_copy: Vec<Move> = pv.to_vec(); // Clone if needed across searches
     /// ```
