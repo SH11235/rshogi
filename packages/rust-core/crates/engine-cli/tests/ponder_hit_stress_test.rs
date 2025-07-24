@@ -291,8 +291,9 @@ fn test_ponder_hit_stress_with_thread_timing() {
             // Start ponder
             send_command(stdin, "go ponder btime 10000 wtime 10000");
 
-            // Very short sleep to create race condition opportunity
-            thread::sleep(Duration::from_micros(100));
+            // Short sleep to create race condition opportunity
+            // Using 1ms instead of 100μs for stability in release mode
+            thread::sleep(Duration::from_millis(1));
 
             // Send ponderhit
             send_command(stdin, "ponderhit");
