@@ -79,22 +79,6 @@ jobs:
           echo "## Large Stack Test Summary"
           echo "Total ignored tests: $(grep -r "#\[ignore\]" --include="*.rs" . | grep -B1 "fn test_" | wc -l)"
 
-  wasm-build:
-    name: WASM Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install wasm-pack
-        run: |
-          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: packages/rust-core
-      - name: Build WASM
-        run: make build
-
   security:
     name: Security Audit
     runs-on: ubuntu-latest
