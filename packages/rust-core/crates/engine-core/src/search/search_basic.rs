@@ -11,11 +11,11 @@ use crate::shogi::{Move, MoveList};
 use crate::{MoveGen, Position};
 
 use super::constants::*;
+use super::types::{InfoCallback, SearchResult, SearchStats};
 
 // Constants are now imported from super::constants
 
-/// Info callback type
-pub type InfoCallback = Box<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send>;
+// InfoCallback is now imported from super::types
 
 /// Search limits
 pub struct SearchLimits {
@@ -55,27 +55,9 @@ impl std::fmt::Debug for SearchLimits {
     }
 }
 
-/// Search statistics
-#[derive(Clone, Debug, Default)]
-pub struct SearchStats {
-    /// Nodes searched
-    pub nodes: u64,
-    /// Time elapsed
-    pub elapsed: Duration,
-    /// Principal variation
-    pub pv: Vec<Move>,
-}
+// SearchStats is now imported from super::types
 
-/// Search result
-#[derive(Clone, Debug)]
-pub struct SearchResult {
-    /// Best move found
-    pub best_move: Option<Move>,
-    /// Evaluation score (from side to move perspective)
-    pub score: i32,
-    /// Search statistics
-    pub stats: SearchStats,
-}
+// SearchResult is now imported from super::types
 
 /// Search engine
 pub struct Searcher<E: Evaluator> {
@@ -121,6 +103,7 @@ impl<E: Evaluator> Searcher<E> {
 
         let mut best_move = None;
         let mut best_score = -SEARCH_INF;
+        let mut search_depth = 0;
 
         // If no move is found during iterative deepening, we need a fallback
         // Generate all legal moves and evaluate them at depth 0 for better quality
@@ -202,6 +185,7 @@ impl<E: Evaluator> Searcher<E> {
             // Don't overwrite non-zero fallback score with 0
             if score != 0 || best_score == -SEARCH_INF {
                 best_score = score;
+                search_depth = depth;
                 if !self.pv[0].is_empty() {
                     best_move = Some(self.pv[0][0]);
                 }
@@ -221,6 +205,8 @@ impl<E: Evaluator> Searcher<E> {
                 nodes: self.nodes,
                 elapsed: self.start_time.elapsed(),
                 pv: self.pv[0].clone(),
+                depth: search_depth,
+                ..Default::default()
             },
         }
     }
