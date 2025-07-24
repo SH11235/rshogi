@@ -1,6 +1,7 @@
 pub mod common;
 pub mod constants;
 pub mod history;
+pub mod limits;
 pub mod search_basic;
 pub mod search_enhanced;
 pub mod tt;
