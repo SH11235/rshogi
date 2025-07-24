@@ -104,6 +104,7 @@ fn benchmark_engine(engine: &Engine, mut pos: Position, name: &str) -> (f64, i32
 
 #[test]
 fn test_nnue_performance() {
+    use std::time::Duration;
     // Simple performance regression test
     let pos = Position::startpos();
     let engine = Engine::new(EngineType::Nnue);
