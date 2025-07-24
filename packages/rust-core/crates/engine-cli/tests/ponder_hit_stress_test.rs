@@ -104,8 +104,7 @@ fn test_rapid_ponder_hit() {
         // Allow more time for search completion since we're using time controls
         assert!(
             ponder_hit_elapsed < Duration::from_secs(5),
-            "Ponder_hit processing took too long: {:?}",
-            ponder_hit_elapsed
+            "Ponder_hit processing took too long: {ponder_hit_elapsed:?}"
         );
 
         println!("Iteration {} completed in {:?}", iteration + 1, ponder_hit_elapsed);
@@ -209,8 +208,7 @@ fn test_concurrent_ponder_and_position_commands() {
     assert!(result.is_ok(), "Failed to complete new search after position update");
     assert!(
         total_elapsed < Duration::from_secs(3),
-        "Position update appeared to block for too long: {:?}",
-        total_elapsed
+        "Position update appeared to block for too long: {total_elapsed:?}"
     );
 
     // Cleanup
@@ -255,8 +253,7 @@ fn test_ponder_hit_with_stop() {
     assert!(result.is_ok(), "Failed to get bestmove after stop");
     assert!(
         stop_elapsed < Duration::from_millis(500),
-        "Stop after ponderhit took too long: {:?}",
-        stop_elapsed
+        "Stop after ponderhit took too long: {stop_elapsed:?}"
     );
 
     // Cleanup
@@ -306,7 +303,7 @@ fn test_ponder_hit_stress_with_thread_timing() {
                     iteration += 1;
                 }
                 Err(e) => {
-                    eprintln!("Failed to get bestmove in iteration {}: {}", iteration, e);
+                    eprintln!("Failed to get bestmove in iteration {iteration}: {e}");
                     send_command(stdin, "stop");
                     let _ = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(500));
                     break;
@@ -333,7 +330,6 @@ fn test_ponder_hit_stress_with_thread_timing() {
     // Should have completed at least a few iterations without deadlock
     assert!(
         iterations_completed >= 5,
-        "Only completed {} iterations, possible deadlock",
-        iterations_completed
+        "Only completed {iterations_completed} iterations, possible deadlock"
     );
 }

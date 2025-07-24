@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 fn spawn_engine() -> std::process::Child {
     Command::new("cargo")
-        .args(&["run", "--bin", "engine-cli"])
+        .args(["run", "--bin", "engine-cli"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -14,8 +14,8 @@ fn spawn_engine() -> std::process::Child {
 }
 
 fn send_command(stdin: &mut std::process::ChildStdin, cmd: &str) {
-    println!(">>> {}", cmd);
-    writeln!(stdin, "{}", cmd).expect("Failed to write command");
+    println!(">>> {cmd}");
+    writeln!(stdin, "{cmd}").expect("Failed to write command");
     stdin.flush().expect("Failed to flush stdin");
 }
 
@@ -34,17 +34,17 @@ fn read_until_pattern(
             Ok(_) => {
                 let line = buffer.trim();
                 if !line.is_empty() {
-                    println!("<<< {}", line);
+                    println!("<<< {line}");
                     if line.contains(pattern) {
                         return Ok(line.to_string());
                     }
                 }
             }
-            Err(e) => return Err(format!("Read error: {}", e)),
+            Err(e) => return Err(format!("Read error: {e}")),
         }
     }
 
-    Err(format!("Timeout waiting for pattern: {}", pattern))
+    Err(format!("Timeout waiting for pattern: {pattern}"))
 }
 
 #[test]
@@ -57,11 +57,11 @@ fn test_simple_ponder() {
     // Initialize
     send_command(stdin, "usi");
     let result = read_until_pattern(&mut reader, "usiok", Duration::from_secs(5));
-    assert!(result.is_ok(), "Failed to get usiok: {:?}", result);
+    assert!(result.is_ok(), "Failed to get usiok: {result:?}");
 
     send_command(stdin, "isready");
     let result = read_until_pattern(&mut reader, "readyok", Duration::from_secs(5));
-    assert!(result.is_ok(), "Failed to get readyok: {:?}", result);
+    assert!(result.is_ok(), "Failed to get readyok: {result:?}");
 
     // Set position
     send_command(stdin, "position startpos");
@@ -82,7 +82,7 @@ fn test_simple_ponder() {
         // If no bestmove yet, try stopping manually
         send_command(stdin, "stop");
         let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(2));
-        assert!(stop_result.is_ok(), "No bestmove after stop: {:?}", stop_result);
+        assert!(stop_result.is_ok(), "No bestmove after stop: {stop_result:?}");
     }
 
     // Cleanup
