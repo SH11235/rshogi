@@ -50,7 +50,7 @@ impl LimitChecker {
     }
 
     /// Check if any limit has been exceeded
-    #[inline]
+    #[inline(always)]
     pub fn should_stop(&self, nodes: u64, current_time: Instant) -> bool {
         // Check external stop flag
         if let Some(ref stop_flag) = self.stop_flag {
