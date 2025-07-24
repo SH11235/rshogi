@@ -226,31 +226,46 @@ fn test_ponder_sequence() {
 
     // Initialize
     send_command(stdin, "usi");
-    let _ = read_until_pattern(&mut reader, "usiok", Duration::from_secs(2));
+    let _ = read_until_pattern(&mut reader, "usiok", Duration::from_secs(2))
+        .expect("Failed to get usiok");
     send_command(stdin, "isready");
-    let _ = read_until_pattern(&mut reader, "readyok", Duration::from_secs(2));
+    let _ = read_until_pattern(&mut reader, "readyok", Duration::from_secs(2))
+        .expect("Failed to get readyok");
 
-    // Set position
-    send_command(stdin, "position startpos moves 7g7f 3c3d");
+    // Set position (Black move then White move)
+    send_command(stdin, "position startpos moves 2c2d 8g8f");
 
-    // Start ponder search
-    send_command(stdin, "go ponder");
+    // Start ponder search with time controls (these will be used after ponderhit)
+    // The ponder search itself runs infinitely, but we need time controls for after ponderhit
+    send_command(stdin, "go ponder btime 10000 wtime 10000");
 
-    // Give it some time to start pondering
-    thread::sleep(Duration::from_millis(100));
+    // Give it some time to start pondering (ponder mode runs infinitely)
+    thread::sleep(Duration::from_millis(200));
 
     // Send ponder hit (opponent played expected move)
+    // This should convert the ponder search to a normal search with the time limits
     send_command(stdin, "ponderhit");
 
-    // Give it some time to continue searching
-    thread::sleep(Duration::from_millis(100));
+    // Now the search should have time limits and will complete on its own
+    // Wait for bestmove (should come relatively quickly after ponderhit)
+    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(5));
 
-    // Stop the search
-    send_command(stdin, "stop");
+    match result {
+        Ok(lines) => {
+            // Check that we got info lines before bestmove
+            let has_info = lines.iter().any(|line| line.starts_with("info"));
+            assert!(has_info, "Expected info output during search");
 
-    // Should get bestmove
-    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(1));
-    assert!(result.is_ok(), "No bestmove after ponder sequence");
+            let has_bestmove = lines.iter().any(|line| line.starts_with("bestmove"));
+            assert!(has_bestmove, "Expected bestmove after ponderhit");
+        }
+        Err(e) => {
+            // If no bestmove, try stopping manually
+            send_command(stdin, "stop");
+            let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(1));
+            assert!(stop_result.is_ok(), "No bestmove after stop. Original error: {e}");
+        }
+    }
 
     // Cleanup
     send_command(stdin, "quit");

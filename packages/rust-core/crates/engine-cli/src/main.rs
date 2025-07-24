@@ -222,7 +222,7 @@ fn main() -> Result<()> {
         );
     }
 
-    log::info!("USI Engine starting...");
+    log::info!("Shogi USI Engine starting (version 1.0)");
 
     // Create communication channels
     let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
@@ -251,7 +251,7 @@ fn main() -> Result<()> {
             recv(cmd_rx) -> msg => {
                 match msg {
                     Ok(cmd) => {
-                        log::debug!("Processing command: {cmd:?}");
+                        log::debug!("USI command received: {cmd:?}");
 
                         // Check if it's quit command
                         if matches!(cmd, UsiCommand::Quit) {
@@ -446,10 +446,11 @@ fn handle_command(
         }
 
         UsiCommand::PonderHit => {
-            // Convert ponder search to normal search
+            // Handle ponder hit
             let mut engine = engine.lock().unwrap();
-            if let Err(e) = engine.ponder_hit() {
-                log::warn!("Ponder hit error: {e}");
+            match engine.ponder_hit() {
+                Ok(()) => log::debug!("Ponder hit successfully processed"),
+                Err(e) => log::debug!("Ponder hit ignored: {e}"),
             }
         }
 
@@ -483,7 +484,7 @@ fn search_worker(
     stop_flag: Arc<AtomicBool>,
     tx: Sender<WorkerMessage>,
 ) {
-    log::debug!("Search worker started with params: {params:?}");
+    log::debug!("Search worker thread started");
 
     // Set up info callback
     let tx_info = tx.clone();
