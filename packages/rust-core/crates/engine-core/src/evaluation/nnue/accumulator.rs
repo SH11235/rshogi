@@ -7,6 +7,7 @@ use super::features::{extract_features, halfkp_index, BonaPiece, FeatureTransfor
 use super::simd::SimdDispatcher;
 use crate::shogi::{piece_type_to_hand_index, Move};
 use crate::{Color, Piece, PieceType, Position, Square};
+use log::error;
 
 /// Accumulator for storing transformed features
 #[derive(Clone)]
@@ -176,7 +177,7 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
             Ok(bona_hand_black) => removed.push(halfkp_index(black_king, bona_hand_black)),
             Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
+                error!("[NNUE] Error creating BonaPiece from hand: {_e}");
             }
         }
 
@@ -185,7 +186,7 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
             Ok(bona_hand_white) => removed.push(halfkp_index(white_king_flipped, bona_hand_white)),
             Err(_e) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[NNUE] Error creating BonaPiece from hand: {_e}");
+                error!("[NNUE] Error creating BonaPiece from hand: {_e}");
             }
         }
 

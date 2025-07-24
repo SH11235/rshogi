@@ -11,9 +11,10 @@ use super::history::History;
 use super::tt::{NodeType, TranspositionTable};
 use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::Move;
+use crate::shogi::MoveList;
 use crate::time_management::{SearchLimits, TimeManager};
 use crate::zobrist::ZOBRIST;
-use crate::{Color, MovePicker, PieceType, Position};
+use crate::{Color, MoveGen, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -332,6 +333,8 @@ pub struct EnhancedSearcher {
     nodes: AtomicU64,
     /// Stop flag
     stop: AtomicBool,
+    /// External stop flag (from USI)
+    external_stop: Option<Arc<AtomicBool>>,
     /// Time limit (deprecated - use time_manager instead)
     time_limit: Option<Instant>,
     /// Node limit (deprecated - use time_manager instead)
@@ -358,6 +361,7 @@ impl EnhancedSearcher {
             params: SearchParams::default(),
             nodes: AtomicU64::new(0),
             stop: AtomicBool::new(false),
+            external_stop: None,
             time_limit: None,
             node_limit: None,
             start_time: Instant::now(),
@@ -421,12 +425,41 @@ impl EnhancedSearcher {
         self.pv.get_pv()
     }
 
+    /// Set external stop flag
+    pub fn set_stop_flag(&mut self, stop_flag: Arc<AtomicBool>) {
+        self.external_stop = Some(stop_flag);
+    }
+
     /// Search position with new SearchLimits interface
     pub fn search_with_limits(
         &mut self,
         pos: &mut Position,
         limits: SearchLimits,
     ) -> (Option<Move>, i32) {
+        // Initialize start time
+        self.start_time = Instant::now();
+
+        // Safety margin for time control (40ms)
+        const SAFETY_MARGIN_MS: u64 = 40;
+
+        // Set legacy time/node limits for fallback in should_stop()
+        match &limits.time_control {
+            crate::time_management::TimeControl::FixedTime { ms_per_move } => {
+                // Set time limit with safety margin
+                let time_ms = ms_per_move.saturating_sub(SAFETY_MARGIN_MS);
+                self.time_limit = Some(self.start_time + Duration::from_millis(time_ms));
+                self.node_limit = None;
+            }
+            crate::time_management::TimeControl::FixedNodes { nodes } => {
+                self.time_limit = None;
+                self.node_limit = Some(*nodes);
+            }
+            _ => {
+                self.time_limit = None;
+                self.node_limit = limits.nodes;
+            }
+        }
+
         // Create time manager if time control is specified
         self.time_manager = match &limits.time_control {
             crate::time_management::TimeControl::Infinite => None,
@@ -665,6 +698,22 @@ impl EnhancedSearcher {
 
             if should_stop {
                 break;
+            }
+        }
+
+        // If no move was found (e.g., immediate stop), try to find any legal move
+        if best_move.is_none() {
+            let mut move_gen = MoveGen::new();
+            let mut moves = MoveList::new();
+            move_gen.generate_all(pos, &mut moves);
+            if !moves.is_empty() {
+                // Count at least one node for fallback evaluation
+                self.nodes.fetch_add(1, Ordering::Relaxed);
+
+                // Try to evaluate the first move if we have time
+                let evaluator = self.evaluator.clone();
+                best_score = evaluator.evaluate(pos);
+                best_move = Some(moves[0]);
             }
         }
 
@@ -1155,9 +1204,17 @@ impl EnhancedSearcher {
     }
 
     /// Check if search should stop
+    #[allow(dead_code)] // Actually used despite compiler warning
     fn should_stop(&self) -> bool {
         if self.stop.load(Ordering::Relaxed) {
             return true;
+        }
+
+        // Check external stop flag (use Acquire to pair with Release in GUI thread)
+        if let Some(ref external_stop) = self.external_stop {
+            if external_stop.load(Ordering::Acquire) {
+                return true;
+            }
         }
 
         // Use TimeManager if available
@@ -1188,6 +1245,13 @@ impl EnhancedSearcher {
     fn should_stop_deterministic(&self) -> bool {
         if self.stop.load(Ordering::Relaxed) {
             return true;
+        }
+
+        // Check external stop flag (use Acquire to pair with Release in GUI thread)
+        if let Some(ref external_stop) = self.external_stop {
+            if external_stop.load(Ordering::Acquire) {
+                return true;
+            }
         }
 
         // Skip time check completely for deterministic behavior
@@ -1240,6 +1304,40 @@ mod tests {
 
         // Test margins
         assert!((params.futility_margin)(1) > 0);
+    }
+
+    #[test]
+    fn test_search_with_external_stop_flag() {
+        use std::thread;
+        use std::time::Instant;
+
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut pos = Position::startpos();
+
+        // Set up external stop flag
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        searcher.set_stop_flag(stop_flag.clone());
+
+        // Set stop flag after a short delay (give time to find at least one move)
+        let stop_flag_clone = stop_flag.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50)); // Slightly longer to ensure depth 1 completes
+            stop_flag_clone.store(true, Ordering::Release);
+        });
+
+        let start = Instant::now();
+        let (best_move, _score) = searcher.search(&mut pos, 10, None, None); // Deep search
+        let elapsed = start.elapsed();
+
+        // Should find a move (even if search was stopped)
+        assert!(best_move.is_some());
+
+        // Should have stopped quickly (well before searching to depth 10)
+        assert!(elapsed < Duration::from_secs(1));
+
+        // Should have searched relatively few nodes
+        assert!(searcher.nodes.load(Ordering::Relaxed) < 1_000_000);
     }
 
     #[test]

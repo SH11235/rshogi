@@ -1299,7 +1299,7 @@ mod tests {
         // Ponder for 5 seconds
         mock_advance_time(5000);
         let elapsed_before = tm.elapsed_ms();
-        assert!(elapsed_before >= 4999 && elapsed_before <= 5001); // Allow small variance
+        assert!((4999..=5001).contains(&elapsed_before)); // Allow small variance
 
         // After ponder hit, elapsed should reset
         tm.ponder_hit(None, 5000);
@@ -1309,6 +1309,6 @@ mod tests {
         // Advance more time
         mock_advance_time(2000);
         let elapsed_final = tm.elapsed_ms();
-        assert!(elapsed_final >= 1999 && elapsed_final <= 2001); // Should count from ponder_hit
+        assert!((1999..=2001).contains(&elapsed_final)); // Should count from ponder_hit
     }
 }
