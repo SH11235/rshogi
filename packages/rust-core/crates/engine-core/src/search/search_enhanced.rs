@@ -11,9 +11,10 @@ use super::history::History;
 use super::tt::{NodeType, TranspositionTable};
 use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::Move;
+use crate::shogi::MoveList;
 use crate::time_management::{SearchLimits, TimeManager};
 use crate::zobrist::ZOBRIST;
-use crate::{Color, MovePicker, PieceType, Position};
+use crate::{Color, MoveGen, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -673,6 +674,16 @@ impl EnhancedSearcher {
 
             if should_stop {
                 break;
+            }
+        }
+
+        // If no move was found (e.g., immediate stop), try to find any legal move
+        if best_move.is_none() {
+            let mut move_gen = MoveGen::new();
+            let mut moves = MoveList::new();
+            move_gen.generate_all(pos, &mut moves);
+            if !moves.is_empty() {
+                best_move = Some(moves[0]);
             }
         }
 
