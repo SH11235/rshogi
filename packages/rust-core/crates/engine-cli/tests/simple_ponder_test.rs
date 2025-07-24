@@ -4,8 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn spawn_engine() -> std::process::Child {
-    Command::new("cargo")
-        .args(["run", "--bin", "engine-cli"])
+    Command::new(env!("CARGO_BIN_EXE_engine-cli"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
