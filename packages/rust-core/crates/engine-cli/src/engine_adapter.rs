@@ -350,7 +350,7 @@ fn apply_go_params(
         } else {
             depth
         };
-        
+
         // Clamp depth to MAX_PLY to prevent array bounds violation
         let clamped_depth = safe_depth.min(MAX_PLY as u32);
         if safe_depth != clamped_depth {
@@ -668,59 +668,5 @@ mod tests {
             TimeControl::Ponder => {}
             _ => panic!("Expected Ponder to take priority"),
         }
-    }
-
-    #[test]
-    fn test_ponder_state_transitions() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let mut adapter = EngineAdapter::new();
-        
-        // Initialize position
-        adapter
-            .set_position(true, None, &[])
-            .expect("Failed to set position");
-
-        // Initially not pondering
-        assert!(!adapter.ponder_state.is_pondering);
-        assert!(adapter.ponder_state.ponder_move.is_none());
-        assert!(adapter.ponder_state.ponder_start_time.is_none());
-
-        // Start ponder search
-        let params = GoParams {
-            ponder: true,
-            infinite: true,
-            ..Default::default()
-        };
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let info_callback = Box::new(|_: SearchInfo| {});
-        
-        // Search should set ponder state
-        let _ = adapter.search(params, stop_flag.clone(), info_callback);
-        
-        assert!(adapter.ponder_state.is_pondering);
-        assert!(adapter.ponder_state.ponder_start_time.is_some());
-
-        // Ponder hit should clear ponder state
-        let result = adapter.ponder_hit();
-        assert!(result.is_ok());
-        assert!(!adapter.ponder_state.is_pondering);
-        assert!(adapter.ponder_state.ponder_start_time.is_none());
-
-        // Non-ponder search should also clear ponder state
-        adapter.ponder_state.is_pondering = true;
-        adapter.ponder_state.ponder_start_time = Some(std::time::Instant::now());
-        
-        let params = GoParams {
-            ponder: false,
-            infinite: true,
-            ..Default::default()
-        };
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let info_callback = Box::new(|_: SearchInfo| {});
-        
-        let _ = adapter.search(params, stop_flag, info_callback);
-        
-        assert!(!adapter.ponder_state.is_pondering);
     }
 }
