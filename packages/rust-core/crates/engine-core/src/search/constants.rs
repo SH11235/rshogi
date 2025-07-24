@@ -18,6 +18,8 @@ pub const SEARCH_INTERRUPTED: i32 = SEARCH_INF + 1;
 pub const MAX_PLY: usize = 127;
 
 /// Default search depth when not specified
+/// Based on USI protocol default (depth 6) for compatibility
+/// This value can be overridden by engine configuration if needed
 pub const DEFAULT_SEARCH_DEPTH: u8 = 6;
 
 /// Maximum additional plies for quiescence search
