@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
-    search::search_basic::{SearchLimits, SearchResult, Searcher},
+    search::search_basic::{SearchLimits, Searcher},
     search::search_enhanced::EnhancedSearcher,
+    search::{SearchResult, SearchStats},
     Position,
 };
 
@@ -109,7 +110,13 @@ impl Engine {
                     SearchResult {
                         best_move,
                         score,
-                        stats: crate::search::search_basic::SearchStats { nodes, elapsed, pv },
+                        stats: SearchStats {
+                            nodes,
+                            elapsed,
+                            pv,
+                            depth: limits.depth,
+                            ..Default::default()
+                        },
                     }
                 } else {
                     // Should not happen if engine type is Enhanced
