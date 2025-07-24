@@ -19,6 +19,8 @@ fn test_nnue_engine_basic() {
         depth: 3,
         time: Some(Duration::from_secs(1)),
         nodes: Some(10000),
+        stop_flag: None,
+        info_callback: None,
     };
 
     let result = engine.search(&mut pos, limits);
@@ -41,12 +43,21 @@ fn test_nnue_vs_material_comparison() {
         depth: 4,
         time: Some(Duration::from_secs(1)),
         nodes: None,
+        stop_flag: None,
+        info_callback: None,
     };
-    let material_result = material_engine.search(&mut pos, limits.clone());
+    let material_result = material_engine.search(&mut pos, limits);
 
     // Test with NNUE evaluator
     let nnue_engine = Engine::new(EngineType::Nnue);
-    let nnue_result = nnue_engine.search(&mut pos, limits);
+    let limits2 = SearchLimits {
+        depth: 4,
+        time: Some(Duration::from_secs(1)),
+        nodes: None,
+        stop_flag: None,
+        info_callback: None,
+    };
+    let nnue_result = nnue_engine.search(&mut pos, limits2);
 
     println!(
         "Material eval: {} (best: {:?})",
