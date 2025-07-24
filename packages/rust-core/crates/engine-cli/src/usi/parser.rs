@@ -194,6 +194,19 @@ fn parse_go(parts: &[&str]) -> Result<UsiCommand> {
                         .map_err(|_| anyhow!("Invalid movestogo value: {}", parts[i]))?,
                 )
             }
+            "periods" => {
+                i += 1;
+                if i >= parts.len() {
+                    return Err(anyhow!("go periods requires a value"));
+                }
+                let periods_val = parts[i]
+                    .parse::<u32>()
+                    .map_err(|_| anyhow!("Invalid periods value: {}", parts[i]))?;
+                if periods_val == 0 {
+                    return Err(anyhow!("Periods must be at least 1"));
+                }
+                params.periods = Some(periods_val);
+            }
             _ => {
                 // Unknown parameter, skip
                 warn!("Unknown go parameter: {}", parts[i]);
@@ -335,6 +348,38 @@ mod tests {
             }
             _ => panic!("Expected Go"),
         }
+    }
+
+    #[test]
+    fn test_parse_go_with_periods() {
+        // Test periods parsing
+        let cmd = parse_usi_command("go byoyomi 30000 periods 3").unwrap();
+        match cmd {
+            UsiCommand::Go(params) => {
+                assert_eq!(params.byoyomi, Some(30000));
+                assert_eq!(params.periods, Some(3));
+            }
+            _ => panic!("Expected Go"),
+        }
+
+        // Test periods without byoyomi (should still parse)
+        let cmd = parse_usi_command("go btime 300000 wtime 300000 periods 5").unwrap();
+        match cmd {
+            UsiCommand::Go(params) => {
+                assert_eq!(params.periods, Some(5));
+            }
+            _ => panic!("Expected Go"),
+        }
+
+        // Test periods 0 error
+        let result = parse_usi_command("go byoyomi 30000 periods 0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Periods must be at least 1"));
+
+        // Test invalid periods value
+        let result = parse_usi_command("go byoyomi 30000 periods abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid periods value"));
     }
 
     #[test]
