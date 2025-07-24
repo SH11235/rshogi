@@ -184,15 +184,16 @@ impl EngineAdapter {
         // Set info callback
         builder = builder.info_callback(info_callback_box);
 
-        // Apply go parameters
-        let limits = apply_go_params(builder, &params)?;
+        // Apply go parameters with position info
+        let limits = apply_go_params(builder, &params, &position)?;
         let search_depth = limits.depth.unwrap_or(DEFAULT_SEARCH_DEPTH as u32) as u8; // Save depth before move
 
         log::debug!(
-            "Search limits: depth={:?}, time={:?}, nodes={:?}",
+            "Search limits: time_control={:?}, depth={:?}, nodes={:?}, moves_to_go={:?}",
+            limits.time_control,
             limits.depth,
-            limits.time_limit(),
-            limits.node_limit()
+            limits.node_limit(),
+            limits.moves_to_go
         );
 
         // Run search
@@ -224,10 +225,13 @@ impl EngineAdapter {
     }
 }
 
-/// Convert USI go parameters to basic search limits
+/// Convert USI go parameters to search limits with proper time control
+///
+/// Priority order: ponder > infinite > movetime > byoyomi > fischer > default
 fn apply_go_params(
     mut builder: engine_core::search::limits::SearchLimitsBuilder,
     params: &GoParams,
+    position: &Position,
 ) -> Result<SearchLimits> {
     // Set depth limit
     if let Some(depth) = params.depth {
@@ -239,15 +243,277 @@ fn apply_go_params(
         builder = builder.nodes(nodes);
     }
 
-    // Set time limit
-    if let Some(movetime) = params.movetime {
-        builder = builder.fixed_time_ms(movetime);
+    // Set moves to go
+    if let Some(moves_to_go) = params.moves_to_go {
+        builder = builder.moves_to_go(moves_to_go);
+    }
+
+    // Set time control based on provided parameters
+    // Priority: ponder > infinite > movetime > byoyomi > fischer > default
+    if params.ponder {
+        // Ponder mode
+        builder = builder.ponder();
     } else if params.infinite {
-        // No time limit - already default
+        // Infinite time control
+        builder = builder.infinite();
+    } else if let Some(movetime) = params.movetime {
+        // Fixed time per move
+        builder = builder.fixed_time_ms(movetime);
+    } else if let Some(byoyomi) = params.byoyomi {
+        // Check if this is actually Fischer time control disguised as byoyomi
+        // Some GUIs send byoyomi=0 with binc/winc for Fischer
+        if byoyomi == 0 && (params.binc.is_some() || params.winc.is_some()) {
+            // Treat as Fischer time control
+            let black_time = params.btime.unwrap_or(0);
+            let white_time = params.wtime.unwrap_or(0);
+            let black_inc = params.binc.unwrap_or(0);
+            let white_inc = params.winc.unwrap_or(0);
+
+            // Use the increment for the current side
+            let increment = match position.side_to_move() {
+                engine_core::shogi::Color::Black => black_inc,
+                engine_core::shogi::Color::White => white_inc,
+            };
+
+            // Note: fischer() expects (black_ms, white_ms, increment_ms)
+            builder = builder.fischer(black_time, white_time, increment);
+        } else {
+            // True byoyomi time control
+            let main_time = match position.side_to_move() {
+                engine_core::shogi::Color::Black => params.btime.unwrap_or(0),
+                engine_core::shogi::Color::White => params.wtime.unwrap_or(0),
+            };
+            // TODO: Add periods field to GoParams for full byoyomi support
+            // Currently defaulting to 1 period
+            builder = builder.byoyomi(main_time, byoyomi, 1);
+        }
+    } else if params.btime.is_some() || params.wtime.is_some() {
+        // Fischer time control
+        let black_time = params.btime.unwrap_or(0);
+        let white_time = params.wtime.unwrap_or(0);
+        let black_inc = params.binc.unwrap_or(0);
+        let white_inc = params.winc.unwrap_or(0);
+
+        // Use the increment for the current side
+        let increment = match position.side_to_move() {
+            engine_core::shogi::Color::Black => black_inc,
+            engine_core::shogi::Color::White => white_inc,
+        };
+
+        // Note: fischer() expects (black_ms, white_ms, increment_ms)
+        builder = builder.fischer(black_time, white_time, increment);
     } else {
         // Default to 5 seconds if no time specified
+        log::warn!("No time control specified in go command, defaulting to 5 seconds");
         builder = builder.fixed_time_ms(5000);
     }
 
     Ok(builder.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_core::shogi::Position;
+    use engine_core::time_management::TimeControl;
+
+    fn create_test_position() -> Position {
+        Position::default()
+    }
+
+    #[test]
+    fn test_apply_go_params_ponder() {
+        let params = GoParams {
+            ponder: true,
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::Ponder => {}
+            _ => panic!("Expected Ponder time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_infinite() {
+        let params = GoParams {
+            infinite: true,
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::Infinite => {}
+            _ => panic!("Expected Infinite time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_movetime() {
+        let params = GoParams {
+            movetime: Some(1000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::FixedTime { ms_per_move } => {
+                assert_eq!(ms_per_move, 1000);
+            }
+            _ => panic!("Expected FixedTime time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_byoyomi() {
+        let params = GoParams {
+            byoyomi: Some(30000),
+            btime: Some(600000),
+            wtime: Some(600000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::Byoyomi {
+                main_time_ms,
+                byoyomi_ms,
+                periods,
+            } => {
+                assert_eq!(main_time_ms, 600000); // Black to move
+                assert_eq!(byoyomi_ms, 30000);
+                assert_eq!(periods, 1);
+            }
+            _ => panic!("Expected Byoyomi time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_fischer_via_byoyomi_zero() {
+        // Some GUIs send byoyomi=0 with binc/winc for Fischer
+        let params = GoParams {
+            byoyomi: Some(0),
+            btime: Some(300000),
+            wtime: Some(300000),
+            binc: Some(2000),
+            winc: Some(2000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::Fischer {
+                black_ms,
+                white_ms,
+                increment_ms,
+            } => {
+                assert_eq!(black_ms, 300000);
+                assert_eq!(white_ms, 300000);
+                assert_eq!(increment_ms, 2000); // Black to move
+            }
+            _ => panic!("Expected Fischer time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_fischer() {
+        let params = GoParams {
+            btime: Some(300000),
+            wtime: Some(300000),
+            binc: Some(2000),
+            winc: Some(3000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::Fischer {
+                black_ms,
+                white_ms,
+                increment_ms,
+            } => {
+                assert_eq!(black_ms, 300000);
+                assert_eq!(white_ms, 300000);
+                assert_eq!(increment_ms, 2000); // Black to move, so black increment
+            }
+            _ => panic!("Expected Fischer time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_depth_and_nodes() {
+        let params = GoParams {
+            depth: Some(20),
+            nodes: Some(1000000),
+            infinite: true,
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        assert_eq!(limits.depth, Some(20));
+        assert_eq!(limits.node_limit(), Some(1000000));
+    }
+
+    #[test]
+    fn test_apply_go_params_moves_to_go() {
+        let params = GoParams {
+            moves_to_go: Some(40),
+            btime: Some(300000),
+            wtime: Some(300000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        assert_eq!(limits.moves_to_go, Some(40));
+    }
+
+    #[test]
+    fn test_apply_go_params_default() {
+        let params = GoParams::default();
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::FixedTime { ms_per_move } => {
+                assert_eq!(ms_per_move, 5000);
+            }
+            _ => panic!("Expected FixedTime time control with default 5000ms"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_priority_ponder_over_infinite() {
+        let params = GoParams {
+            ponder: true,
+            infinite: true,
+            movetime: Some(1000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position).unwrap();
+
+        match limits.time_control {
+            TimeControl::Ponder => {}
+            _ => panic!("Expected Ponder to take priority"),
+        }
+    }
 }
