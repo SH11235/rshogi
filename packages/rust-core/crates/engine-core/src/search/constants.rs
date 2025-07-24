@@ -39,6 +39,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_constant_relationships() {
         // Ensure mate score is below infinity
         assert!(MATE_SCORE < SEARCH_INF);

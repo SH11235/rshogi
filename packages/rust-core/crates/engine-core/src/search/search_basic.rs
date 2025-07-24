@@ -11,65 +11,15 @@ use crate::shogi::{Move, MoveList};
 use crate::{MoveGen, Position};
 
 use super::constants::*;
+use super::limits::SearchLimits;
 use super::types::{InfoCallback, SearchResult, SearchStats};
 
 // Constants are now imported from super::constants
 
 // InfoCallback is now imported from super::types
 
-/// Search limits
-#[deprecated(
-    since = "0.2.0",
-    note = "Use unified search::limits::SearchLimits instead"
-)]
-pub struct SearchLimits {
-    /// Maximum search depth
-    pub depth: u8,
-    /// Maximum search time
-    pub time: Option<Duration>,
-    /// Maximum nodes to search
-    pub nodes: Option<u64>,
-    /// Stop flag for interrupting search
-    pub stop_flag: Option<Arc<AtomicBool>>,
-    /// Info callback for search progress
-    pub info_callback: Option<InfoCallback>,
-}
-
-impl Default for SearchLimits {
-    fn default() -> Self {
-        SearchLimits {
-            depth: 6,
-            time: None,
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        }
-    }
-}
-
-impl Clone for SearchLimits {
-    fn clone(&self) -> Self {
-        Self {
-            depth: self.depth,
-            time: self.time,
-            nodes: self.nodes,
-            stop_flag: self.stop_flag.clone(),
-            info_callback: None, // Cannot clone function pointers
-        }
-    }
-}
-
-impl std::fmt::Debug for SearchLimits {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SearchLimits")
-            .field("depth", &self.depth)
-            .field("time", &self.time)
-            .field("nodes", &self.nodes)
-            .field("stop_flag", &self.stop_flag.as_ref().map(|arc| arc.as_ptr()))
-            .field("info_callback", &self.info_callback.is_some())
-            .finish()
-    }
-}
+// SearchLimits type has been moved to search::limits module
+// Use search::limits::SearchLimits instead
 
 // SearchStats is now imported from super::types
 
@@ -77,8 +27,12 @@ impl std::fmt::Debug for SearchLimits {
 
 /// Search engine
 pub struct Searcher<E: Evaluator> {
-    /// Search limits
-    limits: SearchLimits,
+    /// Maximum search depth
+    depth: u8,
+    /// Maximum search time
+    time_limit: Option<Duration>,
+    /// Maximum nodes to search
+    node_limit: Option<u64>,
     /// Start time
     start_time: Instant,
     /// Node counter
@@ -101,7 +55,9 @@ impl<E: Evaluator> Searcher<E> {
         let info_callback = limits.info_callback.take();
 
         Searcher {
-            limits,
+            depth: limits.depth_limit_u8(),
+            time_limit: limits.time_limit(),
+            node_limit: limits.node_limit(),
             start_time: Instant::now(),
             nodes: 0,
             pv: vec![vec![]; 128], // Max depth 128
@@ -204,7 +160,7 @@ impl<E: Evaluator> Searcher<E> {
         }
 
         // Iterative deepening
-        for depth in 1..=self.limits.depth {
+        for depth in 1..=self.depth {
             let score = self.alpha_beta(pos, depth, -SEARCH_INF, SEARCH_INF, 0);
 
             // Handle interruption
@@ -359,7 +315,7 @@ impl<E: Evaluator> Searcher<E> {
         }
 
         // Depth limit for quiescence search (fixed maximum)
-        if ply >= self.limits.depth + QUIESCE_MAX_PLY {
+        if ply >= self.depth + QUIESCE_MAX_PLY {
             return stand_pat;
         }
 
@@ -413,14 +369,14 @@ impl<E: Evaluator> Searcher<E> {
         }
 
         // Check node limit
-        if let Some(max_nodes) = self.limits.nodes {
+        if let Some(max_nodes) = self.node_limit {
             if self.nodes >= max_nodes {
                 return true;
             }
         }
 
         // Check time limit
-        if let Some(max_time) = self.limits.time {
+        if let Some(max_time) = self.time_limit {
             if self.start_time.elapsed() >= max_time {
                 return true;
             }
@@ -445,7 +401,7 @@ mod tests {
             .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits.into(), evaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
         let result = searcher.search(&mut pos);
 
         // Should find a move
@@ -471,7 +427,7 @@ mod tests {
             .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits.into(), evaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
 
         // Set stop flag after a short delay
         let stop_flag_clone = stop_flag.clone();
@@ -504,7 +460,7 @@ mod tests {
             .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits.into(), evaluator);
+        let mut searcher = Searcher::new(limits, evaluator);
 
         // Set stop flag immediately to force fallback
         stop_flag.store(true, Ordering::Release);

@@ -223,44 +223,8 @@ impl SearchLimitsBuilder {
     }
 }
 
-/// Convert from basic search limits (for compatibility)
-impl From<super::search_basic::SearchLimits> for SearchLimits {
-    fn from(basic: super::search_basic::SearchLimits) -> Self {
-        let mut builder = SearchLimits::builder().depth(basic.depth as u32);
-
-        // Only set nodes if actually specified
-        if let Some(nodes) = basic.nodes {
-            builder = builder.nodes(nodes);
-        }
-
-        if let Some(time) = basic.time {
-            builder = builder.fixed_time_ms(time.as_millis() as u64);
-        }
-
-        if let Some(stop_flag) = basic.stop_flag {
-            builder = builder.stop_flag(stop_flag);
-        }
-
-        if let Some(info_callback) = basic.info_callback {
-            builder = builder.info_callback(info_callback);
-        }
-
-        builder.build()
-    }
-}
-
-/// Convert to basic search limits (for compatibility)
-impl From<SearchLimits> for super::search_basic::SearchLimits {
-    fn from(unified: SearchLimits) -> Self {
-        super::search_basic::SearchLimits {
-            depth: unified.depth_limit_u8(),
-            time: unified.time_limit(),
-            nodes: unified.node_limit(),
-            stop_flag: unified.stop_flag,
-            info_callback: unified.info_callback,
-        }
-    }
-}
+// Conversion from/to basic search limits removed
+// Basic search now uses unified SearchLimits directly
 
 /// Convert from time_management SearchLimits
 impl From<crate::time_management::SearchLimits> for SearchLimits {
@@ -340,42 +304,8 @@ mod tests {
         assert_eq!(limits.time_limit(), Some(Duration::from_secs(1)));
     }
 
-    #[test]
-    fn test_conversion_from_basic() {
-        #[allow(deprecated)]
-        let basic = super::super::search_basic::SearchLimits {
-            depth: 8,
-            time: Some(Duration::from_millis(500)),
-            nodes: Some(10000),
-            stop_flag: None,
-            info_callback: None,
-        };
-
-        let unified: SearchLimits = basic.into();
-        assert_eq!(unified.depth, Some(8));
-        assert_eq!(unified.node_limit(), Some(10000));
-        assert_eq!(unified.time_limit(), Some(Duration::from_millis(500)));
-    }
-
-    #[test]
-    fn test_conversion_roundtrip() {
-        #[allow(deprecated)]
-        let original_basic = super::super::search_basic::SearchLimits {
-            depth: 6,
-            time: Some(Duration::from_millis(1500)),
-            nodes: Some(20000),
-            stop_flag: None,
-            info_callback: None,
-        };
-
-        let unified: SearchLimits = original_basic.clone().into();
-        #[allow(deprecated)]
-        let back_to_basic: super::super::search_basic::SearchLimits = unified.into();
-
-        assert_eq!(back_to_basic.depth, original_basic.depth);
-        assert_eq!(back_to_basic.time, original_basic.time);
-        assert_eq!(back_to_basic.nodes, original_basic.nodes);
-    }
+    // test_conversion_from_basic removed - basic SearchLimits no longer exists
+    // test_conversion_roundtrip removed - basic SearchLimits no longer exists
 
     #[test]
     fn test_fixed_nodes_time_control() {
@@ -452,22 +382,7 @@ mod tests {
         assert_eq!(limits3.node_limit(), Some(100000));
     }
 
-    #[test]
-    fn test_basic_conversion_no_nodes() {
-        #[allow(deprecated)]
-        let basic = super::super::search_basic::SearchLimits {
-            depth: 8,
-            time: Some(Duration::from_millis(500)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
-
-        let unified: SearchLimits = basic.into();
-        assert_eq!(unified.depth, Some(8));
-        assert_eq!(unified.node_limit(), None);
-        assert_eq!(unified.time_limit(), Some(Duration::from_millis(500)));
-    }
+    // test_basic_conversion_no_nodes removed - basic SearchLimits no longer exists
 
     #[test]
     fn test_default_depth() {
