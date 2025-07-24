@@ -10,82 +10,29 @@ use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::{Move, MoveList};
 use crate::{MoveGen, Position};
 
-/// Infinity score for search bounds
-const INFINITY_SCORE: i32 = 32000;
+use super::constants::*;
+use super::limits::SearchLimits;
+use super::types::{InfoCallback, SearchResult, SearchStats};
 
-/// Special value to indicate search was interrupted (sentinel value)
-const SEARCH_INTERRUPTED: i32 = INFINITY_SCORE + 1;
+// Constants are now imported from super::constants
 
-/// Maximum depth for quiescence search
-const QUIESCE_MAX_PLY: u8 = 4;
+// InfoCallback is now imported from super::types
 
-/// Info callback type
-pub type InfoCallback = Box<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send>;
+// SearchLimits type has been moved to search::limits module
+// Use search::limits::SearchLimits instead
 
-/// Search limits
-pub struct SearchLimits {
-    /// Maximum search depth
-    pub depth: u8,
-    /// Maximum search time
-    pub time: Option<Duration>,
-    /// Maximum nodes to search
-    pub nodes: Option<u64>,
-    /// Stop flag for interrupting search
-    pub stop_flag: Option<Arc<AtomicBool>>,
-    /// Info callback for search progress
-    pub info_callback: Option<InfoCallback>,
-}
+// SearchStats is now imported from super::types
 
-impl Default for SearchLimits {
-    fn default() -> Self {
-        SearchLimits {
-            depth: 6,
-            time: None,
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        }
-    }
-}
-
-impl std::fmt::Debug for SearchLimits {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SearchLimits")
-            .field("depth", &self.depth)
-            .field("time", &self.time)
-            .field("nodes", &self.nodes)
-            .field("stop_flag", &self.stop_flag.as_ref().map(|arc| arc.as_ptr()))
-            .field("info_callback", &self.info_callback.is_some())
-            .finish()
-    }
-}
-
-/// Search statistics
-#[derive(Clone, Debug, Default)]
-pub struct SearchStats {
-    /// Nodes searched
-    pub nodes: u64,
-    /// Time elapsed
-    pub elapsed: Duration,
-    /// Principal variation
-    pub pv: Vec<Move>,
-}
-
-/// Search result
-#[derive(Clone, Debug)]
-pub struct SearchResult {
-    /// Best move found
-    pub best_move: Option<Move>,
-    /// Evaluation score (from side to move perspective)
-    pub score: i32,
-    /// Search statistics
-    pub stats: SearchStats,
-}
+// SearchResult is now imported from super::types
 
 /// Search engine
 pub struct Searcher<E: Evaluator> {
-    /// Search limits
-    limits: SearchLimits,
+    /// Maximum search depth
+    depth: u8,
+    /// Maximum search time
+    time_limit: Option<Duration>,
+    /// Maximum nodes to search
+    node_limit: Option<u64>,
     /// Start time
     start_time: Instant,
     /// Node counter
@@ -94,18 +41,40 @@ pub struct Searcher<E: Evaluator> {
     pv: Vec<Vec<Move>>,
     /// Evaluation function
     evaluator: Arc<E>,
+    /// Stop flag for interrupting search
+    stop_flag: Option<Arc<AtomicBool>>,
+    /// Info callback for search progress
+    info_callback: Option<InfoCallback>,
 }
 
 impl<E: Evaluator> Searcher<E> {
     /// Create new searcher with limits and evaluator
-    pub fn new(limits: SearchLimits, evaluator: Arc<E>) -> Self {
+    pub fn new(mut limits: SearchLimits, evaluator: Arc<E>) -> Self {
+        // Extract stop_flag and info_callback from limits
+        let stop_flag = limits.stop_flag.take();
+        let info_callback = limits.info_callback.take();
+
         Searcher {
-            limits,
+            depth: limits.depth_limit_u8(),
+            time_limit: limits.time_limit(),
+            node_limit: limits.node_limit(),
             start_time: Instant::now(),
             nodes: 0,
             pv: vec![vec![]; 128], // Max depth 128
             evaluator,
+            stop_flag,
+            info_callback,
         }
+    }
+
+    /// Set stop flag
+    pub fn set_stop_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.stop_flag = Some(flag);
+    }
+
+    /// Set info callback
+    pub fn set_info_callback(&mut self, callback: InfoCallback) {
+        self.info_callback = Some(callback);
     }
 
     /// Increment node count and check if search should stop
@@ -125,7 +94,8 @@ impl<E: Evaluator> Searcher<E> {
         self.nodes = 0;
 
         let mut best_move = None;
-        let mut best_score = -INFINITY_SCORE;
+        let mut best_score = -SEARCH_INF;
+        let mut search_depth = 0;
 
         // If no move is found during iterative deepening, we need a fallback
         // Generate all legal moves and evaluate them at depth 0 for better quality
@@ -137,7 +107,7 @@ impl<E: Evaluator> Searcher<E> {
         if !legal_moves.is_empty() {
             // If stop flag is set immediately, at least evaluate the first few moves quickly
             // This ensures the test case where stop is immediate still gets reasonable results
-            let mut fallback_score = -INFINITY_SCORE;
+            let mut fallback_score = -SEARCH_INF;
             let moves_to_evaluate = if self.should_stop() {
                 // When stopped immediately, still evaluate at least first move for quality
                 1.min(legal_moves.len())
@@ -163,7 +133,7 @@ impl<E: Evaluator> Searcher<E> {
                 let undo_info = pos.do_move(mv);
 
                 // Evaluate position after move (negated for opponent's perspective)
-                let score = -self.quiesce(pos, -INFINITY_SCORE, INFINITY_SCORE, 0);
+                let score = -self.quiesce(pos, -SEARCH_INF, SEARCH_INF, 0);
 
                 // Undo move
                 pos.undo_move(mv, undo_info);
@@ -190,8 +160,8 @@ impl<E: Evaluator> Searcher<E> {
         }
 
         // Iterative deepening
-        for depth in 1..=self.limits.depth {
-            let score = self.alpha_beta(pos, depth, -INFINITY_SCORE, INFINITY_SCORE, 0);
+        for depth in 1..=self.depth {
+            let score = self.alpha_beta(pos, depth, -SEARCH_INF, SEARCH_INF, 0);
 
             // Handle interruption
             if score == SEARCH_INTERRUPTED {
@@ -205,15 +175,16 @@ impl<E: Evaluator> Searcher<E> {
 
             // Update best score (only for valid completions)
             // Don't overwrite non-zero fallback score with 0
-            if score != 0 || best_score == -INFINITY_SCORE {
+            if score != 0 || best_score == -SEARCH_INF {
                 best_score = score;
+                search_depth = depth;
                 if !self.pv[0].is_empty() {
                     best_move = Some(self.pv[0][0]);
                 }
             }
 
             // Call info callback if provided
-            if let Some(ref callback) = self.limits.info_callback {
+            if let Some(ref callback) = self.info_callback {
                 let elapsed = self.start_time.elapsed();
                 callback(depth, score, self.nodes, elapsed, &self.pv[0]);
             }
@@ -226,6 +197,8 @@ impl<E: Evaluator> Searcher<E> {
                 nodes: self.nodes,
                 elapsed: self.start_time.elapsed(),
                 pv: self.pv[0].clone(),
+                depth: search_depth,
+                ..Default::default()
             },
         }
     }
@@ -261,14 +234,14 @@ impl<E: Evaluator> Searcher<E> {
         if moves.is_empty() {
             if pos.in_check() {
                 // Checkmate - return negative score
-                return -INFINITY_SCORE + ply as i32;
+                return -SEARCH_INF + ply as i32;
             } else {
                 // Stalemate (shouldn't happen in shogi)
                 return 0;
             }
         }
 
-        let mut best_score = -INFINITY_SCORE;
+        let mut best_score = -SEARCH_INF;
 
         // Search all moves
         for &mv in moves.as_slice() {
@@ -342,7 +315,7 @@ impl<E: Evaluator> Searcher<E> {
         }
 
         // Depth limit for quiescence search (fixed maximum)
-        if ply >= self.limits.depth + QUIESCE_MAX_PLY {
+        if ply >= self.depth + QUIESCE_MAX_PLY {
             return stand_pat;
         }
 
@@ -389,21 +362,21 @@ impl<E: Evaluator> Searcher<E> {
     /// Check if search should stop
     fn should_stop(&self) -> bool {
         // Check stop flag (use Acquire to pair with Release in GUI thread)
-        if let Some(ref stop_flag) = self.limits.stop_flag {
+        if let Some(ref stop_flag) = self.stop_flag {
             if stop_flag.load(Ordering::Acquire) {
                 return true;
             }
         }
 
         // Check node limit
-        if let Some(max_nodes) = self.limits.nodes {
+        if let Some(max_nodes) = self.node_limit {
             if self.nodes >= max_nodes {
                 return true;
             }
         }
 
         // Check time limit
-        if let Some(max_time) = self.limits.time {
+        if let Some(max_time) = self.time_limit {
             if self.start_time.elapsed() >= max_time {
                 return true;
             }
@@ -422,13 +395,10 @@ mod tests {
     #[test]
     fn test_search_startpos() {
         let mut pos = Position::startpos();
-        let limits = SearchLimits {
-            depth: 3,
-            time: Some(Duration::from_secs(1)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = super::super::limits::SearchLimits::builder()
+            .depth(3)
+            .fixed_time_ms(1000)
+            .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
         let mut searcher = Searcher::new(limits, evaluator);
@@ -451,13 +421,10 @@ mod tests {
 
         let mut pos = Position::startpos();
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let limits = SearchLimits {
-            depth: 10, // Deep search that would normally take a while
-            time: None,
-            nodes: None,
-            stop_flag: Some(stop_flag.clone()),
-            info_callback: None,
-        };
+        let limits = super::super::limits::SearchLimits::builder()
+            .depth(10) // Deep search that would normally take a while
+            .stop_flag(stop_flag.clone())
+            .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
         let mut searcher = Searcher::new(limits, evaluator);
@@ -487,13 +454,10 @@ mod tests {
     fn test_fallback_move_quality() {
         let mut pos = Position::startpos();
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let limits = SearchLimits {
-            depth: 5,
-            time: None,
-            nodes: None,
-            stop_flag: Some(stop_flag.clone()),
-            info_callback: None,
-        };
+        let limits = super::super::limits::SearchLimits::builder()
+            .depth(5)
+            .stop_flag(stop_flag.clone())
+            .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
         let mut searcher = Searcher::new(limits, evaluator);
@@ -511,88 +475,15 @@ mod tests {
         let _best_move = result.best_move.unwrap();
 
         // Score should be based on depth-0 evaluation, not just -INFINITY
-        assert!(result.score > -INFINITY_SCORE);
-        assert!(result.score < INFINITY_SCORE);
+        assert!(result.score > -SEARCH_INF);
+        assert!(result.score < SEARCH_INF);
 
         // When stopped immediately, we should have at least evaluated the fallback move
         // The actual node count depends on when exactly the stop flag is checked
         assert!(result.stats.nodes >= 1, "Should have evaluated at least one position");
     }
 
-    #[test]
-    fn test_search_limits_debug() {
-        let stop_flag1 = Arc::new(AtomicBool::new(false));
-        let stop_flag2 = Arc::new(AtomicBool::new(false));
-        let stop_flag1_clone = stop_flag1.clone();
-
-        let limits1 = SearchLimits {
-            depth: 10,
-            time: Some(Duration::from_secs(5)),
-            nodes: Some(1000000),
-            stop_flag: Some(stop_flag1),
-            info_callback: None,
-        };
-
-        let limits2 = SearchLimits {
-            depth: 10,
-            time: Some(Duration::from_secs(5)),
-            nodes: Some(1000000),
-            stop_flag: Some(stop_flag1_clone), // Same flag as limits1
-            info_callback: None,
-        };
-
-        let limits3 = SearchLimits {
-            depth: 10,
-            time: Some(Duration::from_secs(5)),
-            nodes: Some(1000000),
-            stop_flag: Some(stop_flag2), // Different flag
-            info_callback: None,
-        };
-
-        let limits4 = SearchLimits {
-            depth: 10,
-            time: None,
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
-
-        println!("limits1: {limits1:?}");
-        println!("limits2: {limits2:?}");
-        println!("limits3: {limits3:?}");
-        println!("limits4: {limits4:?}");
-
-        // Verify that same stop_flag shows same pointer
-        let debug1 = format!("{limits1:?}");
-        let debug2 = format!("{limits2:?}");
-        let debug3 = format!("{limits3:?}");
-
-        // Extract pointer addresses from debug strings
-        if let (Some(ptr1), Some(ptr2)) = (
-            debug1.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug1[start..].find(")").map(|end| &debug1[start..start + end])
-            }),
-            debug2.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug2[start..].find(")").map(|end| &debug2[start..start + end])
-            }),
-        ) {
-            assert_eq!(ptr1, ptr2, "Same stop_flag should show same pointer");
-        }
-
-        // Verify that different stop_flag shows different pointer
-        if let (Some(ptr1), Some(ptr3)) = (
-            debug1.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug1[start..].find(")").map(|end| &debug1[start..start + end])
-            }),
-            debug3.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug3[start..].find(")").map(|end| &debug3[start..start + end])
-            }),
-        ) {
-            assert_ne!(ptr1, ptr3, "Different stop_flags should show different pointers");
-        }
-    }
+    // test_search_limits_debug removed:
+    // This test was testing Debug formatting of the deprecated SearchLimits type.
+    // The new unified SearchLimits has its own Debug implementation tested in limits.rs
 }

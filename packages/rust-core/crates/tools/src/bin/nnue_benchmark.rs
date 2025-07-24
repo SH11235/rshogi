@@ -1,11 +1,11 @@
 //! NNUE performance benchmark
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use engine_core::{
     benchmark::{benchmark_evaluation, run_benchmark},
     engine::controller::{Engine, EngineType},
-    search::search_basic::SearchLimits,
+    search::SearchLimits,
     Position,
 };
 
@@ -82,13 +82,10 @@ fn main() {
 fn benchmark_engine(engine: &Engine, mut pos: Position, name: &str) -> (f64, i32) {
     println!("\n  {name} Engine:");
 
-    let limits = SearchLimits {
-        depth: 8,
-        time: Some(Duration::from_secs(5)), // Longer time for more accurate measurement
-        nodes: None,
-        stop_flag: None,
-        info_callback: None,
-    };
+    let limits = SearchLimits::builder()
+        .depth(8)
+        .fixed_time_ms(5000) // Longer time for more accurate measurement
+        .build();
 
     let start = Instant::now();
     let result = engine.search(&mut pos, limits);
@@ -107,17 +104,12 @@ fn benchmark_engine(engine: &Engine, mut pos: Position, name: &str) -> (f64, i32
 
 #[test]
 fn test_nnue_performance() {
+    use std::time::Duration;
     // Simple performance regression test
     let pos = Position::startpos();
     let engine = Engine::new(EngineType::Nnue);
 
-    let limits = SearchLimits {
-        depth: 4,
-        time: Some(Duration::from_millis(100)),
-        nodes: None,
-        stop_flag: None,
-        info_callback: None,
-    };
+    let limits = SearchLimits::builder().depth(4).fixed_time_ms(100).build();
 
     let start = Instant::now();
     let result = engine.search(&mut pos.clone(), limits);
