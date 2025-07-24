@@ -3,18 +3,8 @@
 use anyhow::{anyhow, Result};
 use engine_core::movegen::MoveGen;
 use engine_core::shogi::{Move, MoveList, Position};
-use engine_core::usi::{move_to_usi, parse_sfen, parse_usi_move, position_to_sfen};
+use engine_core::usi::{parse_sfen, parse_usi_move};
 use log::debug;
-
-/// Convert a list of USI move strings to Move objects
-pub fn parse_moves(move_strings: &[String]) -> Result<Vec<Move>> {
-    move_strings.iter().map(|s| parse_usi_move(s).map_err(|e| anyhow!(e))).collect()
-}
-
-/// Convert a list of Move objects to USI strings
-pub fn moves_to_usi(moves: &[Move]) -> Vec<String> {
-    moves.iter().map(move_to_usi).collect()
-}
 
 /// Helper function to compare moves semantically (ignoring piece type encoding)
 fn moves_equal(m1: Move, m2: Move) -> bool {
@@ -103,23 +93,9 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
     Ok(pos)
 }
 
-/// Convert Position to SFEN string
-pub fn position_to_usi_string(pos: &Position) -> String {
-    position_to_sfen(pos)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_moves() {
-        let move_strs = vec!["7g7f".to_string(), "3c3d".to_string()];
-        let moves = parse_moves(&move_strs).unwrap();
-        assert_eq!(moves.len(), 2);
-        assert!(!moves[0].is_drop());
-        assert!(!moves[1].is_drop());
-    }
 
     #[test]
     fn test_create_position_startpos() {
