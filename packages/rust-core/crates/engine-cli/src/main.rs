@@ -435,7 +435,9 @@ fn handle_command(
         UsiCommand::PonderHit => {
             // Convert ponder search to normal search
             let mut engine = engine.lock().unwrap();
-            engine.ponder_hit();
+            if let Err(e) = engine.ponder_hit() {
+                log::warn!("Ponder hit error: {}", e);
+            }
         }
 
         UsiCommand::SetOption { name, value } => {
