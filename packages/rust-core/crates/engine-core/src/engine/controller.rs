@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
-    search::search_basic::{SearchLimits, Searcher},
+    search::search_basic::Searcher,
     search::search_enhanced::EnhancedSearcher,
-    search::{SearchResult, SearchStats},
+    search::{SearchLimits, SearchResult, SearchStats},
     Position,
 };
 
@@ -64,14 +64,14 @@ impl Engine {
     pub fn search(&self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
         match self.engine_type {
             EngineType::Material => {
-                let mut searcher = Searcher::new(limits, self.material_evaluator.clone());
+                let mut searcher = Searcher::new(limits.into(), self.material_evaluator.clone());
                 searcher.search(pos)
             }
             EngineType::Nnue => {
                 let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
                     evaluator: self.nnue_evaluator.clone(),
                 });
-                let mut searcher = Searcher::new(limits, nnue_proxy);
+                let mut searcher = Searcher::new(limits.into(), nnue_proxy);
                 searcher.search(pos)
             }
             EngineType::Enhanced => {
@@ -92,9 +92,9 @@ impl Engine {
                     // Run enhanced search
                     let (best_move, score) = enhanced_searcher.search(
                         pos,
-                        limits.depth as i32,
-                        limits.time,
-                        limits.nodes,
+                        limits.depth.unwrap_or(6) as i32,
+                        limits.time_limit(),
+                        limits.node_limit(),
                     );
 
                     // Calculate elapsed time
@@ -114,7 +114,7 @@ impl Engine {
                             nodes,
                             elapsed,
                             pv,
-                            depth: limits.depth,
+                            depth: limits.depth.unwrap_or(6) as u8,
                             ..Default::default()
                         },
                     }

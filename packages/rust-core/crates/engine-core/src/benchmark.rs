@@ -3,7 +3,8 @@
 use crate::evaluate::{Evaluator, MaterialEvaluator};
 use crate::movegen::MoveGen;
 use crate::nnue::NNUEEvaluatorWrapper;
-use crate::search::search_basic::{SearchLimits, Searcher};
+use crate::search::search_basic::Searcher;
+use crate::search::SearchLimits;
 use crate::shogi::MoveList;
 use crate::shogi::{Color, Piece, PieceType, Position, Square};
 use std::sync::Arc;
@@ -98,16 +99,10 @@ fn benchmark_search() -> (u64, u64, Duration) {
     for (i, pos) in test_positions.iter().enumerate() {
         println!("Testing position {}...", i + 1);
 
-        let limits = SearchLimits {
-            depth: 8,
-            time: Some(Duration::from_secs(5)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = SearchLimits::builder().depth(8).fixed_time_ms(5000).build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits, evaluator);
+        let mut searcher = Searcher::new(limits.into(), evaluator);
         let mut pos_clone = pos.clone();
         let result = searcher.search(&mut pos_clone);
 

@@ -10,6 +10,7 @@ pub mod types;
 // Re-export commonly used items
 pub use common::{is_mate_score, mate_distance_pruning, mate_score, LimitChecker, SearchContext};
 pub use constants::*;
+pub use limits::{SearchLimits, SearchLimitsBuilder};
 pub use search_enhanced::GamePhase;
 pub use tt::TranspositionTable;
 pub use types::{InfoCallback, NodeType, SearchResult, SearchState, SearchStats};
