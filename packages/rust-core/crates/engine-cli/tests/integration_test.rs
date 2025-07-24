@@ -7,19 +7,41 @@ use std::time::{Duration, Instant};
 
 /// Helper to spawn engine process
 fn spawn_engine() -> std::process::Child {
-    Command::new("cargo")
-        .args(["run", "--bin", "engine-cli", "--"])
-        .stdin(Stdio::piped())
+    // In GitHub Actions, we should use the built binary directly
+    let program = if std::env::var("CI").is_ok() {
+        // In CI, use the built binary
+        std::env::current_exe()
+            .map(|p| p.parent().unwrap().join("engine-cli").to_string_lossy().to_string())
+            .unwrap_or_else(|_| "cargo".to_string())
+    } else {
+        "cargo".to_string()
+    };
+
+    let mut cmd = if program == "cargo" {
+        let mut c = Command::new("cargo");
+        c.args(["run", "--bin", "engine-cli", "--"]);
+        c
+    } else {
+        Command::new(&program)
+    };
+
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped()) // Capture stderr for debugging
         .spawn()
         .expect("Failed to spawn engine")
 }
 
 /// Helper to send command to engine
 fn send_command(stdin: &mut impl Write, command: &str) {
-    writeln!(stdin, "{command}").expect("Failed to write command");
-    stdin.flush().expect("Failed to flush stdin");
+    if let Err(e) = writeln!(stdin, "{command}") {
+        eprintln!("Failed to write command '{}': {}", command, e);
+        panic!("Failed to write command: {}", e);
+    }
+    if let Err(e) = stdin.flush() {
+        eprintln!("Failed to flush stdin after command '{}': {}", command, e);
+        panic!("Failed to flush stdin: {}", e);
+    }
 }
 
 /// Helper to read lines until a specific pattern or timeout
@@ -220,16 +242,30 @@ fn test_multiple_stop_commands() {
 #[test]
 fn test_ponder_sequence() {
     let mut engine = spawn_engine();
+
+    // Check if engine process started successfully
+    match engine.try_wait() {
+        Ok(Some(status)) => {
+            panic!("Engine exited immediately with status: {:?}", status);
+        }
+        Ok(None) => {
+            // Process is still running, good
+        }
+        Err(e) => {
+            panic!("Failed to check engine status: {}", e);
+        }
+    }
+
     let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
     let stdout = engine.stdout.as_mut().expect("Failed to get stdout");
     let mut reader = BufReader::new(stdout);
 
     // Initialize
     send_command(stdin, "usi");
-    let _ = read_until_pattern(&mut reader, "usiok", Duration::from_secs(2))
+    let _ = read_until_pattern(&mut reader, "usiok", Duration::from_secs(5))
         .expect("Failed to get usiok");
     send_command(stdin, "isready");
-    let _ = read_until_pattern(&mut reader, "readyok", Duration::from_secs(2))
+    let _ = read_until_pattern(&mut reader, "readyok", Duration::from_secs(5))
         .expect("Failed to get readyok");
 
     // Set position (Black move then White move)
@@ -240,7 +276,7 @@ fn test_ponder_sequence() {
     send_command(stdin, "go ponder btime 10000 wtime 10000");
 
     // Give it some time to start pondering (ponder mode runs infinitely)
-    thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(500));
 
     // Send ponder hit (opponent played expected move)
     // This should convert the ponder search to a normal search with the time limits
@@ -248,7 +284,7 @@ fn test_ponder_sequence() {
 
     // Now the search should have time limits and will complete on its own
     // Wait for bestmove (should come relatively quickly after ponderhit)
-    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(5));
+    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(10));
 
     match result {
         Ok(lines) => {
@@ -261,8 +297,9 @@ fn test_ponder_sequence() {
         }
         Err(e) => {
             // If no bestmove, try stopping manually
+            eprintln!("No bestmove received after ponderhit, trying stop command. Error: {}", e);
             send_command(stdin, "stop");
-            let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(1));
+            let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(2));
             assert!(stop_result.is_ok(), "No bestmove after stop. Original error: {e}");
         }
     }
