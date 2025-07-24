@@ -126,8 +126,13 @@ impl PVTable {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let pv = searcher.principal_variation();
+    /// # use engine_core::shogi::Move;
+    /// # // This is a conceptual example showing how to use the PV table
+    /// # // In practice, you would get this from your search instance
+    /// # fn example_usage(pv_table: &engine_core::search::search_enhanced::PVTable) {
+    /// let pv: &[Move] = pv_table.get_pv();
     /// let pv_copy: Vec<Move> = pv.to_vec(); // Clone if needed across searches
+    /// # }
     /// ```
     pub fn get_pv(&self) -> &[Move] {
         let len = self.len[0] as usize;
