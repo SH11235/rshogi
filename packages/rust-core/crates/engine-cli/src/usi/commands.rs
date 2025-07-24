@@ -154,14 +154,6 @@ impl EngineOption {
         }
     }
 
-    /// Create a string option
-    pub fn string(name: impl Into<String>, default: String) -> Self {
-        Self {
-            name: name.into(),
-            option_type: OptionType::String { default },
-        }
-    }
-
     /// Format as USI option string
     pub fn to_usi_string(&self) -> String {
         match &self.option_type {
