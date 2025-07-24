@@ -41,7 +41,7 @@ impl EngineAdapter {
     /// Create a new engine adapter
     pub fn new() -> Self {
         let mut adapter = Self {
-            engine: Engine::new(EngineType::Material), // Start with material evaluator
+            engine: Engine::new(EngineType::Material), // Start with simplest for compatibility
             position: None,
             options: Vec::new(),
             hash_size: 16,
@@ -67,6 +67,7 @@ impl EngineAdapter {
                     "Material".to_string(),
                     "Nnue".to_string(),
                     "Enhanced".to_string(),
+                    "EnhancedNnue".to_string(),
                 ],
             ),
         ];
@@ -120,6 +121,7 @@ impl EngineAdapter {
                         "Material" => EngineType::Material,
                         "Nnue" => EngineType::Nnue,
                         "Enhanced" => EngineType::Enhanced,
+                        "EnhancedNnue" => EngineType::EnhancedNnue,
                         _ => return Err(anyhow!("Invalid engine type: {}", val)),
                     };
                     self.engine.set_engine_type(engine_type);

@@ -141,6 +141,17 @@ Note: Format and lint checks are automatically run via Hooks after file edits.
 
 ## Rust/WebAssembly Development (packages/rust-core/)
 
+### Engine Type Selection
+
+**推奨設定**: `EnhancedNnue` - 最強の組み合わせ（高度な探索技術 + NNUE評価関数）
+
+```bash
+# USIプロトコルで設定
+setoption name EngineType value EnhancedNnue
+```
+
+詳細は `packages/rust-core/docs/engine-types-guide.md` を参照。
+
 ### Commands
 
 **IMPORTANT**: When modifying any Rust code in packages/rust-core/, ALWAYS run these commands in order:

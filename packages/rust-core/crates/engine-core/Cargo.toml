@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 # Loom feature for parallel safety testing (not available on WASM)
 loom = ["dep:loom"]
+# Feature for tests that require large stack size
+large-stack-tests = []
 
 [dependencies]
 serde = { workspace = true }
