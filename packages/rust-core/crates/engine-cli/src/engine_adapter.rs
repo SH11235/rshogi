@@ -7,10 +7,10 @@ use anyhow::{anyhow, Result};
 use engine_core::{
     engine::controller::{Engine, EngineType},
     search::constants::{MATE_SCORE, MAX_PLY},
-    search::limits::SearchLimits,
+    search::limits::{SearchLimits, SearchLimitsBuilder},
     shogi::Position,
 };
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::usi::output::{Score, SearchInfo};
@@ -36,8 +36,8 @@ fn to_usi_score(raw_score: i32) -> Score {
 
 /// Engine adapter that bridges USI protocol with engine-core
 pub struct EngineAdapter {
-    /// The underlying engine
-    engine: Engine,
+    /// The underlying engine (wrapped in Option for temporary ownership transfer)
+    engine: Option<Engine>,
     /// Current position
     position: Option<Position>,
     /// Engine options
@@ -50,6 +50,8 @@ pub struct EngineAdapter {
     ponder: bool,
     /// Ponder state for managing ponder searches
     ponder_state: PonderState,
+    /// Active ponder hit flag (shared with searcher during ponder)
+    active_ponder_hit_flag: Option<Arc<AtomicBool>>,
 }
 
 /// State for managing ponder (think on opponent's time) functionality
@@ -70,16 +72,38 @@ impl Default for EngineAdapter {
 }
 
 impl EngineAdapter {
+    /// Get a reference to the internal engine
+    #[allow(dead_code)]
+    pub fn engine(&self) -> Option<&Engine> {
+        self.engine.as_ref()
+    }
+
+    /// Take the engine out for exclusive use (for search operations)
+    pub fn take_engine(&mut self) -> Result<Engine> {
+        self.engine
+            .take()
+            .ok_or_else(|| anyhow!("Engine is currently in use (probably searching)"))
+    }
+
+    /// Return the engine after use
+    pub fn return_engine(&mut self, engine: Engine) {
+        if self.engine.is_some() {
+            log::warn!("Engine returned while another engine instance exists");
+        }
+        self.engine = Some(engine);
+    }
+
     /// Create a new engine adapter
     pub fn new() -> Self {
         let mut adapter = Self {
-            engine: Engine::new(EngineType::Material), // Start with simplest for compatibility
+            engine: Some(Engine::new(EngineType::Material)), // Start with simplest for compatibility
             position: None,
             options: Vec::new(),
             hash_size: 16,
             threads: 1,
             ponder: true,
             ponder_state: PonderState::default(),
+            active_ponder_hit_flag: None,
         };
 
         // Initialize options
@@ -137,14 +161,19 @@ impl EngineAdapter {
         match name {
             "USI_Hash" => {
                 if let Some(val) = value {
-                    self.hash_size =
-                        val.parse::<usize>().map_err(|_| anyhow!("Invalid hash size"))?;
+                    self.hash_size = val.parse::<usize>().map_err(|_| {
+                        anyhow!("Invalid hash size: '{}'. Must be a number between 1 and 1024", val)
+                    })?;
                 }
             }
             "Threads" => {
                 if let Some(val) = value {
-                    self.threads =
-                        val.parse::<usize>().map_err(|_| anyhow!("Invalid thread count"))?;
+                    self.threads = val.parse::<usize>().map_err(|_| {
+                        anyhow!(
+                            "Invalid thread count: '{}'. Must be a number between 1 and 256",
+                            val
+                        )
+                    })?;
                 }
             }
             "USI_Ponder" => {
@@ -159,13 +188,17 @@ impl EngineAdapter {
                         "Nnue" => EngineType::Nnue,
                         "Enhanced" => EngineType::Enhanced,
                         "EnhancedNnue" => EngineType::EnhancedNnue,
-                        _ => return Err(anyhow!("Invalid engine type: {}", val)),
+                        _ => return Err(anyhow!("Invalid engine type: '{}'. Valid values are: Material, Nnue, Enhanced, EnhancedNnue", val)),
                     };
-                    self.engine.set_engine_type(engine_type);
+                    if let Some(ref mut engine) = self.engine {
+                        engine.set_engine_type(engine_type);
+                    } else {
+                        return Err(anyhow!("Engine is currently in use"));
+                    }
                 }
             }
             _ => {
-                return Err(anyhow!("Unknown option: {}", name));
+                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType", name));
             }
         }
         Ok(())
@@ -173,32 +206,16 @@ impl EngineAdapter {
 
     /// Handle ponder hit (opponent played the expected move)
     pub fn ponder_hit(&mut self) -> Result<()> {
-        if !self.ponder_state.is_pondering {
-            return Err(anyhow!("Not currently pondering"));
-        }
+        if let Some(ref flag) = self.active_ponder_hit_flag {
+            flag.store(true, Ordering::Release);
 
-        // Calculate time already spent pondering
-        let time_spent_ms = if let Some(start_time) = self.ponder_state.ponder_start_time {
-            start_time.elapsed().as_millis() as u64
+            // Clear ponder state since we're transitioning to normal search
+            self.ponder_state.is_pondering = false;
+
+            log::info!("Ponder hit: Converting ponder search to normal search");
+            Ok(())
         } else {
-            0
-        };
-
-        log::debug!("Ponder hit after {time_spent_ms} ms");
-
-        // Notify engine about ponder hit first
-        // Only clear ponder state if engine successfully handles ponder_hit
-        match self.engine.ponder_hit(time_spent_ms) {
-            Ok(()) => {
-                // Success - clear ponder state
-                self.clear_ponder_state();
-                Ok(())
-            }
-            Err(e) => {
-                // Failed - keep ponder state intact
-                log::warn!("ponder_hit failed: {e}");
-                Err(anyhow!("Engine ponder_hit failed: {}", e))
-            }
+            Err(anyhow!("Ponder hit received but engine is not in ponder mode"))
         }
     }
 
@@ -211,16 +228,25 @@ impl EngineAdapter {
         self.clear_ponder_state();
     }
 
-    /// Search for best move
+    /// Search for best move (legacy method - kept for compatibility during migration)
+    #[allow(dead_code)]
     pub fn search(
         &mut self,
         params: GoParams,
         stop_flag: Arc<AtomicBool>,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<(String, Option<String>)> {
-        log::debug!("Starting search with params: {params:?}");
+        log::info!(
+            "Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
+            if params.ponder { "ponder" } else { "normal" },
+            params.depth,
+            params.movetime.or(params.btime.or(params.wtime)),
+            params.nodes
+        );
 
-        let mut position = self.position.clone().ok_or_else(|| anyhow!("No position set"))?;
+        let mut position = self.position.clone().ok_or_else(|| {
+            anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first")
+        })?;
 
         // Set up info callback using Arc to share between closures
         let info_callback_arc = Arc::new(info_callback);
@@ -248,6 +274,9 @@ impl EngineAdapter {
         if params.ponder {
             self.ponder_state.is_pondering = true;
             self.ponder_state.ponder_start_time = Some(std::time::Instant::now());
+            // Create ponder hit flag for this search
+            self.active_ponder_hit_flag = Some(Arc::new(AtomicBool::new(false)));
+            log::debug!("Ponder mode activated with shared flag");
         } else {
             // New non-ponder search clears any existing ponder state
             self.clear_ponder_state();
@@ -262,6 +291,11 @@ impl EngineAdapter {
         // Set info callback
         builder = builder.info_callback(info_callback_arc_inner);
 
+        // Set ponder hit flag if this is a ponder search
+        if let Some(ref flag) = self.active_ponder_hit_flag {
+            builder = builder.ponder_hit_flag(flag.clone());
+        }
+
         // Apply go parameters with position info
         let limits = apply_go_params(builder, &params, &position)?;
 
@@ -274,17 +308,33 @@ impl EngineAdapter {
         );
 
         // Run search
-        log::debug!("Starting engine search...");
-        let result = self.engine.search(&mut position, limits);
-        log::debug!("Search completed: {result:?}");
+        let engine = self.engine.as_ref().ok_or_else(|| anyhow!("Engine is currently in use"))?;
+        let result = engine.search(&mut position, limits);
+        log::info!(
+            "Search completed - depth:{} nodes:{} time:{}ms",
+            result.stats.depth,
+            result.stats.nodes,
+            result.stats.elapsed.as_millis()
+        );
+
+        // Clear ponder hit flag after search completes
+        if params.ponder {
+            self.active_ponder_hit_flag = None;
+            // Also update ponder state if it's still marked as pondering
+            if self.ponder_state.is_pondering {
+                self.ponder_state.is_pondering = false;
+            }
+        }
 
         // Get best move
-        let best_move = result.best_move.ok_or_else(|| anyhow!("No legal moves found"))?;
+        let best_move = result.best_move.ok_or_else(|| {
+            anyhow!("No legal moves available in this position (checkmate or stalemate)")
+        })?;
 
         // Convert move to USI format
         let best_move_str = engine_core::usi::move_to_usi(&best_move);
 
-        log::debug!("Best move: {best_move_str}");
+        log::info!("Best move: {} (score: {:?})", best_move_str, result.score);
 
         // Send final info
         let score = to_usi_score(result.score);
@@ -330,34 +380,240 @@ impl EngineAdapter {
         self.ponder_state.is_pondering = false;
         self.ponder_state.ponder_move = None;
         self.ponder_state.ponder_start_time = None;
+        self.active_ponder_hit_flag = None;
+    }
+
+    /// Prepare search data and return necessary components
+    /// This allows releasing the mutex lock before the actual search
+    pub fn prepare_search(
+        &mut self,
+        params: &GoParams,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Result<(Position, SearchLimits, Option<Arc<AtomicBool>>)> {
+        log::info!(
+            "Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
+            if params.ponder { "ponder" } else { "normal" },
+            params.depth,
+            params.movetime.or(params.btime.or(params.wtime)),
+            params.nodes
+        );
+
+        // Get position
+        let position = self.position.clone().ok_or_else(|| {
+            anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first")
+        })?;
+
+        // Update ponder state and create flag if needed
+        let ponder_hit_flag = if params.ponder {
+            self.ponder_state.is_pondering = true;
+            self.ponder_state.ponder_start_time = Some(std::time::Instant::now());
+            let flag = Arc::new(AtomicBool::new(false));
+            self.active_ponder_hit_flag = Some(flag.clone());
+            log::debug!("Ponder mode activated with shared flag");
+            Some(flag)
+        } else {
+            self.clear_ponder_state();
+            None
+        };
+
+        // Create SearchLimits
+        let mut builder = SearchLimits::builder();
+
+        // Set stop flag
+        builder = builder.stop_flag(stop_flag);
+
+        // Set ponder hit flag if available
+        if let Some(ref flag) = ponder_hit_flag {
+            builder = builder.ponder_hit_flag(flag.clone());
+        }
+
+        // Apply go parameters
+        let limits = apply_go_params(builder, params, &position)?;
+
+        Ok((position, limits, ponder_hit_flag))
+    }
+
+    /// Execute search with prepared data and return USI result
+    /// This takes a mutable reference to avoid ownership transfer
+    pub fn execute_search_static(
+        engine: &mut Engine,
+        mut position: Position,
+        limits: SearchLimits,
+        info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
+    ) -> Result<(String, Option<String>)> {
+        // Set up info callback
+        let info_callback_arc = Arc::new(info_callback);
+        let info_callback_clone = info_callback_arc.clone();
+        type InfoCallbackType = Arc<
+            dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync,
+        >;
+        let info_callback_inner: InfoCallbackType =
+            Arc::new(move |depth, score, nodes, elapsed, pv| {
+                let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
+                let score_enum = to_usi_score(score);
+
+                let info = SearchInfo {
+                    depth: Some(depth as u32),
+                    time: Some(elapsed.as_millis().max(1) as u64),
+                    nodes: Some(nodes),
+                    pv: pv_str,
+                    score: Some(score_enum),
+                    ..Default::default()
+                };
+                (*info_callback_clone)(info);
+            });
+
+        // Create a new SearchLimits with info_callback added
+        // We can't add it in prepare_search because the callback is created here
+        // This is not shadowing - we're creating a new instance with the callback
+        let limits = SearchLimits {
+            info_callback: Some(info_callback_inner),
+            ..limits
+        };
+
+        // Execute search
+        let result = engine.search(&mut position, limits);
+        log::info!(
+            "Search completed - depth:{} nodes:{} time:{}ms",
+            result.stats.depth,
+            result.stats.nodes,
+            result.stats.elapsed.as_millis()
+        );
+
+        // Get best move
+        let best_move = result.best_move.ok_or_else(|| {
+            anyhow!("No legal moves available in this position (checkmate or stalemate)")
+        })?;
+
+        // Convert move to USI format
+        let best_move_str = engine_core::usi::move_to_usi(&best_move);
+        log::info!("Best move: {} (score: {:?})", best_move_str, result.score);
+
+        // Send final info
+        let score = to_usi_score(result.score);
+        let depth = if result.stats.depth == 0 {
+            log::warn!("SearchStats.depth is 0, this should not happen. Using 1 as fallback.");
+            1
+        } else {
+            result.stats.depth
+        };
+
+        let info = SearchInfo {
+            depth: Some(depth as u32),
+            time: Some(result.stats.elapsed.as_millis().max(1) as u64),
+            nodes: Some(result.stats.nodes),
+            pv: vec![best_move_str.clone()],
+            score: Some(score),
+            ..Default::default()
+        };
+        (*info_callback_arc)(info);
+
+        // For now, no ponder move generation
+        Ok((best_move_str, None))
+    }
+
+    /// Clean up after search completion
+    pub fn cleanup_after_search(&mut self, was_ponder: bool) {
+        if was_ponder {
+            self.active_ponder_hit_flag = None;
+            if self.ponder_state.is_pondering {
+                self.ponder_state.is_pondering = false;
+            }
+        }
     }
 }
 
-/// Convert USI go parameters to search limits with proper time control
+/// Validate and clamp search depth to ensure it's within valid range
+fn validate_and_clamp_depth(depth: u32) -> u32 {
+    // Ensure minimum depth of 1 to prevent "no search" scenario
+    let safe_depth = if depth == 0 {
+        log::warn!("Depth 0 is not supported, using minimum depth of 1");
+        1
+    } else {
+        depth
+    };
+
+    // Clamp depth to MAX_PLY to prevent array bounds violation
+    let clamped_depth = safe_depth.min(MAX_PLY as u32);
+    if safe_depth != clamped_depth {
+        log::warn!(
+            "Depth {safe_depth} exceeds maximum supported depth {MAX_PLY}, clamping to {clamped_depth}"
+        );
+    }
+    clamped_depth
+}
+
+/// Check if the go parameters represent Fischer time control disguised as byoyomi
 ///
-/// Priority order: ponder > infinite > movetime > byoyomi > fischer > default
-fn apply_go_params(
-    mut builder: engine_core::search::limits::SearchLimitsBuilder,
+/// Some GUIs send byoyomi=0 with binc/winc for Fischer time control
+fn is_fischer_disguised_as_byoyomi(params: &GoParams) -> bool {
+    params.byoyomi == Some(0) && (params.binc.is_some() || params.winc.is_some())
+}
+
+/// Get the increment for the given side from go parameters
+fn get_increment_for_side(params: &GoParams, side: engine_core::shogi::Color) -> u64 {
+    match side {
+        engine_core::shogi::Color::Black => params.binc.unwrap_or(0),
+        engine_core::shogi::Color::White => params.winc.unwrap_or(0),
+    }
+}
+
+/// Apply ponder mode time control
+fn apply_ponder_mode(builder: SearchLimitsBuilder) -> SearchLimitsBuilder {
+    builder.ponder()
+}
+
+/// Apply infinite mode time control
+fn apply_infinite_mode(builder: SearchLimitsBuilder) -> SearchLimitsBuilder {
+    builder.infinite()
+}
+
+/// Apply fixed time mode with specified time per move
+fn apply_fixed_time_mode(builder: SearchLimitsBuilder, movetime: u64) -> SearchLimitsBuilder {
+    builder.fixed_time_ms(movetime)
+}
+
+/// Apply byoyomi time control
+fn apply_byoyomi_mode(
+    builder: SearchLimitsBuilder,
     params: &GoParams,
     position: &Position,
-) -> Result<SearchLimits> {
+) -> SearchLimitsBuilder {
+    let main_time = match position.side_to_move {
+        engine_core::shogi::Color::Black => params.btime.unwrap_or(0),
+        engine_core::shogi::Color::White => params.wtime.unwrap_or(0),
+    };
+    let byoyomi = params.byoyomi.unwrap_or(0);
+    // TODO: Add periods field to GoParams for full byoyomi support
+    // Currently defaulting to 1 period
+    builder.byoyomi(main_time, byoyomi, 1)
+}
+
+/// Apply Fischer time control
+fn apply_fischer_mode(
+    builder: SearchLimitsBuilder,
+    params: &GoParams,
+    position: &Position,
+) -> SearchLimitsBuilder {
+    let black_time = params.btime.unwrap_or(0);
+    let white_time = params.wtime.unwrap_or(0);
+    let increment = get_increment_for_side(params, position.side_to_move);
+
+    // Note: fischer() expects (black_ms, white_ms, increment_ms)
+    builder.fischer(black_time, white_time, increment)
+}
+
+/// Apply default time control when no specific time control is specified
+fn apply_default_time_control(builder: SearchLimitsBuilder) -> SearchLimitsBuilder {
+    log::warn!("No time control specified in go command, defaulting to 5 seconds");
+    builder.fixed_time_ms(5000)
+}
+
+/// Apply search limits (depth, nodes, moves_to_go) from go parameters
+fn apply_search_limits(mut builder: SearchLimitsBuilder, params: &GoParams) -> SearchLimitsBuilder {
     // Set depth limit
     if let Some(depth) = params.depth {
-        // Ensure minimum depth of 1 to prevent "no search" scenario
-        let safe_depth = if depth == 0 {
-            log::warn!("Depth 0 is not supported, using minimum depth of 1");
-            1
-        } else {
-            depth
-        };
-
-        // Clamp depth to MAX_PLY to prevent array bounds violation
-        let clamped_depth = safe_depth.min(MAX_PLY as u32);
-        if safe_depth != clamped_depth {
-            log::warn!(
-                "Depth {safe_depth} exceeds maximum supported depth {MAX_PLY}, clamping to {clamped_depth}"
-            );
-        }
+        let clamped_depth = validate_and_clamp_depth(depth);
         builder = builder.depth(clamped_depth);
     }
 
@@ -371,66 +627,47 @@ fn apply_go_params(
         builder = builder.moves_to_go(moves_to_go);
     }
 
-    // Set time control based on provided parameters
-    // Priority: ponder > infinite > movetime > byoyomi > fischer > default
+    builder
+}
+
+/// Apply time control based on priority order
+///
+/// Priority: ponder > infinite > movetime > byoyomi > fischer > default
+fn apply_time_control(
+    builder: SearchLimitsBuilder,
+    params: &GoParams,
+    position: &Position,
+) -> SearchLimitsBuilder {
     if params.ponder {
-        // Ponder mode
-        builder = builder.ponder();
+        apply_ponder_mode(builder)
     } else if params.infinite {
-        // Infinite time control
-        builder = builder.infinite();
+        apply_infinite_mode(builder)
     } else if let Some(movetime) = params.movetime {
-        // Fixed time per move
-        builder = builder.fixed_time_ms(movetime);
-    } else if let Some(byoyomi) = params.byoyomi {
+        apply_fixed_time_mode(builder, movetime)
+    } else if let Some(_byoyomi) = params.byoyomi {
         // Check if this is actually Fischer time control disguised as byoyomi
-        // Some GUIs send byoyomi=0 with binc/winc for Fischer
-        if byoyomi == 0 && (params.binc.is_some() || params.winc.is_some()) {
-            // Treat as Fischer time control
-            let black_time = params.btime.unwrap_or(0);
-            let white_time = params.wtime.unwrap_or(0);
-            let black_inc = params.binc.unwrap_or(0);
-            let white_inc = params.winc.unwrap_or(0);
-
-            // Use the increment for the current side
-            let increment = match position.side_to_move {
-                engine_core::shogi::Color::Black => black_inc,
-                engine_core::shogi::Color::White => white_inc,
-            };
-
-            // Note: fischer() expects (black_ms, white_ms, increment_ms)
-            builder = builder.fischer(black_time, white_time, increment);
+        if is_fischer_disguised_as_byoyomi(params) {
+            apply_fischer_mode(builder, params, position)
         } else {
-            // True byoyomi time control
-            let main_time = match position.side_to_move {
-                engine_core::shogi::Color::Black => params.btime.unwrap_or(0),
-                engine_core::shogi::Color::White => params.wtime.unwrap_or(0),
-            };
-            // TODO: Add periods field to GoParams for full byoyomi support
-            // Currently defaulting to 1 period
-            builder = builder.byoyomi(main_time, byoyomi, 1);
+            apply_byoyomi_mode(builder, params, position)
         }
     } else if params.btime.is_some() || params.wtime.is_some() {
-        // Fischer time control
-        let black_time = params.btime.unwrap_or(0);
-        let white_time = params.wtime.unwrap_or(0);
-        let black_inc = params.binc.unwrap_or(0);
-        let white_inc = params.winc.unwrap_or(0);
-
-        // Use the increment for the current side
-        let increment = match position.side_to_move {
-            engine_core::shogi::Color::Black => black_inc,
-            engine_core::shogi::Color::White => white_inc,
-        };
-
-        // Note: fischer() expects (black_ms, white_ms, increment_ms)
-        builder = builder.fischer(black_time, white_time, increment);
+        apply_fischer_mode(builder, params, position)
     } else {
-        // Default to 5 seconds if no time specified
-        log::warn!("No time control specified in go command, defaulting to 5 seconds");
-        builder = builder.fixed_time_ms(5000);
+        apply_default_time_control(builder)
     }
+}
 
+/// Convert USI go parameters to search limits with proper time control
+///
+/// Priority order: ponder > infinite > movetime > byoyomi > fischer > default
+fn apply_go_params(
+    builder: SearchLimitsBuilder,
+    params: &GoParams,
+    position: &Position,
+) -> Result<SearchLimits> {
+    let builder = apply_search_limits(builder, params);
+    let builder = apply_time_control(builder, params, position);
     Ok(builder.build())
 }
 
@@ -667,6 +904,131 @@ mod tests {
         match limits.time_control {
             TimeControl::Ponder => {}
             _ => panic!("Expected Ponder to take priority"),
+        }
+    }
+
+    // Tests for helper functions
+    #[test]
+    fn test_validate_and_clamp_depth_zero() {
+        assert_eq!(validate_and_clamp_depth(0), 1);
+    }
+
+    #[test]
+    fn test_validate_and_clamp_depth_exceeds_max() {
+        assert_eq!(validate_and_clamp_depth(200), MAX_PLY as u32);
+    }
+
+    #[test]
+    fn test_validate_and_clamp_depth_normal() {
+        assert_eq!(validate_and_clamp_depth(10), 10);
+    }
+
+    #[test]
+    fn test_is_fischer_disguised_as_byoyomi_true() {
+        let params = GoParams {
+            byoyomi: Some(0),
+            binc: Some(1000),
+            ..Default::default()
+        };
+        assert!(is_fischer_disguised_as_byoyomi(&params));
+
+        let params2 = GoParams {
+            byoyomi: Some(0),
+            winc: Some(1000),
+            ..Default::default()
+        };
+        assert!(is_fischer_disguised_as_byoyomi(&params2));
+    }
+
+    #[test]
+    fn test_is_fischer_disguised_as_byoyomi_false() {
+        let params = GoParams {
+            byoyomi: Some(30000),
+            binc: Some(1000),
+            ..Default::default()
+        };
+        assert!(!is_fischer_disguised_as_byoyomi(&params));
+
+        let params2 = GoParams {
+            byoyomi: Some(0),
+            ..Default::default()
+        };
+        assert!(!is_fischer_disguised_as_byoyomi(&params2));
+    }
+
+    #[test]
+    fn test_get_increment_for_black() {
+        let params = GoParams {
+            binc: Some(2000),
+            winc: Some(3000),
+            ..Default::default()
+        };
+        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::Black), 2000);
+    }
+
+    #[test]
+    fn test_get_increment_for_white() {
+        let params = GoParams {
+            binc: Some(2000),
+            winc: Some(3000),
+            ..Default::default()
+        };
+        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::White), 3000);
+    }
+
+    #[test]
+    fn test_get_increment_missing_values() {
+        let params = GoParams::default();
+        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::Black), 0);
+        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::White), 0);
+    }
+
+    // Tests for individual time control functions
+    #[test]
+    fn test_apply_ponder_mode() {
+        let builder = SearchLimits::builder();
+        let builder = apply_ponder_mode(builder);
+        let limits = builder.build();
+        match limits.time_control {
+            TimeControl::Ponder => {}
+            _ => panic!("Expected Ponder time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_infinite_mode() {
+        let builder = SearchLimits::builder();
+        let builder = apply_infinite_mode(builder);
+        let limits = builder.build();
+        match limits.time_control {
+            TimeControl::Infinite => {}
+            _ => panic!("Expected Infinite time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_fixed_time_mode() {
+        let builder = SearchLimits::builder();
+        let builder = apply_fixed_time_mode(builder, 1500);
+        let limits = builder.build();
+        match limits.time_control {
+            TimeControl::FixedTime { ms_per_move } => {
+                assert_eq!(ms_per_move, 1500);
+            }
+            _ => panic!("Expected FixedTime time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_default_time_control() {
+        let builder = SearchLimits::builder();
+        let builder = apply_default_time_control(builder);
+        let limits = builder.build();
+        match limits.time_control {
+            TimeControl::FixedTime { ms_per_move } => {
+                assert_eq!(ms_per_move, 5000);
+            }
+            _ => panic!("Expected FixedTime time control with 5000ms"),
         }
     }
 }
