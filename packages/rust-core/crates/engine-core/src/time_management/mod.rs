@@ -33,7 +33,7 @@ mod test_utils;
 
 pub use allocation::calculate_time_allocation;
 pub use parameters::TimeParameters;
-pub use types::{ByoyomiInfo, SearchLimits, TimeControl, TimeInfo, TimeState};
+pub use types::{ByoyomiInfo, TimeControl, TimeInfo, TimeLimits, TimeState};
 
 /// Time manager coordinating all time-related decisions
 pub struct TimeManager {
@@ -97,7 +97,7 @@ struct ByoyomiState {
 
 impl TimeManager {
     /// Create a new time manager for a search
-    pub fn new(limits: &SearchLimits, side: Color, ply: u32, game_phase: GamePhase) -> Self {
+    pub fn new(limits: &TimeLimits, side: Color, ply: u32, game_phase: GamePhase) -> Self {
         let params = limits.time_parameters.unwrap_or_default();
 
         // Calculate initial time allocation
@@ -150,13 +150,13 @@ impl TimeManager {
     /// Create a new time manager for pondering
     #[inline]
     pub fn new_ponder(
-        pending_limits: &SearchLimits,
+        pending_limits: &TimeLimits,
         side: Color,
         ply: u32,
         game_phase: GamePhase,
     ) -> Self {
         // Create ponder limits with infinite time
-        let ponder_limits = SearchLimits {
+        let ponder_limits = TimeLimits {
             time_control: TimeControl::Ponder,
             moves_to_go: pending_limits.moves_to_go,
             depth: pending_limits.depth,
@@ -210,7 +210,7 @@ impl TimeManager {
     /// Create a new time manager with mock time for testing
     #[cfg(test)]
     fn new_with_mock_time(
-        limits: &SearchLimits,
+        limits: &TimeLimits,
         side: Color,
         ply: u32,
         game_phase: GamePhase,
@@ -312,11 +312,11 @@ impl TimeManager {
     ///
     /// # Example
     /// ```
-    /// use engine_core::time_management::{TimeManager, TimeState, SearchLimits, TimeControl};
+    /// use engine_core::time_management::{TimeManager, TimeState, TimeLimits, TimeControl};
     /// use engine_core::search::GamePhase;
     /// use engine_core::Color;
     ///
-    /// let limits = SearchLimits {
+    /// let limits = TimeLimits {
     ///     time_control: TimeControl::Byoyomi {
     ///         main_time_ms: 150000,
     ///         byoyomi_ms: 10000,
@@ -445,7 +445,7 @@ impl TimeManager {
     /// # Arguments
     /// - `new_limits`: Updated search limits with actual time control
     /// - `time_already_spent_ms`: Time already spent during pondering
-    pub fn ponder_hit(&self, new_limits: Option<&SearchLimits>, time_already_spent_ms: u64) {
+    pub fn ponder_hit(&self, new_limits: Option<&TimeLimits>, time_already_spent_ms: u64) {
         // Check if currently pondering
         if !self.is_pondering() {
             return;
@@ -596,8 +596,8 @@ impl TimeManager {
 mod tests {
     use super::*;
 
-    fn create_test_limits() -> SearchLimits {
-        SearchLimits {
+    fn create_test_limits() -> TimeLimits {
+        TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn test_byoyomi_exact_boundary() {
         // Test exact boundary condition: time_spent == byoyomi_ms
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 0,
                 byoyomi_ms: 1000,
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn test_byoyomi_multiple_period_consumption() {
         // Test consuming multiple periods in one move
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 0,
                 byoyomi_ms: 1000,
@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn test_byoyomi_main_time_transition() {
         // Test transition from main time to byoyomi
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 5000,
                 byoyomi_ms: 1000,
@@ -742,7 +742,7 @@ mod tests {
     fn test_time_pressure_calculation() {
         mock_set_time(0);
 
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::FixedTime { ms_per_move: 1000 },
             ..Default::default()
         };
@@ -769,7 +769,7 @@ mod tests {
         mock_set_time(0);
 
         // Test Fischer emergency stop
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 200, // Critical time
                 black_ms: 200,
@@ -782,7 +782,7 @@ mod tests {
         assert!(tm.is_time_critical()); // Should be critical immediately
 
         // Test Byoyomi emergency stop
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 0,
                 byoyomi_ms: 1000,
@@ -802,7 +802,7 @@ mod tests {
     fn test_soft_limit_extension() {
         mock_set_time(0);
 
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn test_byoyomi_time_forfeit() {
         // Test time forfeit when all periods consumed
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 0,
                 byoyomi_ms: 1000,
@@ -860,7 +860,7 @@ mod tests {
     #[cfg(not(debug_assertions))]
     fn test_byoyomi_transition_with_wrong_state() {
         // Test that using wrong TimeState doesn't cause transition
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 5000,
                 byoyomi_ms: 1000,
@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn test_byoyomi_proper_transition_with_new_api() {
         // Test proper transition with new API
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 5000,
                 byoyomi_ms: 1000,
@@ -912,7 +912,7 @@ mod tests {
     #[test]
     fn test_byoyomi_transition_with_multiple_period_overspend() {
         // Test transition from main time to byoyomi with overspend > 2 periods
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 1000,
                 byoyomi_ms: 1000,
@@ -935,7 +935,7 @@ mod tests {
     #[test]
     fn test_continuous_byoyomi_to_time_forfeit() {
         // Test main=0 start → consume all periods → time forfeit
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 0, // Start in byoyomi
                 byoyomi_ms: 1000,
@@ -968,7 +968,7 @@ mod tests {
     #[should_panic(expected = "TimeState::NonByoyomi used with Byoyomi")]
     fn test_debug_assertion_on_wrong_time_state() {
         // Test debug assertion fires on API misuse
-        let limits = SearchLimits {
+        let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 5000,
                 byoyomi_ms: 1000,
@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn test_new_api_with_various_time_controls() {
         // Test that new API works correctly with non-byoyomi time controls
-        let fischer_limits = SearchLimits {
+        let fischer_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -996,7 +996,7 @@ mod tests {
         let tm = TimeManager::new(&fischer_limits, Color::White, 0, GamePhase::Opening);
         tm.update_after_move(2000, TimeState::NonByoyomi); // Should work fine
 
-        let fixed_limits = SearchLimits {
+        let fixed_limits = TimeLimits {
             time_control: TimeControl::FixedTime { ms_per_move: 1000 },
             ..Default::default()
         };
@@ -1010,7 +1010,7 @@ mod tests {
         mock_set_time(0);
 
         // Create pending limits with Fischer time control
-        let pending_limits = SearchLimits {
+        let pending_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -1046,7 +1046,7 @@ mod tests {
         mock_set_time(0);
 
         // Create pending limits with Byoyomi
-        let pending_limits = SearchLimits {
+        let pending_limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 10000, // 10 seconds main time
                 byoyomi_ms: 30000,   // 30 seconds per period
@@ -1075,7 +1075,7 @@ mod tests {
         mock_set_time(0);
 
         // Test 1: Ponder hit with spent > remain
-        let pending_limits = SearchLimits {
+        let pending_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 2000, // Only 2 seconds
                 black_ms: 2000,
@@ -1108,7 +1108,7 @@ mod tests {
         mock_set_time(0);
 
         // Initial pending limits
-        let pending_limits = SearchLimits {
+        let pending_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 50000,
                 black_ms: 50000,
@@ -1122,7 +1122,7 @@ mod tests {
         mock_advance_time(2000);
 
         // New limits provided at ponder hit (e.g., opponent's time updated)
-        let new_limits = SearchLimits {
+        let new_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 48000, // Updated time
                 black_ms: 45000,
@@ -1145,7 +1145,7 @@ mod tests {
         mock_set_time(0);
 
         // Start with Fischer in pending
-        let pending_limits = SearchLimits {
+        let pending_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -1169,7 +1169,7 @@ mod tests {
         assert!(tm.get_byoyomi_state().is_none());
 
         // Test with Byoyomi
-        let byoyomi_limits = SearchLimits {
+        let byoyomi_limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 5000,
                 byoyomi_ms: 10000,
@@ -1196,7 +1196,7 @@ mod tests {
 
         mock_set_time(0);
 
-        let pending_limits = SearchLimits {
+        let pending_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -1249,7 +1249,7 @@ mod tests {
         mock_set_time(0);
 
         // Start with Fischer in pending
-        let fischer_limits = SearchLimits {
+        let fischer_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,
@@ -1261,7 +1261,7 @@ mod tests {
         let tm = TimeManager::new_ponder(&fischer_limits, Color::White, 0, GamePhase::Opening);
 
         // Provide new Byoyomi limits at ponder hit
-        let byoyomi_limits = SearchLimits {
+        let byoyomi_limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
                 main_time_ms: 10000,
                 byoyomi_ms: 5000,
@@ -1285,7 +1285,7 @@ mod tests {
     fn test_elapsed_time_after_ponder_hit() {
         mock_set_time(0);
 
-        let pending_limits = SearchLimits {
+        let pending_limits = TimeLimits {
             time_control: TimeControl::Fischer {
                 white_ms: 60000,
                 black_ms: 60000,

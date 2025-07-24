@@ -36,9 +36,9 @@ pub enum TimeControl {
     Ponder,
 }
 
-/// Search limits combining time control with other constraints
+/// Time limits combining time control with other constraints
 #[derive(Debug, Clone)]
-pub struct SearchLimits {
+pub struct TimeLimits {
     pub time_control: TimeControl,
     pub moves_to_go: Option<u32>, // Moves until next time control
     pub depth: Option<u32>,       // Maximum search depth
@@ -46,7 +46,7 @@ pub struct SearchLimits {
     pub time_parameters: Option<TimeParameters>, // Custom parameters
 }
 
-impl Default for SearchLimits {
+impl Default for TimeLimits {
     fn default() -> Self {
         Self {
             time_control: TimeControl::Infinite,
