@@ -13,7 +13,7 @@ use super::tt::{NodeType, TranspositionTable};
 use crate::evaluation::evaluate::Evaluator;
 use crate::shogi::Move;
 use crate::shogi::MoveList;
-use crate::time_management::{SearchLimits, TimeManager};
+use crate::time_management::{TimeLimits, TimeManager};
 use crate::zobrist::ZOBRIST;
 use crate::{Color, MoveGen, MovePicker, PieceType, Position};
 use smallvec::SmallVec;
@@ -415,7 +415,7 @@ impl EnhancedSearcher {
     pub fn search_with_limits(
         &mut self,
         pos: &mut Position,
-        limits: SearchLimits,
+        limits: super::limits::SearchLimits,
     ) -> (Option<Move>, i32) {
         // Initialize start time
         self.start_time = Instant::now();
@@ -446,7 +446,8 @@ impl EnhancedSearcher {
             crate::time_management::TimeControl::Infinite => None,
             _ => {
                 let game_phase = self.estimate_game_phase(pos);
-                Some(TimeManager::new(&limits, pos.side_to_move, pos.ply as u32, game_phase))
+                let time_limits: TimeLimits = limits.clone().into();
+                Some(TimeManager::new(&time_limits, pos.side_to_move, pos.ply as u32, game_phase))
             }
         };
 
@@ -465,8 +466,8 @@ impl EnhancedSearcher {
         time_limit: Option<Duration>,
         node_limit: Option<u64>,
     ) -> (Option<Move>, i32) {
-        // Convert legacy parameters to SearchLimits
-        let limits = SearchLimits {
+        // Convert legacy parameters to TimeLimits
+        let limits = TimeLimits {
             time_control: match (time_limit, node_limit) {
                 (Some(duration), _) => crate::time_management::TimeControl::FixedTime {
                     ms_per_move: duration.as_millis() as u64,
@@ -480,7 +481,7 @@ impl EnhancedSearcher {
             time_parameters: None,
         };
 
-        self.search_with_limits(pos, limits)
+        self.search_with_limits(pos, limits.into())
     }
 
     /// Internal search implementation
