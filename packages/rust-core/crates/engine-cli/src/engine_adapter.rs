@@ -10,7 +10,7 @@ use engine_core::{
     search::limits::SearchLimits,
     shogi::Position,
 };
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::usi::output::{Score, SearchInfo};
@@ -50,6 +50,8 @@ pub struct EngineAdapter {
     ponder: bool,
     /// Ponder state for managing ponder searches
     ponder_state: PonderState,
+    /// Active ponder hit flag (shared with searcher during ponder)
+    active_ponder_hit_flag: Option<Arc<AtomicBool>>,
 }
 
 /// State for managing ponder (think on opponent's time) functionality
@@ -80,6 +82,7 @@ impl EngineAdapter {
             threads: 1,
             ponder: true,
             ponder_state: PonderState::default(),
+            active_ponder_hit_flag: None,
         };
 
         // Initialize options
@@ -138,13 +141,13 @@ impl EngineAdapter {
             "USI_Hash" => {
                 if let Some(val) = value {
                     self.hash_size =
-                        val.parse::<usize>().map_err(|_| anyhow!("Invalid hash size"))?;
+                        val.parse::<usize>().map_err(|_| anyhow!("Invalid hash size: '{}'. Must be a number between 1 and 1024", val))?;
                 }
             }
             "Threads" => {
                 if let Some(val) = value {
                     self.threads =
-                        val.parse::<usize>().map_err(|_| anyhow!("Invalid thread count"))?;
+                        val.parse::<usize>().map_err(|_| anyhow!("Invalid thread count: '{}'. Must be a number between 1 and 256", val))?;
                 }
             }
             "USI_Ponder" => {
@@ -159,13 +162,13 @@ impl EngineAdapter {
                         "Nnue" => EngineType::Nnue,
                         "Enhanced" => EngineType::Enhanced,
                         "EnhancedNnue" => EngineType::EnhancedNnue,
-                        _ => return Err(anyhow!("Invalid engine type: {}", val)),
+                        _ => return Err(anyhow!("Invalid engine type: '{}'. Valid values are: Material, Nnue, Enhanced, EnhancedNnue", val)),
                     };
                     self.engine.set_engine_type(engine_type);
                 }
             }
             _ => {
-                return Err(anyhow!("Unknown option: {}", name));
+                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType", name));
             }
         }
         Ok(())
@@ -173,32 +176,16 @@ impl EngineAdapter {
 
     /// Handle ponder hit (opponent played the expected move)
     pub fn ponder_hit(&mut self) -> Result<()> {
-        if !self.ponder_state.is_pondering {
-            return Err(anyhow!("Not currently pondering"));
-        }
+        if let Some(ref flag) = self.active_ponder_hit_flag {
+            flag.store(true, Ordering::Release);
 
-        // Calculate time already spent pondering
-        let time_spent_ms = if let Some(start_time) = self.ponder_state.ponder_start_time {
-            start_time.elapsed().as_millis() as u64
+            // Clear ponder state since we're transitioning to normal search
+            self.ponder_state.is_pondering = false;
+
+            log::info!("Ponder hit: Converting ponder search to normal search");
+            Ok(())
         } else {
-            0
-        };
-
-        log::debug!("Ponder hit after {time_spent_ms} ms");
-
-        // Notify engine about ponder hit first
-        // Only clear ponder state if engine successfully handles ponder_hit
-        match self.engine.ponder_hit(time_spent_ms) {
-            Ok(()) => {
-                // Success - clear ponder state
-                self.clear_ponder_state();
-                Ok(())
-            }
-            Err(e) => {
-                // Failed - keep ponder state intact
-                log::warn!("ponder_hit failed: {e}");
-                Err(anyhow!("Engine ponder_hit failed: {}", e))
-            }
+            Err(anyhow!("Ponder hit received but engine is not in ponder mode"))
         }
     }
 
@@ -218,9 +205,14 @@ impl EngineAdapter {
         stop_flag: Arc<AtomicBool>,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<(String, Option<String>)> {
-        log::debug!("Starting search with params: {params:?}");
+        log::info!("Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
+            if params.ponder { "ponder" } else { "normal" },
+            params.depth,
+            params.movetime.or(params.btime.or(params.wtime)),
+            params.nodes
+        );
 
-        let mut position = self.position.clone().ok_or_else(|| anyhow!("No position set"))?;
+        let mut position = self.position.clone().ok_or_else(|| anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first"))?;
 
         // Set up info callback using Arc to share between closures
         let info_callback_arc = Arc::new(info_callback);
@@ -248,6 +240,9 @@ impl EngineAdapter {
         if params.ponder {
             self.ponder_state.is_pondering = true;
             self.ponder_state.ponder_start_time = Some(std::time::Instant::now());
+            // Create ponder hit flag for this search
+            self.active_ponder_hit_flag = Some(Arc::new(AtomicBool::new(false)));
+            log::debug!("Ponder mode activated with shared flag");
         } else {
             // New non-ponder search clears any existing ponder state
             self.clear_ponder_state();
@@ -262,6 +257,11 @@ impl EngineAdapter {
         // Set info callback
         builder = builder.info_callback(info_callback_arc_inner);
 
+        // Set ponder hit flag if this is a ponder search
+        if let Some(ref flag) = self.active_ponder_hit_flag {
+            builder = builder.ponder_hit_flag(flag.clone());
+        }
+
         // Apply go parameters with position info
         let limits = apply_go_params(builder, &params, &position)?;
 
@@ -274,17 +274,29 @@ impl EngineAdapter {
         );
 
         // Run search
-        log::debug!("Starting engine search...");
         let result = self.engine.search(&mut position, limits);
-        log::debug!("Search completed: {result:?}");
+        log::info!("Search completed - depth:{} nodes:{} time:{}ms",
+            result.stats.depth,
+            result.stats.nodes,
+            result.stats.elapsed.as_millis()
+        );
+
+        // Clear ponder hit flag after search completes
+        if params.ponder {
+            self.active_ponder_hit_flag = None;
+            // Also update ponder state if it's still marked as pondering
+            if self.ponder_state.is_pondering {
+                self.ponder_state.is_pondering = false;
+            }
+        }
 
         // Get best move
-        let best_move = result.best_move.ok_or_else(|| anyhow!("No legal moves found"))?;
+        let best_move = result.best_move.ok_or_else(|| anyhow!("No legal moves available in this position (checkmate or stalemate)"))?;
 
         // Convert move to USI format
         let best_move_str = engine_core::usi::move_to_usi(&best_move);
 
-        log::debug!("Best move: {best_move_str}");
+        log::info!("Best move: {} (score: {:?})", best_move_str, result.score);
 
         // Send final info
         let score = to_usi_score(result.score);
@@ -330,6 +342,7 @@ impl EngineAdapter {
         self.ponder_state.is_pondering = false;
         self.ponder_state.ponder_move = None;
         self.ponder_state.ponder_start_time = None;
+        self.active_ponder_hit_flag = None;
     }
 }
 
