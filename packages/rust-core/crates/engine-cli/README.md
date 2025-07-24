@@ -63,6 +63,31 @@ cargo test -p engine-cli
 - `gameover` - ゲーム終了通知
 - `quit` - エンジン終了
 
+### Byoyomi Time Control 拡張
+
+このエンジンは複数の秒読み期間（periods）をサポートしています。以下の2つの方法で設定可能です：
+
+1. **SetOption方式**（推奨、GUI互換性が高い）:
+   ```
+   setoption name ByoyomiPeriods value 3
+   go btime 300000 wtime 300000 byoyomi 30000
+   ```
+
+2. **直接periodsパラメータ指定**（非標準）:
+   ```
+   go btime 300000 wtime 300000 byoyomi 30000 periods 3
+   ```
+
+両方が指定された場合、periodsパラメータが優先されます。未指定の場合のデフォルトは1期間です。
+
+### サポートされるオプション
+
+- `USI_Hash` - ハッシュテーブルサイズ (MB)
+- `Threads` - 使用スレッド数
+- `USI_Ponder` - ポンダー（相手の手番での思考）有効/無効
+- `EngineType` - エンジンタイプ (Material/Nnue/Enhanced/EnhancedNnue)
+- `ByoyomiPeriods` - 秒読み期間数 (1-10、デフォルト: 1)
+
 ## アーキテクチャ
 
 - **メインスレッド**: USI I/O処理
