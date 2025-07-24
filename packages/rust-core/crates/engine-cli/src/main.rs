@@ -43,31 +43,13 @@ impl std::ops::Deref for EngineReturnGuard {
     type Target = Engine;
 
     fn deref(&self) -> &Self::Target {
-        // In normal operation, engine should never be None when deref is called
-        // If it is None, it's a programming error, so panic is appropriate
-        match self.engine.as_ref() {
-            Some(engine) => engine,
-            None => {
-                // This should never happen in correct usage
-                log::error!("EngineReturnGuard::deref called but engine is None");
-                panic!("EngineReturnGuard: engine already taken or not initialized")
-            }
-        }
+        self.engine.as_ref().expect("Engine already taken")
     }
 }
 
 impl std::ops::DerefMut for EngineReturnGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // In normal operation, engine should never be None when deref_mut is called
-        // If it is None, it's a programming error, so panic is appropriate
-        match self.engine.as_mut() {
-            Some(engine) => engine,
-            None => {
-                // This should never happen in correct usage
-                log::error!("EngineReturnGuard::deref_mut called but engine is None");
-                panic!("EngineReturnGuard: engine already taken or not initialized")
-            }
-        }
+        self.engine.as_mut().expect("Engine already taken")
     }
 }
 
