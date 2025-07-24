@@ -29,6 +29,21 @@ pub struct EngineAdapter {
     threads: usize,
     /// Enable pondering
     ponder: bool,
+    /// Ponder state for managing ponder searches
+    ponder_state: PonderState,
+}
+
+/// State for managing ponder (think on opponent's time) functionality
+#[derive(Debug, Clone, Default)]
+struct PonderState {
+    /// Whether currently pondering
+    is_pondering: bool,
+    /// The move we're pondering on (opponent's expected move)
+    ponder_move: Option<String>,
+    /// Original time limits before ponder mode
+    original_limits: Option<GoParams>,
+    /// Time spent pondering in milliseconds
+    ponder_start_time: Option<std::time::Instant>,
 }
 
 impl Default for EngineAdapter {
@@ -47,6 +62,7 @@ impl EngineAdapter {
             hash_size: 16,
             threads: 1,
             ponder: true,
+            ponder_state: PonderState::default(),
         };
 
         // Initialize options
@@ -92,6 +108,10 @@ impl EngineAdapter {
         moves: &[String],
     ) -> Result<()> {
         self.position = Some(create_position(startpos, sfen, moves)?);
+        
+        // Clear ponder state when position changes
+        self.clear_ponder_state();
+        
         Ok(())
     }
 
@@ -134,15 +154,37 @@ impl EngineAdapter {
         Ok(())
     }
 
-    /// Handle ponder hit
-    pub fn ponder_hit(&mut self) {
-        // TODO: Implement ponder hit logic
+    /// Handle ponder hit (opponent played the expected move)
+    pub fn ponder_hit(&mut self) -> Result<()> {
+        if !self.ponder_state.is_pondering {
+            return Err(anyhow!("Not currently pondering"));
+        }
+
+        // Calculate time already spent pondering
+        let time_spent_ms = if let Some(start_time) = self.ponder_state.ponder_start_time {
+            start_time.elapsed().as_millis() as u64
+        } else {
+            0
+        };
+
+        log::debug!("Ponder hit after {} ms", time_spent_ms);
+
+        // Clear ponder state
+        self.clear_ponder_state();
+
+        // Note: The actual time adjustment is handled by TimeManager in the search
+        // which was created with ponder mode and will be notified via ponder_hit()
+
+        Ok()
     }
 
     /// Handle game over
     pub fn game_over(&mut self, _result: GameResult) {
         // Clear position and prepare for new game
         self.position = None;
+        
+        // Clear ponder state
+        self.clear_ponder_state();
     }
 
     /// Search for best move
@@ -174,6 +216,18 @@ impl EngineAdapter {
                 };
                 info_callback_clone(info);
             });
+
+        // Update ponder state based on search type
+        if params.ponder {
+            self.ponder_state.is_pondering = true;
+            // Note: original_limits is reserved for future use
+            // when we need to restore time limits after ponder hit
+            self.ponder_state.original_limits = Some(params.clone());
+            self.ponder_state.ponder_start_time = Some(std::time::Instant::now());
+        } else {
+            // New non-ponder search clears any existing ponder state
+            self.clear_ponder_state();
+        }
 
         // Convert GoParams to SearchLimits with info callback
         let mut builder = SearchLimits::builder();
@@ -220,8 +274,30 @@ impl EngineAdapter {
         };
         info_callback_arc(info);
 
-        // No ponder move for now
-        Ok((best_move_str, None))
+        // Generate ponder move if pondering is enabled and this isn't a ponder search
+        let ponder_move = if self.ponder && !params.ponder {
+            // Try to get the next move from PV or generate a simple prediction
+            // For now, we'll return None - full implementation would analyze the position
+            // after making the best move to find the most likely response
+            None
+        } else {
+            None
+        };
+
+        // Store ponder move if we have one
+        if let Some(ref pm) = ponder_move {
+            self.ponder_state.ponder_move = Some(pm.clone());
+        }
+
+        Ok((best_move_str, ponder_move))
+    }
+
+    /// Clear ponder state
+    fn clear_ponder_state(&mut self) {
+        self.ponder_state.is_pondering = false;
+        self.ponder_state.ponder_move = None;
+        self.ponder_state.ponder_start_time = None;
+        self.ponder_state.original_limits = None;
     }
 }
 
