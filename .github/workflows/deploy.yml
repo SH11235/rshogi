@@ -1,11 +1,12 @@
 name: Deploy to GitHub Pages
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types:
-      - completed
-    branches: [main]
+  # TODO: Re-enable when WASM build is ready
+  # workflow_run:
+  #   workflows: ["CI"]
+  #   types:
+  #     - completed
+  #   branches: [main]
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
