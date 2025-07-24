@@ -5,12 +5,12 @@ mod usi;
 
 use anyhow::Result;
 use clap::Parser;
-use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::{EngineAdapter, SearchInfo};
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use usi::{parse_usi_command, send_response, UsiCommand, UsiResponse};
 
@@ -35,6 +35,7 @@ enum WorkerMessage {
 }
 
 /// Drain remaining messages from worker thread
+#[allow(dead_code)]
 fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> Result<()> {
     while let Ok(msg) = rx.try_recv() {
         match msg {
@@ -64,6 +65,7 @@ fn flush_worker_queue(rx: &Receiver<WorkerMessage>, stdout: &mut impl Write) -> 
 
 /// Pumps messages from worker thread until bestmove or termination
 /// Returns true if bestmove was sent, false otherwise
+#[allow(dead_code)]
 fn pump_messages(
     rx: &Receiver<WorkerMessage>,
     stdout: &mut impl Write,
@@ -114,6 +116,54 @@ fn pump_messages(
     Ok(bestmove_sent)
 }
 
+/// Spawn stdin reader thread
+fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>, shutdown_rx: Receiver<()>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let reader = stdin.lock();
+
+        for line in reader.lines() {
+            // Check for shutdown signal
+            if shutdown_rx.try_recv().is_ok() {
+                log::debug!("Stdin reader shutting down");
+                break;
+            }
+
+            match line {
+                Ok(line) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    log::debug!("Received: {line}");
+
+                    match parse_usi_command(line) {
+                        Ok(cmd) => {
+                            // Use try_send to avoid blocking
+                            if let Err(e) = cmd_tx.try_send(cmd) {
+                                log::warn!("Command channel full, dropping command: {e:?}");
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to parse command '{line}': {e}");
+                            // Invalid commands are silently ignored in USI protocol
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("Stdin read error (EOF?): {e}");
+                    // Send quit command on EOF
+                    let _ = cmd_tx.try_send(UsiCommand::Quit);
+                    break;
+                }
+            }
+        }
+
+        log::debug!("Stdin reader thread exiting");
+    })
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -131,7 +181,9 @@ fn main() -> Result<()> {
     log::info!("USI Engine starting...");
 
     // Create communication channels
-    let (tx, rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
+    let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
+    let (cmd_tx, cmd_rx) = bounded::<UsiCommand>(1024);
+    let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
 
     // Create engine adapter (thread-safe)
     let engine = Arc::new(Mutex::new(EngineAdapter::new()));
@@ -139,36 +191,97 @@ fn main() -> Result<()> {
     // Create stop flag for search control
     let stop_flag = Arc::new(AtomicBool::new(false));
 
+    // Spawn stdin reader thread
+    let stdin_handle = spawn_stdin_reader(cmd_tx, shutdown_rx);
+
     // Store active worker thread handle
-    let mut worker_handle: Option<thread::JoinHandle<()>> = None;
+    let mut worker_handle: Option<JoinHandle<()>> = None;
+    let mut searching = false;
 
-    // Main I/O loop
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    // Get stdout handle
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
 
-    for line in stdin.lock().lines() {
-        let line = line?;
-        log::debug!("Received command: {line}");
+    // Main event loop
+    loop {
+        select! {
+            recv(cmd_rx) -> msg => {
+                match msg {
+                    Ok(cmd) => {
+                        log::debug!("Processing command: {cmd:?}");
 
-        match parse_usi_command(&line) {
-            Ok(command) => {
-                handle_command(
-                    command,
-                    &engine,
-                    &stop_flag,
-                    &tx,
-                    &rx,
-                    &mut worker_handle,
-                    &mut stdout,
-                )?;
+                        // Check if it's quit command
+                        if matches!(cmd, UsiCommand::Quit) {
+                            // Handle quit
+                            stop_flag.store(true, Ordering::Release);
+                            break;
+                        }
+
+                        // Handle other commands
+                        handle_command(
+                            cmd,
+                            &engine,
+                            &stop_flag,
+                            &worker_tx,
+                            &mut worker_handle,
+                            &mut searching,
+                            &mut stdout,
+                        )?;
+                    }
+                    Err(_) => {
+                        log::debug!("Command channel closed");
+                        break;
+                    }
+                }
             }
-            Err(e) => {
-                // Invalid commands are reported as info string
-                send_response(UsiResponse::String(format!("Error: {e}")));
+
+            recv(worker_rx) -> msg => {
+                match msg {
+                    Ok(WorkerMessage::Info(info)) => {
+                        send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
+                        stdout.flush()?;
+                    }
+                    Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
+                        send_response(UsiResponse::BestMove {
+                            best_move,
+                            ponder: ponder_move,
+                        });
+                        stdout.flush()?;
+                        searching = false;
+                    }
+                    Ok(WorkerMessage::Finished) => {
+                        log::debug!("Worker thread finished");
+                    }
+                    Ok(WorkerMessage::Error(err)) => {
+                        send_response(UsiResponse::String(format!("info string Error: {err}")));
+                        stdout.flush()?;
+                    }
+                    Err(_) => {
+                        log::debug!("Worker channel closed");
+                    }
+                }
+            }
+
+            default(Duration::from_millis(5)) => {
+                // Idle - prevents busy loop
             }
         }
     }
 
+    // Clean shutdown
+    log::debug!("Starting shutdown sequence");
+
+    // Stop any ongoing search
+    if let Some(handle) = worker_handle.take() {
+        stop_flag.store(true, Ordering::Release);
+        let _ = handle.join();
+    }
+
+    // Stop stdin reader thread
+    let _ = shutdown_tx.send(());
+    let _ = stdin_handle.join();
+
+    log::debug!("Shutdown complete");
     Ok(())
 }
 
@@ -176,9 +289,9 @@ fn handle_command(
     command: UsiCommand,
     engine: &Arc<Mutex<EngineAdapter>>,
     stop_flag: &Arc<AtomicBool>,
-    tx: &Sender<WorkerMessage>,
-    rx: &Receiver<WorkerMessage>,
-    worker_handle: &mut Option<thread::JoinHandle<()>>,
+    worker_tx: &Sender<WorkerMessage>,
+    worker_handle: &mut Option<JoinHandle<()>>,
+    searching: &mut bool,
     stdout: &mut impl Write,
 ) -> Result<()> {
     match command {
@@ -221,11 +334,11 @@ fn handle_command(
 
         UsiCommand::Go(params) => {
             // Stop any ongoing search
-            stop_flag.store(true, Ordering::Release);
-
-            // Wait for previous worker to finish
-            if let Some(handle) = worker_handle.take() {
-                let _ = handle.join();
+            if *searching {
+                stop_flag.store(true, Ordering::Release);
+                if let Some(handle) = worker_handle.take() {
+                    let _ = handle.join();
+                }
             }
 
             // Reset stop flag
@@ -234,7 +347,7 @@ fn handle_command(
             // Clone necessary data for worker thread
             let engine_clone = Arc::clone(engine);
             let stop_clone = Arc::clone(stop_flag);
-            let tx_clone = tx.clone();
+            let tx_clone = worker_tx.clone();
 
             // Spawn worker thread for search
             let handle = thread::spawn(move || {
@@ -242,28 +355,16 @@ fn handle_command(
             });
 
             *worker_handle = Some(handle);
+            *searching = true;
 
-            // Process messages until bestmove is received
-            pump_messages(rx, stdout, true)?;
-
-            // Join the worker thread after loop exits
-            if let Some(handle) = worker_handle.take() {
-                let _ = handle.join();
-            }
+            // Don't block - return immediately
         }
 
         UsiCommand::Stop => {
             // Signal stop to worker thread
-            stop_flag.store(true, Ordering::Release);
-
-            // Wait for messages from worker (don't exit on bestmove)
-            if worker_handle.is_some() {
-                pump_messages(rx, stdout, false)?;
-
-                // Join the worker thread
-                if let Some(handle) = worker_handle.take() {
-                    let _ = handle.join();
-                }
+            if *searching {
+                stop_flag.store(true, Ordering::Release);
+                // Don't wait - bestmove will come through the channel
             }
         }
 
@@ -288,45 +389,9 @@ fn handle_command(
         }
 
         UsiCommand::Quit => {
-            // Stop search
-            stop_flag.store(true, Ordering::Release);
-
-            // Drain remaining messages first
-            flush_worker_queue(rx, stdout)?;
-
-            // Wait for worker to finish
-            if let Some(handle) = worker_handle.take() {
-                let _ = handle.join();
-            }
-
-            // Exit gracefully
-            std::process::exit(0);
+            // Quit is handled in main loop
+            unreachable!("Quit should be handled in main loop");
         }
-    }
-
-    // Process any pending messages from worker thread
-    while let Ok(msg) = rx.try_recv() {
-        match msg {
-            WorkerMessage::Info(info) => {
-                send_response(UsiResponse::String(format!("info {}", info.to_usi_string())));
-            }
-            WorkerMessage::BestMove {
-                best_move,
-                ponder_move,
-            } => {
-                send_response(UsiResponse::BestMove {
-                    best_move,
-                    ponder: ponder_move,
-                });
-            }
-            WorkerMessage::Finished => {
-                // Worker thread finished - nothing to do
-            }
-            WorkerMessage::Error(err) => {
-                send_response(UsiResponse::String(format!("Error: {err}")));
-            }
-        }
-        stdout.flush()?;
     }
 
     Ok(())
