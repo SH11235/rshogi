@@ -4,6 +4,7 @@
 
 use crate::shogi::ATTACK_TABLES;
 use crate::zobrist::ZOBRIST;
+use log::warn;
 
 use super::moves::Move;
 use super::piece_constants::{
@@ -549,8 +550,8 @@ impl Board {
         #[cfg(debug_assertions)]
         {
             if king_sq.is_none() {
-                eprintln!("Warning: No king found for {color:?}");
-                eprintln!("Board state: all_bb has {} pieces", self.all_bb.count_ones());
+                warn!("No king found for {color:?}");
+                warn!("Board state: all_bb has {} pieces", self.all_bb.count_ones());
             }
             // Verify there's only one king
             if !bb.is_empty() {
@@ -750,11 +751,9 @@ impl Position {
         pos
     }
 
-    /// Create position from SFEN string (simplified for testing)
-    pub fn from_sfen(_sfen: &str) -> Result<Position, String> {
-        // For now, return startpos for any SFEN
-        // Full SFEN parsing would be implemented here
-        Ok(Position::startpos())
+    /// Create position from SFEN string
+    pub fn from_sfen(sfen: &str) -> Result<Position, String> {
+        crate::usi::parse_sfen(sfen).map_err(|e| e.to_string())
     }
 
     /// Compute Zobrist hash
