@@ -156,22 +156,19 @@ impl PVTable {
         // Copy child PV if exists
         if ply + 1 < MAX_PLY {
             let child_len = self.len[ply + 1] as usize;
-            // We need child_len + 1 positions: index 0 for the new move,
-            // and indices 1..=child_len for the child PV
-            #[allow(clippy::int_plus_one)]
-            if child_len > 0 && child_len + 1 <= MAX_PLY {
-                // Safety check: ensure we don't exceed array bounds when copying child PV
-                // We access first_half[ply][1..=child_len], where ply is the current row
-                // and child_len is the number of moves to copy from the child PV
+            if child_len > 0 && child_len < MAX_PLY {
+                // Safety check: ensure we don't exceed array bounds
                 debug_assert!(
-                    ply + 1 + child_len <= MAX_PLY,
-                    "PV copy would exceed MAX_PLY: ply={ply}, child_len={child_len}, MAX_PLY={MAX_PLY}"
+                    1 + child_len <= MAX_PLY,
+                    "PV copy would exceed MAX_PLY: child_len={child_len}, MAX_PLY={MAX_PLY}"
                 );
 
-                // Use split_at_mut to avoid mutable borrow conflict
-                let (first_half, second_half) = self.line.split_at_mut(ply + 1);
-                first_half[ply][1..=child_len].copy_from_slice(&second_half[0][0..child_len]);
-                self.len[ply] = 1 + self.len[ply + 1];
+                // Copy child PV moves to current ply (after the new best move)
+                // We copy from line[ply+1][0..child_len] to line[ply][1..1+child_len]
+                for i in 0..child_len {
+                    self.line[ply][i + 1] = self.line[ply + 1][i];
+                }
+                self.len[ply] = 1 + child_len as u8;
             }
         }
     }
@@ -415,7 +412,7 @@ impl EnhancedSearcher {
     pub fn search_with_limits(
         &mut self,
         pos: &mut Position,
-        limits: super::limits::SearchLimits,
+        limits: crate::search::SearchLimits,
     ) -> (Option<Move>, i32) {
         // Initialize start time
         self.start_time = Instant::now();
@@ -579,6 +576,11 @@ impl EnhancedSearcher {
                     depth > 1 && aspiration_failed,
                 );
 
+                // Check for search interruption
+                if score == SEARCH_INTERRUPTED {
+                    break;
+                }
+
                 if self.stop.load(Ordering::Relaxed) {
                     break;
                 }
@@ -647,8 +649,11 @@ impl EnhancedSearcher {
             }
 
             // 探索結果の保存
-            best_score = score;
-            last_root_score = score; // 次の深さで使用するため更新
+            // Don't update best_score if search was interrupted
+            if score != SEARCH_INTERRUPTED {
+                best_score = score;
+                last_root_score = score; // 次の深さで使用するため更新
+            }
 
             // Extract best move from TT
             if let Some(tt_entry) = self.tt.probe(pos.hash) {
@@ -765,11 +770,19 @@ impl EnhancedSearcher {
 
         if should_stop {
             self.stop.store(true, Ordering::Relaxed);
-            return 0;
+            return SEARCH_INTERRUPTED;
         }
 
         // Update node count
         self.nodes.fetch_add(1, Ordering::Relaxed);
+
+        // Check node limit immediately after increment for better accuracy
+        if let Some(limit) = self.node_limit {
+            if self.nodes.load(Ordering::Relaxed) >= limit {
+                self.stop.store(true, Ordering::Relaxed);
+                return SEARCH_INTERRUPTED;
+            }
+        }
 
         // Check for draws
         if pos.is_draw() {
@@ -863,6 +876,11 @@ impl EnhancedSearcher {
             self.undo_null_move(pos, undo);
             stack[ctx.ply + 1].null_move = false;
 
+            // Check for search interruption
+            if score == -SEARCH_INTERRUPTED {
+                return SEARCH_INTERRUPTED;
+            }
+
             if score >= ctx.beta {
                 return score;
             }
@@ -938,10 +956,20 @@ impl EnhancedSearcher {
                     stack,
                 );
 
+                // Check for search interruption
+                if score == -SEARCH_INTERRUPTED {
+                    return SEARCH_INTERRUPTED;
+                }
+
                 // Re-search if failed high
                 if score > ctx.alpha {
                     score =
                         -self.alpha_beta(pos, -ctx.beta, -ctx.alpha, new_depth, ctx.ply + 1, stack);
+
+                    // Check for search interruption
+                    if score == -SEARCH_INTERRUPTED {
+                        return SEARCH_INTERRUPTED;
+                    }
                 }
             } else if moves_searched > 1 {
                 // Null window search
@@ -954,10 +982,20 @@ impl EnhancedSearcher {
                     stack,
                 );
 
+                // Check for search interruption
+                if score == -SEARCH_INTERRUPTED {
+                    return SEARCH_INTERRUPTED;
+                }
+
                 // Re-search with full window if needed
                 if score > ctx.alpha && score < ctx.beta {
                     score =
                         -self.alpha_beta(pos, -ctx.beta, -ctx.alpha, new_depth, ctx.ply + 1, stack);
+
+                    // Check for search interruption
+                    if score == -SEARCH_INTERRUPTED {
+                        return SEARCH_INTERRUPTED;
+                    }
                 }
             } else {
                 // Full window search
@@ -966,6 +1004,11 @@ impl EnhancedSearcher {
 
             // Undo move
             pos.undo_move(mv, undo);
+
+            // Check for search interruption
+            if score == -SEARCH_INTERRUPTED {
+                return SEARCH_INTERRUPTED;
+            }
 
             if self.stop.load(Ordering::Relaxed) {
                 return best_score;
@@ -1054,15 +1097,18 @@ impl EnhancedSearcher {
         let is_aspiration_fail =
             ctx.ply == 0 && ctx.aspiration_failed && node_type != NodeType::Exact;
 
-        self.tt.store_with_aspiration(
-            pos.hash,
-            best_move,
-            best_score as i16,
-            static_eval as i16,
-            ctx.depth as u8,
-            node_type,
-            is_aspiration_fail,
-        );
+        // Don't store search interrupted results in TT
+        if best_score != SEARCH_INTERRUPTED {
+            self.tt.store_with_aspiration(
+                pos.hash,
+                best_move,
+                best_score as i16,
+                static_eval as i16,
+                ctx.depth as u8,
+                node_type,
+                is_aspiration_fail,
+            );
+        }
 
         best_score
     }
@@ -1083,10 +1129,18 @@ impl EnhancedSearcher {
 
         if should_stop {
             self.stop.store(true, Ordering::Relaxed);
-            return 0;
+            return SEARCH_INTERRUPTED;
         }
 
         self.nodes.fetch_add(1, Ordering::Relaxed);
+
+        // Check node limit immediately after increment for better accuracy
+        if let Some(limit) = self.node_limit {
+            if self.nodes.load(Ordering::Relaxed) >= limit {
+                self.stop.store(true, Ordering::Relaxed);
+                return SEARCH_INTERRUPTED;
+            }
+        }
 
         // Stand pat
         let stand_pat = if stack[ply].in_check {
@@ -1120,6 +1174,11 @@ impl EnhancedSearcher {
             let undo = pos.do_move(mv);
             let score = -self.quiescence(pos, -beta, -alpha, ply + 1, stack);
             pos.undo_move(mv, undo);
+
+            // Check for search interruption
+            if score == -SEARCH_INTERRUPTED {
+                return SEARCH_INTERRUPTED;
+            }
 
             if score > alpha {
                 alpha = score;
