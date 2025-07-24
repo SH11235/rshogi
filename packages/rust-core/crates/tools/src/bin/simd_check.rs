@@ -1,10 +1,8 @@
 //! Check which SIMD implementation is being used
 
-use std::time::Duration;
-
 use engine_core::{
     engine::controller::{Engine, EngineType},
-    search::search_basic::SearchLimits,
+    search::SearchLimits,
     Position,
 };
 
@@ -33,13 +31,7 @@ fn main() {
     {
         let mut pos = Position::startpos();
         let engine = Engine::new(EngineType::Nnue);
-        let limits = SearchLimits {
-            depth: 5,
-            time: Some(Duration::from_millis(100)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = SearchLimits::builder().depth(5).fixed_time_ms(100).build();
 
         let result = engine.search(&mut pos, limits);
         println!("  Nodes: {}", result.stats.nodes);
@@ -56,13 +48,7 @@ fn main() {
         for i in 0..5 {
             let mut pos = Position::startpos();
             let engine = Engine::new(EngineType::Nnue);
-            let limits = SearchLimits {
-                depth: 5,
-                time: Some(Duration::from_millis(100)),
-                nodes: None,
-                stop_flag: None,
-                info_callback: None,
-            };
+            let limits = SearchLimits::builder().depth(5).fixed_time_ms(100).build();
 
             let result = engine.search(&mut pos, limits);
             let nps = result.stats.nodes * 1_000_000_000 / result.stats.elapsed.as_nanos() as u64;
