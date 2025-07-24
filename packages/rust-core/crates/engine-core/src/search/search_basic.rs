@@ -439,16 +439,13 @@ mod tests {
     #[test]
     fn test_search_startpos() {
         let mut pos = Position::startpos();
-        let limits = SearchLimits {
-            depth: 3,
-            time: Some(Duration::from_secs(1)),
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
+        let limits = super::super::limits::SearchLimits::builder()
+            .depth(3)
+            .fixed_time_ms(1000)
+            .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits, evaluator);
+        let mut searcher = Searcher::new(limits.into(), evaluator);
         let result = searcher.search(&mut pos);
 
         // Should find a move
@@ -468,16 +465,13 @@ mod tests {
 
         let mut pos = Position::startpos();
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let limits = SearchLimits {
-            depth: 10, // Deep search that would normally take a while
-            time: None,
-            nodes: None,
-            stop_flag: Some(stop_flag.clone()),
-            info_callback: None,
-        };
+        let limits = super::super::limits::SearchLimits::builder()
+            .depth(10) // Deep search that would normally take a while
+            .stop_flag(stop_flag.clone())
+            .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits, evaluator);
+        let mut searcher = Searcher::new(limits.into(), evaluator);
 
         // Set stop flag after a short delay
         let stop_flag_clone = stop_flag.clone();
@@ -504,16 +498,13 @@ mod tests {
     fn test_fallback_move_quality() {
         let mut pos = Position::startpos();
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let limits = SearchLimits {
-            depth: 5,
-            time: None,
-            nodes: None,
-            stop_flag: Some(stop_flag.clone()),
-            info_callback: None,
-        };
+        let limits = super::super::limits::SearchLimits::builder()
+            .depth(5)
+            .stop_flag(stop_flag.clone())
+            .build();
 
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits, evaluator);
+        let mut searcher = Searcher::new(limits.into(), evaluator);
 
         // Set stop flag immediately to force fallback
         stop_flag.store(true, Ordering::Release);
@@ -536,80 +527,7 @@ mod tests {
         assert!(result.stats.nodes >= 1, "Should have evaluated at least one position");
     }
 
-    #[test]
-    fn test_search_limits_debug() {
-        let stop_flag1 = Arc::new(AtomicBool::new(false));
-        let stop_flag2 = Arc::new(AtomicBool::new(false));
-        let stop_flag1_clone = stop_flag1.clone();
-
-        let limits1 = SearchLimits {
-            depth: 10,
-            time: Some(Duration::from_secs(5)),
-            nodes: Some(1000000),
-            stop_flag: Some(stop_flag1),
-            info_callback: None,
-        };
-
-        let limits2 = SearchLimits {
-            depth: 10,
-            time: Some(Duration::from_secs(5)),
-            nodes: Some(1000000),
-            stop_flag: Some(stop_flag1_clone), // Same flag as limits1
-            info_callback: None,
-        };
-
-        let limits3 = SearchLimits {
-            depth: 10,
-            time: Some(Duration::from_secs(5)),
-            nodes: Some(1000000),
-            stop_flag: Some(stop_flag2), // Different flag
-            info_callback: None,
-        };
-
-        let limits4 = SearchLimits {
-            depth: 10,
-            time: None,
-            nodes: None,
-            stop_flag: None,
-            info_callback: None,
-        };
-
-        println!("limits1: {limits1:?}");
-        println!("limits2: {limits2:?}");
-        println!("limits3: {limits3:?}");
-        println!("limits4: {limits4:?}");
-
-        // Verify that same stop_flag shows same pointer
-        let debug1 = format!("{limits1:?}");
-        let debug2 = format!("{limits2:?}");
-        let debug3 = format!("{limits3:?}");
-
-        // Extract pointer addresses from debug strings
-        if let (Some(ptr1), Some(ptr2)) = (
-            debug1.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug1[start..].find(")").map(|end| &debug1[start..start + end])
-            }),
-            debug2.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug2[start..].find(")").map(|end| &debug2[start..start + end])
-            }),
-        ) {
-            assert_eq!(ptr1, ptr2, "Same stop_flag should show same pointer");
-        }
-
-        // Verify that different stop_flag shows different pointer
-        if let (Some(ptr1), Some(ptr3)) = (
-            debug1.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug1[start..].find(")").map(|end| &debug1[start..start + end])
-            }),
-            debug3.find("stop_flag: Some(").and_then(|idx| {
-                let start = idx + "stop_flag: Some(".len();
-                debug3[start..].find(")").map(|end| &debug3[start..start + end])
-            }),
-        ) {
-            assert_ne!(ptr1, ptr3, "Different stop_flags should show different pointers");
-        }
-    }
+    // test_search_limits_debug removed:
+    // This test was testing Debug formatting of the deprecated SearchLimits type.
+    // The new unified SearchLimits has its own Debug implementation tested in limits.rs
 }

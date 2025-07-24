@@ -108,13 +108,7 @@ fn test_nnue_performance() {
     let pos = Position::startpos();
     let engine = Engine::new(EngineType::Nnue);
 
-    let limits = SearchLimits {
-        depth: 4,
-        time: Some(Duration::from_millis(100)),
-        nodes: None,
-        stop_flag: None,
-        info_callback: None,
-    };
+    let limits = SearchLimits::builder().depth(4).fixed_time_ms(100).build();
 
     let start = Instant::now();
     let result = engine.search(&mut pos.clone(), limits);
