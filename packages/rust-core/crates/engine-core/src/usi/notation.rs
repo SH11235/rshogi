@@ -42,28 +42,11 @@ impl fmt::Display for UsiParseError {
 impl std::error::Error for UsiParseError {}
 
 /// Parse a USI square notation (e.g., "5e", "1a") to Square
+///
+/// This function is maintained for backward compatibility.
+/// Consider using `s.parse::<Square>()` directly for new code.
 pub fn parse_usi_square(s: &str) -> Result<Square, UsiParseError> {
-    if s.len() != 2 {
-        return Err(UsiParseError::InvalidSquare(s.to_string()));
-    }
-
-    let chars: Vec<char> = s.chars().collect();
-    let file = chars[0];
-    let rank = chars[1];
-
-    // File: '1'-'9' (right to left in Shogi)
-    let file_idx = match file {
-        '1'..='9' => 8 - (file.to_digit(10).unwrap() as u8 - 1),
-        _ => return Err(UsiParseError::InvalidSquare(s.to_string())),
-    };
-
-    // Rank: 'a'-'i' (top to bottom)
-    let rank_idx = match rank {
-        'a'..='i' => (rank as u32 - 'a' as u32) as u8,
-        _ => return Err(UsiParseError::InvalidSquare(s.to_string())),
-    };
-
-    Ok(Square::new(file_idx, rank_idx))
+    s.parse::<Square>()
 }
 
 /// Parse a USI piece character to PieceType
