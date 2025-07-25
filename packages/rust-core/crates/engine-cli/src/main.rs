@@ -98,11 +98,13 @@ fn wait_for_worker_with_timeout(
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
     searching: &mut bool,
+    stdout: &mut dyn Write,
 ) -> Result<()> {
     let deadline = Instant::now() + JOIN_TIMEOUT;
     let mut finished = false;
+    let mut engine_returned = false;
 
-    // Wait for Finished message or timeout
+    // Wait for Finished message AND EngineReturn message or timeout
     loop {
         select! {
             recv(worker_rx) -> msg => {
@@ -110,20 +112,30 @@ fn wait_for_worker_with_timeout(
                     Ok(WorkerMessage::Finished) => {
                         log::debug!("Worker thread finished cleanly");
                         finished = true;
-                        break;
+                        if engine_returned {
+                            break;
+                        }
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
                         let mut adapter = engine.lock().unwrap();
                         adapter.return_engine(returned_engine);
+                        engine_returned = true;
+                        if finished {
+                            break;
+                        }
                     }
                     Ok(WorkerMessage::Info(info)) => {
                         // Info messages during shutdown can be ignored
                         log::trace!("Received info during shutdown: {info:?}");
                     }
-                    Ok(WorkerMessage::BestMove { .. }) => {
-                        // BestMove should have been processed already
-                        log::trace!("Received bestmove during shutdown");
+                    Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
+                        // Forward bestmove to stdout instead of discarding it
+                        send_response(UsiResponse::BestMove {
+                            best_move,
+                            ponder: ponder_move,
+                        });
+                        stdout.flush()?;
                     }
                     Ok(WorkerMessage::Error(err)) => {
                         log::error!("Worker error during shutdown: {err}");
@@ -180,10 +192,11 @@ fn wait_for_search_completion(
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
+    stdout: &mut dyn Write,
 ) -> Result<()> {
     if *searching {
         stop_flag.store(true, Ordering::Release);
-        wait_for_worker_with_timeout(worker_handle, worker_rx, engine, searching)?;
+        wait_for_worker_with_timeout(worker_handle, worker_rx, engine, searching, stdout)?;
     }
     Ok(())
 }
@@ -346,24 +359,36 @@ fn run_engine() -> Result<()> {
                         log::debug!("Worker thread finished");
                         searching = false;
 
-                        // Drain any remaining Info messages in the queue
-                        while let Ok(msg) = worker_rx.try_recv() {
-                            match msg {
-                                WorkerMessage::Info(info) => {
+                        // Drain any remaining messages including EngineReturn
+                        let mut engine_returned = false;
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+
+                        while std::time::Instant::now() < deadline && !engine_returned {
+                            match worker_rx.try_recv() {
+                                Ok(WorkerMessage::Info(info)) => {
                                     send_response(UsiResponse::Info(info));
                                     if let Err(e) = stdout.flush() {
                                         log::debug!("Failed to flush stdout while draining info: {e}");
-                                        // Continue draining even if flush fails
                                     }
                                 }
-                                _ => {
-                                    // Other message types shouldn't be in queue after Finished
-                                    // If they are, it indicates an error condition, so we break
-                                    log::debug!("Unexpected message type after Finished: {:?}",
-                                               std::any::type_name_of_val(&msg));
-                                    break;
+                                Ok(WorkerMessage::EngineReturn(returned_engine)) => {
+                                    log::debug!("Engine returned after Finished");
+                                    let mut adapter = engine.lock().unwrap();
+                                    adapter.return_engine(returned_engine);
+                                    engine_returned = true;
+                                }
+                                Ok(other) => {
+                                    log::debug!("Unexpected message after Finished: {:?}",
+                                               std::any::type_name_of_val(&other));
+                                }
+                                Err(_) => {
+                                    thread::sleep(std::time::Duration::from_millis(10));
                                 }
                             }
+                        }
+
+                        if !engine_returned {
+                            log::warn!("Engine not returned within timeout after Finished");
                         }
                     }
                     Ok(WorkerMessage::Error(err)) => {
@@ -396,7 +421,13 @@ fn run_engine() -> Result<()> {
     // Stop any ongoing search with timeout
     stop_flag.store(true, Ordering::Release);
     if searching {
-        wait_for_worker_with_timeout(&mut worker_handle, &worker_rx, &engine, &mut searching)?;
+        wait_for_worker_with_timeout(
+            &mut worker_handle,
+            &worker_rx,
+            &engine,
+            &mut searching,
+            &mut stdout,
+        )?;
     }
 
     // Stop stdin reader thread by closing the channel
@@ -458,6 +489,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
+                ctx.stdout,
             )?;
 
             let mut engine = ctx.engine.lock().unwrap();
@@ -472,6 +504,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
+                ctx.stdout,
             )?;
 
             // Reset stop flag
