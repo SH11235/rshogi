@@ -12,8 +12,20 @@ pub use parser::parse_usi_command;
 
 /// USI option name constants
 pub const OPT_BYOYOMI_PERIODS: &str = "ByoyomiPeriods";
+pub const OPT_USI_BYOYOMI_PERIODS: &str = "USI_ByoyomiPeriods"; // Alias for compatibility
 pub const MAX_BYOYOMI_PERIODS: u32 = 10;
 pub const MIN_BYOYOMI_PERIODS: u32 = 1;
+
+/// Clamp periods value to valid range with optional warning
+pub fn clamp_periods(periods: u32, warn_on_clamp: bool) -> u32 {
+    let clamped = periods.clamp(MIN_BYOYOMI_PERIODS, MAX_BYOYOMI_PERIODS);
+    if warn_on_clamp && periods != clamped {
+        log::warn!(
+            "Periods value {periods} exceeds valid range {MIN_BYOYOMI_PERIODS}-{MAX_BYOYOMI_PERIODS}, clamping to {clamped}"
+        );
+    }
+    clamped
+}
 
 /// Standard engine options
 #[allow(dead_code)]
