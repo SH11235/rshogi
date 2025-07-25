@@ -24,7 +24,7 @@ fn test_ponder_output_depth_3() {
     let stderr_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         let mut logs = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.contains("Best move:") {
                 println!("LOG: {line}");
                 logs.push(line);
@@ -37,7 +37,7 @@ fn test_ponder_output_depth_3() {
     let stdout_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut lines = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.starts_with("bestmove") {
                 println!("USI: {line}");
             }
@@ -119,7 +119,7 @@ fn test_ponder_output_movetime() {
     let stderr_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         let mut logs = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.contains("Best move:") || line.contains("Search completed") {
                 println!("LOG: {line}");
                 logs.push(line);
@@ -132,7 +132,7 @@ fn test_ponder_output_movetime() {
     let stdout_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut lines = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if line.starts_with("bestmove") || line.starts_with("info") {
                 println!("USI: {line}");
             }
