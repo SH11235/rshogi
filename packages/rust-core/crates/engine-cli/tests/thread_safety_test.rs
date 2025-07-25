@@ -208,7 +208,7 @@ fn test_multiple_go_commands_concurrent() {
 
     // Set position
     {
-        let mut stdin = stdin.lock().unwrap();
+        let mut stdin = stdin.lock().expect("Failed to lock stdin for initial position");
         send_command(&mut *stdin, "position startpos");
     }
 
@@ -225,7 +225,7 @@ fn test_multiple_go_commands_concurrent() {
 
         let handle = thread::spawn(move || {
             barrier.wait();
-            let mut stdin = stdin.lock().unwrap();
+            let mut stdin = stdin.lock().expect("Failed to lock stdin for go command");
             send_command(&mut *stdin, &format!("go movetime {}", 1000 + i * 100));
             drop(stdin); // Release lock immediately
             success_count.fetch_add(1, Ordering::SeqCst);
@@ -238,12 +238,50 @@ fn test_multiple_go_commands_concurrent() {
         handle.join().expect("Thread panicked");
     }
 
-    // Should get exactly one bestmove (engine should handle concurrent go gracefully)
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
-    assert!(result.is_ok(), "Failed to get bestmove after concurrent go commands");
+    // Collect all messages to verify proper handling of multiple go commands
+    let mut messages = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut bestmove_count = 0;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                messages.push(line.clone());
+                if line.starts_with("bestmove") {
+                    bestmove_count += 1;
+                }
+                if line.contains("Engine is currently in use") || line.contains("error") {
+                    println!("Engine busy/error message: {line}");
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Engine should process all go commands sequentially (current implementation)
+    // This is acceptable behavior - engine queues and processes each command
+    println!("Received {bestmove_count} bestmove responses");
+    assert!(bestmove_count >= 1, "Expected at least 1 bestmove, got {bestmove_count}");
+
+    // Check for any error messages
+    let error_messages: Vec<_> = messages
+        .iter()
+        .filter(|m| m.contains("error") || m.contains("Engine is currently in use"))
+        .collect();
+    if !error_messages.is_empty() {
+        println!("Error messages: {error_messages:?}");
+    }
 
     // Verify we sent 3 commands
     assert_eq!(success_count.load(Ordering::SeqCst), 3, "Not all go commands were sent");
+
+    // Verify engine handled all commands without errors
+    assert!(error_messages.is_empty(), "Engine reported errors: {error_messages:?}");
 
     // Cleanup
     {
@@ -269,7 +307,7 @@ fn test_position_update_during_stop() {
     }
 
     // Wait for search to actually start by looking for info output
-    match read_until_pattern(&rx, "info", Duration::from_millis(500)) {
+    match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
         Ok(_) => println!("Search confirmed started (info received)"),
         Err(e) => {
             println!("Warning: No info line for infinite search: {e}");
@@ -403,7 +441,7 @@ fn test_rapid_go_stop_cycles() {
         send_command(&mut stdin, "go movetime 500");
 
         // Wait for "info" line to confirm search actually started
-        match read_until_pattern(&rx, "info", Duration::from_millis(500)) {
+        match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
             Ok(_) => {
                 println!("Search started (info received), sending stop");
             }
