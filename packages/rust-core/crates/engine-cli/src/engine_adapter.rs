@@ -750,8 +750,9 @@ fn apply_go_params(
 mod tests {
     use super::*;
     use engine_core::movegen::MoveGen;
-    use engine_core::shogi::{Move, MoveList, Position, Square};
+    use engine_core::shogi::{Move, MoveList, Position};
     use engine_core::time_management::TimeControl;
+    use engine_core::usi::parse_usi_square;
 
     const DEFAULT_BYOYOMI_PERIODS: u32 = 1;
 
@@ -762,7 +763,7 @@ mod tests {
         let mut legal_moves = MoveList::new();
         move_gen.generate_all(position, &mut legal_moves);
 
-        if legal_moves.len() == 0 {
+        if legal_moves.is_empty() {
             return Err(anyhow::anyhow!("No legal moves in position"));
         }
 
@@ -1446,8 +1447,8 @@ mod tests {
 
         // Invalid move - trying to parse our color's move should fail in opponent's turn
         // So we test with an illegal move instead
-        let illegal_from = Square::new(0, 0); // 9a in internal coordinates
-        let illegal_to = Square::new(8, 8); // 1i in internal coordinates - impossible move
+        let illegal_from = parse_usi_square("9a").unwrap();
+        let illegal_to = parse_usi_square("1i").unwrap();
         let invalid_ponder = Move::normal(illegal_from, illegal_to, false);
         assert!(
             !EngineAdapter::is_valid_ponder_move(&position, &best_move, &invalid_ponder),

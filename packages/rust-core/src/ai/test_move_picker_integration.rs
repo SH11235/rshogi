@@ -9,6 +9,7 @@ mod tests {
     use crate::ai::movegen::MoveGen;
     use crate::ai::moves::{Move, MoveList};
     use crate::ai::search_enhanced::{EnhancedSearcher, SearchStack};
+    use crate::ai::usi::parse_usi_square;
     use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Duration;
@@ -50,7 +51,11 @@ mod tests {
         let stack = SearchStack::default();
 
         // Set a specific move as TT move (2g2f)
-        let tt_move = Some(Move::normal(Square::new(7, 2), Square::new(7, 3), false));
+        let tt_move = Some(Move::normal(
+            parse_usi_square("2g").unwrap(),
+            parse_usi_square("2f").unwrap(),
+            false,
+        ));
         let mut picker = MovePicker::new(&pos, tt_move, None, &history, &stack, 1);
 
         // First move should be TT move
@@ -64,8 +69,17 @@ mod tests {
         let mut stack = SearchStack::default();
 
         // Set killer moves (legal pawn moves)
-        stack.killers[0] = Some(Move::normal(Square::new(2, 2), Square::new(2, 3), false));
-        stack.killers[1] = Some(Move::normal(Square::new(3, 2), Square::new(3, 3), false));
+        // Note: In this implementation, these correspond to 7g7f and 6g6f
+        stack.killers[0] = Some(Move::normal(
+            parse_usi_square("7g").unwrap(),
+            parse_usi_square("7f").unwrap(),
+            false,
+        ));
+        stack.killers[1] = Some(Move::normal(
+            parse_usi_square("6g").unwrap(),
+            parse_usi_square("6f").unwrap(),
+            false,
+        ));
 
         let mut picker = MovePicker::new(&pos, None, None, &history, &stack, 1);
 
@@ -114,11 +128,31 @@ mod tests {
         // Make some moves to create a position with captures
         // These moves create a position where captures are possible
         let moves = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
-            Move::normal(Square::new(2, 6), Square::new(2, 5), false), // 7c7d
-            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
-            Move::normal(Square::new(2, 4), Square::new(2, 5), false), // 7e7d (capture)
+            Move::normal(
+                parse_usi_square("7g").unwrap(),
+                parse_usi_square("7f").unwrap(),
+                false,
+            ), // 7g7f
+            Move::normal(
+                parse_usi_square("7c").unwrap(),
+                parse_usi_square("7d").unwrap(),
+                false,
+            ), // 7c7d
+            Move::normal(
+                parse_usi_square("7f").unwrap(),
+                parse_usi_square("7e").unwrap(),
+                false,
+            ), // 7f7e
+            Move::normal(
+                parse_usi_square("6c").unwrap(),
+                parse_usi_square("6d").unwrap(),
+                false,
+            ), // 6c6d
+            Move::normal(
+                parse_usi_square("7e").unwrap(),
+                parse_usi_square("7d").unwrap(),
+                false,
+            ), // 7e7d (capture)
         ];
 
         for mv in &moves {
@@ -164,11 +198,31 @@ mod tests {
 
         // Make moves to create capture opportunities
         let moves = [
-            Move::normal(Square::new(7, 2), Square::new(7, 3), false), // 2g2f
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
-            Move::normal(Square::new(7, 3), Square::new(7, 4), false), // 2f2e
-            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
-            Move::normal(Square::new(7, 4), Square::new(7, 5), false), // 2e2d (threatens capture)
+            Move::normal(
+                parse_usi_square("2g").unwrap(),
+                parse_usi_square("2f").unwrap(),
+                false,
+            ), // 2g2f
+            Move::normal(
+                parse_usi_square("6c").unwrap(),
+                parse_usi_square("6d").unwrap(),
+                false,
+            ), // 6c6d
+            Move::normal(
+                parse_usi_square("2f").unwrap(),
+                parse_usi_square("2e").unwrap(),
+                false,
+            ), // 2f2e
+            Move::normal(
+                parse_usi_square("6d").unwrap(),
+                parse_usi_square("6e").unwrap(),
+                false,
+            ), // 6d6e
+            Move::normal(
+                parse_usi_square("2e").unwrap(),
+                parse_usi_square("2d").unwrap(),
+                false,
+            ), // 2e2d (threatens capture)
         ];
 
         for mv in &moves {
@@ -197,10 +251,10 @@ mod tests {
         let stack = SearchStack::default();
 
         // Update history for a specific move (5g5f)
-        // In the starting position, square 4,2 has a Pawn piece for Black
+        // In the starting position, this is a pawn move
         let good_move = Move::normal_with_piece(
-            Square::new(4, 2),
-            Square::new(4, 3),
+            parse_usi_square("5g").unwrap(),
+            parse_usi_square("5f").unwrap(),
             false,
             PieceType::Pawn,
             None,
