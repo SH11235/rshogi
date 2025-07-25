@@ -203,7 +203,7 @@ fn get_flush_interval_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .map(|v| {
-            if v == 0 && cfg!(test) {
+            if v == 0 && (cfg!(test) || std::env::var("USI_BENCH_MODE").is_ok()) {
                 v
             } else {
                 v.clamp(1, MAX_FLUSH_INTERVAL) // 上限値も設定
