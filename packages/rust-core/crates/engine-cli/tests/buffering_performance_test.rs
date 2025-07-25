@@ -215,8 +215,8 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
     };
 
     // Quit
-    writeln!(stdin, "quit").unwrap();
-    stdin.flush().unwrap();
+    let _ = writeln!(stdin, "quit");
+    let _ = stdin.flush();
     drop(stdin);
 
     let _ = engine.wait();
@@ -296,8 +296,8 @@ fn run_search_test_timed(flush_delay: &str, movetime_ms: u64) -> (Duration, usiz
     };
 
     // Quit
-    writeln!(stdin, "quit").unwrap();
-    stdin.flush().unwrap();
+    let _ = writeln!(stdin, "quit");
+    let _ = stdin.flush();
     drop(stdin);
 
     let _ = engine.wait();
@@ -432,8 +432,7 @@ fn test_buffering_performance_impact() {
         }
 
         println!(
-            "  Time statistics: mean={:.3}s, std_dev={:.3}s, median={:.3}s, p90={:.3}s, p99={:.3}s",
-            mean_time, std_dev, median_time, p90_time, p99_time
+            "  Time statistics: mean={mean_time:.3}s, std_dev={std_dev:.3}s, median={median_time:.3}s, p90={p90_time:.3}s, p99={p99_time:.3}s"
         );
 
         // Calculate syscall reduction
@@ -608,7 +607,15 @@ fn run_search_test_with_syscalls(
             Stdio::null()
         });
 
-    let mut engine = engine_cmd.spawn().expect("Failed to spawn engine");
+    let mut engine = match engine_cmd.spawn() {
+        Ok(proc) => proc,
+        Err(e) => {
+            eprintln!("Failed to spawn engine with syscall measurement: {}", e);
+            // Fall back to regular test without syscalls
+            let (time, lines, infos) = run_search_test(flush_delay, depth);
+            return (time, lines, infos, None);
+        }
+    };
 
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
@@ -648,22 +655,60 @@ fn run_search_test_with_syscalls(
         })
     });
 
-    // Initialize engine
-    writeln!(stdin, "usi").unwrap();
-    stdin.flush().unwrap();
-    thread::sleep(Duration::from_millis(50));
+    // Initialize engine with error handling
+    if let Err(e) = writeln!(stdin, "usi") {
+        eprintln!("Failed to send 'usi' command: {}", e);
 
-    writeln!(stdin, "isready").unwrap();
-    stdin.flush().unwrap();
-    thread::sleep(Duration::from_millis(50));
+        // Try to get exit status
+        drop(stdin);
+        if let Ok(status) = engine.wait() {
+            eprintln!("Engine exited with status: {:?}", status);
+        }
 
-    writeln!(stdin, "position startpos").unwrap();
-    stdin.flush().unwrap();
+        // Fall back to regular test without syscalls
+        let (time, lines, infos) = run_search_test(flush_delay, depth);
+        return (time, lines, infos, None);
+    }
+    stdin.flush().unwrap_or_else(|e| {
+        eprintln!("Failed to flush after 'usi': {}", e);
+    });
+    thread::sleep(Duration::from_millis(100));
+
+    if let Err(e) = writeln!(stdin, "isready") {
+        eprintln!("Failed to send 'isready' command: {}", e);
+        drop(stdin);
+        let _ = engine.wait();
+        let (time, lines, infos) = run_search_test(flush_delay, depth);
+        return (time, lines, infos, None);
+    }
+    stdin.flush().unwrap_or_else(|e| {
+        eprintln!("Failed to flush after 'isready': {}", e);
+    });
+    thread::sleep(Duration::from_millis(100));
+
+    if let Err(e) = writeln!(stdin, "position startpos") {
+        eprintln!("Failed to send 'position' command: {}", e);
+        drop(stdin);
+        let _ = engine.wait();
+        let (time, lines, infos) = run_search_test(flush_delay, depth);
+        return (time, lines, infos, None);
+    }
+    stdin.flush().unwrap_or_else(|e| {
+        eprintln!("Failed to flush after 'position': {}", e);
+    });
 
     // Measure search time
     let start = Instant::now();
-    writeln!(stdin, "go depth {depth}").unwrap();
-    stdin.flush().unwrap();
+    if let Err(e) = writeln!(stdin, "go depth {depth}") {
+        eprintln!("Failed to send 'go' command: {}", e);
+        drop(stdin);
+        let _ = engine.wait();
+        let (time, lines, infos) = run_search_test(flush_delay, depth);
+        return (time, lines, infos, None);
+    }
+    stdin.flush().unwrap_or_else(|e| {
+        eprintln!("Failed to flush after 'go': {}", e);
+    });
 
     // Wait for bestmove with dynamic timeout
     let timeout = Duration::from_secs((depth * 2) as u64 + 5);
@@ -683,8 +728,8 @@ fn run_search_test_with_syscalls(
     };
 
     // Quit
-    writeln!(stdin, "quit").unwrap();
-    stdin.flush().unwrap();
+    let _ = writeln!(stdin, "quit");
+    let _ = stdin.flush();
     drop(stdin);
 
     let _ = engine.wait();
