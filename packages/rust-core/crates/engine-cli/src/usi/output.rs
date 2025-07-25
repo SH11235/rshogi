@@ -173,9 +173,13 @@ impl fmt::Display for SearchInfo {
     }
 }
 
-/// Helper to send USI response to stdout
+/// Helper to send USI response to stdout with automatic flush
 pub fn send_response(response: UsiResponse) {
+    use std::io::{self, Write};
+
     println!("{response}");
+    // Flush stdout to ensure immediate delivery
+    let _ = io::stdout().flush();
 }
 
 /// Helper to send info string message

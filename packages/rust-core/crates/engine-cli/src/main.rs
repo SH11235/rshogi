@@ -17,7 +17,7 @@ use usi::output::SearchInfo;
 use usi::{parse_usi_command, send_info_string, send_response, UsiCommand, UsiResponse};
 
 // Constants for timeout and channel management
-const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const CHANNEL_SIZE: usize = 1024;
 const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -90,6 +90,43 @@ struct CommandContext<'a> {
     worker_handle: &'a mut Option<JoinHandle<()>>,
     searching: &'a mut bool,
     stdout: &'a mut dyn Write,
+    current_search_timeout: &'a mut Duration,
+}
+
+/// Calculate maximum expected search time from GoParams
+fn calculate_max_search_time(params: &usi::GoParams) -> Duration {
+    if params.infinite {
+        // For infinite search, use a large but reasonable timeout
+        return Duration::from_secs(3600); // 1 hour
+    }
+
+    if let Some(movetime) = params.movetime {
+        // Fixed time per move + margin
+        return Duration::from_millis(movetime + 1000);
+    }
+
+    // For time-based searches, estimate based on available time
+    let mut max_time = 0u64;
+
+    if let Some(wtime) = params.wtime {
+        max_time = max_time.max(wtime);
+    }
+    if let Some(btime) = params.btime {
+        max_time = max_time.max(btime);
+    }
+    if let Some(byoyomi) = params.byoyomi {
+        // Byoyomi could be used multiple times
+        let periods = params.periods.unwrap_or(1) as u64;
+        max_time = max_time.max(byoyomi * periods);
+    }
+
+    if max_time > 0 {
+        // Use half of available time + margin
+        Duration::from_millis(max_time / 2 + 2000)
+    } else {
+        // Default timeout for depth/node limited searches
+        Duration::from_secs(60)
+    }
 }
 
 /// Wait for worker thread to finish with timeout
@@ -98,11 +135,14 @@ fn wait_for_worker_with_timeout(
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
     searching: &mut bool,
+    _stdout: &mut dyn Write,
+    timeout: Duration,
 ) -> Result<()> {
-    let deadline = Instant::now() + JOIN_TIMEOUT;
+    let deadline = Instant::now() + timeout.max(MIN_JOIN_TIMEOUT);
     let mut finished = false;
+    let mut engine_returned = false;
 
-    // Wait for Finished message or timeout
+    // Wait for Finished message AND EngineReturn message or timeout
     loop {
         select! {
             recv(worker_rx) -> msg => {
@@ -110,20 +150,31 @@ fn wait_for_worker_with_timeout(
                     Ok(WorkerMessage::Finished) => {
                         log::debug!("Worker thread finished cleanly");
                         finished = true;
-                        break;
+                        if engine_returned {
+                            break;
+                        }
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
                         let mut adapter = engine.lock().unwrap();
                         adapter.return_engine(returned_engine);
+                        engine_returned = true;
+                        if finished {
+                            break;
+                        }
                     }
                     Ok(WorkerMessage::Info(info)) => {
                         // Info messages during shutdown can be ignored
                         log::trace!("Received info during shutdown: {info:?}");
                     }
-                    Ok(WorkerMessage::BestMove { .. }) => {
-                        // BestMove should have been processed already
-                        log::trace!("Received bestmove during shutdown");
+                    Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
+                        // Forward bestmove to stdout instead of discarding it
+                        send_response(UsiResponse::BestMove {
+                            best_move,
+                            ponder: ponder_move,
+                        });
+                        // Mark search as finished when bestmove is received
+                        *searching = false;
                     }
                     Ok(WorkerMessage::Error(err)) => {
                         log::error!("Worker error during shutdown: {err}");
@@ -136,9 +187,9 @@ fn wait_for_worker_with_timeout(
             }
             default(SELECT_TIMEOUT) => {
                 if Instant::now() > deadline {
-                    log::error!("Worker thread timeout after {JOIN_TIMEOUT:?}");
-                    // Fatal error - exit process
-                    std::process::exit(1);
+                    log::error!("Worker thread timeout after {:?}", timeout.max(MIN_JOIN_TIMEOUT));
+                    // Return error instead of exit for graceful handling
+                    return Err(anyhow::anyhow!("Worker thread timeout"));
                 }
             }
         }
@@ -180,10 +231,18 @@ fn wait_for_search_completion(
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
+    stdout: &mut dyn Write,
 ) -> Result<()> {
     if *searching {
         stop_flag.store(true, Ordering::Release);
-        wait_for_worker_with_timeout(worker_handle, worker_rx, engine, searching)?;
+        wait_for_worker_with_timeout(
+            worker_handle,
+            worker_rx,
+            engine,
+            searching,
+            stdout,
+            MIN_JOIN_TIMEOUT,
+        )?;
     }
     Ok(())
 }
@@ -284,6 +343,7 @@ fn run_engine() -> Result<()> {
     // Store active worker thread handle
     let mut worker_handle: Option<JoinHandle<()>> = None;
     let mut searching = false;
+    let mut current_search_timeout = MIN_JOIN_TIMEOUT;
 
     // Get stdout handle
     let stdout = io::stdout();
@@ -313,6 +373,7 @@ fn run_engine() -> Result<()> {
                             worker_handle: &mut worker_handle,
                             searching: &mut searching,
                             stdout: &mut stdout,
+                            current_search_timeout: &mut current_search_timeout,
                         };
                         handle_command(cmd, &mut ctx)?;
                     }
@@ -327,51 +388,48 @@ fn run_engine() -> Result<()> {
                 match msg {
                     Ok(WorkerMessage::Info(info)) => {
                         send_response(UsiResponse::Info(info));
-                        if let Err(e) = stdout.flush() {
-                            log::error!("Failed to flush stdout after sending info: {e}");
-                            return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
-                        }
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
                         send_response(UsiResponse::BestMove {
                             best_move,
                             ponder: ponder_move,
                         });
-                        if let Err(e) = stdout.flush() {
-                            log::error!("Failed to flush stdout after sending best move: {e}");
-                            return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
-                        }
                     }
                     Ok(WorkerMessage::Finished) => {
                         log::debug!("Worker thread finished");
                         searching = false;
 
-                        // Drain any remaining Info messages in the queue
-                        while let Ok(msg) = worker_rx.try_recv() {
-                            match msg {
-                                WorkerMessage::Info(info) => {
+                        // Drain any remaining messages including EngineReturn
+                        let mut engine_returned = false;
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+
+                        while std::time::Instant::now() < deadline && !engine_returned {
+                            match worker_rx.try_recv() {
+                                Ok(WorkerMessage::Info(info)) => {
                                     send_response(UsiResponse::Info(info));
-                                    if let Err(e) = stdout.flush() {
-                                        log::debug!("Failed to flush stdout while draining info: {e}");
-                                        // Continue draining even if flush fails
-                                    }
                                 }
-                                _ => {
-                                    // Other message types shouldn't be in queue after Finished
-                                    // If they are, it indicates an error condition, so we break
-                                    log::debug!("Unexpected message type after Finished: {:?}",
-                                               std::any::type_name_of_val(&msg));
-                                    break;
+                                Ok(WorkerMessage::EngineReturn(returned_engine)) => {
+                                    log::debug!("Engine returned after Finished");
+                                    let mut adapter = engine.lock().unwrap();
+                                    adapter.return_engine(returned_engine);
+                                    engine_returned = true;
+                                }
+                                Ok(other) => {
+                                    log::debug!("Unexpected message after Finished: {:?}",
+                                               std::any::type_name_of_val(&other));
+                                }
+                                Err(_) => {
+                                    thread::sleep(std::time::Duration::from_millis(10));
                                 }
                             }
+                        }
+
+                        if !engine_returned {
+                            log::warn!("Engine not returned within timeout after Finished");
                         }
                     }
                     Ok(WorkerMessage::Error(err)) => {
                         send_info_string(format!("Error: {err}"));
-                        if let Err(e) = stdout.flush() {
-                            log::error!("Failed to flush stdout after sending error: {e}");
-                            return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
-                        }
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
@@ -396,7 +454,14 @@ fn run_engine() -> Result<()> {
     // Stop any ongoing search with timeout
     stop_flag.store(true, Ordering::Release);
     if searching {
-        wait_for_worker_with_timeout(&mut worker_handle, &worker_rx, &engine, &mut searching)?;
+        wait_for_worker_with_timeout(
+            &mut worker_handle,
+            &worker_rx,
+            &engine,
+            &mut searching,
+            &mut stdout,
+            MIN_JOIN_TIMEOUT,
+        )?;
     }
 
     // Stop stdin reader thread by closing the channel
@@ -427,10 +492,6 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             }
 
             send_response(UsiResponse::UsiOk);
-            if let Err(e) = ctx.stdout.flush() {
-                log::error!("Failed to flush stdout after sending uciok: {e}");
-                return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
-            }
         }
 
         UsiCommand::IsReady => {
@@ -440,10 +501,6 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 engine.initialize()?;
             }
             send_response(UsiResponse::ReadyOk);
-            if let Err(e) = ctx.stdout.flush() {
-                log::error!("Failed to flush stdout after sending readyok: {e}");
-                return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
-            }
         }
 
         UsiCommand::Position {
@@ -458,6 +515,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
+                ctx.stdout,
             )?;
 
             let mut engine = ctx.engine.lock().unwrap();
@@ -472,10 +530,14 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
+                ctx.stdout,
             )?;
 
             // Reset stop flag
             ctx.stop_flag.store(false, Ordering::Release);
+
+            // Calculate timeout for this search
+            *ctx.current_search_timeout = calculate_max_search_time(&params);
 
             // Clone necessary data for worker thread
             let engine_clone = Arc::clone(ctx.engine);
@@ -515,10 +577,6 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     best_move: "resign".to_string(),
                     ponder: None,
                 });
-                if let Err(e) = ctx.stdout.flush() {
-                    log::error!("Failed to flush stdout after sending resign: {e}");
-                    return Err(anyhow::anyhow!("Failed to flush stdout: {}", e));
-                }
             }
         }
 
