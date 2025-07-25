@@ -10,6 +10,11 @@ pub use conversion::create_position;
 pub use output::{send_info_string, send_response, UsiResponse};
 pub use parser::parse_usi_command;
 
+/// USI option name constants
+pub const OPT_BYOYOMI_PERIODS: &str = "ByoyomiPeriods";
+pub const MAX_BYOYOMI_PERIODS: u32 = 10;
+pub const MIN_BYOYOMI_PERIODS: u32 = 1;
+
 /// Standard engine options
 #[allow(dead_code)]
 pub fn default_options() -> Vec<EngineOption> {
