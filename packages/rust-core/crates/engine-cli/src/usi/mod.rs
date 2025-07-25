@@ -7,7 +7,10 @@ pub mod parser;
 
 pub use commands::{EngineOption, GameResult, GoParams, UsiCommand};
 pub use conversion::create_position;
-pub use output::{send_info_string, send_response, send_response_or_exit, UsiResponse};
+pub use output::{
+    ensure_flush_on_exit, flush_final, send_info_string, send_response, send_response_or_exit,
+    UsiResponse,
+};
 pub use parser::parse_usi_command;
 
 /// USI option name constants
