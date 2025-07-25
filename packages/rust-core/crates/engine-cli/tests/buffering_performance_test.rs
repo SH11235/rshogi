@@ -24,12 +24,10 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
         let mut line_count = 0;
         let mut info_count = 0;
 
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                line_count += 1;
-                if line.starts_with("info ") && !line.contains("string") {
-                    info_count += 1;
-                }
+        for line in reader.lines().flatten() {
+            line_count += 1;
+            if line.starts_with("info ") && !line.contains("string") {
+                info_count += 1;
             }
         }
         (line_count, info_count)
