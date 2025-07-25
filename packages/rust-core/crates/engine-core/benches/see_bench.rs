@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::movegen::MoveGen;
-use engine_core::shogi::{Color, Move, MoveList, Piece, PieceType, Position, Square};
+use engine_core::shogi::{Color, Move, MoveList, Piece, PieceType, Position};
+use engine_core::usi::parse_usi_square;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::hint::black_box;
@@ -13,13 +14,13 @@ fn create_test_positions() -> Vec<(String, Position)> {
     {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Pawn, Color::White));
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
         positions.push(("simple_pawn".to_string(), pos));
@@ -29,19 +30,23 @@ fn create_test_positions() -> Vec<(String, Position)> {
     {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::White));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("6d").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            parse_usi_square("4f").unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
         pos.board
-            .put_piece(Square::new(3, 3), Piece::new(PieceType::Silver, Color::Black));
+            .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Rook, Color::White));
         pos.board
-            .put_piece(Square::new(5, 5), Piece::new(PieceType::Bishop, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Rook, Color::White));
-        pos.board
-            .put_piece(Square::new(4, 2), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Rook, Color::Black));
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
         positions.push(("complex_exchange".to_string(), pos));
@@ -51,17 +56,17 @@ fn create_test_positions() -> Vec<(String, Position)> {
     {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Rook, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Pawn, Color::White));
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
         positions.push(("xray_attack".to_string(), pos));
@@ -71,17 +76,19 @@ fn create_test_positions() -> Vec<(String, Position)> {
     {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::White));
         pos.board
-            .put_piece(Square::new(5, 4), Piece::new(PieceType::Pawn, Color::White));
-        pos.board
-            .put_piece(Square::new(3, 3), Piece::new(PieceType::Silver, Color::Black));
+            .put_piece(parse_usi_square("4e").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("6d").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
         positions.push(("pinned_pieces".to_string(), pos));
@@ -91,31 +98,39 @@ fn create_test_positions() -> Vec<(String, Position)> {
     {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Central target
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::White));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::White));
 
         // Multiple attackers
         pos.board
-            .put_piece(Square::new(3, 3), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("6d").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board.put_piece(
+            parse_usi_square("7c").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
         pos.board
-            .put_piece(Square::new(2, 2), Piece::new(PieceType::Silver, Color::Black));
+            .put_piece(parse_usi_square("4f").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("3g").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
         pos.board
-            .put_piece(Square::new(5, 5), Piece::new(PieceType::Pawn, Color::White));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::Black));
         pos.board
-            .put_piece(Square::new(6, 6), Piece::new(PieceType::Silver, Color::White));
-        pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::Rook, Color::White));
-        pos.board
-            .put_piece(Square::new(1, 1), Piece::new(PieceType::Bishop, Color::Black));
-        pos.board
-            .put_piece(Square::new(7, 7), Piece::new(PieceType::Bishop, Color::White));
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("8b").unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
+        pos.board.put_piece(
+            parse_usi_square("2h").unwrap(),
+            Piece::new(PieceType::Bishop, Color::White),
+        );
 
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
