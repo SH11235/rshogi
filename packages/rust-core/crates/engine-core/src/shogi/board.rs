@@ -62,31 +62,35 @@ impl Square {
         Square(80 - self.0)
     }
 
-    /// Create square from USI notation characters
+    /// Create square from USI notation characters (low-level API)
     ///
-    /// This is the recommended way to create a Square from known coordinates.
+    /// # Arguments
+    /// * `file` - File character ('1'-'9')
+    /// * `rank` - Rank character ('a'-'i')
     ///
-    /// # Examples
+    /// # Example
     /// ```
     /// use engine_core::shogi::board::Square;
     ///
-    /// let sq = Square::from_usi('7', 'g').unwrap();
+    /// let sq = Square::from_usi_chars('7', 'g').unwrap();
     /// assert_eq!(sq.to_string(), "7g");
     /// ```
-    pub fn from_usi(file_char: char, rank_char: char) -> Result<Self, &'static str> {
+    pub fn from_usi_chars(file: char, rank: char) -> Result<Self, crate::usi::UsiParseError> {
+        use crate::usi::UsiParseError;
+
         // Validate file character
-        let file = match file_char {
-            '1'..='9' => 8 - (file_char.to_digit(10).unwrap() as u8 - 1),
-            _ => return Err("Invalid file character"),
+        let file_idx = match file {
+            '1'..='9' => 8 - (file.to_digit(10).unwrap() as u8 - 1),
+            _ => return Err(UsiParseError::InvalidSquare(format!("Invalid file: {file}"))),
         };
 
         // Validate rank character
-        let rank = match rank_char {
-            'a'..='i' => (rank_char as u32 - 'a' as u32) as u8,
-            _ => return Err("Invalid rank character"),
+        let rank_idx = match rank {
+            'a'..='i' => (rank as u32 - 'a' as u32) as u8,
+            _ => return Err(UsiParseError::InvalidSquare(format!("Invalid rank: {rank}"))),
         };
 
-        Ok(Square::new(file, rank))
+        Ok(Square::new(file_idx, rank_idx))
     }
 }
 
@@ -110,6 +114,32 @@ impl fmt::Display for Square {
         let file = b'9' - self.file();
         let rank = b'a' + self.rank();
         write!(f, "{}{}", file as char, rank as char)
+    }
+}
+
+impl std::str::FromStr for Square {
+    type Err = crate::usi::UsiParseError;
+
+    /// Parse USI square notation (e.g., "5e", "1a")
+    ///
+    /// # Example
+    /// ```
+    /// use engine_core::shogi::board::Square;
+    /// use std::str::FromStr;
+    ///
+    /// let sq: Square = "7g".parse().unwrap();
+    /// assert_eq!(sq, Square::new(2, 6));
+    /// ```
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use crate::usi::UsiParseError;
+
+        let mut chars = s.chars();
+        match (chars.next(), chars.next(), chars.next()) {
+            (Some(f), Some(r), None) => Self::from_usi_chars(f, r),
+            _ => {
+                Err(UsiParseError::InvalidSquare(format!("Expected 2 characters, got {}", s.len())))
+            }
+        }
     }
 }
 
@@ -1934,31 +1964,48 @@ mod tests {
     }
 
     #[test]
-    fn test_square_from_usi() {
-        // Valid cases
-        let sq = Square::from_usi('7', 'g').unwrap();
+    fn test_square_from_usi_chars() {
+        let sq = Square::from_usi_chars('7', 'g').unwrap();
         assert_eq!(sq, Square::new(2, 6)); // 7g
         assert_eq!(sq.to_string(), "7g");
 
-        let sq = Square::from_usi('1', 'a').unwrap();
+        let sq = Square::from_usi_chars('1', 'a').unwrap();
         assert_eq!(sq, Square::new(8, 0)); // 1a
         assert_eq!(sq.to_string(), "1a");
 
-        let sq = Square::from_usi('9', 'i').unwrap();
+        let sq = Square::from_usi_chars('9', 'i').unwrap();
         assert_eq!(sq, Square::new(0, 8)); // 9i
         assert_eq!(sq.to_string(), "9i");
 
-        let sq = Square::from_usi('5', 'e').unwrap();
+        let sq = Square::from_usi_chars('5', 'e').unwrap();
         assert_eq!(sq, Square::new(4, 4)); // 5e
         assert_eq!(sq.to_string(), "5e");
 
         // Invalid file
-        assert!(Square::from_usi('0', 'e').is_err());
-        assert!(Square::from_usi('a', 'e').is_err());
+        assert!(Square::from_usi_chars('0', 'e').is_err());
+        assert!(Square::from_usi_chars('a', 'e').is_err());
 
         // Invalid rank
-        assert!(Square::from_usi('5', 'j').is_err());
-        assert!(Square::from_usi('5', '1').is_err());
+        assert!(Square::from_usi_chars('5', 'j').is_err());
+        assert!(Square::from_usi_chars('5', '1').is_err());
+
+        // Test FromStr implementation
+        let sq: Square = "7g".parse().unwrap();
+        assert_eq!(sq, Square::new(2, 6));
+        assert_eq!(sq.to_string(), "7g");
+
+        let sq: Square = "1a".parse().unwrap();
+        assert_eq!(sq, Square::new(8, 0));
+
+        let sq: Square = "9i".parse().unwrap();
+        assert_eq!(sq, Square::new(0, 8));
+
+        // Invalid formats for parse
+        assert!("5".parse::<Square>().is_err());
+        assert!("5ee".parse::<Square>().is_err());
+        assert!("".parse::<Square>().is_err());
+        assert!("0a".parse::<Square>().is_err());
+        assert!("5j".parse::<Square>().is_err());
     }
 
     #[test]
