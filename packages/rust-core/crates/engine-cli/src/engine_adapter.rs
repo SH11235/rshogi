@@ -752,7 +752,7 @@ mod tests {
     use engine_core::movegen::MoveGen;
     use engine_core::shogi::{Move, MoveList, Position};
     use engine_core::time_management::TimeControl;
-    use engine_core::usi::parse_usi_square;
+    use engine_core::Square;
 
     const DEFAULT_BYOYOMI_PERIODS: u32 = 1;
 
@@ -1447,8 +1447,8 @@ mod tests {
 
         // Invalid move - trying to parse our color's move should fail in opponent's turn
         // So we test with an illegal move instead
-        let illegal_from = parse_usi_square("9a").unwrap();
-        let illegal_to = parse_usi_square("1i").unwrap();
+        let illegal_from = "9a".parse::<Square>().unwrap();
+        let illegal_to = "1i".parse::<Square>().unwrap();
         let invalid_ponder = Move::normal(illegal_from, illegal_to, false);
         assert!(
             !EngineAdapter::is_valid_ponder_move(&position, &best_move, &invalid_ponder),
