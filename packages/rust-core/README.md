@@ -81,6 +81,33 @@ quit
 - **Enhanced**: 省メモリ環境用
 - **Material**: デバッグ用
 
+### Engine Options
+
+| Option | Type | Default | Range | Description |
+|--------|------|---------|-------|-------------|
+| USI_Hash | Spin | 16 | 1-1024 | Hash table size in MB |
+| Threads | Spin | 1 | 1-256 | Number of search threads |
+| USI_Ponder | Check | true | true/false | Enable pondering (thinking on opponent's time) |
+| EngineType | Combo | Material | Material/Nnue/Enhanced/EnhancedNnue | Engine evaluation and search type |
+| ByoyomiPeriods | Spin | 1 | 1-10 or 'default' | Number of byoyomi periods (USI_ByoyomiPeriods alias also supported) |
+
+#### ByoyomiPeriods Option
+
+Controls the number of byoyomi periods when using byoyomi time control:
+
+```bash
+# Set default number of periods (used when not specified in go command)
+setoption name ByoyomiPeriods value 3
+# or using the alias
+setoption name USI_ByoyomiPeriods value 3
+
+# Reset to default (1 period)
+setoption name ByoyomiPeriods value default
+
+# Override in go command
+go byoyomi 30000 periods 5  # 5 periods of 30 seconds each
+```
+
 ## Building
 
 ### From project root
