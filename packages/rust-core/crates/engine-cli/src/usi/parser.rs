@@ -1,6 +1,7 @@
 //! USI protocol command parser
 
 use super::commands::{GameResult, GoParams, UsiCommand};
+use super::{MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS};
 use anyhow::{anyhow, Result};
 use log::warn;
 
@@ -202,10 +203,17 @@ fn parse_go(parts: &[&str]) -> Result<UsiCommand> {
                 let periods_val = parts[i]
                     .parse::<u32>()
                     .map_err(|_| anyhow!("Invalid periods value: {}", parts[i]))?;
-                if periods_val == 0 {
-                    return Err(anyhow!("Periods must be at least 1"));
+                if periods_val < MIN_BYOYOMI_PERIODS {
+                    return Err(anyhow!("Periods must be at least {}", MIN_BYOYOMI_PERIODS));
                 }
-                params.periods = Some(periods_val);
+                // Clamp periods to MIN-MAX range (same as SetOption)
+                let clamped_periods = periods_val.min(MAX_BYOYOMI_PERIODS);
+                if periods_val != clamped_periods {
+                    warn!(
+                        "Periods value {periods_val} exceeds maximum {MAX_BYOYOMI_PERIODS}, clamping to {clamped_periods}"
+                    );
+                }
+                params.periods = Some(clamped_periods);
             }
             _ => {
                 // Unknown parameter, skip
@@ -380,6 +388,15 @@ mod tests {
         let result = parse_usi_command("go byoyomi 30000 periods abc");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid periods value"));
+
+        // Test periods clamping to max
+        let cmd = parse_usi_command("go byoyomi 30000 periods 15").unwrap();
+        match cmd {
+            UsiCommand::Go(params) => {
+                assert_eq!(params.periods, Some(MAX_BYOYOMI_PERIODS)); // Should be clamped to MAX
+            }
+            _ => panic!("Expected Go"),
+        }
     }
 
     #[test]

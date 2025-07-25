@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::usi::output::{Score, SearchInfo};
 use crate::usi::{create_position, EngineOption, GameResult, GoParams};
+use crate::usi::{MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_PERIODS};
 
 /// Convert raw engine score to USI score format (Cp or Mate)
 fn to_usi_score(raw_score: i32) -> Score {
@@ -124,7 +125,12 @@ impl EngineAdapter {
                     "EnhancedNnue".to_string(),
                 ],
             ),
-            EngineOption::spin("ByoyomiPeriods", 1, 1, 10),
+            EngineOption::spin(
+                OPT_BYOYOMI_PERIODS,
+                1,
+                MIN_BYOYOMI_PERIODS as i64,
+                MAX_BYOYOMI_PERIODS as i64,
+            ),
         ];
     }
 
@@ -195,21 +201,24 @@ impl EngineAdapter {
                     }
                 }
             }
-            "ByoyomiPeriods" => {
+            OPT_BYOYOMI_PERIODS => {
                 if let Some(val) = value {
                     self.byoyomi_periods = val
                         .parse::<u32>()
                         .map_err(|_| {
                             anyhow!(
-                                "Invalid ByoyomiPeriods: '{}'. Must be a number between 1 and 10",
-                                val
+                                "Invalid {}: '{}'. Must be a number between {} and {}",
+                                OPT_BYOYOMI_PERIODS,
+                                val,
+                                MIN_BYOYOMI_PERIODS,
+                                MAX_BYOYOMI_PERIODS
                             )
                         })?
-                        .clamp(1, 10);
+                        .clamp(MIN_BYOYOMI_PERIODS, MAX_BYOYOMI_PERIODS);
                 }
             }
             _ => {
-                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, ByoyomiPeriods", name));
+                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, {}", name, OPT_BYOYOMI_PERIODS));
             }
         }
         Ok(())
@@ -498,32 +507,60 @@ fn apply_search_limits(mut builder: SearchLimitsBuilder, params: &GoParams) -> S
     builder
 }
 
-/// Apply time control based on priority order
+/// Inferred time control mode from go parameters
+enum TimeControlMode {
+    Ponder,
+    Infinite,
+    FixedTime(u64),
+    Byoyomi,
+    Fischer,
+    Default,
+}
+
+/// Infer time control mode from go parameters
 ///
 /// Priority: ponder > infinite > movetime > byoyomi > fischer > default
+fn infer_time_control_mode(params: &GoParams) -> TimeControlMode {
+    if params.ponder {
+        TimeControlMode::Ponder
+    } else if params.infinite {
+        TimeControlMode::Infinite
+    } else if let Some(movetime) = params.movetime {
+        TimeControlMode::FixedTime(movetime)
+    } else if params.byoyomi.is_some() {
+        // Check if this is actually Fischer time control disguised as byoyomi
+        if is_fischer_disguised_as_byoyomi(params) {
+            TimeControlMode::Fischer
+        } else {
+            TimeControlMode::Byoyomi
+        }
+    } else if params.periods.is_some() {
+        // If periods is specified without byoyomi, it's still Byoyomi mode
+        log::info!("Periods specified without byoyomi, using Byoyomi mode with byoyomi=0");
+        TimeControlMode::Byoyomi
+    } else if params.btime.is_some() || params.wtime.is_some() {
+        TimeControlMode::Fischer
+    } else {
+        TimeControlMode::Default
+    }
+}
+
+/// Apply time control based on inferred mode
 fn apply_time_control(
     builder: SearchLimitsBuilder,
     params: &GoParams,
     position: &Position,
     byoyomi_periods: u32,
 ) -> SearchLimitsBuilder {
-    if params.ponder {
-        apply_ponder_mode(builder)
-    } else if params.infinite {
-        apply_infinite_mode(builder)
-    } else if let Some(movetime) = params.movetime {
-        apply_fixed_time_mode(builder, movetime)
-    } else if let Some(_byoyomi) = params.byoyomi {
-        // Check if this is actually Fischer time control disguised as byoyomi
-        if is_fischer_disguised_as_byoyomi(params) {
-            apply_fischer_mode(builder, params, position)
-        } else {
-            apply_byoyomi_mode(builder, params, position, byoyomi_periods)
-        }
-    } else if params.btime.is_some() || params.wtime.is_some() {
-        apply_fischer_mode(builder, params, position)
-    } else {
-        apply_default_time_control(builder)
+    let mode = infer_time_control_mode(params);
+
+    match mode {
+        TimeControlMode::Ponder => apply_ponder_mode(builder),
+        TimeControlMode::Infinite => apply_infinite_mode(builder),
+        TimeControlMode::FixedTime(movetime) => apply_fixed_time_mode(builder, movetime),
+        TimeControlMode::Byoyomi => apply_byoyomi_mode(builder, params, position, byoyomi_periods),
+        TimeControlMode::Fischer => apply_fischer_mode(builder, params, position),
+        TimeControlMode::Default => apply_default_time_control(builder),
     }
 }
 
@@ -1001,20 +1038,47 @@ mod tests {
         assert_eq!(adapter.byoyomi_periods, 1);
 
         // Test setting valid value
-        adapter.set_option("ByoyomiPeriods", Some("3")).unwrap();
+        adapter.set_option(OPT_BYOYOMI_PERIODS, Some("3")).unwrap();
         assert_eq!(adapter.byoyomi_periods, 3);
 
         // Test clamping to max
-        adapter.set_option("ByoyomiPeriods", Some("15")).unwrap();
+        adapter.set_option(OPT_BYOYOMI_PERIODS, Some("15")).unwrap();
         assert_eq!(adapter.byoyomi_periods, 10); // Should be clamped to 10
 
         // Test clamping to min
-        adapter.set_option("ByoyomiPeriods", Some("0")).unwrap();
+        adapter.set_option(OPT_BYOYOMI_PERIODS, Some("0")).unwrap();
         assert_eq!(adapter.byoyomi_periods, 1); // Should be clamped to 1
 
         // Test invalid value
-        let result = adapter.set_option("ByoyomiPeriods", Some("abc"));
+        let result = adapter.set_option(OPT_BYOYOMI_PERIODS, Some("abc"));
         assert!(result.is_err());
         assert_eq!(adapter.byoyomi_periods, 1); // Should remain unchanged
+    }
+
+    #[test]
+    fn test_apply_go_params_periods_only() {
+        // Test periods specified without byoyomi
+        let params = GoParams {
+            periods: Some(3),
+            btime: Some(300000),
+            wtime: Some(300000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position, DEFAULT_BYOYOMI_PERIODS).unwrap();
+
+        match limits.time_control {
+            TimeControl::Byoyomi {
+                main_time_ms,
+                byoyomi_ms,
+                periods,
+            } => {
+                assert_eq!(main_time_ms, 300000); // Black to move
+                assert_eq!(byoyomi_ms, 0); // byoyomi defaults to 0
+                assert_eq!(periods, 3); // Should use specified periods
+            }
+            _ => panic!("Expected Byoyomi time control"),
+        }
     }
 }
