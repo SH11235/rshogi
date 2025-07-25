@@ -185,11 +185,11 @@ const MAX_RETRY_ATTEMPTS: u32 = 3;
 /// Send USI response with error handling and retry logic
 fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
     use std::io::{self, Write};
-    
+
     // Get stdout handle and write response
     let mut stdout = io::stdout();
     writeln!(stdout, "{response}")?;
-    
+
     // Then try to flush with limited retries
     for attempt in 0..MAX_RETRY_ATTEMPTS {
         match stdout.flush() {
@@ -211,7 +211,11 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
             }
             Err(e) if attempt < MAX_RETRY_ATTEMPTS - 1 => {
                 // Other errors - very brief backoff to avoid blocking time-critical responses
-                log::warn!("stdout flush error: {e}, retry attempt {}/{}", attempt + 1, MAX_RETRY_ATTEMPTS);
+                log::warn!(
+                    "stdout flush error: {e}, retry attempt {}/{}",
+                    attempt + 1,
+                    MAX_RETRY_ATTEMPTS
+                );
                 thread::sleep(Duration::from_millis(1));
             }
             Err(e) => {
@@ -220,9 +224,9 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
             }
         }
     }
-    
+
     // Should not reach here, but return error if we do
-    Err(io::Error::new(io::ErrorKind::Other, "Max retry attempts exceeded"))
+    Err(io::Error::other("Max retry attempts exceeded"))
 }
 
 /// Error types for stdout operations
@@ -257,29 +261,23 @@ pub fn send_response(response: UsiResponse) {
 /// Send USI response with error handling, returning Result for proper error propagation
 pub fn send_response_safe(response: UsiResponse) -> Result<(), StdoutError> {
     use std::io;
-    
+
     // Determine if this is a critical response
     let is_critical = matches!(
         response,
         UsiResponse::UsiOk | UsiResponse::ReadyOk | UsiResponse::BestMove { .. }
     );
-    
+
     // Try to send with retry
     if let Err(e) = send_response_with_retry(&response) {
         // Increment error count
         let error_count = STDOUT_ERROR_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        
+
         // Handle based on error type and criticality
         match e.kind() {
-            io::ErrorKind::BrokenPipe => {
-                Err(StdoutError::BrokenPipe)
-            }
-            _ if error_count >= MAX_STDOUT_ERRORS => {
-                Err(StdoutError::TooManyErrors(error_count))
-            }
-            _ if is_critical => {
-                Err(StdoutError::CriticalMessageFailed(e))
-            }
+            io::ErrorKind::BrokenPipe => Err(StdoutError::BrokenPipe),
+            _ if error_count >= MAX_STDOUT_ERRORS => Err(StdoutError::TooManyErrors(error_count)),
+            _ if is_critical => Err(StdoutError::CriticalMessageFailed(e)),
             _ => {
                 // Non-critical error - log and continue
                 log::warn!("Failed to send response: {e} (error #{error_count})");
