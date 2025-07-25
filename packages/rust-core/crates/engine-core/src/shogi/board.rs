@@ -68,6 +68,8 @@ impl Square {
     ///
     /// # Examples
     /// ```
+    /// use engine_core::shogi::board::Square;
+    ///
     /// let sq = Square::from_usi('7', 'g').unwrap();
     /// assert_eq!(sq.to_string(), "7g");
     /// ```
@@ -1929,6 +1931,34 @@ mod tests {
         assert_eq!(flipped.file(), 4);
         assert_eq!(flipped.rank(), 4);
         assert_eq!(flipped.index(), 40);
+    }
+
+    #[test]
+    fn test_square_from_usi() {
+        // Valid cases
+        let sq = Square::from_usi('7', 'g').unwrap();
+        assert_eq!(sq, Square::new(2, 6)); // 7g
+        assert_eq!(sq.to_string(), "7g");
+
+        let sq = Square::from_usi('1', 'a').unwrap();
+        assert_eq!(sq, Square::new(8, 0)); // 1a
+        assert_eq!(sq.to_string(), "1a");
+
+        let sq = Square::from_usi('9', 'i').unwrap();
+        assert_eq!(sq, Square::new(0, 8)); // 9i
+        assert_eq!(sq.to_string(), "9i");
+
+        let sq = Square::from_usi('5', 'e').unwrap();
+        assert_eq!(sq, Square::new(4, 4)); // 5e
+        assert_eq!(sq.to_string(), "5e");
+
+        // Invalid file
+        assert!(Square::from_usi('0', 'e').is_err());
+        assert!(Square::from_usi('a', 'e').is_err());
+
+        // Invalid rank
+        assert!(Square::from_usi('5', 'j').is_err());
+        assert!(Square::from_usi('5', '1').is_err());
     }
 
     #[test]
