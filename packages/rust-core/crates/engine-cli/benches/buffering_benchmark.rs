@@ -126,7 +126,7 @@ fn bench_buffered_search(c: &mut Criterion) {
     for depth in [3, 4, 5] {
         // Run once to get actual info count for throughput
         let (_, info_count) =
-            run_engine_with_command("0", |stdin| writeln!(stdin, "go depth {}", depth));
+            run_engine_with_command("0", |stdin| writeln!(stdin, "go depth {depth}"));
 
         group.throughput(Throughput::Elements(info_count as u64));
 
