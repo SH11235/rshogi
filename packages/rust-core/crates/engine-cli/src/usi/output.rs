@@ -198,6 +198,11 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
                 STDOUT_ERROR_COUNT.store(0, Ordering::Relaxed);
                 return Ok(());
             }
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                // BrokenPipe - no point in retrying
+                log::debug!("stdout flush failed with broken pipe");
+                return Err(e);
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 // EINTR - retry immediately without sleep
                 log::debug!("stdout flush interrupted, retrying immediately");
@@ -230,15 +235,23 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
 }
 
 /// Error types for stdout operations
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StdoutError {
+    #[error("Broken pipe detected, GUI disconnected")]
     BrokenPipe,
+
+    #[error("Too many stdout errors ({0})")]
     TooManyErrors(u32),
-    CriticalMessageFailed(std::io::Error),
+
+    #[error("Failed to send critical response: {0}")]
+    CriticalMessageFailed(#[from] std::io::Error),
 }
 
-/// Helper to send USI response to stdout with automatic flush
-pub fn send_response(response: UsiResponse) {
+/// Helper to send USI response to stdout with automatic flush (exits on error)
+///
+/// Use this in worker threads or contexts where error propagation is not feasible.
+/// This function will call `std::process::exit(1)` on critical errors.
+pub fn send_response_or_exit(response: UsiResponse) {
     if let Err(e) = send_response_safe(response) {
         match e {
             StdoutError::BrokenPipe => {
@@ -256,6 +269,14 @@ pub fn send_response(response: UsiResponse) {
             }
         }
     }
+}
+
+/// Helper to send USI response, returning Result for error propagation
+///
+/// Use this in main thread and contexts where errors can be propagated up the call stack.
+/// For worker threads and fire-and-forget contexts, use `send_response_or_exit` instead.
+pub fn send_response(response: UsiResponse) -> Result<(), StdoutError> {
+    send_response_safe(response)
 }
 
 /// Send USI response with error handling, returning Result for proper error propagation
@@ -289,9 +310,12 @@ pub fn send_response_safe(response: UsiResponse) -> Result<(), StdoutError> {
     }
 }
 
-/// Helper to send info string message
-pub fn send_info_string(message: impl Into<String>) {
-    send_response(UsiResponse::String(message.into()));
+/// Helper to send info string message, returning Result for error propagation
+///
+/// Use this in main thread and contexts where errors can be propagated up the call stack.
+/// For worker threads and fire-and-forget contexts, wrap this with appropriate error handling.
+pub fn send_info_string(message: impl Into<String>) -> Result<(), StdoutError> {
+    send_response(UsiResponse::String(message.into()))
 }
 
 #[cfg(test)]
