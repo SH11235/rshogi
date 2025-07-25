@@ -335,6 +335,7 @@ impl EngineAdapter {
                   nodes: u64,
                   elapsed: std::time::Duration,
                   pv: &[engine_core::shogi::Move]| {
+                // TODO: Consider reusing Vec<String> or using SmallVec for performance
                 let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
                 let score_enum = to_usi_score(score);
 
@@ -357,7 +358,7 @@ impl EngineAdapter {
     fn process_search_result(
         result: &engine_core::search::types::SearchResult,
         info_callback_arc: &UsiInfoCallback,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<engine_core::shogi::Move>)> {
         // Get best move
         let best_move = result.best_move.ok_or_else(|| {
             anyhow!("No legal moves available in this position (checkmate or stalemate)")
@@ -365,28 +366,47 @@ impl EngineAdapter {
 
         // Convert move to USI format
         let best_move_str = engine_core::usi::move_to_usi(&best_move);
-        log::info!("Best move: {} (score: {:?})", best_move_str, result.score);
+
+        // Extract ponder move from PV if available
+        let ponder_move = if result.stats.pv.len() >= 2 {
+            Some(result.stats.pv[1])
+        } else {
+            None
+        };
+
+        log::debug!(
+            "Best move: {} (score: {:?}) ponder: {:?}",
+            best_move_str,
+            result.score,
+            ponder_move
+        );
 
         // Send final info
         let score = to_usi_score(result.score);
         let depth = if result.stats.depth == 0 {
+            // This can happen when search is interrupted very early or in some edge cases
+            // TODO: Investigate root cause - might be related to time control or early termination
             log::warn!("SearchStats.depth is 0, this should not happen. Using 1 as fallback.");
             1
         } else {
             result.stats.depth
         };
 
+        // Convert full PV to USI format for final info
+        let pv_usi: Vec<String> =
+            result.stats.pv.iter().map(engine_core::usi::move_to_usi).collect();
+
         let info = SearchInfo {
             depth: Some(depth as u32),
             time: Some(result.stats.elapsed.as_millis().max(1) as u64),
             nodes: Some(result.stats.nodes),
-            pv: vec![best_move_str.clone()],
+            pv: pv_usi,
             score: Some(score),
             ..Default::default()
         };
         (*info_callback_arc)(info);
 
-        Ok(best_move_str)
+        Ok((best_move_str, ponder_move))
     }
 
     /// Execute search with prepared data and return USI result
@@ -418,10 +438,13 @@ impl EngineAdapter {
         );
 
         // Process result
-        let best_move_str = Self::process_search_result(&result, &info_callback_arc)?;
+        let (best_move_str, ponder_move) =
+            Self::process_search_result(&result, &info_callback_arc)?;
 
-        // For now, no ponder move generation
-        Ok((best_move_str, None))
+        // Convert ponder move to USI format if available
+        let ponder_move_str = ponder_move.map(|m| engine_core::usi::move_to_usi(&m));
+
+        Ok((best_move_str, ponder_move_str))
     }
 
     /// Clean up after search completion
@@ -612,15 +635,15 @@ fn apply_go_params(
 ) -> Result<SearchLimits> {
     let builder = apply_search_limits(builder, params);
     // Use periods from go command if specified, otherwise use the provided default
-    let periods = params.periods.unwrap_or(byoyomi_periods);
-    let builder = apply_time_control(builder, params, position, periods);
+    let effective_periods = params.periods.unwrap_or(byoyomi_periods);
+    let builder = apply_time_control(builder, params, position, effective_periods);
     Ok(builder.build())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_core::shogi::Position;
+    use engine_core::shogi::{Move, Position, Square};
     use engine_core::time_management::TimeControl;
 
     const DEFAULT_BYOYOMI_PERIODS: u32 = 1;
@@ -1135,5 +1158,104 @@ mod tests {
             }
             _ => panic!("Expected Byoyomi time control"),
         }
+    }
+
+    #[test]
+    fn test_process_search_result_with_pv() {
+        use engine_core::search::types::{SearchResult, SearchStats};
+        use std::time::Duration;
+
+        // Create a mock SearchResult with PV
+        let move1 = Move::normal(Square::new(6, 6), Square::new(6, 5), false); // 7g7f
+        let move2 = Move::normal(Square::new(2, 2), Square::new(2, 3), false); // 3c3d
+        let move3 = Move::normal(Square::new(5, 6), Square::new(5, 5), false); // 6g6f
+
+        let result = SearchResult {
+            best_move: Some(move1),
+            score: 100,
+            stats: SearchStats {
+                nodes: 1000,
+                elapsed: Duration::from_millis(100),
+                pv: vec![move1, move2, move3],
+                depth: 3,
+                ..Default::default()
+            },
+        };
+
+        // Create a dummy callback
+        let info_callback: Arc<dyn Fn(SearchInfo) + Send + Sync> = Arc::new(|_: SearchInfo| {});
+
+        // Process result
+        let (best_move_str, ponder_move) =
+            EngineAdapter::process_search_result(&result, &info_callback).unwrap();
+
+        // Verify
+        assert_eq!(best_move_str, engine_core::usi::move_to_usi(&move1));
+        assert!(ponder_move.is_some());
+        assert_eq!(ponder_move.unwrap(), move2);
+    }
+
+    #[test]
+    fn test_process_search_result_without_ponder() {
+        use engine_core::search::types::{SearchResult, SearchStats};
+        use std::time::Duration;
+
+        // Create a mock SearchResult with short PV
+        let move1 = Move::normal(Square::new(6, 6), Square::new(6, 5), false); // 7g7f
+
+        let result = SearchResult {
+            best_move: Some(move1),
+            score: 50,
+            stats: SearchStats {
+                nodes: 10,
+                elapsed: Duration::from_millis(10),
+                pv: vec![move1], // Only one move in PV
+                depth: 1,
+                ..Default::default()
+            },
+        };
+
+        // Create a dummy callback
+        let info_callback: Arc<dyn Fn(SearchInfo) + Send + Sync> = Arc::new(|_: SearchInfo| {});
+
+        // Process result
+        let (best_move_str, ponder_move) =
+            EngineAdapter::process_search_result(&result, &info_callback).unwrap();
+
+        // Verify
+        assert_eq!(best_move_str, engine_core::usi::move_to_usi(&move1));
+        assert!(ponder_move.is_none());
+    }
+
+    #[test]
+    fn test_process_search_result_empty_pv() {
+        use engine_core::search::types::{SearchResult, SearchStats};
+        use std::time::Duration;
+
+        // Create a mock SearchResult with empty PV
+        let move1 = Move::normal(Square::new(6, 6), Square::new(6, 5), false); // 7g7f
+
+        let result = SearchResult {
+            best_move: Some(move1),
+            score: 0,
+            stats: SearchStats {
+                nodes: 1,
+                elapsed: Duration::from_millis(1),
+                pv: vec![], // Empty PV
+                depth: 0,
+                ..Default::default()
+            },
+        };
+
+        // Create a dummy callback
+        let info_callback: Arc<dyn Fn(SearchInfo) + Send + Sync> = Arc::new(|_: SearchInfo| {});
+
+        // Process result
+        let (best_move_str, ponder_move) =
+            EngineAdapter::process_search_result(&result, &info_callback).unwrap();
+
+        // Verify
+        assert_eq!(best_move_str, engine_core::usi::move_to_usi(&move1));
+        assert!(ponder_move.is_none());
     }
 }
