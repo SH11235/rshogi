@@ -414,6 +414,10 @@ impl EnhancedSearcher {
 
     /// Get current principal variation
     pub fn principal_variation(&self) -> &[Move] {
+        // If search was interrupted, return empty PV to avoid corruption
+        if self.stop.load(Ordering::Relaxed) {
+            return &[];
+        }
         self.pv.get_pv()
     }
 
