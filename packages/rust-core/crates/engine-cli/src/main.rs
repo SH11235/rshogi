@@ -286,10 +286,25 @@ fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
                     }
                 }
                 Err(e) => {
-                    log::debug!("Stdin read error (EOF?): {e}");
-                    // Try to send quit command on EOF
+                    // Distinguish between EOF and actual errors
+                    match e.kind() {
+                        io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => {
+                            log::info!("Stdin closed (EOF or broken pipe), shutting down gracefully");
+                        }
+                        io::ErrorKind::Interrupted => {
+                            // EINTR - could retry, but for stdin it's safer to exit
+                            log::warn!("Stdin read interrupted, shutting down");
+                        }
+                        _ => {
+                            log::error!("Stdin read error: {e}");
+                        }
+                    }
+                    
+                    // Try to send quit command for graceful shutdown
                     match cmd_tx.try_send(UsiCommand::Quit) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            log::debug!("Sent quit command for graceful shutdown");
+                        }
                         Err(_) => {
                             log::debug!("Failed to send quit command, channel likely closed");
                         }
@@ -299,7 +314,13 @@ fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
             }
         }
 
-        log::debug!("Stdin reader thread exiting");
+        // Reached here = normal EOF. GUI closed the pipe, send quit
+        match cmd_tx.try_send(UsiCommand::Quit) {
+            Ok(()) => log::info!("Sent quit command after EOF"),
+            Err(_) => log::debug!("Channel closed before quit after EOF"),
+        }
+
+        log::debug!("Stdin reader thread exiting (EOF)");
     })
 }
 
