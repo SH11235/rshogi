@@ -15,8 +15,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use usi::output::SearchInfo;
 use usi::{
-    parse_usi_command, send_info_string, send_response, send_response_or_exit, UsiCommand,
-    UsiResponse,
+    ensure_flush_on_exit, flush_final, parse_usi_command, send_info_string, send_response,
+    send_response_or_exit, UsiCommand, UsiResponse,
 };
 
 // Constants for timeout and channel management
@@ -354,6 +354,9 @@ fn main() {
         );
     }
 
+    // Set up flush on exit hooks
+    ensure_flush_on_exit();
+
     log::info!("Shogi USI Engine starting (version 1.0)");
 
     // Run the main loop and handle any errors
@@ -507,6 +510,11 @@ fn run_engine() -> Result<()> {
     match stdin_handle.join() {
         Ok(()) => log::debug!("Stdin reader thread joined successfully"),
         Err(_) => log::error!("Stdin reader thread panicked"),
+    }
+
+    // Ensure all buffered output is flushed before exit
+    if let Err(e) = flush_final() {
+        log::warn!("Failed to flush final output: {e}");
     }
 
     log::debug!("Shutdown complete");
