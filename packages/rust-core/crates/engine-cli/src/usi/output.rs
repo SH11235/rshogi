@@ -245,7 +245,15 @@ impl UsiWriter {
     }
 
     fn write_line(&self, response: &UsiResponse, flush_kind: FlushKind) -> std::io::Result<()> {
-        let mut writer = self.inner.lock().unwrap();
+        // Handle poisoned mutex gracefully
+        let mut writer = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Recover from poisoned state
+                log::warn!("stdout-write: recovering from poisoned mutex");
+                poisoned.into_inner()
+            }
+        };
 
         // Write the response
         writeln!(writer, "{response}")?;
@@ -293,8 +301,28 @@ impl UsiWriter {
     }
 
     fn flush_all(&self) -> std::io::Result<()> {
-        let mut writer = self.inner.lock().unwrap();
+        // Handle poisoned mutex gracefully
+        let mut writer = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Recover from poisoned state
+                log::warn!("stdout-write: recovering from poisoned mutex in flush_all");
+                poisoned.into_inner()
+            }
+        };
         writer.flush()
+    }
+
+    /// Try to flush without blocking (for panic handler)
+    fn try_flush_all(&self) -> std::io::Result<()> {
+        match self.inner.try_lock() {
+            Ok(mut writer) => writer.flush(),
+            Err(_) => {
+                // Mutex is locked, possibly by the same thread in a panic
+                // Skip flushing to avoid deadlock
+                Ok(())
+            }
+        }
     }
 }
 
@@ -467,8 +495,8 @@ pub fn ensure_flush_on_exit() {
     // Set panic hook to flush on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        // Try to flush, but don't panic if it fails
-        let _ = USI_WRITER.flush_all();
+        // Use try_flush_all to avoid deadlock if panic occurs during write_line
+        let _ = USI_WRITER.try_flush_all();
         original_hook(panic_info);
     }));
 }
