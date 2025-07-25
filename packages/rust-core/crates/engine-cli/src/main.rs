@@ -14,7 +14,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use usi::output::SearchInfo;
-use usi::{parse_usi_command, send_info_string, send_response, UsiCommand, UsiResponse};
+use usi::{
+    parse_usi_command, send_info_string, send_response, send_response_or_exit, UsiCommand,
+    UsiResponse,
+};
 
 // Constants for timeout and channel management
 const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -167,13 +170,7 @@ fn wait_for_worker_with_timeout(
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
-                        let mut adapter = match engine.lock() {
-                            Ok(guard) => guard,
-                            Err(poisoned) => {
-                                log::error!("Engine mutex was poisoned during worker return, attempting recovery");
-                                poisoned.into_inner()
-                            }
-                        };
+                        let mut adapter = lock_or_recover(engine);
                         adapter.return_engine(returned_engine);
                         engine_returned = true;
                         if finished {
@@ -186,7 +183,7 @@ fn wait_for_worker_with_timeout(
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
                         // Forward bestmove to stdout instead of discarding it
-                        send_response(UsiResponse::BestMove {
+                        send_response_or_exit(UsiResponse::BestMove {
                             best_move,
                             ponder: ponder_move,
                         });
@@ -427,13 +424,13 @@ fn run_engine() -> Result<()> {
             recv(worker_rx) -> msg => {
                 match msg {
                     Ok(WorkerMessage::Info(info)) => {
-                        send_response(UsiResponse::Info(info));
+                        send_response(UsiResponse::Info(info))?;
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
                         send_response(UsiResponse::BestMove {
                             best_move,
                             ponder: ponder_move,
-                        });
+                        })?;
                     }
                     Ok(WorkerMessage::Finished) => {
                         log::debug!("Worker thread finished");
@@ -446,7 +443,8 @@ fn run_engine() -> Result<()> {
                         while std::time::Instant::now() < deadline && !engine_returned {
                             match worker_rx.try_recv() {
                                 Ok(WorkerMessage::Info(info)) => {
-                                    send_response(UsiResponse::Info(info));
+                                    // During shutdown, ignore send errors
+                                    let _ = send_response(UsiResponse::Info(info));
                                 }
                                 Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                                     log::debug!("Engine returned after Finished");
@@ -469,7 +467,7 @@ fn run_engine() -> Result<()> {
                         }
                     }
                     Ok(WorkerMessage::Error(err)) => {
-                        send_info_string(format!("Error: {err}"));
+                        send_info_string(format!("Error: {err}"))?;
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
@@ -521,17 +519,17 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             send_response(UsiResponse::Id {
                 name: "RustShogi 1.0".to_string(),
                 author: "RustShogi Team".to_string(),
-            });
+            })?;
 
             // Send available options
             {
                 let engine = lock_or_recover(ctx.engine);
                 for option in engine.get_options() {
-                    send_response(UsiResponse::Option(option.to_usi_string()));
+                    send_response(UsiResponse::Option(option.to_usi_string()))?;
                 }
             }
 
-            send_response(UsiResponse::UsiOk);
+            send_response(UsiResponse::UsiOk)?;
         }
 
         UsiCommand::IsReady => {
@@ -540,7 +538,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 let mut engine = lock_or_recover(ctx.engine);
                 engine.initialize()?;
             }
-            send_response(UsiResponse::ReadyOk);
+            send_response(UsiResponse::ReadyOk)?;
         }
 
         UsiCommand::Position {
@@ -616,7 +614,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 send_response(UsiResponse::BestMove {
                     best_move: "resign".to_string(),
                     ponder: None,
-                });
+                })?;
             }
         }
 
@@ -670,13 +668,7 @@ fn search_worker(
     // Take engine out and prepare search
     let was_ponder = params.ponder;
     let (engine, position, limits, ponder_hit_flag) = {
-        let mut adapter = match engine_adapter.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                log::error!("Engine adapter mutex was poisoned, attempting recovery");
-                poisoned.into_inner()
-            }
-        };
+        let mut adapter = lock_or_recover(&engine_adapter);
         match adapter.take_engine() {
             Ok(engine) => {
                 match adapter.prepare_search(&params, stop_flag.clone()) {
