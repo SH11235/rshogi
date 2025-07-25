@@ -315,22 +315,22 @@ impl EngineAdapter {
         Ok((position, limits, ponder_hit_flag))
     }
 
-    /// Execute search with prepared data and return USI result
-    /// This takes a mutable reference to avoid ownership transfer
-    pub fn execute_search_static(
-        engine: &mut Engine,
-        mut position: Position,
-        limits: SearchLimits,
+    /// Create info callback wrapper for engine search
+    fn create_info_callback(
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
-    ) -> Result<(String, Option<String>)> {
-        // Set up info callback
+    ) -> (
+        Arc<dyn Fn(SearchInfo) + Send + Sync>,
+        Arc<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync>,
+    ) {
         let info_callback_arc = Arc::new(info_callback);
         let info_callback_clone = info_callback_arc.clone();
-        type InfoCallbackType = Arc<
-            dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync,
-        >;
-        let info_callback_inner: InfoCallbackType =
-            Arc::new(move |depth, score, nodes, elapsed, pv| {
+
+        let info_callback_inner = Arc::new(
+            move |depth: u8,
+                  score: i32,
+                  nodes: u64,
+                  elapsed: std::time::Duration,
+                  pv: &[engine_core::shogi::Move]| {
                 let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
                 let score_enum = to_usi_score(score);
 
@@ -343,25 +343,17 @@ impl EngineAdapter {
                     ..Default::default()
                 };
                 (*info_callback_clone)(info);
-            });
-
-        // Create a new SearchLimits with info_callback added
-        // We can't add it in prepare_search because the callback is created here
-        // This is not shadowing - we're creating a new instance with the callback
-        let limits = SearchLimits {
-            info_callback: Some(info_callback_inner),
-            ..limits
-        };
-
-        // Execute search
-        let result = engine.search(&mut position, limits);
-        log::info!(
-            "Search completed - depth:{} nodes:{} time:{}ms",
-            result.stats.depth,
-            result.stats.nodes,
-            result.stats.elapsed.as_millis()
+            },
         );
 
+        (info_callback_arc, info_callback_inner)
+    }
+
+    /// Process search result and send final info
+    fn process_search_result(
+        result: &engine_core::search::types::SearchResult,
+        info_callback_arc: &Arc<dyn Fn(SearchInfo) + Send + Sync>,
+    ) -> Result<String> {
         // Get best move
         let best_move = result.best_move.ok_or_else(|| {
             anyhow!("No legal moves available in this position (checkmate or stalemate)")
@@ -389,6 +381,40 @@ impl EngineAdapter {
             ..Default::default()
         };
         (*info_callback_arc)(info);
+
+        Ok(best_move_str)
+    }
+
+    /// Execute search with prepared data and return USI result
+    /// This takes a mutable reference to avoid ownership transfer
+    pub fn execute_search_static(
+        engine: &mut Engine,
+        mut position: Position,
+        limits: SearchLimits,
+        info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
+    ) -> Result<(String, Option<String>)> {
+        // Set up info callback
+        let (info_callback_arc, info_callback_inner) = Self::create_info_callback(info_callback);
+
+        // Create a new SearchLimits with info_callback added
+        // We can't add it in prepare_search because the callback is created here
+        // This is not shadowing - we're creating a new instance with the callback
+        let limits = SearchLimits {
+            info_callback: Some(info_callback_inner),
+            ..limits
+        };
+
+        // Execute search
+        let result = engine.search(&mut position, limits);
+        log::info!(
+            "Search completed - depth:{} nodes:{} time:{}ms",
+            result.stats.depth,
+            result.stats.nodes,
+            result.stats.elapsed.as_millis()
+        );
+
+        // Process result
+        let best_move_str = Self::process_search_result(&result, &info_callback_arc)?;
 
         // For now, no ponder move generation
         Ok((best_move_str, None))
