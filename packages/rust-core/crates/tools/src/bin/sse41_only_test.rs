@@ -4,16 +4,21 @@ use std::time::Instant;
 
 use engine_core::nnue::simd;
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {
+    println!("=== SSE4.1 Only Performance Test ===\n");
+    println!("This test requires x86_64 architecture");
+    println!("Current architecture: {}", std::env::consts::ARCH);
+}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     println!("=== SSE4.1 Only Performance Test ===\n");
 
     // Check CPU features
     println!("CPU Features:");
-    #[cfg(target_arch = "x86_64")]
-    {
-        println!("  SSE4.1: {}", is_x86_feature_detected!("sse4.1"));
-        println!("  AVX2:   {}", is_x86_feature_detected!("avx2"));
-    }
+    println!("  SSE4.1: {}", is_x86_feature_detected!("sse4.1"));
+    println!("  AVX2:   {}", is_x86_feature_detected!("avx2"));
 
     if !is_x86_feature_detected!("sse4.1") {
         println!("\nSSE4.1 not available on this CPU!");
