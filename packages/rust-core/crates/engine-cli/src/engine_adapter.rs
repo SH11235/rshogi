@@ -379,7 +379,7 @@ impl EngineAdapter {
         // Validate ponder move
         if let Some(ref pm) = ponder_move {
             if !Self::is_valid_ponder_move(position, &best_move, pm) {
-                log::warn!("Invalid ponder move detected, regenerating with fallback");
+                log::debug!("Invalid ponder move detected, regenerating with fallback");
                 ponder_move = Self::generate_ponder_fallback(position, &best_move);
             }
         }
