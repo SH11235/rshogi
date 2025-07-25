@@ -12,7 +12,7 @@
 ### 内部表現（Square）
 ```rust
 Square::new(file, rank)
-// file: 0-8 (0=1筋, 8=9筋)
+// file: 0-8 (0=9筋, 8=1筋)
 // rank: 0-8 (0=a段, 8=i段)
 ```
 
@@ -102,7 +102,7 @@ sq.flip()  // 先後反転した座標を返す
 3. **Display実装の活用**
    ```rust
    // Squareは自動的にUSI形式で表示される
-   let sq = Square::new(4, 4);
+   let sq = Square::new(4, 4);  // 内部file=4は5筋
    println!("Square: {}", sq);  // "Square: 5e"
    ```
 
@@ -110,15 +110,15 @@ sq.flip()  // 先後反転した座標を返す
 
 ### 先手（Black）の駒
 - 王将: 5i (4, 8)
-- 飛車: 2h (1, 7)
-- 角行: 8h (7, 7)
-- 歩兵: 1g-9g (0,6)-(8,6)
+- 飛車: 2h (7, 7) ← 内部file=7が2筋
+- 角行: 8h (1, 7) ← 内部file=1が8筋
+- 歩兵: 1g-9g → 内部では(8,6)-(0,6)
 
 ### 後手（White）の駒
 - 王将: 5a (4, 0)
-- 飛車: 8b (7, 1)
-- 角行: 2b (1, 1)
-- 歩兵: 1c-9c (0,2)-(8,2)
+- 飛車: 8b (1, 1) ← 内部file=1が8筋
+- 角行: 2b (7, 1) ← 内部file=7が2筋
+- 歩兵: 1c-9c → 内部では(8,2)-(0,2)
 
 ## よくある混乱点
 
@@ -198,9 +198,56 @@ fn parse_and_validate_move(position: &Position, usi_move: &str) -> Result<Move> 
 
 ## まとめ
 
-1. **座標は0ベース**: file-1, rank-1
-2. **先手後手を確認**: side_to_moveで現在の手番を確認
-3. **USI文字列を使う**: 手動でSquareを組み立てるより安全
-4. **合法手と照合**: 完全な手の情報を得るため
+1. **座標は0ベース**: rankは0-8、fileは0-8（ただし左右反転）
+2. **fileの左右反転に注意**: 内部file 0 = 9筋、内部file 8 = 1筋
+3. **先手後手を確認**: side_to_moveで現在の手番を確認
+4. **USI文字列を使う**: 手動でSquareを組み立てるより安全
+5. **合法手と照合**: 完全な手の情報を得るため
 
 このガイドラインに従えば、座標系の混乱を避けることができます。
+
+## 開発者向けガイド
+
+### なぜ左右反転しているのか
+
+本実装では、内部のfile座標がUSI表記と左右反転しています。これは歴史的経緯によるもので、現在の実装全体がこの前提で動作しています。
+
+### Square::new()を避けるべき理由
+
+1. **左右の混乱**: USIの"7g"をSquare::new(6, 6)と書いてしまうと"3g"になる
+2. **バグの温床**: 手動で座標を指定すると、座標系の理解不足からバグが生まれやすい
+3. **コードレビューの難しさ**: 数値だけでは意図が伝わりにくい
+
+### 推奨されるAPI使用パターン
+
+```rust
+// ◎ 良い例：USI文字列から変換
+let sq = parse_usi_square("7g").unwrap();
+let mv = parse_usi_move("7g7f").unwrap();
+
+// × 悪い例：手動で座標を指定
+let sq = Square::new(6, 6);  // 意図は7gだが実際は3g
+let mv = Move::normal(Square::new(6, 6), Square::new(6, 5), false);
+```
+
+### 将来的な安全APIの提案
+
+```rust
+// 将来実装予定
+impl Square {
+    /// USI表記から直接Squareを生成する安全なコンストラクタ
+    pub fn from_usi(file_char: char, rank_char: char) -> Result<Square> {
+        parse_usi_square(&format!("{}{}", file_char, rank_char))
+    }
+}
+
+// 使用例
+let sq = Square::from_usi('7', 'g').unwrap();
+```
+
+### 既存コードを修正する際のチェックリスト
+
+1. Square::new()を使っている箇所を探す
+2. USI文字列からの変換に置き換える
+3. テストを実行して動作確認
+4. コメントで意図を明記する
