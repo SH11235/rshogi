@@ -14,8 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::usi::output::{Score, SearchInfo};
+use crate::usi::{
+    clamp_periods, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_PERIODS,
+    OPT_USI_BYOYOMI_PERIODS,
+};
 use crate::usi::{create_position, EngineOption, GameResult, GoParams};
-use crate::usi::{MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_PERIODS};
 
 /// Convert raw engine score to USI score format (Cp or Mate)
 fn to_usi_score(raw_score: i32) -> Score {
@@ -49,8 +52,8 @@ pub struct EngineAdapter {
     threads: usize,
     /// Enable pondering
     ponder: bool,
-    /// Byoyomi periods (default: 1)
-    byoyomi_periods: u32,
+    /// Byoyomi periods (None = use default of 1)
+    byoyomi_periods: Option<u32>,
     /// Ponder state for managing ponder searches
     ponder_state: PonderState,
     /// Active ponder hit flag (shared with searcher during ponder)
@@ -99,7 +102,7 @@ impl EngineAdapter {
             hash_size: 16,
             threads: 1,
             ponder: true,
-            byoyomi_periods: 1,
+            byoyomi_periods: None,
             ponder_state: PonderState::default(),
             active_ponder_hit_flag: None,
         };
@@ -201,24 +204,28 @@ impl EngineAdapter {
                     }
                 }
             }
-            OPT_BYOYOMI_PERIODS => {
+            OPT_BYOYOMI_PERIODS | OPT_USI_BYOYOMI_PERIODS => {
                 if let Some(val) = value {
-                    self.byoyomi_periods = val
-                        .parse::<u32>()
-                        .map_err(|_| {
+                    if val == "default" {
+                        self.byoyomi_periods = None;
+                    } else {
+                        let periods = val.parse::<u32>().map_err(|_| {
                             anyhow!(
-                                "Invalid {}: '{}'. Must be a number between {} and {}",
+                                "Invalid {}: '{}'. Must be a number between {} and {} or 'default'",
                                 OPT_BYOYOMI_PERIODS,
                                 val,
                                 MIN_BYOYOMI_PERIODS,
                                 MAX_BYOYOMI_PERIODS
                             )
-                        })?
-                        .clamp(MIN_BYOYOMI_PERIODS, MAX_BYOYOMI_PERIODS);
+                        })?;
+                        self.byoyomi_periods = Some(clamp_periods(periods, false));
+                    }
+                } else {
+                    self.byoyomi_periods = None;
                 }
             }
             _ => {
-                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, {}", name, OPT_BYOYOMI_PERIODS));
+                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, {}, {}", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS));
             }
         }
         Ok(())
@@ -301,8 +308,8 @@ impl EngineAdapter {
         }
 
         // Apply go parameters
-        // Use periods from go command if specified, otherwise use SetOption value
-        let periods = params.periods.unwrap_or(self.byoyomi_periods);
+        // Use periods from go command if specified, otherwise use SetOption value (or default to 1)
+        let periods = params.periods.unwrap_or(self.byoyomi_periods.unwrap_or(1));
         let limits = apply_go_params(builder, params, &position, periods)?;
 
         Ok((position, limits, ponder_hit_flag))
@@ -536,7 +543,7 @@ fn infer_time_control_mode(params: &GoParams) -> TimeControlMode {
         }
     } else if params.periods.is_some() {
         // If periods is specified without byoyomi, it's still Byoyomi mode
-        log::info!("Periods specified without byoyomi, using Byoyomi mode with byoyomi=0");
+        log::debug!("Periods specified without byoyomi, using Byoyomi mode with byoyomi=0");
         TimeControlMode::Byoyomi
     } else if params.btime.is_some() || params.wtime.is_some() {
         TimeControlMode::Fischer
@@ -1034,25 +1041,43 @@ mod tests {
     fn test_engine_adapter_byoyomi_periods_option() {
         let mut adapter = EngineAdapter::new();
 
-        // Default should be 1
-        assert_eq!(adapter.byoyomi_periods, 1);
+        // Default should be None
+        assert_eq!(adapter.byoyomi_periods, None);
 
         // Test setting valid value
         adapter.set_option(OPT_BYOYOMI_PERIODS, Some("3")).unwrap();
-        assert_eq!(adapter.byoyomi_periods, 3);
+        assert_eq!(adapter.byoyomi_periods, Some(3));
 
         // Test clamping to max
         adapter.set_option(OPT_BYOYOMI_PERIODS, Some("15")).unwrap();
-        assert_eq!(adapter.byoyomi_periods, 10); // Should be clamped to 10
+        assert_eq!(adapter.byoyomi_periods, Some(10)); // Should be clamped to 10
 
         // Test clamping to min
         adapter.set_option(OPT_BYOYOMI_PERIODS, Some("0")).unwrap();
-        assert_eq!(adapter.byoyomi_periods, 1); // Should be clamped to 1
+        assert_eq!(adapter.byoyomi_periods, Some(1)); // Should be clamped to 1
+
+        // Test resetting to default
+        adapter.set_option(OPT_BYOYOMI_PERIODS, Some("default")).unwrap();
+        assert_eq!(adapter.byoyomi_periods, None);
 
         // Test invalid value
         let result = adapter.set_option(OPT_BYOYOMI_PERIODS, Some("abc"));
         assert!(result.is_err());
-        assert_eq!(adapter.byoyomi_periods, 1); // Should remain unchanged
+        assert_eq!(adapter.byoyomi_periods, None); // Should remain unchanged
+    }
+
+    #[test]
+    #[ignore = "Stack overflow with NNUE initialization in test environment"]
+    fn test_engine_adapter_byoyomi_periods_alias() {
+        let mut adapter = EngineAdapter::new();
+
+        // Test USI_ByoyomiPeriods alias
+        adapter.set_option(OPT_USI_BYOYOMI_PERIODS, Some("5")).unwrap();
+        assert_eq!(adapter.byoyomi_periods, Some(5));
+
+        // Test both options refer to same value
+        adapter.set_option(OPT_BYOYOMI_PERIODS, Some("7")).unwrap();
+        assert_eq!(adapter.byoyomi_periods, Some(7));
     }
 
     #[test]
