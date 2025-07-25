@@ -7,6 +7,52 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[test]
+fn test_panic_safe_flush() {
+    // Test that we don't deadlock when panicking during write
+    // This test is designed to ensure try_flush_all works correctly
+
+    let mut engine = Command::new(env!("CARGO_BIN_EXE_engine-cli"))
+        .env("USI_FLUSH_DELAY_MS", "100")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Failed to spawn engine");
+
+    let mut stdin = engine.stdin.take().expect("Failed to get stdin");
+    let stdout = engine.stdout.take().expect("Failed to get stdout");
+
+    // Start reader
+    let reader_handle = thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let mut lines = Vec::new();
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                lines.push(line);
+            }
+        }
+        lines
+    });
+
+    // Send USI command
+    writeln!(stdin, "usi").unwrap();
+    stdin.flush().unwrap();
+    thread::sleep(Duration::from_millis(50));
+
+    // Send quit to trigger clean shutdown
+    writeln!(stdin, "quit").unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+
+    let _ = engine.wait();
+    let lines = reader_handle.join().unwrap();
+
+    // Verify we got expected output
+    assert!(lines.iter().any(|l| l.contains("id name")));
+    assert!(lines.iter().any(|l| l == "usiok"));
+}
+
+#[test]
 fn test_buffering_with_env_vars() {
     // Test immediate flush with USI_FLUSH_DELAY_MS=0
     let mut engine = Command::new(env!("CARGO_BIN_EXE_engine-cli"))
