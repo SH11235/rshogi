@@ -230,21 +230,6 @@ let sq = Square::new(6, 6);  // 意図は7gだが実際は3g
 let mv = Move::normal(Square::new(6, 6), Square::new(6, 5), false);
 ```
 
-### 将来的な安全APIの提案
-
-```rust
-// 将来実装予定
-impl Square {
-    /// USI表記から直接Squareを生成する安全なコンストラクタ
-    pub fn from_usi(file_char: char, rank_char: char) -> Result<Square> {
-        parse_usi_square(&format!("{}{}", file_char, rank_char))
-    }
-}
-
-// 使用例
-let sq = Square::from_usi('7', 'g').unwrap();
-```
-
 ### 既存コードを修正する際のチェックリスト
 
 1. Square::new()を使っている箇所を探す

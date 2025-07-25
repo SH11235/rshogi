@@ -18,7 +18,7 @@ use std::fmt;
 /// - file 0 = 9筋 (leftmost)
 /// - file 8 = 1筋 (rightmost)
 ///
-/// To avoid confusion, prefer using parse_usi_square() instead of Square::new().
+/// To avoid confusion, prefer using from_usi_chars() instead of Square::new().
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Square(pub u8); // 0-80 (9x9)
 
@@ -29,7 +29,7 @@ impl Square {
     /// - file 0 = 9筋 (leftmost)
     /// - file 8 = 1筋 (rightmost)
     ///
-    /// Consider using `parse_usi_square()` instead for safety.
+    /// Consider using `from_usi_chars()` instead for safety.
     #[inline]
     pub const fn new(file: u8, rank: u8) -> Self {
         debug_assert!(file < 9 && rank < 9);
