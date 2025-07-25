@@ -10,7 +10,7 @@ use engine_adapter::EngineAdapter;
 use engine_core::engine::controller::Engine;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use usi::output::SearchInfo;
@@ -20,6 +20,17 @@ use usi::{parse_usi_command, send_info_string, send_response, UsiCommand, UsiRes
 const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const CHANNEL_SIZE: usize = 1024;
 const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Helper function to lock a mutex with recovery for Poisoned state
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::error!("Mutex was poisoned, attempting recovery");
+            poisoned.into_inner()
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -156,7 +167,13 @@ fn wait_for_worker_with_timeout(
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
-                        let mut adapter = engine.lock().unwrap();
+                        let mut adapter = match engine.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => {
+                                log::error!("Engine mutex was poisoned during worker return, attempting recovery");
+                                poisoned.into_inner()
+                            }
+                        };
                         adapter.return_engine(returned_engine);
                         engine_returned = true;
                         if finished {
@@ -212,7 +229,7 @@ fn wait_for_worker_with_timeout(
         match msg {
             WorkerMessage::EngineReturn(returned_engine) => {
                 log::debug!("Engine returned during drain");
-                let mut adapter = engine.lock().unwrap();
+                let mut adapter = lock_or_recover(engine);
                 adapter.return_engine(returned_engine);
             }
             _ => {
@@ -286,10 +303,27 @@ fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
                     }
                 }
                 Err(e) => {
-                    log::debug!("Stdin read error (EOF?): {e}");
-                    // Try to send quit command on EOF
+                    // Distinguish between EOF and actual errors
+                    match e.kind() {
+                        io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => {
+                            log::info!(
+                                "Stdin closed (EOF or broken pipe), shutting down gracefully"
+                            );
+                        }
+                        io::ErrorKind::Interrupted => {
+                            // EINTR - could retry, but for stdin it's safer to exit
+                            log::warn!("Stdin read interrupted, shutting down");
+                        }
+                        _ => {
+                            log::error!("Stdin read error: {e}");
+                        }
+                    }
+
+                    // Try to send quit command for graceful shutdown
                     match cmd_tx.try_send(UsiCommand::Quit) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            log::debug!("Sent quit command for graceful shutdown");
+                        }
                         Err(_) => {
                             log::debug!("Failed to send quit command, channel likely closed");
                         }
@@ -299,7 +333,13 @@ fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
             }
         }
 
-        log::debug!("Stdin reader thread exiting");
+        // Reached here = normal EOF. GUI closed the pipe, send quit
+        match cmd_tx.try_send(UsiCommand::Quit) {
+            Ok(()) => log::info!("Sent quit command after EOF"),
+            Err(_) => log::debug!("Channel closed before quit after EOF"),
+        }
+
+        log::debug!("Stdin reader thread exiting (EOF)");
     })
 }
 
@@ -410,7 +450,7 @@ fn run_engine() -> Result<()> {
                                 }
                                 Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                                     log::debug!("Engine returned after Finished");
-                                    let mut adapter = engine.lock().unwrap();
+                                    let mut adapter = lock_or_recover(&engine);
                                     adapter.return_engine(returned_engine);
                                     engine_returned = true;
                                 }
@@ -433,7 +473,7 @@ fn run_engine() -> Result<()> {
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
-                        let mut adapter = engine.lock().unwrap();
+                        let mut adapter = lock_or_recover(&engine);
                         adapter.return_engine(returned_engine);
                     }
                     Err(_) => {
@@ -485,7 +525,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
             // Send available options
             {
-                let engine = ctx.engine.lock().unwrap();
+                let engine = lock_or_recover(ctx.engine);
                 for option in engine.get_options() {
                     send_response(UsiResponse::Option(option.to_usi_string()));
                 }
@@ -497,7 +537,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
         UsiCommand::IsReady => {
             // Initialize engine if needed
             {
-                let mut engine = ctx.engine.lock().unwrap();
+                let mut engine = lock_or_recover(ctx.engine);
                 engine.initialize()?;
             }
             send_response(UsiResponse::ReadyOk);
@@ -518,7 +558,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.stdout,
             )?;
 
-            let mut engine = ctx.engine.lock().unwrap();
+            let mut engine = lock_or_recover(ctx.engine);
             engine.set_position(startpos, sfen.as_deref(), &moves)?;
         }
 
@@ -582,7 +622,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
         UsiCommand::PonderHit => {
             // Handle ponder hit
-            let mut engine = ctx.engine.lock().unwrap();
+            let mut engine = lock_or_recover(ctx.engine);
             match engine.ponder_hit() {
                 Ok(()) => log::debug!("Ponder hit successfully processed"),
                 Err(e) => log::debug!("Ponder hit ignored: {e}"),
@@ -590,7 +630,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
         }
 
         UsiCommand::SetOption { name, value } => {
-            let mut engine = ctx.engine.lock().unwrap();
+            let mut engine = lock_or_recover(ctx.engine);
             engine.set_option(&name, value.as_deref())?;
         }
 
@@ -599,7 +639,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             ctx.stop_flag.store(true, Ordering::Release);
 
             // Notify engine of game result
-            let mut engine = ctx.engine.lock().unwrap();
+            let mut engine = lock_or_recover(ctx.engine);
             engine.game_over(result);
         }
 
@@ -630,7 +670,13 @@ fn search_worker(
     // Take engine out and prepare search
     let was_ponder = params.ponder;
     let (engine, position, limits, ponder_hit_flag) = {
-        let mut adapter = engine_adapter.lock().unwrap();
+        let mut adapter = match engine_adapter.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::error!("Engine adapter mutex was poisoned, attempting recovery");
+                poisoned.into_inner()
+            }
+        };
         match adapter.take_engine() {
             Ok(engine) => {
                 match adapter.prepare_search(&params, stop_flag.clone()) {
@@ -681,7 +727,7 @@ fn search_worker(
         Ok((best_move, ponder_move)) => {
             // Clean up ponder state if needed
             {
-                let mut adapter = engine_adapter.lock().unwrap();
+                let mut adapter = lock_or_recover(&engine_adapter);
                 adapter.cleanup_after_search(was_ponder);
             }
 
@@ -697,7 +743,7 @@ fn search_worker(
 
             // Clean up ponder state if needed
             {
-                let mut adapter = engine_adapter.lock().unwrap();
+                let mut adapter = lock_or_recover(&engine_adapter);
                 adapter.cleanup_after_search(was_ponder);
             }
 

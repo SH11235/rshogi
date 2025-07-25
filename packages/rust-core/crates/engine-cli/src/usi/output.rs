@@ -1,6 +1,9 @@
 //! USI protocol output formatting
 
 use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
+use std::time::Duration;
 
 /// USI protocol responses
 #[derive(Debug, Clone)]
@@ -173,13 +176,117 @@ impl fmt::Display for SearchInfo {
     }
 }
 
-/// Helper to send USI response to stdout with automatic flush
-pub fn send_response(response: UsiResponse) {
+// Error tracking for stdout failures
+// Note: AtomicU32 is used for future thread-safety, though currently only main thread calls this
+static STDOUT_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
+const MAX_STDOUT_ERRORS: u32 = 5;
+const MAX_RETRY_ATTEMPTS: u32 = 3;
+
+/// Send USI response with error handling and retry logic
+fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
     use std::io::{self, Write};
 
-    println!("{response}");
-    // Flush stdout to ensure immediate delivery
-    let _ = io::stdout().flush();
+    // Get stdout handle and write response
+    let mut stdout = io::stdout();
+    writeln!(stdout, "{response}")?;
+
+    // Then try to flush with limited retries
+    for attempt in 0..MAX_RETRY_ATTEMPTS {
+        match stdout.flush() {
+            Ok(()) => {
+                // Reset error count on success
+                STDOUT_ERROR_COUNT.store(0, Ordering::Relaxed);
+                return Ok(());
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                // EINTR - retry immediately without sleep
+                log::debug!("stdout flush interrupted, retrying immediately");
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && attempt < MAX_RETRY_ATTEMPTS - 1 => {
+                // WouldBlock - brief pause then retry
+                log::debug!("stdout would block, brief retry");
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(e) if attempt < MAX_RETRY_ATTEMPTS - 1 => {
+                // Other errors - very brief backoff to avoid blocking time-critical responses
+                log::warn!(
+                    "stdout flush error: {e}, retry attempt {}/{}",
+                    attempt + 1,
+                    MAX_RETRY_ATTEMPTS
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => {
+                // Final attempt failed
+                return Err(e);
+            }
+        }
+    }
+
+    // Should not reach here, but return error if we do
+    Err(io::Error::other("Max retry attempts exceeded"))
+}
+
+/// Error types for stdout operations
+#[derive(Debug)]
+pub enum StdoutError {
+    BrokenPipe,
+    TooManyErrors(u32),
+    CriticalMessageFailed(std::io::Error),
+}
+
+/// Helper to send USI response to stdout with automatic flush
+pub fn send_response(response: UsiResponse) {
+    if let Err(e) = send_response_safe(response) {
+        match e {
+            StdoutError::BrokenPipe => {
+                log::error!("Broken pipe detected, GUI disconnected");
+                // Exit with code 1 (portable) instead of 141 (Unix-specific)
+                std::process::exit(1);
+            }
+            StdoutError::TooManyErrors(count) => {
+                log::error!("Too many stdout errors ({count}), exiting");
+                std::process::exit(1);
+            }
+            StdoutError::CriticalMessageFailed(io_err) => {
+                log::error!("Failed to send critical response: {io_err}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Send USI response with error handling, returning Result for proper error propagation
+pub fn send_response_safe(response: UsiResponse) -> Result<(), StdoutError> {
+    use std::io;
+
+    // Determine if this is a critical response
+    let is_critical = matches!(
+        response,
+        UsiResponse::UsiOk | UsiResponse::ReadyOk | UsiResponse::BestMove { .. }
+    );
+
+    // Try to send with retry
+    if let Err(e) = send_response_with_retry(&response) {
+        // Increment error count
+        let error_count = STDOUT_ERROR_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Handle based on error type and criticality
+        match e.kind() {
+            io::ErrorKind::BrokenPipe => Err(StdoutError::BrokenPipe),
+            _ if error_count >= MAX_STDOUT_ERRORS => Err(StdoutError::TooManyErrors(error_count)),
+            _ if is_critical => Err(StdoutError::CriticalMessageFailed(e)),
+            _ => {
+                // Non-critical error - log and continue
+                log::warn!("Failed to send response: {e} (error #{error_count})");
+                Ok(())
+            }
+        }
+    } else {
+        Ok(())
+    }
 }
 
 /// Helper to send info string message
