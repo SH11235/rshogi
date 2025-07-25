@@ -7,9 +7,39 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
+struct PerformanceResult {
+    name: String,
+    mean_time: f64,
+    std_dev: f64,
+    median_time: f64,
+    p90_time: f64,
+    p99_time: f64,
+    syscall_reduction: Option<f64>,
+    samples: usize,
+    outliers_removed: usize,
+}
+
+impl PerformanceResult {
+    fn to_json(&self) -> String {
+        format!(
+            r#"{{"name":"{}","mean_time":{:.4},"std_dev":{:.4},"median_time":{:.4},"p90_time":{:.4},"p99_time":{:.4},"syscall_reduction":{},"samples":{},"outliers_removed":{}}}"#,
+            self.name,
+            self.mean_time,
+            self.std_dev,
+            self.median_time,
+            self.p90_time,
+            self.p99_time,
+            self.syscall_reduction.map_or("null".to_string(), |v| format!("{v:.2}")),
+            self.samples,
+            self.outliers_removed
+        )
+    }
+}
+
 /// Platform-specific syscall measurement
 #[cfg(target_os = "linux")]
-fn measure_syscalls(cmd: &mut Command) -> Option<usize> {
+fn measure_syscalls(cmd: &mut Command) -> Option<()> {
     // Check if strace is available
     if Command::new("which").arg("strace").output().ok()?.status.success() {
         // Use strace to count write syscalls
@@ -29,6 +59,11 @@ fn measure_syscalls(cmd: &mut Command) -> Option<usize> {
         }
         new_cmd.arg(engine_path);
 
+        // Copy CLI arguments
+        for arg in cmd.get_args() {
+            new_cmd.arg(arg);
+        }
+
         // Copy environment variables
         for (key, value) in cmd.get_envs() {
             if let Some(value) = value {
@@ -39,14 +74,39 @@ fn measure_syscalls(cmd: &mut Command) -> Option<usize> {
         // Replace the command
         *cmd = new_cmd;
 
-        return Some(0); // Marker that strace is enabled
+        return Some(()); // Marker that strace is enabled
+    }
+
+    // Try perf as fallback
+    if Command::new("which").arg("perf").output().ok()?.status.success() {
+        let engine_path = cmd.get_program().to_str().unwrap().to_string();
+        let mut new_cmd = Command::new("perf");
+        new_cmd.arg("stat");
+        new_cmd.arg("-e");
+        new_cmd.arg("syscalls:sys_enter_write");
+        new_cmd.arg(engine_path);
+
+        // Copy CLI arguments
+        for arg in cmd.get_args() {
+            new_cmd.arg(arg);
+        }
+
+        // Copy environment variables
+        for (key, value) in cmd.get_envs() {
+            if let Some(value) = value {
+                new_cmd.env(key, value);
+            }
+        }
+
+        *cmd = new_cmd;
+        return Some(());
     }
 
     None
 }
 
 #[cfg(not(target_os = "linux"))]
-fn measure_syscalls(_cmd: &mut Command) -> Option<usize> {
+fn measure_syscalls(_cmd: &mut Command) -> Option<()> {
     eprintln!("Syscall measurement not available on this platform");
     None
 }
@@ -59,6 +119,7 @@ fn parse_strace_output(stderr: String) -> Option<usize> {
     let mut in_summary = false;
 
     for line in stderr.lines() {
+        let line = line.trim_start(); // Handle leading spaces
         if line.contains("% time") && line.contains("calls") {
             in_summary = true;
             continue;
@@ -104,7 +165,7 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
         let mut info_count = 0;
         let bestmove_sender = bestmove_tx;
 
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             line_count += 1;
             if line.starts_with("info ") && !line.contains("string") {
                 info_count += 1;
@@ -142,8 +203,14 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
     let search_time = match bestmove_rx.recv_timeout(timeout) {
         Ok(()) => start.elapsed(),
         Err(_) => {
-            eprintln!("Warning: Timeout waiting for bestmove at depth {}", depth);
-            start.elapsed()
+            let elapsed = start.elapsed();
+            eprintln!(
+                "Warning: Timeout waiting for bestmove at depth {}, elapsed: {:.2}s (timeout: {:.2}s)",
+                depth,
+                elapsed.as_secs_f64(),
+                timeout.as_secs_f64()
+            );
+            elapsed
         }
     };
 
@@ -180,7 +247,7 @@ fn run_search_test_timed(flush_delay: &str, movetime_ms: u64) -> (Duration, usiz
         let mut info_count = 0;
         let bestmove_sender = bestmove_tx;
 
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             line_count += 1;
             if line.starts_with("info ") && !line.contains("string") {
                 info_count += 1;
@@ -217,8 +284,14 @@ fn run_search_test_timed(flush_delay: &str, movetime_ms: u64) -> (Duration, usiz
     let search_time = match bestmove_rx.recv_timeout(timeout) {
         Ok(()) => start.elapsed(),
         Err(_) => {
-            eprintln!("Warning: Timeout waiting for bestmove at movetime {}ms", movetime_ms);
-            start.elapsed()
+            let elapsed = start.elapsed();
+            eprintln!(
+                "Warning: Timeout waiting for bestmove at movetime {}ms, elapsed: {:.2}s (timeout: {:.2}s)",
+                movetime_ms,
+                elapsed.as_secs_f64(),
+                timeout.as_secs_f64()
+            );
+            elapsed
         }
     };
 
@@ -250,13 +323,16 @@ fn calculate_statistics(values: &[f64]) -> (f64, f64, f64, f64, f64) {
         sorted[sorted.len() / 2]
     };
 
-    let p90 = sorted[(sorted.len() as f64 * 0.9) as usize].min(sorted[sorted.len() - 1]);
-    let p99 = sorted[(sorted.len() as f64 * 0.99) as usize].min(sorted[sorted.len() - 1]);
+    // Improved percentile calculation
+    let p90_idx = ((sorted.len() as f64 * 0.9) as usize).min(sorted.len() - 1);
+    let p99_idx = ((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1);
+    let p90 = sorted[p90_idx];
+    let p99 = sorted[p99_idx];
 
     (mean, std_dev, median, p90, p99)
 }
 
-/// Remove outliers using IQR method
+/// Remove outliers using IQR method with Tukey's factor
 fn remove_outliers(values: &[f64]) -> Vec<f64> {
     if values.len() < 4 {
         return values.to_vec();
@@ -271,8 +347,16 @@ fn remove_outliers(values: &[f64]) -> Vec<f64> {
     let q3 = sorted[q3_idx];
     let iqr = q3 - q1;
 
-    let lower_bound = q1 - 1.5 * iqr;
-    let upper_bound = q3 + 1.5 * iqr;
+    // Handle IQR == 0 case (all values are similar)
+    if iqr == 0.0 {
+        // Return all values as there's no variation
+        return values.to_vec();
+    }
+
+    // Use Tukey's factor 3.0 for extreme outliers (as suggested)
+    let tukey_factor = 3.0;
+    let lower_bound = q1 - tukey_factor * iqr;
+    let upper_bound = q3 + tukey_factor * iqr;
 
     values
         .iter()
@@ -293,6 +377,10 @@ fn test_buffering_performance_impact() {
     ];
 
     let depth = 4; // Moderate depth for quick testing
+    let mut results = Vec::new();
+
+    // Baseline info count for syscall reduction calculation
+    let mut baseline_infos = 0.0;
 
     for (delay, desc) in &configs {
         println!("Testing {desc}: ");
@@ -328,38 +416,75 @@ fn test_buffering_performance_impact() {
         }
 
         // Remove outliers
+        let original_count = times.len();
         let clean_times = remove_outliers(&times);
-        println!("  Outliers removed: {} measurements", times.len() - clean_times.len());
+        let outliers_removed = original_count - clean_times.len();
+        println!("  Outliers removed: {outliers_removed} measurements");
 
         // Calculate statistics
         let (mean_time, std_dev, median_time, p90_time, p99_time) =
             calculate_statistics(&clean_times);
         let (mean_infos, _, _, _, _) = calculate_statistics(&info_counts);
 
+        // Store baseline for immediate flush
+        if *delay == "0" {
+            baseline_infos = mean_infos;
+        }
+
         println!(
             "  Time statistics: mean={:.3}s, std_dev={:.3}s, median={:.3}s, p90={:.3}s, p99={:.3}s",
             mean_time, std_dev, median_time, p90_time, p99_time
         );
 
-        // Estimate syscall reduction
-        let syscalls_immediate = mean_infos as usize + 5; // Each info + critical messages
+        // Calculate syscall reduction
+        let syscalls_immediate = baseline_infos as usize + 5;
         let syscalls_buffered = if *delay == "0" {
             syscalls_immediate
         } else {
-            // Assume batches of ~10 messages
             (mean_infos as usize / 10) + 5
+        };
+
+        let syscall_reduction = if *delay == "0" {
+            None
+        } else {
+            Some(
+                ((syscalls_immediate - syscalls_buffered) as f64 * 100.0)
+                    / syscalls_immediate as f64,
+            )
         };
 
         println!(
             "  Estimated syscalls: {} ({}% reduction)\n",
             syscalls_buffered,
-            if *delay == "0" {
-                0
-            } else {
-                ((syscalls_immediate - syscalls_buffered) * 100) / syscalls_immediate
-            }
+            syscall_reduction.map_or(0, |r| r as usize)
         );
+
+        // Store result
+        results.push(PerformanceResult {
+            name: desc.to_string(),
+            mean_time,
+            std_dev,
+            median_time,
+            p90_time,
+            p99_time,
+            syscall_reduction,
+            samples: clean_times.len(),
+            outliers_removed,
+        });
     }
+
+    // Output JSON results for CI
+    println!("\n--- CI Results (JSON) ---");
+    println!("PERF_RESULTS=[");
+    for (i, result) in results.iter().enumerate() {
+        print!("  {}", result.to_json());
+        if i < results.len() - 1 {
+            println!(",");
+        } else {
+            println!();
+        }
+    }
+    println!("]");
 }
 
 #[test]
@@ -499,7 +624,7 @@ fn run_search_test_with_syscalls(
         let mut info_count = 0;
         let bestmove_sender = bestmove_tx;
 
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             line_count += 1;
             if line.starts_with("info ") && !line.contains("string") {
                 info_count += 1;
@@ -546,8 +671,14 @@ fn run_search_test_with_syscalls(
     let search_time = match bestmove_rx.recv_timeout(timeout) {
         Ok(()) => start.elapsed(),
         Err(_) => {
-            eprintln!("Warning: Timeout waiting for bestmove at depth {}", depth);
-            start.elapsed()
+            let elapsed = start.elapsed();
+            eprintln!(
+                "Warning: Timeout waiting for bestmove at depth {}, elapsed: {:.2}s (timeout: {:.2}s)",
+                depth,
+                elapsed.as_secs_f64(),
+                timeout.as_secs_f64()
+            );
+            elapsed
         }
     };
 
@@ -590,10 +721,10 @@ fn test_syscall_measurement() {
         let (time, lines, infos, syscalls) = run_search_test_with_syscalls(delay, depth);
 
         println!("  Time: {:.2}s", time.as_secs_f64());
-        println!("  Lines: {}, Info messages: {}", lines, infos);
+        println!("  Lines: {lines}, Info messages: {infos}");
 
         if let Some(count) = syscalls {
-            println!("  Measured write syscalls: {}", count);
+            println!("  Measured write syscalls: {count}");
         } else {
             println!("  Syscall measurement not available");
         }
@@ -610,8 +741,8 @@ fn test_syscall_measurement() {
         } else {
             0
         };
-        println!("Syscall reduction with buffering: {}%", reduction);
-        println!("  Immediate: {} syscalls", immediate);
-        println!("  Buffered: {} syscalls", buffered);
+        println!("Syscall reduction with buffering: {reduction}%");
+        println!("  Immediate: {immediate} syscalls");
+        println!("  Buffered: {buffered} syscalls");
     }
 }
