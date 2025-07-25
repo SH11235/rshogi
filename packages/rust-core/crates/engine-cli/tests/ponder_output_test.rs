@@ -86,23 +86,18 @@ fn test_ponder_output_depth_3() {
 
     println!("Found bestmove: {bestmove_line}");
 
-    // Check if we have ponder in logs
-    let has_ponder_in_log = logs.iter().any(|l| l.contains("ponder: Some"));
+    // With fallback logic, we should always have ponder move
+    assert!(
+        bestmove_line.contains(" ponder "),
+        "Expected ponder in USI output (with fallback logic)"
+    );
 
-    if has_ponder_in_log {
-        println!("PV was long enough to extract ponder move");
-        // Should have ponder in USI output
-        assert!(
-            bestmove_line.contains(" ponder "),
-            "Expected ponder in USI output when PV has 2+ moves"
-        );
+    // Check if fallback was used
+    let used_fallback = logs.iter().any(|l| l.contains("Generated fallback"));
+    if used_fallback {
+        println!("Fallback ponder move was generated");
     } else {
-        println!("PV was too short for ponder move");
-        // Should not have ponder in USI output
-        assert!(
-            !bestmove_line.contains(" ponder "),
-            "Should not have ponder in USI output when PV is short"
-        );
+        println!("Ponder move was extracted from PV");
     }
 }
 
