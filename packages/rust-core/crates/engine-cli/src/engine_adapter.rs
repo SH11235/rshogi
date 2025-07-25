@@ -335,6 +335,7 @@ impl EngineAdapter {
                   nodes: u64,
                   elapsed: std::time::Duration,
                   pv: &[engine_core::shogi::Move]| {
+                // TODO: Consider reusing Vec<String> or using SmallVec for performance
                 let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
                 let score_enum = to_usi_score(score);
 
@@ -357,7 +358,8 @@ impl EngineAdapter {
     fn process_search_result(
         result: &engine_core::search::types::SearchResult,
         info_callback_arc: &UsiInfoCallback,
-    ) -> Result<String> {
+        position: &Position,
+    ) -> Result<(String, Option<engine_core::shogi::Move>)> {
         // Get best move
         let best_move = result.best_move.ok_or_else(|| {
             anyhow!("No legal moves available in this position (checkmate or stalemate)")
@@ -365,28 +367,152 @@ impl EngineAdapter {
 
         // Convert move to USI format
         let best_move_str = engine_core::usi::move_to_usi(&best_move);
-        log::info!("Best move: {} (score: {:?})", best_move_str, result.score);
+
+        // Extract ponder move from PV if available
+        let mut ponder_move = if result.stats.pv.len() >= 2 {
+            Some(result.stats.pv[1])
+        } else {
+            // Fallback: Generate plausible ponder move
+            Self::generate_ponder_fallback(position, &best_move)
+        };
+
+        // Validate ponder move
+        if let Some(ref pm) = ponder_move {
+            if !Self::is_valid_ponder_move(position, &best_move, pm) {
+                log::debug!("Invalid ponder move detected, regenerating with fallback");
+                ponder_move = Self::generate_ponder_fallback(position, &best_move);
+            }
+        }
+
+        log::debug!(
+            "Best move: {} (score: {:?}) ponder: {:?}",
+            best_move_str,
+            result.score,
+            ponder_move
+        );
 
         // Send final info
         let score = to_usi_score(result.score);
         let depth = if result.stats.depth == 0 {
+            // This can happen when search is interrupted very early or in some edge cases
+            // TODO: Investigate root cause - might be related to time control or early termination
             log::warn!("SearchStats.depth is 0, this should not happen. Using 1 as fallback.");
             1
         } else {
             result.stats.depth
         };
 
+        // Convert full PV to USI format for final info
+        let pv_usi: Vec<String> =
+            result.stats.pv.iter().map(engine_core::usi::move_to_usi).collect();
+
         let info = SearchInfo {
             depth: Some(depth as u32),
             time: Some(result.stats.elapsed.as_millis().max(1) as u64),
             nodes: Some(result.stats.nodes),
-            pv: vec![best_move_str.clone()],
+            pv: pv_usi,
             score: Some(score),
             ..Default::default()
         };
         (*info_callback_arc)(info);
 
-        Ok(best_move_str)
+        Ok((best_move_str, ponder_move))
+    }
+
+    /// Generate fallback ponder move when PV is too short
+    fn generate_ponder_fallback(
+        position: &Position,
+        best_move: &engine_core::shogi::Move,
+    ) -> Option<engine_core::shogi::Move> {
+        use engine_core::movegen::MoveGen;
+        use engine_core::shogi::MoveList;
+
+        // Create a copy of the position to make the move
+        let mut temp_position = position.clone();
+
+        // Apply the best move
+        temp_position.do_move(*best_move);
+
+        // Generate legal moves in the new position (opponent's moves)
+        let mut generator = MoveGen::new();
+        let mut moves = MoveList::new();
+        generator.generate_all(&temp_position, &mut moves);
+
+        if moves.is_empty() {
+            // Position after best move is checkmate or stalemate
+            return None;
+        }
+
+        // Simple heuristic: prefer captures, checks, and central moves
+        let ponder_move = Self::select_plausible_move(&temp_position, &moves);
+
+        log::debug!(
+            "Generated fallback ponder move: {:?} from {} candidates",
+            ponder_move,
+            moves.len()
+        );
+
+        ponder_move
+    }
+
+    /// Select a plausible move from candidates using simple heuristics
+    fn select_plausible_move(
+        position: &Position,
+        moves: &engine_core::shogi::MoveList,
+    ) -> Option<engine_core::shogi::Move> {
+        // First pass: Look for captures
+        for i in 0..moves.len() {
+            let mv = moves[i];
+            // Check if target square has opponent piece
+            if position.board.piece_on(mv.to()).is_some() {
+                return Some(mv);
+            }
+        }
+
+        // Second pass: Look for checks
+        for i in 0..moves.len() {
+            let mv = moves[i];
+            let mut temp_pos = position.clone();
+            temp_pos.do_move(mv);
+            if temp_pos.in_check() {
+                return Some(mv);
+            }
+        }
+
+        // Third pass: Return the first legal move
+        if !moves.is_empty() {
+            Some(moves[0])
+        } else {
+            None
+        }
+    }
+
+    /// Validate that ponder move is legal in the position after best move
+    fn is_valid_ponder_move(
+        position: &Position,
+        best_move: &engine_core::shogi::Move,
+        ponder_move: &engine_core::shogi::Move,
+    ) -> bool {
+        use engine_core::movegen::MoveGen;
+        use engine_core::shogi::MoveList;
+
+        // Create a copy of the position and apply the best move
+        let mut temp_position = position.clone();
+        temp_position.do_move(*best_move);
+
+        // Generate all legal moves in the new position
+        let mut generator = MoveGen::new();
+        let mut moves = MoveList::new();
+        generator.generate_all(&temp_position, &mut moves);
+
+        // Check if ponder move is in the legal moves list
+        for i in 0..moves.len() {
+            if moves[i] == *ponder_move {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Execute search with prepared data and return USI result
@@ -418,10 +544,13 @@ impl EngineAdapter {
         );
 
         // Process result
-        let best_move_str = Self::process_search_result(&result, &info_callback_arc)?;
+        let (best_move_str, ponder_move) =
+            Self::process_search_result(&result, &info_callback_arc, &position)?;
 
-        // For now, no ponder move generation
-        Ok((best_move_str, None))
+        // Convert ponder move to USI format if available
+        let ponder_move_str = ponder_move.map(|m| engine_core::usi::move_to_usi(&m));
+
+        Ok((best_move_str, ponder_move_str))
     }
 
     /// Clean up after search completion
@@ -612,18 +741,43 @@ fn apply_go_params(
 ) -> Result<SearchLimits> {
     let builder = apply_search_limits(builder, params);
     // Use periods from go command if specified, otherwise use the provided default
-    let periods = params.periods.unwrap_or(byoyomi_periods);
-    let builder = apply_time_control(builder, params, position, periods);
+    let effective_periods = params.periods.unwrap_or(byoyomi_periods);
+    let builder = apply_time_control(builder, params, position, effective_periods);
     Ok(builder.build())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_core::shogi::Position;
+    use engine_core::movegen::MoveGen;
+    use engine_core::shogi::{Move, MoveList, Position};
     use engine_core::time_management::TimeControl;
+    use engine_core::usi::parse_usi_square;
 
     const DEFAULT_BYOYOMI_PERIODS: u32 = 1;
+
+    // Helper function to parse and validate USI move string
+    fn parse_and_validate_move(position: &Position, usi_move: &str) -> Result<Move> {
+        // Generate legal moves
+        let mut move_gen = MoveGen::new();
+        let mut legal_moves = MoveList::new();
+        move_gen.generate_all(position, &mut legal_moves);
+
+        if legal_moves.is_empty() {
+            return Err(anyhow::anyhow!("No legal moves in position"));
+        }
+
+        // Find the matching legal move by USI string comparison
+        for i in 0..legal_moves.len() {
+            let legal_move = legal_moves[i];
+            let legal_usi = engine_core::usi::move_to_usi(&legal_move);
+            if legal_usi == usi_move {
+                return Ok(legal_move);
+            }
+        }
+
+        Err(anyhow::anyhow!("Move {} is not legal in current position", usi_move))
+    }
 
     fn create_test_position() -> Position {
         Position::startpos()
@@ -1135,5 +1289,170 @@ mod tests {
             }
             _ => panic!("Expected Byoyomi time control"),
         }
+    }
+
+    #[test]
+    fn test_process_search_result_with_pv() {
+        use engine_core::search::types::{SearchResult, SearchStats};
+        use std::time::Duration;
+
+        // Create test position and moves using known valid moves
+        let position = Position::startpos();
+        // Using actual valid moves from the initial position
+        // Note: In this implementation, 7c7d is a valid black pawn move
+        let move1 = parse_and_validate_move(&position, "7c7d").unwrap();
+
+        let mut pos2 = position.clone();
+        pos2.do_move(move1);
+        // After black 7c7d, white can respond
+        let move2 = parse_and_validate_move(&pos2, "3g3f").unwrap();
+
+        let mut pos3 = pos2.clone();
+        pos3.do_move(move2);
+        // After white 3g3f, black can continue
+        let move3 = parse_and_validate_move(&pos3, "8c8d").unwrap();
+
+        let result = SearchResult {
+            best_move: Some(move1),
+            score: 100,
+            stats: SearchStats {
+                nodes: 1000,
+                elapsed: Duration::from_millis(100),
+                pv: vec![move1, move2, move3],
+                depth: 3,
+                ..Default::default()
+            },
+        };
+
+        // Create a dummy callback
+        let info_callback: Arc<dyn Fn(SearchInfo) + Send + Sync> = Arc::new(|_: SearchInfo| {});
+
+        // Process result
+        let (best_move_str, ponder_move) =
+            EngineAdapter::process_search_result(&result, &info_callback, &position).unwrap();
+
+        // Verify
+        assert_eq!(best_move_str, engine_core::usi::move_to_usi(&move1));
+        assert!(ponder_move.is_some());
+        assert_eq!(ponder_move.unwrap(), move2);
+    }
+
+    #[test]
+    fn test_process_search_result_without_ponder() {
+        use engine_core::search::types::{SearchResult, SearchStats};
+        use std::time::Duration;
+
+        // Create test position and move
+        let position = Position::startpos();
+        // Note: In this implementation, 7c7d is a valid black pawn move
+        let move1 = parse_and_validate_move(&position, "7c7d").unwrap();
+
+        let result = SearchResult {
+            best_move: Some(move1),
+            score: 50,
+            stats: SearchStats {
+                nodes: 10,
+                elapsed: Duration::from_millis(10),
+                pv: vec![move1], // Only one move in PV
+                depth: 1,
+                ..Default::default()
+            },
+        };
+
+        // Create a dummy callback
+        let info_callback: Arc<dyn Fn(SearchInfo) + Send + Sync> = Arc::new(|_: SearchInfo| {});
+
+        // Process result
+        let (best_move_str, ponder_move) =
+            EngineAdapter::process_search_result(&result, &info_callback, &position).unwrap();
+
+        // Verify - with fallback, we should get a ponder move
+        assert_eq!(best_move_str, engine_core::usi::move_to_usi(&move1));
+        assert!(ponder_move.is_some(), "Fallback should generate ponder move");
+    }
+
+    #[test]
+    fn test_process_search_result_empty_pv() {
+        use engine_core::search::types::{SearchResult, SearchStats};
+        use std::time::Duration;
+
+        // Create test position and move
+        let position = Position::startpos();
+        let move1 = parse_and_validate_move(&position, "3c3d").unwrap();
+
+        let result = SearchResult {
+            best_move: Some(move1),
+            score: 0,
+            stats: SearchStats {
+                nodes: 1,
+                elapsed: Duration::from_millis(1),
+                pv: vec![], // Empty PV
+                depth: 0,
+                ..Default::default()
+            },
+        };
+
+        // Create a dummy callback
+        let info_callback: Arc<dyn Fn(SearchInfo) + Send + Sync> = Arc::new(|_: SearchInfo| {});
+
+        // Process result
+        let (best_move_str, ponder_move) =
+            EngineAdapter::process_search_result(&result, &info_callback, &position).unwrap();
+
+        // Verify - with fallback, we should get a ponder move
+        assert_eq!(best_move_str, engine_core::usi::move_to_usi(&move1));
+        assert!(ponder_move.is_some(), "Fallback should generate ponder move");
+    }
+
+    #[test]
+    fn test_ponder_fallback_generation() {
+        // Test fallback ponder move generation
+        let position = Position::startpos();
+
+        // Use a move that exists in the initial position
+        // Note: In this implementation, 7c7d is a valid black pawn move
+        let best_move = parse_and_validate_move(&position, "7c7d").unwrap();
+
+        let ponder = EngineAdapter::generate_ponder_fallback(&position, &best_move);
+
+        assert!(ponder.is_some(), "Should generate fallback ponder move");
+
+        // Verify the ponder move is valid
+        let ponder_move = ponder.unwrap();
+        assert!(EngineAdapter::is_valid_ponder_move(&position, &best_move, &ponder_move));
+    }
+
+    #[test]
+    fn test_ponder_move_validation() {
+        let position = Position::startpos();
+        // Note: In this implementation, 7c7d is a valid black pawn move
+        let best_move = parse_and_validate_move(&position, "7c7d").unwrap();
+
+        // Create position after best move
+        let mut pos_after = position.clone();
+        pos_after.do_move(best_move);
+
+        // Valid ponder move (opponent's response)
+        // After 7c7d (black pawn advance), white can respond
+        let valid_ponder = parse_and_validate_move(&pos_after, "3g3f").unwrap();
+        let is_valid = EngineAdapter::is_valid_ponder_move(&position, &best_move, &valid_ponder);
+        assert!(is_valid, "3g3f should be valid after 7c7d");
+
+        // Another valid opponent move
+        let another_valid = parse_and_validate_move(&pos_after, "8g8f").unwrap();
+        assert!(
+            EngineAdapter::is_valid_ponder_move(&position, &best_move, &another_valid),
+            "8g8f should be valid"
+        );
+
+        // Invalid move - trying to parse our color's move should fail in opponent's turn
+        // So we test with an illegal move instead
+        let illegal_from = parse_usi_square("9a").unwrap();
+        let illegal_to = parse_usi_square("1i").unwrap();
+        let invalid_ponder = Move::normal(illegal_from, illegal_to, false);
+        assert!(
+            !EngineAdapter::is_valid_ponder_move(&position, &best_move, &invalid_ponder),
+            "Illegal move should be invalid"
+        );
     }
 }
