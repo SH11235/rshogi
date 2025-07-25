@@ -13,24 +13,38 @@ use super::piece_constants::{
 use std::fmt;
 
 /// Square on shogi board (0-80)
+///
+/// **IMPORTANT**: Internal file coordinate is reversed from USI notation!
+/// - file 0 = 9筋 (leftmost)
+/// - file 8 = 1筋 (rightmost)
+///
+/// To avoid confusion, prefer using parse_usi_square() instead of Square::new().
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Square(pub u8); // 0-80 (9x9)
 
 impl Square {
     /// Create square from file and rank
+    ///
+    /// **WARNING**: file coordinate is reversed from USI notation!
+    /// - file 0 = 9筋 (leftmost)
+    /// - file 8 = 1筋 (rightmost)
+    ///
+    /// Consider using `parse_usi_square()` instead for safety.
     #[inline]
     pub const fn new(file: u8, rank: u8) -> Self {
         debug_assert!(file < 9 && rank < 9);
         Square(rank * 9 + file)
     }
 
-    /// Get file (0-8, right to left)
+    /// Get file (0-8, left to right in internal representation)
+    /// Returns: 0=9筋, 1=8筋, ..., 8=1筋
     #[inline]
     pub const fn file(self) -> u8 {
         self.0 % 9
     }
 
     /// Get rank (0-8, top to bottom)
+    /// Returns: 0=a段, 1=b段, ..., 8=i段
     #[inline]
     pub const fn rank(self) -> u8 {
         self.0 / 9
@@ -47,31 +61,48 @@ impl Square {
     pub const fn flip(self) -> Self {
         Square(80 - self.0)
     }
+
+    /// Create square from USI notation characters
+    ///
+    /// This is the recommended way to create a Square from known coordinates.
+    ///
+    /// # Examples
+    /// ```
+    /// let sq = Square::from_usi('7', 'g').unwrap();
+    /// assert_eq!(sq.to_string(), "7g");
+    /// ```
+    pub fn from_usi(file_char: char, rank_char: char) -> Result<Self, &'static str> {
+        // Validate file character
+        let file = match file_char {
+            '1'..='9' => 8 - (file_char.to_digit(10).unwrap() as u8 - 1),
+            _ => return Err("Invalid file character"),
+        };
+
+        // Validate rank character
+        let rank = match rank_char {
+            'a'..='i' => (rank_char as u32 - 'a' as u32) as u8,
+            _ => return Err("Invalid rank character"),
+        };
+
+        Ok(Square::new(file, rank))
+    }
 }
 
 /// Display square in shogi notation (e.g., "5e")
-/// ● USIプロトコルとの関係式
-/// Square::new(file, rank) → USI座標
-/// - file（第一引数）: USI_file = 9 - file
-/// - file 8 → USI 1筋
-/// - file 7 → USI 2筋
-/// - file 0 → USI 9筋
-/// - rank（第二引数）: USI_rank = rank + 'a'
-/// - rank 0 → USI 'a'段（一段目）
-/// - rank 8 → USI 'i'段（九段目）
+///
+/// Converts internal representation to USI notation:
+/// - Internal file 0 → USI '9'
+/// - Internal file 8 → USI '1'
+/// - Internal rank 0 → USI 'a'
+/// - Internal rank 8 → USI 'i'
 ///
 /// ## Examples:
-/// Square::new(8, 7)
-/// → USI: "1h" (1八)
-///
-/// Square::new(8, 0)
-/// → USI: "1a" (1一)
-///
-/// Square::new(0, 0)
-/// → USI: "9a" (9一)
-///
-/// Square::new(4, 4)
-/// → USI: "5e" (5五)
+/// - Square::new(0, 0) → "9a" (9一)
+/// - Square::new(8, 0) → "1a" (1一)
+/// - Square::new(0, 8) → "9i" (9九)
+/// - Square::new(8, 8) → "1i" (1九)
+/// - Square::new(4, 4) → "5e" (5五)
+/// - Square::new(2, 6) → "7g" (7七)
 impl fmt::Display for Square {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let file = b'9' - self.file();
