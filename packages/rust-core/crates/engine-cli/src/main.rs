@@ -524,10 +524,8 @@ fn run_engine() -> Result<()> {
 fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
     match command {
         UsiCommand::Usi => {
-            send_response(UsiResponse::Id {
-                name: "RustShogi 1.0".to_string(),
-                author: "RustShogi Team".to_string(),
-            })?;
+            send_response(UsiResponse::IdName("RustShogi 1.0".to_string()))?;
+            send_response(UsiResponse::IdAuthor("RustShogi Team".to_string()))?;
 
             // Send available options
             {
