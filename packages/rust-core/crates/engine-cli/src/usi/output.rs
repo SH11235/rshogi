@@ -1,15 +1,23 @@
 //! USI protocol output formatting
 
+use once_cell::sync::Lazy;
 use std::fmt;
+use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+#[cfg(feature = "buffered-io")]
+use std::time::Instant;
 
 /// USI protocol responses
 #[derive(Debug, Clone)]
 pub enum UsiResponse {
-    /// Engine identification
-    Id { name: String, author: String },
+    /// Engine identification - name
+    IdName(String),
+
+    /// Engine identification - author
+    IdAuthor(String),
 
     /// USI mode confirmed
     UsiOk,
@@ -88,10 +96,8 @@ pub enum Score {
 impl fmt::Display for UsiResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            UsiResponse::Id { name, author } => {
-                writeln!(f, "id name {name}")?;
-                write!(f, "id author {author}")
-            }
+            UsiResponse::IdName(name) => write!(f, "id name {name}"),
+            UsiResponse::IdAuthor(author) => write!(f, "id author {author}"),
             UsiResponse::UsiOk => write!(f, "usiok"),
             UsiResponse::ReadyOk => write!(f, "readyok"),
             UsiResponse::BestMove { best_move, ponder } => {
@@ -180,19 +186,190 @@ impl fmt::Display for SearchInfo {
 // Note: AtomicU32 is used for future thread-safety, though currently only main thread calls this
 static STDOUT_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
 const MAX_STDOUT_ERRORS: u32 = 5;
-const MAX_RETRY_ATTEMPTS: u32 = 3;
+const MAX_RETRY_ATTEMPTS: u32 = 8; // Increased for buffered writes
+
+// Buffering configuration
+#[cfg(any(feature = "buffered-io", test))]
+const DEFAULT_FLUSH_INTERVAL_MS: u64 = 100;
+#[cfg(any(feature = "buffered-io", test))]
+const DEFAULT_FLUSH_MESSAGE_COUNT: u32 = 10;
+
+/// Get flush interval from environment variable (for testing)
+#[cfg(any(feature = "buffered-io", test))]
+fn get_flush_interval_ms() -> u64 {
+    const MAX_FLUSH_INTERVAL: u64 = 10_000; // 10秒
+
+    std::env::var("USI_FLUSH_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| {
+            if v == 0 && cfg!(test) {
+                v
+            } else {
+                v.clamp(1, MAX_FLUSH_INTERVAL) // 上限値も設定
+            }
+        })
+        .unwrap_or(DEFAULT_FLUSH_INTERVAL_MS)
+}
+
+/// Get flush message count from environment variable (for testing)
+#[cfg(any(feature = "buffered-io", test))]
+fn get_flush_message_count() -> u32 {
+    const MAX_FLUSH_MESSAGE_COUNT: u32 = 1000; // 1000メッセージ
+
+    std::env::var("USI_FLUSH_MESSAGE_COUNT")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .map(|v| v.clamp(1, MAX_FLUSH_MESSAGE_COUNT)) // 1以上、上限値以下
+        .unwrap_or(DEFAULT_FLUSH_MESSAGE_COUNT)
+}
+
+/// Flush strategy for messages
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FlushKind {
+    /// Immediate flush for critical messages (usiok, readyok, bestmove)
+    Immediate,
+    /// Buffered flush for non-critical messages (info)
+    #[cfg(any(feature = "buffered-io", test))]
+    Buffered,
+}
+
+/// USI output writer with buffering capabilities
+///
+/// Note: We use BufWriter<Stdout> instead of BufWriter<StdoutLock> because
+/// StdoutLock is !Send and cannot be stored in a static variable.
+/// The performance difference is minimal as stdout() caches the handle internally.
+struct UsiWriter {
+    inner: Mutex<BufWriter<std::io::Stdout>>,
+    #[cfg(feature = "buffered-io")]
+    last_flush: Mutex<Instant>,
+    #[cfg(feature = "buffered-io")]
+    message_count: AtomicU32,
+}
+
+impl UsiWriter {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(BufWriter::with_capacity(8192, std::io::stdout())),
+            #[cfg(feature = "buffered-io")]
+            last_flush: Mutex::new(Instant::now()),
+            #[cfg(feature = "buffered-io")]
+            message_count: AtomicU32::new(0),
+        }
+    }
+
+    fn write_line(&self, response: &UsiResponse, flush_kind: FlushKind) -> std::io::Result<()> {
+        // Handle poisoned mutex gracefully
+        let mut writer = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Recover from poisoned state
+                log::warn!("stdout-write: recovering from poisoned mutex");
+                poisoned.into_inner()
+            }
+        };
+
+        // Write the response
+        writeln!(writer, "{response}")?;
+
+        // Phase 1: Always flush immediately (behavior compatible)
+        // Phase 2: Will implement conditional flushing based on flush_kind
+        #[cfg(not(feature = "buffered-io"))]
+        {
+            let _ = flush_kind; // Suppress unused warning
+            writer.flush()?;
+        }
+
+        #[cfg(feature = "buffered-io")]
+        {
+            match flush_kind {
+                FlushKind::Immediate => {
+                    writer.flush()?;
+                    *self.last_flush.lock().unwrap() = Instant::now();
+                    self.message_count.store(0, Ordering::Relaxed);
+                }
+                FlushKind::Buffered => {
+                    // Increment message count
+                    let count = self.message_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+                    // Check if we should flush
+                    let should_flush = {
+                        let last_flush = *self.last_flush.lock().unwrap();
+                        let elapsed = last_flush.elapsed();
+
+                        // Flush based on configurable thresholds
+                        count >= get_flush_message_count()
+                            || elapsed >= Duration::from_millis(get_flush_interval_ms())
+                    };
+
+                    if should_flush {
+                        writer.flush()?;
+                        *self.last_flush.lock().unwrap() = Instant::now();
+                        self.message_count.store(0, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn flush_all(&self) -> std::io::Result<()> {
+        // Handle poisoned mutex gracefully
+        let mut writer = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Recover from poisoned state
+                log::warn!("stdout-write: recovering from poisoned mutex in flush_all");
+                poisoned.into_inner()
+            }
+        };
+        writer.flush()
+    }
+
+    /// Try to flush without blocking (for panic handler)
+    fn try_flush_all(&self) -> std::io::Result<()> {
+        match self.inner.try_lock() {
+            Ok(mut writer) => writer.flush(),
+            Err(_) => {
+                // Mutex is locked, possibly by the same thread in a panic
+                // Skip flushing to avoid deadlock
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Global USI writer instance
+static USI_WRITER: Lazy<UsiWriter> = Lazy::new(UsiWriter::new);
 
 /// Send USI response with error handling and retry logic
 fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
-    use std::io::{self, Write};
+    use std::io;
 
-    // Get stdout handle and write response
-    let mut stdout = io::stdout();
-    writeln!(stdout, "{response}")?;
+    // Determine flush strategy based on response type
+    let flush_kind = match response {
+        UsiResponse::IdName(_)
+        | UsiResponse::IdAuthor(_)
+        | UsiResponse::UsiOk
+        | UsiResponse::ReadyOk
+        | UsiResponse::BestMove { .. } => FlushKind::Immediate,
+        UsiResponse::String(_) => FlushKind::Immediate, // Error messages should flush immediately
+        _ => {
+            #[cfg(any(feature = "buffered-io", test))]
+            {
+                FlushKind::Buffered
+            }
+            #[cfg(not(any(feature = "buffered-io", test)))]
+            {
+                FlushKind::Immediate
+            }
+        }
+    };
 
-    // Then try to flush with limited retries
+    // Try to write with retries
     for attempt in 0..MAX_RETRY_ATTEMPTS {
-        match stdout.flush() {
+        match USI_WRITER.write_line(response, flush_kind) {
             Ok(()) => {
                 // Reset error count on success
                 STDOUT_ERROR_COUNT.store(0, Ordering::Relaxed);
@@ -200,28 +377,29 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
             }
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
                 // BrokenPipe - no point in retrying
-                log::debug!("stdout flush failed with broken pipe");
+                log::debug!("stdout-write: broken pipe detected");
                 return Err(e);
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 // EINTR - retry immediately without sleep
-                log::debug!("stdout flush interrupted, retrying immediately");
+                log::debug!("stdout-write: interrupted, retrying immediately");
                 continue;
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock && attempt < MAX_RETRY_ATTEMPTS - 1 => {
-                // WouldBlock - brief pause then retry
-                log::debug!("stdout would block, brief retry");
-                thread::sleep(Duration::from_millis(1));
+                // WouldBlock - exponential backoff
+                let delay_ms = 1u64 << attempt.min(4); // 1, 2, 4, 8, 16ms max
+                log::debug!("stdout-write: would block, retry after {delay_ms}ms");
+                thread::sleep(Duration::from_millis(delay_ms));
                 continue;
             }
             Err(e) if attempt < MAX_RETRY_ATTEMPTS - 1 => {
-                // Other errors - very brief backoff to avoid blocking time-critical responses
+                // Other errors - exponential backoff to avoid blocking time-critical responses
+                let delay_ms = 1u64 << attempt.min(4); // 1, 2, 4, 8, 16ms max
+                let retry_num = attempt + 1;
                 log::warn!(
-                    "stdout flush error: {e}, retry attempt {}/{}",
-                    attempt + 1,
-                    MAX_RETRY_ATTEMPTS
+                    "stdout-write: failed with {e}, retry {retry_num}/{MAX_RETRY_ATTEMPTS} after {delay_ms}ms"
                 );
-                thread::sleep(Duration::from_millis(1));
+                thread::sleep(Duration::from_millis(delay_ms));
             }
             Err(e) => {
                 // Final attempt failed
@@ -286,7 +464,11 @@ pub fn send_response_safe(response: UsiResponse) -> Result<(), StdoutError> {
     // Determine if this is a critical response
     let is_critical = matches!(
         response,
-        UsiResponse::UsiOk | UsiResponse::ReadyOk | UsiResponse::BestMove { .. }
+        UsiResponse::IdName(_)
+            | UsiResponse::IdAuthor(_)
+            | UsiResponse::UsiOk
+            | UsiResponse::ReadyOk
+            | UsiResponse::BestMove { .. }
     );
 
     // Try to send with retry
@@ -318,17 +500,38 @@ pub fn send_info_string(message: impl Into<String>) -> Result<(), StdoutError> {
     send_response(UsiResponse::String(message.into()))
 }
 
+/// Ensure stdout is flushed on exit
+/// Call this early in main() to set up panic and exit hooks
+pub fn ensure_flush_on_exit() {
+    // Force initialization of USI_WRITER
+    Lazy::force(&USI_WRITER);
+
+    // Set panic hook to flush on panic
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Use try_flush_all to avoid deadlock if panic occurs during write_line
+        let _ = USI_WRITER.try_flush_all();
+        original_hook(panic_info);
+    }));
+}
+
+/// Flush any remaining buffered output
+/// Call this before normal program exit
+pub fn flush_final() -> std::io::Result<()> {
+    USI_WRITER.flush_all()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_usi_response_formatting() {
-        let resp = UsiResponse::Id {
-            name: "RustShogi 1.0".to_string(),
-            author: "Rust Team".to_string(),
-        };
-        assert_eq!(resp.to_string(), "id name RustShogi 1.0\nid author Rust Team");
+        let resp = UsiResponse::IdName("RustShogi 1.0".to_string());
+        assert_eq!(resp.to_string(), "id name RustShogi 1.0");
+
+        let resp = UsiResponse::IdAuthor("Rust Team".to_string());
+        assert_eq!(resp.to_string(), "id author Rust Team");
 
         let resp = UsiResponse::BestMove {
             best_move: "7g7f".to_string(),
