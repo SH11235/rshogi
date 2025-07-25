@@ -13,8 +13,11 @@ use std::time::Instant;
 /// USI protocol responses
 #[derive(Debug, Clone)]
 pub enum UsiResponse {
-    /// Engine identification
-    Id { name: String, author: String },
+    /// Engine identification - name
+    IdName(String),
+
+    /// Engine identification - author
+    IdAuthor(String),
 
     /// USI mode confirmed
     UsiOk,
@@ -93,10 +96,8 @@ pub enum Score {
 impl fmt::Display for UsiResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            UsiResponse::Id { name, author } => {
-                writeln!(f, "id name {name}")?;
-                write!(f, "id author {author}")
-            }
+            UsiResponse::IdName(name) => write!(f, "id name {name}"),
+            UsiResponse::IdAuthor(author) => write!(f, "id author {author}"),
             UsiResponse::UsiOk => write!(f, "usiok"),
             UsiResponse::ReadyOk => write!(f, "readyok"),
             UsiResponse::BestMove { best_move, ponder } => {
@@ -187,6 +188,28 @@ static STDOUT_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
 const MAX_STDOUT_ERRORS: u32 = 5;
 const MAX_RETRY_ATTEMPTS: u32 = 8; // Increased for buffered writes
 
+// Buffering configuration
+const DEFAULT_FLUSH_INTERVAL_MS: u64 = 100;
+const DEFAULT_FLUSH_MESSAGE_COUNT: u32 = 10;
+
+/// Get flush interval from environment variable (for testing)
+fn get_flush_interval_ms() -> u64 {
+    std::env::var("USI_FLUSH_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| if v == 0 && cfg!(test) { v } else { v.max(1) }) // Allow 0 in tests
+        .unwrap_or(DEFAULT_FLUSH_INTERVAL_MS)
+}
+
+/// Get flush message count from environment variable (for testing)
+fn get_flush_message_count() -> u32 {
+    std::env::var("USI_FLUSH_MESSAGE_COUNT")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&v| v > 0) // Guard against 0 or negative values
+        .unwrap_or(DEFAULT_FLUSH_MESSAGE_COUNT)
+}
+
 /// Flush strategy for messages
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FlushKind {
@@ -198,7 +221,7 @@ pub enum FlushKind {
 }
 
 /// USI output writer with buffering capabilities
-/// 
+///
 /// Note: We use BufWriter<Stdout> instead of BufWriter<StdoutLock> because
 /// StdoutLock is !Send and cannot be stored in a static variable.
 /// The performance difference is minimal as stdout() caches the handle internally.
@@ -220,13 +243,13 @@ impl UsiWriter {
             message_count: AtomicU32::new(0),
         }
     }
-    
+
     fn write_line(&self, response: &UsiResponse, flush_kind: FlushKind) -> std::io::Result<()> {
         let mut writer = self.inner.lock().unwrap();
-        
+
         // Write the response
-        writeln!(writer, "{}", response)?;
-        
+        writeln!(writer, "{response}")?;
+
         // Phase 1: Always flush immediately (behavior compatible)
         // Phase 2: Will implement conditional flushing based on flush_kind
         #[cfg(not(feature = "buffered-io"))]
@@ -234,7 +257,7 @@ impl UsiWriter {
             let _ = flush_kind; // Suppress unused warning
             writer.flush()?;
         }
-        
+
         #[cfg(feature = "buffered-io")]
         {
             match flush_kind {
@@ -246,16 +269,17 @@ impl UsiWriter {
                 FlushKind::Buffered => {
                     // Increment message count
                     let count = self.message_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    
+
                     // Check if we should flush
                     let should_flush = {
                         let last_flush = *self.last_flush.lock().unwrap();
                         let elapsed = last_flush.elapsed();
-                        
-                        // Flush if: 10 messages or 100ms elapsed
-                        count >= 10 || elapsed >= Duration::from_millis(100)
+
+                        // Flush based on configurable thresholds
+                        count >= get_flush_message_count()
+                            || elapsed >= Duration::from_millis(get_flush_interval_ms())
                     };
-                    
+
                     if should_flush {
                         writer.flush()?;
                         *self.last_flush.lock().unwrap() = Instant::now();
@@ -264,10 +288,10 @@ impl UsiWriter {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     fn flush_all(&self) -> std::io::Result<()> {
         let mut writer = self.inner.lock().unwrap();
         writer.flush()
@@ -283,15 +307,21 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
 
     // Determine flush strategy based on response type
     let flush_kind = match response {
-        UsiResponse::UsiOk | UsiResponse::ReadyOk | UsiResponse::BestMove { .. } => {
-            FlushKind::Immediate
-        }
+        UsiResponse::IdName(_)
+        | UsiResponse::IdAuthor(_)
+        | UsiResponse::UsiOk
+        | UsiResponse::ReadyOk
+        | UsiResponse::BestMove { .. } => FlushKind::Immediate,
         UsiResponse::String(_) => FlushKind::Immediate, // Error messages should flush immediately
         _ => {
             #[cfg(any(feature = "buffered-io", test))]
-            { FlushKind::Buffered }
+            {
+                FlushKind::Buffered
+            }
             #[cfg(not(any(feature = "buffered-io", test)))]
-            { FlushKind::Immediate }
+            {
+                FlushKind::Immediate
+            }
         }
     };
 
@@ -305,28 +335,29 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
             }
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
                 // BrokenPipe - no point in retrying
-                log::debug!("stdout write failed with broken pipe");
+                log::debug!("stdout-write: broken pipe detected");
                 return Err(e);
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 // EINTR - retry immediately without sleep
-                log::debug!("stdout write interrupted, retrying immediately");
+                log::debug!("stdout-write: interrupted, retrying immediately");
                 continue;
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock && attempt < MAX_RETRY_ATTEMPTS - 1 => {
-                // WouldBlock - brief pause then retry
-                log::debug!("stdout write would block, brief retry");
-                thread::sleep(Duration::from_millis(1));
+                // WouldBlock - exponential backoff
+                let delay_ms = 1u64 << attempt.min(4); // 1, 2, 4, 8, 16ms max
+                log::debug!("stdout-write: would block, retry after {delay_ms}ms");
+                thread::sleep(Duration::from_millis(delay_ms));
                 continue;
             }
             Err(e) if attempt < MAX_RETRY_ATTEMPTS - 1 => {
-                // Other errors - very brief backoff to avoid blocking time-critical responses
+                // Other errors - exponential backoff to avoid blocking time-critical responses
+                let delay_ms = 1u64 << attempt.min(4); // 1, 2, 4, 8, 16ms max
+                let retry_num = attempt + 1;
                 log::warn!(
-                    "stdout write failed: {e}, retry attempt {}/{}",
-                    attempt + 1,
-                    MAX_RETRY_ATTEMPTS
+                    "stdout-write: failed with {e}, retry {retry_num}/{MAX_RETRY_ATTEMPTS} after {delay_ms}ms"
                 );
-                thread::sleep(Duration::from_millis(1));
+                thread::sleep(Duration::from_millis(delay_ms));
             }
             Err(e) => {
                 // Final attempt failed
@@ -336,10 +367,7 @@ fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
     }
 
     // Should not reach here, but return error if we do
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        "Max retry attempts exceeded",
-    ))
+    Err(io::Error::other("Max retry attempts exceeded"))
 }
 
 /// Error types for stdout operations
@@ -394,7 +422,11 @@ pub fn send_response_safe(response: UsiResponse) -> Result<(), StdoutError> {
     // Determine if this is a critical response
     let is_critical = matches!(
         response,
-        UsiResponse::UsiOk | UsiResponse::ReadyOk | UsiResponse::BestMove { .. }
+        UsiResponse::IdName(_)
+            | UsiResponse::IdAuthor(_)
+            | UsiResponse::UsiOk
+            | UsiResponse::ReadyOk
+            | UsiResponse::BestMove { .. }
     );
 
     // Try to send with retry
@@ -431,7 +463,7 @@ pub fn send_info_string(message: impl Into<String>) -> Result<(), StdoutError> {
 pub fn ensure_flush_on_exit() {
     // Force initialization of USI_WRITER
     Lazy::force(&USI_WRITER);
-    
+
     // Set panic hook to flush on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -453,11 +485,11 @@ mod tests {
 
     #[test]
     fn test_usi_response_formatting() {
-        let resp = UsiResponse::Id {
-            name: "RustShogi 1.0".to_string(),
-            author: "Rust Team".to_string(),
-        };
-        assert_eq!(resp.to_string(), "id name RustShogi 1.0\nid author Rust Team");
+        let resp = UsiResponse::IdName("RustShogi 1.0".to_string());
+        assert_eq!(resp.to_string(), "id name RustShogi 1.0");
+
+        let resp = UsiResponse::IdAuthor("Rust Team".to_string());
+        assert_eq!(resp.to_string(), "id author Rust Team");
 
         let resp = UsiResponse::BestMove {
             best_move: "7g7f".to_string(),
