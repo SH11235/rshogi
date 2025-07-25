@@ -52,6 +52,9 @@ pub struct GoParams {
     /// Byoyomi time in milliseconds
     pub byoyomi: Option<u64>,
 
+    /// Byoyomi periods (non-standard extension)
+    pub periods: Option<u32>,
+
     /// Black increment in milliseconds
     pub binc: Option<u64>,
 
