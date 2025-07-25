@@ -26,7 +26,7 @@ fn test_panic_safe_flush() {
     let reader_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut lines = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             lines.push(line);
         }
         lines
