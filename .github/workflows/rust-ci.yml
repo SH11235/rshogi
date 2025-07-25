@@ -32,6 +32,9 @@ jobs:
   lint:
     name: Clippy Lint
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ['', '--features buffered-io']
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,11 +44,14 @@ jobs:
         with:
           workspaces: packages/rust-core
       - name: Run Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy ${{ matrix.features }} -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ['', '--features buffered-io']
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -53,7 +59,7 @@ jobs:
         with:
           workspaces: packages/rust-core
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --release ${{ matrix.features }}
 
   test-large-stack:
     name: Test (Large Stack) - Release Mode
