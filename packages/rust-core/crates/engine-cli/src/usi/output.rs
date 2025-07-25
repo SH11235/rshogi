@@ -189,24 +189,38 @@ const MAX_STDOUT_ERRORS: u32 = 5;
 const MAX_RETRY_ATTEMPTS: u32 = 8; // Increased for buffered writes
 
 // Buffering configuration
+#[cfg(any(feature = "buffered-io", test))]
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 100;
+#[cfg(any(feature = "buffered-io", test))]
 const DEFAULT_FLUSH_MESSAGE_COUNT: u32 = 10;
 
 /// Get flush interval from environment variable (for testing)
+#[cfg(any(feature = "buffered-io", test))]
 fn get_flush_interval_ms() -> u64 {
+    const MAX_FLUSH_INTERVAL: u64 = 10_000; // 10秒
+
     std::env::var("USI_FLUSH_DELAY_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .map(|v| if v == 0 && cfg!(test) { v } else { v.max(1) }) // Allow 0 in tests
+        .map(|v| {
+            if v == 0 && cfg!(test) {
+                v
+            } else {
+                v.clamp(1, MAX_FLUSH_INTERVAL) // 上限値も設定
+            }
+        })
         .unwrap_or(DEFAULT_FLUSH_INTERVAL_MS)
 }
 
 /// Get flush message count from environment variable (for testing)
+#[cfg(any(feature = "buffered-io", test))]
 fn get_flush_message_count() -> u32 {
+    const MAX_FLUSH_MESSAGE_COUNT: u32 = 1000; // 1000メッセージ
+
     std::env::var("USI_FLUSH_MESSAGE_COUNT")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .filter(|&v| v > 0) // Guard against 0 or negative values
+        .map(|v| v.clamp(1, MAX_FLUSH_MESSAGE_COUNT)) // 1以上、上限値以下
         .unwrap_or(DEFAULT_FLUSH_MESSAGE_COUNT)
 }
 

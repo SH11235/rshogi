@@ -14,8 +14,8 @@ cargo build -p engine-cli --features buffered-io
 
 バッファリング動作は環境変数で調整できます：
 
-- `USI_FLUSH_DELAY_MS`: フラッシュ間隔（ミリ秒）（デフォルト: 100）
-- `USI_FLUSH_MESSAGE_COUNT`: フラッシュするまでのメッセージ数（デフォルト: 10）
+- `USI_FLUSH_DELAY_MS`: フラッシュ間隔（ミリ秒）（デフォルト: 100、範囲: 1-10000）
+- `USI_FLUSH_MESSAGE_COUNT`: フラッシュするまでのメッセージ数（デフォルト: 10、範囲: 1-1000）
 
 例：
 ```bash
