@@ -295,6 +295,7 @@ dependencies = [
  "engine-core",
  "env_logger",
  "log",
+ "once_cell",
  "thiserror",
 ]
 
