@@ -20,6 +20,13 @@ use crate::usi::{
 };
 use crate::usi::{create_position, EngineOption, GameResult, GoParams};
 
+/// Type alias for USI info callback
+type UsiInfoCallback = Arc<dyn Fn(SearchInfo) + Send + Sync>;
+
+/// Type alias for engine info callback
+type EngineInfoCallback =
+    Arc<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync>;
+
 /// Convert raw engine score to USI score format (Cp or Mate)
 fn to_usi_score(raw_score: i32) -> Score {
     if raw_score.abs() >= MATE_SCORE - MAX_PLY as i32 {
@@ -318,10 +325,7 @@ impl EngineAdapter {
     /// Create info callback wrapper for engine search
     fn create_info_callback(
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
-    ) -> (
-        Arc<dyn Fn(SearchInfo) + Send + Sync>,
-        Arc<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync>,
-    ) {
+    ) -> (UsiInfoCallback, EngineInfoCallback) {
         let info_callback_arc = Arc::new(info_callback);
         let info_callback_clone = info_callback_arc.clone();
 
@@ -352,7 +356,7 @@ impl EngineAdapter {
     /// Process search result and send final info
     fn process_search_result(
         result: &engine_core::search::types::SearchResult,
-        info_callback_arc: &Arc<dyn Fn(SearchInfo) + Send + Sync>,
+        info_callback_arc: &UsiInfoCallback,
     ) -> Result<String> {
         // Get best move
         let best_move = result.best_move.ok_or_else(|| {
