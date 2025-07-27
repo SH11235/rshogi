@@ -100,6 +100,20 @@ impl EngineAdapter {
         self.engine = Some(engine);
     }
 
+    /// Handle new game notification
+    pub fn new_game(&mut self) {
+        // Clear any ponder state
+        self.ponder_state = PonderState::default();
+        self.active_ponder_hit_flag = None;
+
+        // Clear position to start fresh
+        self.position = None;
+
+        // Note: Hash table clearing could be added here if engine supports it
+        // For now, just log the new game
+        log::debug!("New game started - cleared ponder state and position");
+    }
+
     /// Create a new engine adapter
     pub fn new() -> Self {
         let mut adapter = Self {

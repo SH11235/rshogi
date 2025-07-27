@@ -33,6 +33,9 @@ pub enum UsiCommand {
     /// Game over notification
     GameOver { result: GameResult },
 
+    /// New game notification (ShogiGUI extension)
+    UsiNewGame,
+
     /// Quit the engine
     Quit,
 }
