@@ -18,6 +18,7 @@ pub fn parse_usi_command(line: &str) -> Result<UsiCommand> {
         "quit" => Ok(UsiCommand::Quit),
         "stop" => Ok(UsiCommand::Stop),
         "ponderhit" => Ok(UsiCommand::PonderHit),
+        "usinewgame" => Ok(UsiCommand::UsiNewGame),
 
         "setoption" => parse_setoption(&parts[1..]),
         "position" => parse_position(&parts[1..]),
@@ -247,6 +248,7 @@ mod tests {
         assert_eq!(parse_usi_command("quit").unwrap(), UsiCommand::Quit);
         assert_eq!(parse_usi_command("stop").unwrap(), UsiCommand::Stop);
         assert_eq!(parse_usi_command("ponderhit").unwrap(), UsiCommand::PonderHit);
+        assert_eq!(parse_usi_command("usinewgame").unwrap(), UsiCommand::UsiNewGame);
     }
 
     #[test]
