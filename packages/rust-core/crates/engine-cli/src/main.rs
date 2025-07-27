@@ -647,6 +647,24 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             engine.game_over(result);
         }
 
+        UsiCommand::UsiNewGame => {
+            // ShogiGUI extension - new game notification
+            // Stop any ongoing search
+            wait_for_search_completion(
+                ctx.searching,
+                ctx.stop_flag,
+                ctx.worker_handle,
+                ctx.worker_rx,
+                ctx.engine,
+                ctx.stdout,
+            )?;
+
+            // Reset engine state for new game
+            let mut engine = lock_or_recover(ctx.engine);
+            engine.new_game();
+            log::debug!("New game started");
+        }
+
         UsiCommand::Quit => {
             // Quit is handled in main loop
             unreachable!("Quit should be handled in main loop");
