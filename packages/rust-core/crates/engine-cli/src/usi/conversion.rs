@@ -119,11 +119,11 @@ mod tests {
 
     #[test]
     fn test_create_position_with_moves() {
-        // In shogi initial position:
-        // - Black pieces are at ranks 0-2 (USI: a-c)
-        // - White pieces are at ranks 6-8 (USI: g-i)
-        // Common opening move: push the pawn in front of the bishop
-        let moves = vec!["2c2d".to_string()]; // Move Black pawn forward (rank 2->3)
+        // In shogi initial position with new convention:
+        // - Black pieces are at ranks 6-8 (USI: g-i)
+        // - White pieces are at ranks 0-2 (USI: a-c)
+        // Common opening move: push the pawn in front of the rook
+        let moves = vec!["2g2f".to_string()]; // Move Black pawn forward (rank 6->5)
         let pos = create_position(true, None, &moves).unwrap();
         assert_eq!(pos.side_to_move, engine_core::shogi::Color::White);
     }
@@ -138,14 +138,14 @@ mod tests {
         assert!(err_msg.contains("Illegal move"));
 
         // Try to move opponent's piece (White pawn)
-        let moves = vec!["7g7f".to_string()]; // This is a White pawn at rank 6
+        let moves = vec!["7a7b".to_string()]; // This is a White pawn at rank 0
         let result = create_position(true, None, &moves);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Illegal move"));
 
         // Legal move followed by illegal move
-        let moves = vec!["2c2d".to_string(), "2d2e".to_string()]; // Can't move same piece twice in a row
+        let moves = vec!["2g2f".to_string(), "2f2e".to_string()]; // Can't move same piece twice in a row
         let result = create_position(true, None, &moves);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
