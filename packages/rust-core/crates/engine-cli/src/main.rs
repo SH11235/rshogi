@@ -357,7 +357,9 @@ fn main() {
     // Set up flush on exit hooks
     ensure_flush_on_exit();
 
-    log::info!("Shogi USI Engine starting (version 1.0)");
+    // IMPORTANT: Do not output any log messages to stdout before USI protocol starts
+    // ShogiGUI expects only USI protocol messages on stdout
+    // log::info!("Shogi USI Engine starting (version 1.0)");
 
     // Run the main loop and handle any errors
     if let Err(e) = run_engine() {
