@@ -103,12 +103,12 @@ impl Square {
 /// - Internal rank 8 → USI 'i'
 ///
 /// ## Examples:
-/// - Square::new(0, 0) → "9a" (9一)
-/// - Square::new(8, 0) → "1a" (1一)
-/// - Square::new(0, 8) → "9i" (9九)
-/// - Square::new(8, 8) → "1i" (1九)
-/// - Square::new(4, 4) → "5e" (5五)
-/// - Square::new(2, 6) → "7g" (7七)
+/// - Square::from_usi_chars('9', 'a').unwrap() → "9a" (9一)
+/// - Square::from_usi_chars('1', 'a').unwrap() → "1a" (1一)
+/// - Square::from_usi_chars('9', 'i').unwrap() → "9i" (9九)
+/// - Square::from_usi_chars('1', 'i').unwrap() → "1i" (1九)
+/// - Square::from_usi_chars('5', 'e').unwrap() → "5e" (5五)
+/// - Square::from_usi_chars('7', 'g').unwrap() → "7g" (7七)
 impl fmt::Display for Square {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let file = b'9' - self.file();
@@ -128,7 +128,7 @@ impl std::str::FromStr for Square {
     /// use std::str::FromStr;
     ///
     /// let sq: Square = "7g".parse().unwrap();
-    /// assert_eq!(sq, Square::new(2, 6));
+    /// assert_eq!(sq.to_string(), "7g");
     /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use crate::usi::UsiParseError;
@@ -741,71 +741,133 @@ impl Position {
     pub fn startpos() -> Self {
         let mut pos = Self::empty();
 
-        // Place pawns
+        // Place pawns (correct: Black pawns on rank 6, White pawns on rank 2)
         for file in 0..9 {
-            pos.board
-                .put_piece(Square::new(file, 2), Piece::new(PieceType::Pawn, Color::Black));
-            pos.board
-                .put_piece(Square::new(file, 6), Piece::new(PieceType::Pawn, Color::White));
+            // White pawns on 3rd rank (rank index 2)
+            let white_pawn_sq = Square::from_usi_chars((b'9' - file as u8) as char, 'c').unwrap();
+            pos.board.put_piece(white_pawn_sq, Piece::new(PieceType::Pawn, Color::White));
+            // Black pawns on 7th rank (rank index 6)
+            let black_pawn_sq = Square::from_usi_chars((b'9' - file as u8) as char, 'g').unwrap();
+            pos.board.put_piece(black_pawn_sq, Piece::new(PieceType::Pawn, Color::Black));
         }
 
+        // White pieces on 1st rank (rank index 0)
         // Lances
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::Lance, Color::Black));
-        pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::Lance, Color::Black));
-        pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::Lance, Color::White));
-        pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::Lance, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'a').unwrap(),
+            Piece::new(PieceType::Lance, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'a').unwrap(),
+            Piece::new(PieceType::Lance, Color::White),
+        );
 
         // Knights
-        pos.board
-            .put_piece(Square::new(1, 0), Piece::new(PieceType::Knight, Color::Black));
-        pos.board
-            .put_piece(Square::new(7, 0), Piece::new(PieceType::Knight, Color::Black));
-        pos.board
-            .put_piece(Square::new(1, 8), Piece::new(PieceType::Knight, Color::White));
-        pos.board
-            .put_piece(Square::new(7, 8), Piece::new(PieceType::Knight, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'a').unwrap(),
+            Piece::new(PieceType::Knight, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'a').unwrap(),
+            Piece::new(PieceType::Knight, Color::White),
+        );
 
         // Silvers
-        pos.board
-            .put_piece(Square::new(2, 0), Piece::new(PieceType::Silver, Color::Black));
-        pos.board
-            .put_piece(Square::new(6, 0), Piece::new(PieceType::Silver, Color::Black));
-        pos.board
-            .put_piece(Square::new(2, 8), Piece::new(PieceType::Silver, Color::White));
-        pos.board
-            .put_piece(Square::new(6, 8), Piece::new(PieceType::Silver, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('7', 'a').unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('3', 'a').unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
 
         // Golds
-        pos.board
-            .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::Black));
-        pos.board
-            .put_piece(Square::new(5, 0), Piece::new(PieceType::Gold, Color::Black));
-        pos.board
-            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::White));
-        pos.board
-            .put_piece(Square::new(5, 8), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('6', 'a').unwrap(),
+            Piece::new(PieceType::Gold, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'a').unwrap(),
+            Piece::new(PieceType::Gold, Color::White),
+        );
 
-        // Kings
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        // King
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
-        // Rooks
-        pos.board
-            .put_piece(Square::new(7, 1), Piece::new(PieceType::Rook, Color::Black));
-        pos.board
-            .put_piece(Square::new(1, 7), Piece::new(PieceType::Rook, Color::White));
+        // White pieces on 2nd rank (rank index 1)
+        // Bishop
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'b').unwrap(),
+            Piece::new(PieceType::Bishop, Color::White),
+        );
+        // Rook
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'b').unwrap(),
+            Piece::new(PieceType::Rook, Color::White),
+        );
 
-        // Bishops
-        pos.board
-            .put_piece(Square::new(1, 1), Piece::new(PieceType::Bishop, Color::Black));
-        pos.board
-            .put_piece(Square::new(7, 7), Piece::new(PieceType::Bishop, Color::White));
+        // Black pieces on 9th rank (rank index 8)
+        // Lances
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::Lance, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'i').unwrap(),
+            Piece::new(PieceType::Lance, Color::Black),
+        );
+
+        // Knights
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'i').unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'i').unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        );
+
+        // Silvers
+        pos.board.put_piece(
+            Square::from_usi_chars('7', 'i').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('3', 'i').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+
+        // Golds
+        pos.board.put_piece(
+            Square::from_usi_chars('6', 'i').unwrap(),
+            Piece::new(PieceType::Gold, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'i').unwrap(),
+            Piece::new(PieceType::Gold, Color::Black),
+        );
+
+        // King
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+
+        // Black pieces on 8th rank (rank index 7)
+        // Bishop
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'h').unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
+        // Rook
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'h').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
 
         // Calculate hash
         pos.hash = pos.compute_hash();
@@ -1285,7 +1347,7 @@ impl Position {
             let mut rank = rank1 + rank_step;
 
             while file != file2 || rank != rank2 {
-                between.set(Square::new(file as u8, rank as u8));
+                between.set(Square(file as u8 + (rank as u8) * 9));
                 file += file_step;
                 rank += rank_step;
             }
@@ -1951,7 +2013,7 @@ mod tests {
 
     #[test]
     fn test_square_operations() {
-        let sq = Square::new(4, 4); // 5e
+        let sq = Square::from_usi_chars('5', 'e').unwrap(); // 5e
         assert_eq!(sq.file(), 4);
         assert_eq!(sq.rank(), 4);
         assert_eq!(sq.index(), 40);
@@ -1966,19 +2028,23 @@ mod tests {
     #[test]
     fn test_square_from_usi_chars() {
         let sq = Square::from_usi_chars('7', 'g').unwrap();
-        assert_eq!(sq, Square::new(2, 6)); // 7g
+        assert_eq!(sq.file(), 2);
+        assert_eq!(sq.rank(), 6);
         assert_eq!(sq.to_string(), "7g");
 
         let sq = Square::from_usi_chars('1', 'a').unwrap();
-        assert_eq!(sq, Square::new(8, 0)); // 1a
+        assert_eq!(sq.file(), 8);
+        assert_eq!(sq.rank(), 0);
         assert_eq!(sq.to_string(), "1a");
 
         let sq = Square::from_usi_chars('9', 'i').unwrap();
-        assert_eq!(sq, Square::new(0, 8)); // 9i
+        assert_eq!(sq.file(), 0);
+        assert_eq!(sq.rank(), 8);
         assert_eq!(sq.to_string(), "9i");
 
         let sq = Square::from_usi_chars('5', 'e').unwrap();
-        assert_eq!(sq, Square::new(4, 4)); // 5e
+        assert_eq!(sq.file(), 4);
+        assert_eq!(sq.rank(), 4);
         assert_eq!(sq.to_string(), "5e");
 
         // Invalid file
@@ -1991,14 +2057,17 @@ mod tests {
 
         // Test FromStr implementation
         let sq: Square = "7g".parse().unwrap();
-        assert_eq!(sq, Square::new(2, 6));
+        assert_eq!(sq.file(), 2);
+        assert_eq!(sq.rank(), 6);
         assert_eq!(sq.to_string(), "7g");
 
         let sq: Square = "1a".parse().unwrap();
-        assert_eq!(sq, Square::new(8, 0));
+        assert_eq!(sq.file(), 8);
+        assert_eq!(sq.rank(), 0);
 
         let sq: Square = "9i".parse().unwrap();
-        assert_eq!(sq, Square::new(0, 8));
+        assert_eq!(sq.file(), 0);
+        assert_eq!(sq.rank(), 8);
 
         // Invalid formats for parse
         assert!("5".parse::<Square>().is_err());
@@ -2013,7 +2082,7 @@ mod tests {
         let mut bb = Bitboard::EMPTY;
         assert!(bb.is_empty());
 
-        let sq = Square::new(4, 4);
+        let sq = Square::from_usi_chars('5', 'e').unwrap();
         bb.set(sq);
         assert!(bb.test(sq));
         assert_eq!(bb.count_ones(), 1);
@@ -2026,20 +2095,23 @@ mod tests {
     #[test]
     fn test_bitboard_pop_lsb() {
         let mut bb = Bitboard::EMPTY;
-        bb.set(Square::new(0, 0));
-        bb.set(Square::new(4, 4));
-        bb.set(Square::new(8, 8));
+        let sq1 = Square::from_usi_chars('9', 'a').unwrap();
+        let sq2 = Square::from_usi_chars('5', 'e').unwrap();
+        let sq3 = Square::from_usi_chars('1', 'i').unwrap();
+        bb.set(sq1);
+        bb.set(sq2);
+        bb.set(sq3);
 
-        assert_eq!(bb.pop_lsb(), Some(Square::new(0, 0)));
-        assert_eq!(bb.pop_lsb(), Some(Square::new(4, 4)));
-        assert_eq!(bb.pop_lsb(), Some(Square::new(8, 8)));
+        assert_eq!(bb.pop_lsb(), Some(sq1));
+        assert_eq!(bb.pop_lsb(), Some(sq2));
+        assert_eq!(bb.pop_lsb(), Some(sq3));
         assert_eq!(bb.pop_lsb(), None);
     }
 
     #[test]
     fn test_board_operations() {
         let mut board = Board::empty();
-        let sq = Square::new(4, 4);
+        let sq = Square::from_usi_chars('5', 'e').unwrap();
         let piece = Piece::new(PieceType::Pawn, Color::Black);
 
         board.put_piece(sq, piece);
@@ -2056,8 +2128,14 @@ mod tests {
         let pos = Position::startpos();
 
         // Check king positions
-        assert_eq!(pos.board.king_square(Color::Black), Some(Square::new(4, 0)));
-        assert_eq!(pos.board.king_square(Color::White), Some(Square::new(4, 8)));
+        assert_eq!(
+            pos.board.king_square(Color::Black),
+            Some(Square::from_usi_chars('5', 'i').unwrap())
+        );
+        assert_eq!(
+            pos.board.king_square(Color::White),
+            Some(Square::from_usi_chars('5', 'a').unwrap())
+        );
 
         // Check pawn count
         assert_eq!(
@@ -2080,8 +2158,8 @@ mod tests {
     #[test]
     fn test_do_move_normal_move() {
         let mut pos = Position::startpos();
-        let from = Square::new(6, 2); // 3g
-        let to = Square::new(6, 3); // 3f
+        let from = Square::from_usi_chars('3', 'g').unwrap();
+        let to = Square::from_usi_chars('3', 'f').unwrap();
         let mv = Move::normal(from, to, false);
 
         // 初期ハッシュを記録
@@ -2114,24 +2192,40 @@ mod tests {
         let mut pos = Position::startpos();
 
         // 歩を前進させる
-        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        let mv1 = Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'f').unwrap(),
+            false,
+        ); // 3g-3f
         let _undo1 = pos.do_move(mv1);
 
         // 相手の歩を前進させる
-        let mv2 = Move::normal(Square::new(4, 6), Square::new(4, 5), false); // 5c-5d
+        let mv2 = Move::normal(
+            Square::from_usi_chars('5', 'c').unwrap(),
+            Square::from_usi_chars('5', 'd').unwrap(),
+            false,
+        ); // 5c-5d
         let _undo2 = pos.do_move(mv2);
 
         // さらに歩を前進
-        let mv3 = Move::normal(Square::new(6, 3), Square::new(6, 4), false); // 3f-3e
+        let mv3 = Move::normal(
+            Square::from_usi_chars('3', 'f').unwrap(),
+            Square::from_usi_chars('3', 'e').unwrap(),
+            false,
+        ); // 3f-3e
         let _undo3 = pos.do_move(mv3);
 
         // 相手の歩をさらに前進
-        let mv4 = Move::normal(Square::new(4, 5), Square::new(4, 4), false); // 5d-5e
+        let mv4 = Move::normal(
+            Square::from_usi_chars('5', 'd').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        ); // 5d-5e
         let _undo4 = pos.do_move(mv4);
 
         // 歩で相手の歩を取る
-        let from = Square::new(6, 4); // 3e
-        let to = Square::new(4, 4); // 5e
+        let from = Square::from_usi_chars('3', 'e').unwrap(); // 3e
+        let to = Square::from_usi_chars('5', 'e').unwrap(); // 5e
         let mv = Move::normal(from, to, false);
 
         let captured_piece = pos.board.piece_on(to).expect("Capture move must have captured piece");
@@ -2156,15 +2250,17 @@ mod tests {
         // 手動で駒を配置して成りをテスト
         let mut board = Board::empty();
         let mut pawn = Piece::new(PieceType::Pawn, Color::Black);
-        board.put_piece(Square::new(2, 6), pawn);
+        board.put_piece(Square::from_usi_chars('7', 'c').unwrap(), pawn);
 
         // do_moveを使わずに直接成りをテスト
         pawn.promoted = true;
-        board.remove_piece(Square::new(2, 6));
-        board.put_piece(Square::new(2, 7), pawn);
+        board.remove_piece(Square::from_usi_chars('7', 'c').unwrap());
+        board.put_piece(Square::from_usi_chars('7', 'b').unwrap(), pawn);
 
         // 成った駒になっていることを確認
-        let piece = board.piece_on(Square::new(2, 7)).expect("Piece should exist at Square(2, 7)");
+        let piece = board
+            .piece_on(Square::from_usi_chars('7', 'b').unwrap())
+            .expect("Piece should exist at 7b");
         assert_eq!(piece.piece_type, PieceType::Pawn);
         assert!(piece.promoted);
         assert_eq!(piece.color, Color::Black);
@@ -2177,16 +2273,20 @@ mod tests {
         pos.side_to_move = Color::Black;
 
         // 最小限の駒を配置
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         // 持ち駒を設定
         pos.hands[Color::Black as usize][6] = 1;
 
         // 歩を打つ
-        let to = Square::new(4, 4); // 5e
+        let to = Square::from_usi_chars('5', 'e').unwrap(); // 5e
         let mv = Move::drop(PieceType::Pawn, to);
 
         let _undo_info = pos.do_move(mv);
@@ -2207,43 +2307,43 @@ mod tests {
         let test_cases = vec![
             // (from, to, piece_type)
             (
-                Square::new(6, 2), // 3g
-                Square::new(6, 3), // 3f
+                Square::from_usi_chars('3', 'g').unwrap(),
+                Square::from_usi_chars('3', 'f').unwrap(),
                 PieceType::Pawn,
             ),
             (
-                Square::new(4, 0), // 5i
-                Square::new(5, 1), // 4h
+                Square::from_usi_chars('5', 'i').unwrap(),
+                Square::from_usi_chars('4', 'h').unwrap(),
                 PieceType::King,
             ),
             (
-                Square::new(5, 0), // 4i
-                Square::new(5, 1), // 4h
+                Square::from_usi_chars('4', 'i').unwrap(), // 4i
+                Square::from_usi_chars('4', 'h').unwrap(), // 4h
                 PieceType::Gold,
             ),
             (
-                Square::new(6, 0), // 3i
-                Square::new(6, 1), // 3h
+                Square::from_usi_chars('3', 'i').unwrap(), // 3i
+                Square::from_usi_chars('3', 'h').unwrap(), // 3h
                 PieceType::Silver,
             ),
             (
-                Square::new(7, 0), // 2i
-                Square::new(6, 2), // 3g
+                Square::from_usi_chars('2', 'i').unwrap(), // 2i
+                Square::from_usi_chars('3', 'g').unwrap(), // 3g
                 PieceType::Knight,
             ),
             (
-                Square::new(8, 0), // 1i
-                Square::new(8, 1), // 1h
+                Square::from_usi_chars('1', 'i').unwrap(), // 1i
+                Square::from_usi_chars('1', 'h').unwrap(), // 1h
                 PieceType::Lance,
             ),
             (
-                Square::new(7, 1), // 2h
-                Square::new(7, 3), // 2f
+                Square::from_usi_chars('2', 'h').unwrap(), // 2h
+                Square::from_usi_chars('2', 'f').unwrap(), // 2f
                 PieceType::Rook,
             ),
             (
-                Square::new(1, 1), // 8h
-                Square::new(2, 2), // 7g
+                Square::from_usi_chars('8', 'h').unwrap(), // 8h
+                Square::from_usi_chars('7', 'g').unwrap(), // 7g
                 PieceType::Bishop,
             ),
         ];
@@ -2258,9 +2358,9 @@ mod tests {
                 println!("Expected: {expected_piece_type:?}");
                 // 周辺の駒を確認
                 for file in 0..9 {
-                    if let Some(p) = pos.board.piece_on(Square::new(file, 1)) {
+                    if let Some(p) = pos.board.piece_on(Square(file + 1 * 9)) {
                         if p.piece_type == expected_piece_type && p.color == Color::Black {
-                            println!("Found {expected_piece_type:?} at Square::new({file}, 1)");
+                            println!("Found {expected_piece_type:?} at file {file}, rank 1");
                         }
                     }
                 }
@@ -2299,10 +2399,14 @@ mod tests {
             pos.side_to_move = Color::Black;
 
             // 最小限の駒を配置
-            pos.board
-                .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
-            pos.board
-                .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            pos.board.put_piece(
+                Square::from_usi_chars('5', 'i').unwrap(),
+                Piece::new(PieceType::King, Color::Black),
+            );
+            pos.board.put_piece(
+                Square::from_usi_chars('5', 'a').unwrap(),
+                Piece::new(PieceType::King, Color::White),
+            );
 
             // 各種持ち駒を設定
             pos.hands[Color::Black as usize][hand_idx] = 1;
@@ -2310,7 +2414,7 @@ mod tests {
             // 持ち駒があることを確認
             assert!(pos.hands[Color::Black as usize][hand_idx] > 0);
 
-            let to = Square::new(4, 4); // 5e
+            let to = Square::from_usi_chars('5', 'e').unwrap(); // 5e
             let mv = Move::drop(piece_type, to);
 
             let _undo_info = pos.do_move(mv);
@@ -2335,53 +2439,97 @@ mod tests {
 
         // 歩を前進させて成る
         // 7七歩
-        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        let mv1 = Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'f').unwrap(),
+            false,
+        ); // 3g-3f
         pos.do_move(mv1);
 
         // 相手の歩を前進
-        let mv2 = Move::normal(Square::new(6, 6), Square::new(6, 5), false); // 3c-3d
+        let mv2 = Move::normal(
+            Square::from_usi_chars('3', 'c').unwrap(),
+            Square::from_usi_chars('3', 'd').unwrap(),
+            false,
+        ); // 3c-3d
         pos.do_move(mv2);
 
         // さらに前進
-        let mv3 = Move::normal(Square::new(6, 3), Square::new(6, 4), false); // 3f-3e
+        let mv3 = Move::normal(
+            Square::from_usi_chars('3', 'f').unwrap(),
+            Square::from_usi_chars('3', 'e').unwrap(),
+            false,
+        ); // 3f-3e
         pos.do_move(mv3);
 
         // 相手の歩をさらに前進
-        let mv4 = Move::normal(Square::new(6, 5), Square::new(6, 4), false); // 3d-3e
+        let mv4 = Move::normal(
+            Square::from_usi_chars('3', 'd').unwrap(),
+            Square::from_usi_chars('3', 'e').unwrap(),
+            false,
+        ); // 3d-3e
         pos.do_move(mv4);
 
         // 銀を前進させる（成りのテスト用）
-        let mv5 = Move::normal(Square::new(6, 0), Square::new(6, 1), false); // 3i-3h
+        let mv5 = Move::normal(
+            Square::from_usi_chars('3', 'i').unwrap(),
+            Square::from_usi_chars('3', 'h').unwrap(),
+            false,
+        ); // 3i-3h
         pos.do_move(mv5);
 
         // パスのような手
-        let mv6 = Move::normal(Square::new(4, 6), Square::new(4, 5), false);
+        let mv6 = Move::normal(
+            Square::from_usi_chars('5', 'c').unwrap(),
+            Square::from_usi_chars('5', 'd').unwrap(),
+            false,
+        );
         pos.do_move(mv6);
 
         // 銀を敵陣に進めて成る
-        let mv7 = Move::normal(Square::new(6, 1), Square::new(6, 2), false); // 3h-3g
+        let mv7 = Move::normal(
+            Square::from_usi_chars('3', 'h').unwrap(),
+            Square::from_usi_chars('3', 'g').unwrap(),
+            false,
+        ); // 3h-3g
         pos.do_move(mv7);
 
         // パスのような手
-        let mv8 = Move::normal(Square::new(4, 5), Square::new(4, 4), false);
+        let mv8 = Move::normal(
+            Square::from_usi_chars('5', 'd').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        );
         pos.do_move(mv8);
 
         // 銀をさらに前進
-        let mv9 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        let mv9 = Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'f').unwrap(),
+            false,
+        ); // 3g-3f
         let _undo9 = pos.do_move(mv9);
 
         // パスのような手
-        let mv10 = Move::normal(Square::new(4, 4), Square::new(4, 3), false);
+        let mv10 = Move::normal(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Square::from_usi_chars('5', 'f').unwrap(),
+            false,
+        );
         let _undo10 = pos.do_move(mv10);
 
         // 銀を敵陣三段目に進めて成る
-        let mv11 = Move::normal(Square::new(6, 3), Square::new(6, 4), true); // 3f-3e+
+        let mv11 = Move::normal(
+            Square::from_usi_chars('3', 'f').unwrap(),
+            Square::from_usi_chars('3', 'e').unwrap(),
+            true,
+        ); // 3f-3e+
         let _undo11 = pos.do_move(mv11);
 
         let piece = pos
             .board
-            .piece_on(Square::new(6, 4))
-            .expect("Piece should exist at Square(6, 4)");
+            .piece_on(Square::from_usi_chars('3', 'e').unwrap())
+            .expect("Piece should exist at 3e");
         assert_eq!(piece.piece_type, PieceType::Silver);
         assert!(piece.promoted);
     }
@@ -2393,23 +2541,37 @@ mod tests {
         pos.side_to_move = Color::Black;
 
         // 最小限の駒を配置
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::Rook, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
 
         // 初期ハッシュを計算
         pos.hash = pos.compute_hash();
         let initial_hash = pos.hash;
 
         // 飛車を動かす
-        let mv1 = Move::normal(Square::new(0, 0), Square::new(0, 1), false);
+        let mv1 = Move::normal(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Square::from_usi_chars('9', 'h').unwrap(),
+            false,
+        );
         let _undo1 = pos.do_move(mv1);
 
         // 飛車を戻す
-        let mv2 = Move::normal(Square::new(0, 1), Square::new(0, 0), false);
+        let mv2 = Move::normal(
+            Square::from_usi_chars('9', 'h').unwrap(),
+            Square::from_usi_chars('9', 'i').unwrap(),
+            false,
+        );
         let _undo2 = pos.do_move(mv2);
 
         // この時点で初期局面に戻った（1回目）
@@ -2440,14 +2602,26 @@ mod tests {
         let mut pos2 = Position::startpos();
 
         // 同じ動きだが、pos2では歩を取る
-        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false);
+        let mv1 = Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'f').unwrap(),
+            false,
+        );
         pos1.do_move(mv1);
         pos2.do_move(mv1);
 
         // pos2では相手の歩を前進させて取る
-        let mv2 = Move::normal(Square::new(6, 6), Square::new(6, 5), false);
+        let mv2 = Move::normal(
+            Square::from_usi_chars('3', 'c').unwrap(),
+            Square::from_usi_chars('3', 'd').unwrap(),
+            false,
+        );
         pos2.do_move(mv2);
-        let mv3 = Move::normal(Square::new(6, 3), Square::new(6, 5), false);
+        let mv3 = Move::normal(
+            Square::from_usi_chars('3', 'f').unwrap(),
+            Square::from_usi_chars('3', 'd').unwrap(),
+            false,
+        );
         pos2.do_move(mv3);
 
         // 異なるハッシュ値になるはず
@@ -2461,13 +2635,25 @@ mod tests {
         // 履歴が4未満の場合
         assert!(!pos.is_repetition());
 
-        let _undo1 = pos.do_move(Move::normal(Square::new(6, 2), Square::new(6, 3), false));
+        let _undo1 = pos.do_move(Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'f').unwrap(),
+            false,
+        ));
         assert!(!pos.is_repetition());
 
-        let _undo2 = pos.do_move(Move::normal(Square::new(6, 6), Square::new(6, 5), false));
+        let _undo2 = pos.do_move(Move::normal(
+            Square::from_usi_chars('3', 'c').unwrap(),
+            Square::from_usi_chars('3', 'd').unwrap(),
+            false,
+        ));
         assert!(!pos.is_repetition());
 
-        let _undo3 = pos.do_move(Move::normal(Square::new(6, 3), Square::new(6, 4), false));
+        let _undo3 = pos.do_move(Move::normal(
+            Square::from_usi_chars('3', 'f').unwrap(),
+            Square::from_usi_chars('3', 'e').unwrap(),
+            false,
+        ));
         assert!(!pos.is_repetition());
     }
 
@@ -2482,30 +2668,43 @@ mod tests {
         let black_king = Piece::new(PieceType::King, Color::Black);
         let white_king = Piece::new(PieceType::King, Color::White);
 
-        board.put_piece(Square::new(4, 0), black_king);
-        board.put_piece(Square::new(4, 8), white_king);
+        board.put_piece(Square::from_usi_chars('5', 'i').unwrap(), black_king);
+        board.put_piece(Square::from_usi_chars('5', 'a').unwrap(), white_king);
 
-        assert_eq!(board.king_square(Color::Black), Some(Square::new(4, 0)));
-        assert_eq!(board.king_square(Color::White), Some(Square::new(4, 8)));
+        assert_eq!(
+            board.king_square(Color::Black),
+            Some(Square::from_usi_chars('5', 'i').unwrap())
+        );
+        assert_eq!(
+            board.king_square(Color::White),
+            Some(Square::from_usi_chars('5', 'a').unwrap())
+        );
 
         // 玉を移動
-        board.remove_piece(Square::new(4, 0));
-        board.put_piece(Square::new(5, 1), black_king);
+        board.remove_piece(Square::from_usi_chars('5', 'i').unwrap());
+        board.put_piece(Square::from_usi_chars('4', 'h').unwrap(), black_king);
 
-        assert_eq!(board.king_square(Color::Black), Some(Square::new(5, 1)));
-        assert_eq!(board.king_square(Color::White), Some(Square::new(4, 8)));
+        assert_eq!(
+            board.king_square(Color::Black),
+            Some(Square::from_usi_chars('4', 'h').unwrap())
+        );
+        assert_eq!(
+            board.king_square(Color::White),
+            Some(Square::from_usi_chars('5', 'a').unwrap())
+        );
     }
 
     #[test]
     fn test_square_flip() {
         // flip()メソッドのテスト
-        let sq = Square::new(2, 3); // インデックス: 2 + 3*9 = 29
-        let flipped = sq.flip(); // 80 - 29 = 51
+        let sq = Square::from_usi_chars('7', 'f').unwrap(); // 7f
+                                                            // 7f: internal file=2, rank=5, index=47
+        let flipped = sq.flip(); // 80 - 47 = 33
 
-        // 反転後の座標を計算: 51 = file + rank*9
-        // 51 / 9 = 5 余り 6
-        assert_eq!(flipped.file(), 6); // 51 % 9 = 6
-        assert_eq!(flipped.rank(), 5); // 51 / 9 = 5
+        // 反転後の座標を計算: 33 = file + rank*9
+        // 33 / 9 = 3 余り 6
+        assert_eq!(flipped.file(), 6); // 33 % 9 = 6
+        assert_eq!(flipped.rank(), 3); // 33 / 9 = 3
     }
 
     #[test]
@@ -2578,17 +2777,21 @@ mod tests {
         // Test simple pawn takes pawn
         let mut pos = Position::empty();
 
-        // Black pawn on 5e (Square::new(4, 4))
+        // Black pawn on 5e
         let black_pawn = Piece::new(PieceType::Pawn, Color::Black);
-        pos.board.put_piece(Square::new(4, 4), black_pawn);
+        pos.board.put_piece(Square::from_usi_chars('5', 'e').unwrap(), black_pawn);
 
-        // White pawn on 5d (Square::new(4, 3))
+        // White pawn on 5d
         let white_pawn = Piece::new(PieceType::Pawn, Color::White);
-        pos.board.put_piece(Square::new(4, 3), white_pawn);
+        pos.board.put_piece(Square::from_usi_chars('5', 'd').unwrap(), white_pawn);
 
         // Black to move, pawn takes pawn
         pos.side_to_move = Color::Black;
-        let mv = Move::normal(Square::new(4, 4), Square::new(4, 3), false);
+        let mv = Move::normal(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Square::from_usi_chars('5', 'd').unwrap(),
+            false,
+        );
 
         // SEE should be 100 (pawn value)
         assert_eq!(pos.see(mv), 100);
@@ -2602,21 +2805,25 @@ mod tests {
         // Test rook takes pawn defended by pawn
         let mut pos = Position::empty();
 
-        // Black rook on 5f (Square::new(4, 5))
+        // Black rook on 5f
         let black_rook = Piece::new(PieceType::Rook, Color::Black);
-        pos.board.put_piece(Square::new(4, 5), black_rook);
+        pos.board.put_piece(Square::from_usi_chars('5', 'f').unwrap(), black_rook);
 
-        // White pawn on 5d (Square::new(4, 3))
+        // White pawn on 5d
         let white_pawn = Piece::new(PieceType::Pawn, Color::White);
-        pos.board.put_piece(Square::new(4, 3), white_pawn);
+        pos.board.put_piece(Square::from_usi_chars('5', 'd').unwrap(), white_pawn);
 
-        // White gold on 5c defending (Square::new(4, 2))
+        // White gold on 5c defending
         let white_gold = Piece::new(PieceType::Gold, Color::White);
-        pos.board.put_piece(Square::new(4, 2), white_gold);
+        pos.board.put_piece(Square::from_usi_chars('5', 'c').unwrap(), white_gold);
 
         // Black to move, rook takes pawn
         pos.side_to_move = Color::Black;
-        let mv = Move::normal(Square::new(4, 5), Square::new(4, 3), false);
+        let mv = Move::normal(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Square::from_usi_chars('5', 'd').unwrap(),
+            false,
+        );
 
         // SEE should be 100 - 900 = -800 (win pawn, lose rook to gold)
         assert_eq!(pos.see(mv), -800);
@@ -2630,23 +2837,27 @@ mod tests {
 
         // Black pawn on 5e
         let black_pawn = Piece::new(PieceType::Pawn, Color::Black);
-        pos.board.put_piece(Square::new(4, 4), black_pawn);
+        pos.board.put_piece(Square::from_usi_chars('5', 'e').unwrap(), black_pawn);
 
         // White pawn on 5d
         let white_pawn = Piece::new(PieceType::Pawn, Color::White);
-        pos.board.put_piece(Square::new(4, 3), white_pawn);
+        pos.board.put_piece(Square::from_usi_chars('5', 'd').unwrap(), white_pawn);
 
         // White gold on 5c (can capture on 5d)
         let white_gold = Piece::new(PieceType::Gold, Color::White);
-        pos.board.put_piece(Square::new(4, 2), white_gold);
+        pos.board.put_piece(Square::from_usi_chars('5', 'c').unwrap(), white_gold);
 
-        // Black silver on 6e (can capture on 5d diagonally)
+        // Black silver on 4e (can capture on 5d diagonally)
         let black_silver = Piece::new(PieceType::Silver, Color::Black);
-        pos.board.put_piece(Square::new(5, 4), black_silver);
+        pos.board.put_piece(Square::from_usi_chars('4', 'e').unwrap(), black_silver);
 
         // Black to move, pawn takes pawn
         pos.side_to_move = Color::Black;
-        let mv = Move::normal(Square::new(4, 4), Square::new(4, 3), false);
+        let mv = Move::normal(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Square::from_usi_chars('5', 'd').unwrap(),
+            false,
+        );
 
         // Exchange: PxP (win 100), GxP (lose 100), SxG (win 600)
         // Net: 100 - 100 + 600 = 600
@@ -2661,23 +2872,27 @@ mod tests {
 
         // Black rook on 5f
         let black_rook1 = Piece::new(PieceType::Rook, Color::Black);
-        pos.board.put_piece(Square::new(4, 5), black_rook1);
+        pos.board.put_piece(Square::from_usi_chars('5', 'f').unwrap(), black_rook1);
 
         // Black rook on 5g (behind first rook)
         let black_rook2 = Piece::new(PieceType::Rook, Color::Black);
-        pos.board.put_piece(Square::new(4, 6), black_rook2);
+        pos.board.put_piece(Square::from_usi_chars('5', 'g').unwrap(), black_rook2);
 
         // White pawn on 5d
         let white_pawn = Piece::new(PieceType::Pawn, Color::White);
-        pos.board.put_piece(Square::new(4, 3), white_pawn);
+        pos.board.put_piece(Square::from_usi_chars('5', 'd').unwrap(), white_pawn);
 
         // White rook on 5a (defending)
         let white_rook = Piece::new(PieceType::Rook, Color::White);
-        pos.board.put_piece(Square::new(4, 0), white_rook);
+        pos.board.put_piece(Square::from_usi_chars('5', 'i').unwrap(), white_rook);
 
         // Black to move, rook takes pawn
         pos.side_to_move = Color::Black;
-        let mv = Move::normal(Square::new(4, 5), Square::new(4, 3), false);
+        let mv = Move::normal(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Square::from_usi_chars('5', 'd').unwrap(),
+            false,
+        );
 
         // Exchange: RxP (win 100), RxR (lose 900), RxR (win 900)
         // Net: 100 - 900 + 900 = 100
@@ -2690,36 +2905,52 @@ mod tests {
         // Test SEE with pinned pieces
         let mut pos = Position::empty();
 
-        // Black King at 5i (file 4, rank 8)
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        // Black King at 5i
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
 
-        // Black Gold at 5e (file 4, rank 4) - will be pinned
-        pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::Black));
+        // Black Gold at 5e - will be pinned
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Piece::new(PieceType::Gold, Color::Black),
+        );
 
-        // White Rook at 5a (file 4, rank 0) - pinning the Gold
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::White));
+        // White Rook at 5a - pinning the Gold
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::Rook, Color::White),
+        );
 
-        // White Pawn at 4e (file 5, rank 4) - can be captured
-        pos.board
-            .put_piece(Square::new(5, 4), Piece::new(PieceType::Pawn, Color::White));
+        // White Pawn at 4e - can be captured
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'e').unwrap(),
+            Piece::new(PieceType::Pawn, Color::White),
+        );
 
-        // Black Silver at 6f (file 3, rank 5) - can capture the pawn
-        pos.board
-            .put_piece(Square::new(3, 5), Piece::new(PieceType::Silver, Color::Black));
+        // Black Silver at 6f - can capture the pawn
+        pos.board.put_piece(
+            Square::from_usi_chars('6', 'f').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
 
-        // White King at 9a (file 0, rank 0)
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+        // White King at 9a
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
 
         // The Gold cannot capture the Pawn because it's pinned
         // Only the Silver can capture
-        let mv = Move::normal(Square::new(3, 5), Square::new(5, 4), false); // Silver takes Pawn
+        let mv = Move::normal(
+            Square::from_usi_chars('6', 'f').unwrap(),
+            Square::from_usi_chars('4', 'e').unwrap(),
+            false,
+        ); // Silver takes Pawn
 
         // Silver takes Pawn (+100)
         assert_eq!(pos.see(mv), 100);
@@ -2730,36 +2961,52 @@ mod tests {
         // Test SEE with diagonally pinned piece
         let mut pos = Position::empty();
 
-        // Black King at 5i (file 4, rank 8)
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        // Black King at 5i
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
 
-        // Black Silver at 4h (file 5, rank 7) - will be pinned diagonally
-        pos.board
-            .put_piece(Square::new(5, 7), Piece::new(PieceType::Silver, Color::Black));
+        // Black Silver at 4h - will be pinned diagonally
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'h').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
 
-        // White Bishop at 1e (file 8, rank 4) - pinning the Silver
-        pos.board
-            .put_piece(Square::new(8, 4), Piece::new(PieceType::Bishop, Color::White));
+        // White Bishop at 1e - pinning the Silver
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'e').unwrap(),
+            Piece::new(PieceType::Bishop, Color::White),
+        );
 
-        // White Pawn at 3h (file 6, rank 7) - Silver cannot capture due to pin
-        pos.board
-            .put_piece(Square::new(6, 7), Piece::new(PieceType::Pawn, Color::White));
+        // White Pawn at 3h - Silver cannot capture due to pin
+        pos.board.put_piece(
+            Square::from_usi_chars('3', 'h').unwrap(),
+            Piece::new(PieceType::Pawn, Color::White),
+        );
 
-        // Black Gold at 3g (file 6, rank 6) - can capture the pawn
-        pos.board
-            .put_piece(Square::new(6, 6), Piece::new(PieceType::Gold, Color::Black));
+        // Black Gold at 3g - can capture the pawn
+        pos.board.put_piece(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Piece::new(PieceType::Gold, Color::Black),
+        );
 
-        // White King at 9a (file 0, rank 0)
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+        // White King at 9a
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
 
         // The Silver is pinned and cannot capture
         // Only the Gold can capture
-        let mv = Move::normal(Square::new(6, 6), Square::new(6, 7), false); // Gold takes Pawn
+        let mv = Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'h').unwrap(),
+            false,
+        ); // Gold takes Pawn
 
         // Gold takes Pawn (+100)
         assert_eq!(pos.see(mv), 100);
@@ -2772,26 +3019,40 @@ mod tests {
 
         // Set up a position where delta pruning can help
         // Black King at 5i
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
         // White King at 5a
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         // Black Pawn at 5f
-        pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Piece::new(PieceType::Pawn, Color::Black),
+        );
         // White Gold at 5e (defended by Rook)
-        pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Piece::new(PieceType::Gold, Color::White),
+        );
         // White Rook at 5c
-        pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Rook, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'c').unwrap(),
+            Piece::new(PieceType::Rook, Color::White),
+        );
 
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
 
-        let mv = Move::normal(Square::new(4, 3), Square::new(4, 4), false); // Pawn takes Gold
+        let mv = Move::normal(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        ); // Pawn takes Gold
 
         // SEE value: Pawn takes Gold (+600), Rook takes Pawn (-100)
         let see_value = pos.see(mv);
@@ -2813,23 +3074,35 @@ mod tests {
         let mut pos = Position::empty();
 
         // Black King at 5i
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
         // White King at 5a
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         // Black Pawn at 5f
-        pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Piece::new(PieceType::Pawn, Color::Black),
+        );
         // White Pawn at 5e (undefended)
-        pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Piece::new(PieceType::Pawn, Color::White),
+        );
 
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
 
-        let mv = Move::normal(Square::new(4, 3), Square::new(4, 4), false); // Pawn takes Pawn
+        let mv = Move::normal(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        ); // Pawn takes Pawn
 
         // Normal SEE value is +100 (simple pawn capture)
         assert_eq!(pos.see(mv), 100);
@@ -2848,34 +3121,52 @@ mod tests {
         let mut pos = Position::empty();
 
         // Set up a simple position where Black has multiple attackers
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         // Target: White Gold on 5e worth 600
-        pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Piece::new(PieceType::Gold, Color::White),
+        );
 
         // Black attackers:
         // - Pawn on 5f (can take Gold)
-        // - Rook on 5a (can support after pawn takes)
-        // - Bishop on 2h (can support after pawn takes)
-        pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Pawn, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::Rook, Color::Black));
-        pos.board
-            .put_piece(Square::new(1, 1), Piece::new(PieceType::Bishop, Color::Black));
+        // - Rook on 5i (can support after pawn takes)
+        // - Bishop on 8h (can support after pawn takes)
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Piece::new(PieceType::Pawn, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'h').unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
 
-        // White defender: Silver on 6f
-        pos.board
-            .put_piece(Square::new(5, 3), Piece::new(PieceType::Silver, Color::White));
+        // White defender: Silver on 4f
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'f').unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
 
         pos.side_to_move = Color::Black;
 
         // Move: Pawn takes Gold
-        let mv = Move::normal(Square::new(4, 3), Square::new(4, 4), false);
+        let mv = Move::normal(
+            Square::from_usi_chars('5', 'f').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        );
 
         // SEE calculation:
         // +600 (gold) - 100 (pawn) + 500 (silver) - 700 (bishop) = 300
@@ -2897,34 +3188,44 @@ mod tests {
         let mut pos = Position::empty();
 
         // Kings
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         // Target: White promoted pawn (Tokin) on 5e
         let mut tokin = Piece::new(PieceType::Pawn, Color::White);
         tokin.promoted = true;
-        pos.board.put_piece(Square::new(4, 4), tokin);
+        pos.board.put_piece(Square::from_usi_chars('5', 'e').unwrap(), tokin);
 
-        // Black attacker: Silver on 4d
-        pos.board
-            .put_piece(Square::new(3, 3), Piece::new(PieceType::Silver, Color::Black));
+        // Black attacker: Silver on 6f
+        pos.board.put_piece(
+            Square::from_usi_chars('6', 'f').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
 
         // White defenders: promoted Rook (Dragon) on 5a that can recapture
         let mut dragon = Piece::new(PieceType::Rook, Color::White);
         dragon.promoted = true;
-        pos.board.put_piece(Square::new(4, 8), dragon);
+        pos.board.put_piece(Square::from_usi_chars('5', 'a').unwrap(), dragon);
 
-        // Black has another attacker: promoted Bishop (Horse) on 2b
+        // Black has another attacker: promoted Bishop (Horse) on 8b
         let mut horse = Piece::new(PieceType::Bishop, Color::Black);
         horse.promoted = true;
-        pos.board.put_piece(Square::new(1, 7), horse);
+        pos.board.put_piece(Square::from_usi_chars('8', 'b').unwrap(), horse);
 
         pos.side_to_move = Color::Black;
 
         // Move: Silver takes Tokin
-        let mv = Move::normal(Square::new(3, 3), Square::new(4, 4), false);
+        let mv = Move::normal(
+            Square::from_usi_chars('6', 'f').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        );
 
         // SEE calculation:
         // +600 (tokin) - 500 (silver) + 1200 (dragon) - 900 (horse) = 400
@@ -2946,7 +3247,7 @@ mod tests {
 
             // その筋の全ての升がセットされているか確認
             for rank in 0..9 {
-                let sq = Square::new(file, rank);
+                let sq = Square(file + rank * 9);
                 assert!(mask.test(sq), "file {file} rank {rank} should be set");
             }
 
@@ -2954,7 +3255,7 @@ mod tests {
             for other_file in 0..9 {
                 if other_file != file {
                     for rank in 0..9 {
-                        let sq = Square::new(other_file, rank);
+                        let sq = Square(other_file + rank * 9);
                         assert!(!mask.test(sq), "file {other_file} rank {rank} should not be set");
                     }
                 }
@@ -2969,7 +3270,11 @@ mod tests {
         let original_pos = pos.clone();
 
         // テストケース1: 通常の移動
-        let mv1 = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g-3f
+        let mv1 = Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'f').unwrap(),
+            false,
+        ); // 3g-3f
         let undo_info1 = pos.do_move(mv1);
 
         // 手を実行後の状態を確認
@@ -2999,16 +3304,36 @@ mod tests {
         let mut pos = Position::startpos();
 
         // 準備: 駒を取れる位置まで進める
-        let _u1 = pos.do_move(Move::normal(Square::new(6, 2), Square::new(6, 3), false));
-        let _u2 = pos.do_move(Move::normal(Square::new(4, 6), Square::new(4, 5), false));
-        let _u3 = pos.do_move(Move::normal(Square::new(6, 3), Square::new(6, 4), false));
-        let _u4 = pos.do_move(Move::normal(Square::new(4, 5), Square::new(4, 4), false));
+        let _u1 = pos.do_move(Move::normal(
+            Square::from_usi_chars('3', 'g').unwrap(),
+            Square::from_usi_chars('3', 'f').unwrap(),
+            false,
+        ));
+        let _u2 = pos.do_move(Move::normal(
+            Square::from_usi_chars('5', 'c').unwrap(),
+            Square::from_usi_chars('5', 'd').unwrap(),
+            false,
+        ));
+        let _u3 = pos.do_move(Move::normal(
+            Square::from_usi_chars('3', 'f').unwrap(),
+            Square::from_usi_chars('3', 'e').unwrap(),
+            false,
+        ));
+        let _u4 = pos.do_move(Move::normal(
+            Square::from_usi_chars('5', 'd').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        ));
 
         // この時点の状態を保存
         let before_capture = pos.clone();
 
         // 駒を取る
-        let capture_move = Move::normal(Square::new(6, 4), Square::new(4, 4), false);
+        let capture_move = Move::normal(
+            Square::from_usi_chars('3', 'e').unwrap(),
+            Square::from_usi_chars('5', 'e').unwrap(),
+            false,
+        );
         let undo_info = pos.do_move(capture_move);
 
         // 駒が取れたことを確認
@@ -3032,25 +3357,35 @@ mod tests {
         let mut pos = Position::empty();
 
         // 銀を敵陣三段目に配置
-        pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Silver, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'c').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
         pos.hash = pos.compute_hash();
 
         let before_promotion = pos.clone();
 
         // 成る
-        let promote_move = Move::normal(Square::new(4, 6), Square::new(4, 7), true);
+        let promote_move = Move::normal(
+            Square::from_usi_chars('5', 'c').unwrap(),
+            Square::from_usi_chars('5', 'b').unwrap(),
+            true,
+        );
         let undo_info = pos.do_move(promote_move);
 
         // 成ったことを確認
         let promoted_piece = pos
             .board
-            .piece_on(Square::new(4, 7))
-            .expect("Promoted piece should exist at Square(4, 7)");
+            .piece_on(Square::from_usi_chars('5', 'b').unwrap())
+            .expect("Promoted piece should exist at 5b");
         assert!(promoted_piece.promoted);
 
         // 手を戻す
@@ -3060,8 +3395,8 @@ mod tests {
         assert_eq!(pos.hash, before_promotion.hash);
         let original_piece = pos
             .board
-            .piece_on(Square::new(4, 6))
-            .expect("Original piece should exist at Square(4, 6)");
+            .piece_on(Square::from_usi_chars('5', 'c').unwrap())
+            .expect("Original piece should exist at 5c");
         assert!(!original_piece.promoted);
     }
 
@@ -3069,10 +3404,14 @@ mod tests {
     fn test_do_move_undo_move_drop() {
         // 駒打ちの可逆性をテスト
         let mut pos = Position::empty();
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         // 持ち駒を設定
         pos.hands[Color::Black as usize][6] = 1; // 歩を1枚
@@ -3081,11 +3420,11 @@ mod tests {
         let before_drop = pos.clone();
 
         // 歩を打つ
-        let drop_move = Move::drop(PieceType::Pawn, Square::new(4, 4));
+        let drop_move = Move::drop(PieceType::Pawn, Square::from_usi_chars('5', 'e').unwrap());
         let undo_info = pos.do_move(drop_move);
 
         // 打ったことを確認
-        assert!(pos.board.piece_on(Square::new(4, 4)).is_some());
+        assert!(pos.board.piece_on(Square::from_usi_chars('5', 'e').unwrap()).is_some());
         assert_eq!(pos.hands[Color::Black as usize][6], 0);
 
         // 手を戻す
@@ -3093,7 +3432,7 @@ mod tests {
 
         // 完全に元に戻ったことを確認
         assert_eq!(pos.hash, before_drop.hash);
-        assert!(pos.board.piece_on(Square::new(4, 4)).is_none());
+        assert!(pos.board.piece_on(Square::from_usi_chars('5', 'e').unwrap()).is_none());
         assert_eq!(pos.hands[Color::Black as usize][6], 1);
     }
 
@@ -3104,10 +3443,26 @@ mod tests {
         let original_pos = pos.clone();
 
         let moves = vec![
-            Move::normal(Square::new(6, 2), Square::new(6, 3), false),
-            Move::normal(Square::new(4, 6), Square::new(4, 5), false),
-            Move::normal(Square::new(7, 1), Square::new(7, 7), false), // 飛車
-            Move::normal(Square::new(1, 7), Square::new(1, 1), false), // 相手の飛車
+            Move::normal(
+                Square::from_usi_chars('3', 'g').unwrap(),
+                Square::from_usi_chars('3', 'f').unwrap(),
+                false,
+            ),
+            Move::normal(
+                Square::from_usi_chars('5', 'c').unwrap(),
+                Square::from_usi_chars('5', 'd').unwrap(),
+                false,
+            ),
+            Move::normal(
+                Square::from_usi_chars('2', 'h').unwrap(),
+                Square::from_usi_chars('2', 'b').unwrap(),
+                false,
+            ), // 飛車
+            Move::normal(
+                Square::from_usi_chars('8', 'b').unwrap(),
+                Square::from_usi_chars('8', 'h').unwrap(),
+                false,
+            ), // 相手の飛車
         ];
 
         let mut undo_infos = Vec::new();
@@ -3138,56 +3493,70 @@ mod tests {
         // Test is_attacked method with lance attacks
         let mut pos = Position::empty();
 
-        // Black lance at 5i (file 4, rank 8)
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::Lance, Color::Black));
+        // Black lance at 5i
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::Lance, Color::Black),
+        );
 
-        // White lance at 5a (file 4, rank 0)
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::Lance, Color::White));
+        // White lance at 5a
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::Lance, Color::White),
+        );
 
         // Add kings to make position valid
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
         pos.board.rebuild_occupancy_bitboards();
 
         // Black lance at rank 8 cannot attack backward (toward rank 9)
         // Black lance attacks are toward rank 0-7 only
-        assert!(!pos.is_attacked(Square::new(4, 7), Color::Black)); // Black lance at rank 8 cannot attack rank 7
-        assert!(!pos.is_attacked(Square::new(4, 6), Color::Black));
-        assert!(!pos.is_attacked(Square::new(3, 7), Color::Black)); // Different file
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'h').unwrap(), Color::Black)); // Black lance at rank 8 cannot attack rank 7
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'g').unwrap(), Color::Black));
+        assert!(!pos.is_attacked(Square::from_usi_chars('6', 'h').unwrap(), Color::Black)); // Different file
 
         // White lance at rank 0 cannot attack backward (toward rank -1)
         // White lance attacks are toward rank 1-8 only
-        assert!(!pos.is_attacked(Square::new(4, 1), Color::White)); // White lance at rank 0 cannot attack rank 1
-        assert!(!pos.is_attacked(Square::new(4, 2), Color::White));
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'b').unwrap(), Color::White)); // White lance at rank 0 cannot attack rank 1
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'c').unwrap(), Color::White));
 
         // Move lances to positions where they can attack
-        pos.board.remove_piece(Square::new(4, 8));
-        pos.board.remove_piece(Square::new(4, 0));
-        pos.board
-            .put_piece(Square::new(4, 2), Piece::new(PieceType::Lance, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::White));
+        pos.board.remove_piece(Square::from_usi_chars('5', 'i').unwrap());
+        pos.board.remove_piece(Square::from_usi_chars('5', 'a').unwrap());
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'c').unwrap(),
+            Piece::new(PieceType::Lance, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'g').unwrap(),
+            Piece::new(PieceType::Lance, Color::White),
+        );
         pos.board.rebuild_occupancy_bitboards();
 
         // Now test actual attacks
-        // Black lance at rank 2 attacks toward rank 8
-        assert!(pos.is_attacked(Square::new(4, 3), Color::Black));
-        assert!(pos.is_attacked(Square::new(4, 4), Color::Black));
-        assert!(pos.is_attacked(Square::new(4, 5), Color::Black));
+        // Black lance at 5c attacks toward opponent side (rank a)
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'f').unwrap(), Color::Black));
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'e').unwrap(), Color::Black));
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'd').unwrap(), Color::Black));
 
-        // White lance at rank 6 attacks toward rank 0
-        assert!(pos.is_attacked(Square::new(4, 5), Color::White));
-        assert!(pos.is_attacked(Square::new(4, 4), Color::White));
-        assert!(pos.is_attacked(Square::new(4, 3), Color::White));
+        // White lance at 5g attacks toward opponent side (rank a)
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'f').unwrap(), Color::White));
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'e').unwrap(), Color::White));
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'd').unwrap(), Color::White));
 
         // Test with blocker
-        pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'e').unwrap(),
+            Piece::new(PieceType::Pawn, Color::Black),
+        );
         pos.board.rebuild_occupancy_bitboards();
 
         // is_attacked() now correctly considers blockers for lance attacks
@@ -3196,22 +3565,23 @@ mod tests {
         // is_attacked() now correctly considers blockers for lance attacks
         // because it uses get_lance_attackers_to() internally
 
-        // Black lance at rank 2 is blocked by pawn at rank 4
-        assert!(pos.is_attacked(Square::new(4, 3), Color::Black)); // Lance can attack rank 3
-        assert!(pos.is_attacked(Square::new(4, 4), Color::Black)); // Lance can attack blocker
+        // Black lance at 5c is blocked by pawn at 5e
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'f').unwrap(), Color::Black)); // Lance can attack rank 3
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'e').unwrap(), Color::Black)); // Lance can attack blocker
 
         // Note: Square(4, 5) is attacked by the Black pawn at rank 4, not the lance!
-        assert!(pos.is_attacked(Square::new(4, 5), Color::Black)); // Attacked by pawn at rank 4
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'd').unwrap(), Color::Black)); // Attacked by pawn at rank 4
 
         // Lance cannot attack beyond the blocker
-        assert!(!pos.is_attacked(Square::new(4, 6), Color::Black)); // Lance blocked by pawn at rank 4
-        assert!(!pos.is_attacked(Square::new(4, 7), Color::Black)); // Lance blocked by pawn at rank 4
-        assert!(!pos.is_attacked(Square::new(4, 8), Color::Black)); // Lance blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'c').unwrap(), Color::Black)); // Lance blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'b').unwrap(), Color::Black)); // Lance blocked by pawn at rank 4
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'a').unwrap(), Color::Black)); // Lance blocked by pawn at rank 4
 
-        // White lance at rank 6 is blocked by pawn at rank 4
-        assert!(pos.is_attacked(Square::new(4, 5), Color::White)); // Can attack rank 5
-        assert!(!pos.is_attacked(Square::new(4, 3), Color::White)); // Blocked by pawn at rank 4
-        assert!(!pos.is_attacked(Square::new(4, 1), Color::White)); // Blocked by pawn at rank 4
+        // White lance at 5g is blocked by pawn at 5e
+        assert!(pos.is_attacked(Square::from_usi_chars('5', 'f').unwrap(), Color::White)); // Can attack 5f
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'd').unwrap(), Color::White)); // Blocked by pawn at 5e
+        assert!(!pos.is_attacked(Square::from_usi_chars('5', 'b').unwrap(), Color::White));
+        // Blocked by pawn at 5e
     }
 
     #[test]
@@ -3231,18 +3601,20 @@ mod tests {
         for rank in 0..9 {
             if rank % 3 == 0 {
                 pos.board
-                    .put_piece(Square::new(4, rank), Piece::new(PieceType::Lance, Color::Black));
+                    .put_piece(Square(4 + rank * 9), Piece::new(PieceType::Lance, Color::Black));
             }
         }
 
         // Add some blockers
-        pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Pawn, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'd').unwrap(),
+            Piece::new(PieceType::Pawn, Color::White),
+        );
         pos.board.rebuild_occupancy_bitboards();
 
         // Performance test: Call get_lance_attackers_to many times
         let iterations = 100_000;
-        let target = Square::new(4, 7);
+        let target = Square::from_usi_chars('5', 'b').unwrap();
         let lance_bb = pos.board.piece_bb[Color::Black as usize][PieceType::Lance as usize];
         let occupied = pos.board.all_bb;
 
