@@ -742,87 +742,131 @@ impl Position {
         let mut pos = Self::empty();
 
         // Place pawns
-        // White pawns on rank 2 (3rd rank), Black pawns on rank 6 (7th rank)
+        // Black pawns on rank 6 (7th rank), White pawns on rank 2 (3rd rank)
         for file in 0..9 {
-            pos.board
-                .put_piece(Square::new(file, 2), Piece::new(PieceType::Pawn, Color::White));
-            pos.board
-                .put_piece(Square::new(file, 6), Piece::new(PieceType::Pawn, Color::Black));
+            let white_pawn_sq = Square::from_usi_chars((b'9' - file as u8) as char, 'c').unwrap();
+            pos.board.put_piece(white_pawn_sq, Piece::new(PieceType::Pawn, Color::White));
+            let black_pawn_sq = Square::from_usi_chars((b'9' - file as u8) as char, 'g').unwrap();
+            pos.board.put_piece(black_pawn_sq, Piece::new(PieceType::Pawn, Color::Black));
         }
 
-        // White pieces on rank 0 (1st rank) and rank 1 (2nd rank)
+        // Black pieces on rank 8 (9th rank) and rank 7 (8th rank) - Black is at bottom
         // Lances
-        pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::Lance, Color::White));
-        pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::Lance, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'i').unwrap(),
+            Piece::new(PieceType::Lance, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'i').unwrap(),
+            Piece::new(PieceType::Lance, Color::Black),
+        );
 
         // Knights
-        pos.board
-            .put_piece(Square::new(1, 0), Piece::new(PieceType::Knight, Color::White));
-        pos.board
-            .put_piece(Square::new(7, 0), Piece::new(PieceType::Knight, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'i').unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'i').unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        );
 
         // Silvers
-        pos.board
-            .put_piece(Square::new(2, 0), Piece::new(PieceType::Silver, Color::White));
-        pos.board
-            .put_piece(Square::new(6, 0), Piece::new(PieceType::Silver, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('7', 'i').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('3', 'i').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
 
         // Golds
-        pos.board
-            .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::White));
-        pos.board
-            .put_piece(Square::new(5, 0), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('6', 'i').unwrap(),
+            Piece::new(PieceType::Gold, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'i').unwrap(),
+            Piece::new(PieceType::Gold, Color::Black),
+        );
 
         // King
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
 
-        // Rook (at 8b in USI = file 1, rank 1)
-        pos.board
-            .put_piece(Square::new(1, 1), Piece::new(PieceType::Rook, Color::White));
+        // Rook (at 2h in USI)
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'h').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
 
-        // Bishop (at 2b in USI = file 7, rank 1)
-        pos.board
-            .put_piece(Square::new(7, 1), Piece::new(PieceType::Bishop, Color::White));
+        // Bishop (at 8h in USI)
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'h').unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
 
-        // Black pieces on rank 8 (9th rank) and rank 7 (8th rank)
+        // White pieces on rank 0 (1st rank) and rank 1 (2nd rank) - White is at top
         // Lances
-        pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::Lance, Color::Black));
-        pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::Lance, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('9', 'a').unwrap(),
+            Piece::new(PieceType::Lance, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('1', 'a').unwrap(),
+            Piece::new(PieceType::Lance, Color::White),
+        );
 
         // Knights
-        pos.board
-            .put_piece(Square::new(1, 8), Piece::new(PieceType::Knight, Color::Black));
-        pos.board
-            .put_piece(Square::new(7, 8), Piece::new(PieceType::Knight, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'a').unwrap(),
+            Piece::new(PieceType::Knight, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'a').unwrap(),
+            Piece::new(PieceType::Knight, Color::White),
+        );
 
         // Silvers
-        pos.board
-            .put_piece(Square::new(2, 8), Piece::new(PieceType::Silver, Color::Black));
-        pos.board
-            .put_piece(Square::new(6, 8), Piece::new(PieceType::Silver, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('7', 'a').unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('3', 'a').unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
 
         // Golds
-        pos.board
-            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::Black));
-        pos.board
-            .put_piece(Square::new(5, 8), Piece::new(PieceType::Gold, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('6', 'a').unwrap(),
+            Piece::new(PieceType::Gold, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'a').unwrap(),
+            Piece::new(PieceType::Gold, Color::White),
+        );
 
         // King
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
 
-        // Rook (at 2h in USI = file 7, rank 7)
-        pos.board
-            .put_piece(Square::new(7, 7), Piece::new(PieceType::Rook, Color::Black));
+        // Rook (at 8b in USI)
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'b').unwrap(),
+            Piece::new(PieceType::Rook, Color::White),
+        );
 
-        // Bishop (at 8h in USI = file 1, rank 7)
-        pos.board
-            .put_piece(Square::new(1, 7), Piece::new(PieceType::Bishop, Color::Black));
+        // Bishop (at 2b in USI)
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'b').unwrap(),
+            Piece::new(PieceType::Bishop, Color::White),
+        );
 
         // Calculate hash
         pos.hash = pos.compute_hash();
