@@ -618,10 +618,10 @@ mod tests {
         let stack = SearchStack::default();
 
         // Use a known legal move from starting position
-        // 2g2f: file 7, rank 2 -> rank 3
+        // Black pawn at rank 6 moves toward rank 0
         let tt_move = Some(Move::normal(
-            Square::new(7, 2), // 2g
-            Square::new(7, 3), // 2f
+            Square::new(7, 6), // Black pawn
+            Square::new(7, 5), // One square forward
             false,
         ));
 
@@ -696,10 +696,10 @@ mod tests {
 
         // Make some moves to create capture opportunities
         let moves = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
-            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
-            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
+            Move::normal(Square::new(2, 6), Square::new(2, 5), false), // Black pawn forward
+            Move::normal(Square::new(3, 2), Square::new(3, 3), false), // White pawn forward
+            Move::normal(Square::new(2, 5), Square::new(2, 4), false), // Black pawn forward
+            Move::normal(Square::new(3, 3), Square::new(3, 4), false), // White pawn forward
         ];
 
         for mv in &moves {
@@ -732,10 +732,11 @@ mod tests {
         let mut stack = SearchStack::default();
 
         // Set killer moves (using legal moves from starting position)
-        // 2g2f: file 7, rank 2 -> rank 3
-        let killer1 = Move::normal(Square::new(7, 2), Square::new(7, 3), false);
-        // 7g7f: file 2, rank 2 -> rank 3
-        let killer2 = Move::normal(Square::new(2, 2), Square::new(2, 3), false);
+        // Black pawns are at rank 6, move toward rank 0
+        // 2g2f: file 7, rank 6 -> rank 5
+        let killer1 = Move::normal(Square::new(7, 6), Square::new(7, 5), false);
+        // 7g7f: file 2, rank 6 -> rank 5
+        let killer2 = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
         stack.killers[0] = Some(killer1);
         stack.killers[1] = Some(killer2);
 
@@ -944,23 +945,23 @@ mod tests {
         pos.board
             .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
 
-        // Black lances in same file attacking downward
+        // Black lances in same file attacking upward (toward rank 0)
         pos.board
-            .put_piece(Square::new(4, 2), Piece::new(PieceType::Lance, Color::Black));
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::Black));
         pos.board
             .put_piece(Square::new(4, 4), Piece::new(PieceType::Lance, Color::Black));
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
 
-        // For Black, lance attacks downward (toward rank 8)
-        // Check attacks to rank 6 - both lances can potentially attack, but only the front one (at rank 4) reaches it
-        let attackers = pos.get_attackers_to(Square::new(4, 6), Color::Black);
+        // For Black, lance attacks upward (toward rank 0)
+        // Check attacks to rank 3 - only the front lance (at rank 4) can attack it
+        let attackers = pos.get_attackers_to(Square::new(4, 3), Color::Black);
 
-        // Only the lance at rank 4 should be able to attack rank 6
+        // Only the lance at rank 4 should be able to attack rank 3
         assert!(attackers.test(Square::new(4, 4)), "Front lance should attack");
         assert!(
-            !attackers.test(Square::new(4, 2)),
+            !attackers.test(Square::new(4, 6)),
             "Rear lance should be blocked by front lance"
         );
     }

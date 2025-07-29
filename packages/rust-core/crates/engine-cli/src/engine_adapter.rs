@@ -1313,18 +1313,18 @@ mod tests {
         // Create test position and moves using known valid moves
         let position = Position::startpos();
         // Using actual valid moves from the initial position
-        // Note: In this implementation, 7c7d is a valid black pawn move
-        let move1 = parse_and_validate_move(&position, "7c7d").unwrap();
+        // Black pawns are at rank g (6), move toward rank a (0)
+        let move1 = parse_and_validate_move(&position, "7g7f").unwrap();
 
         let mut pos2 = position.clone();
         pos2.do_move(move1);
-        // After black 7c7d, white can respond
-        let move2 = parse_and_validate_move(&pos2, "3g3f").unwrap();
+        // After black 7g7f, white can respond
+        let move2 = parse_and_validate_move(&pos2, "3c3d").unwrap();
 
         let mut pos3 = pos2.clone();
         pos3.do_move(move2);
-        // After white 3g3f, black can continue
-        let move3 = parse_and_validate_move(&pos3, "8c8d").unwrap();
+        // After white 3c3d, black can continue
+        let move3 = parse_and_validate_move(&pos3, "8g8f").unwrap();
 
         let result = SearchResult {
             best_move: Some(move1),
@@ -1358,8 +1358,8 @@ mod tests {
 
         // Create test position and move
         let position = Position::startpos();
-        // Note: In this implementation, 7c7d is a valid black pawn move
-        let move1 = parse_and_validate_move(&position, "7c7d").unwrap();
+        // Black pawn at rank g (6) moves to rank f (5)
+        let move1 = parse_and_validate_move(&position, "7g7f").unwrap();
 
         let result = SearchResult {
             best_move: Some(move1),
@@ -1392,7 +1392,8 @@ mod tests {
 
         // Create test position and move
         let position = Position::startpos();
-        let move1 = parse_and_validate_move(&position, "3c3d").unwrap();
+        // Use a Black move since Black moves first
+        let move1 = parse_and_validate_move(&position, "7g7f").unwrap();
 
         let result = SearchResult {
             best_move: Some(move1),
@@ -1424,8 +1425,8 @@ mod tests {
         let position = Position::startpos();
 
         // Use a move that exists in the initial position
-        // Note: In this implementation, 7c7d is a valid black pawn move
-        let best_move = parse_and_validate_move(&position, "7c7d").unwrap();
+        // Black pawn at rank g (6) moves to rank f (5)
+        let best_move = parse_and_validate_move(&position, "7g7f").unwrap();
 
         let ponder = EngineAdapter::generate_ponder_fallback(&position, &best_move);
 
@@ -1439,24 +1440,24 @@ mod tests {
     #[test]
     fn test_ponder_move_validation() {
         let position = Position::startpos();
-        // Note: In this implementation, 7c7d is a valid black pawn move
-        let best_move = parse_and_validate_move(&position, "7c7d").unwrap();
+        // Black pawn at rank g (6) moves to rank f (5)
+        let best_move = parse_and_validate_move(&position, "7g7f").unwrap();
 
         // Create position after best move
         let mut pos_after = position.clone();
         pos_after.do_move(best_move);
 
         // Valid ponder move (opponent's response)
-        // After 7c7d (black pawn advance), white can respond
-        let valid_ponder = parse_and_validate_move(&pos_after, "3g3f").unwrap();
+        // After 7g7f (black pawn advance), white can respond
+        let valid_ponder = parse_and_validate_move(&pos_after, "3c3d").unwrap();
         let is_valid = EngineAdapter::is_valid_ponder_move(&position, &best_move, &valid_ponder);
-        assert!(is_valid, "3g3f should be valid after 7c7d");
+        assert!(is_valid, "3c3d should be valid after 7g7f");
 
         // Another valid opponent move
-        let another_valid = parse_and_validate_move(&pos_after, "8g8f").unwrap();
+        let another_valid = parse_and_validate_move(&pos_after, "8c8d").unwrap();
         assert!(
             EngineAdapter::is_valid_ponder_move(&position, &best_move, &another_valid),
-            "8g8f should be valid"
+            "8c8d should be valid"
         );
 
         // Invalid move - trying to parse our color's move should fail in opponent's turn

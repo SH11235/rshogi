@@ -201,20 +201,20 @@ impl AttackTables {
         // Gold moves: all adjacent except diagonal backwards
         let directions = match color {
             Color::Black => [
-                Direction::South,     // Forward
-                Direction::SouthEast, // Diagonal forward-right
+                Direction::North,     // Forward (towards rank 0)
+                Direction::NorthEast, // Diagonal forward-right
                 Direction::East,      // Right
                 Direction::West,      // Left
-                Direction::SouthWest, // Diagonal forward-left
-                Direction::North,     // Backward
+                Direction::NorthWest, // Diagonal forward-left
+                Direction::South,     // Backward
             ],
             Color::White => [
-                Direction::North,     // Forward
-                Direction::NorthEast, // Diagonal forward-left
-                Direction::East,      // Right (from White's perspective, actually left)
-                Direction::West,      // Left (from White's perspective, actually right)
-                Direction::NorthWest, // Diagonal forward-right
-                Direction::South,     // Backward
+                Direction::South,     // Forward (towards rank 8)
+                Direction::SouthEast, // Diagonal forward-left
+                Direction::East,      // Right
+                Direction::West,      // Left
+                Direction::SouthWest, // Diagonal forward-right
+                Direction::North,     // Backward
             ],
         };
 
@@ -249,18 +249,18 @@ impl AttackTables {
         // Silver moves: forward and all diagonals
         let directions = match color {
             Color::Black => [
-                Direction::South,     // Forward for Black (towards rank 8)
-                Direction::NorthEast, // Diagonal backward-right
-                Direction::SouthEast, // Diagonal forward-right
-                Direction::SouthWest, // Diagonal forward-left
-                Direction::NorthWest, // Diagonal backward-left
+                Direction::North,     // Forward for Black (towards rank 0)
+                Direction::NorthEast, // Diagonal forward-right
+                Direction::NorthWest, // Diagonal forward-left
+                Direction::SouthEast, // Diagonal backward-right
+                Direction::SouthWest, // Diagonal backward-left
             ],
             Color::White => [
-                Direction::North,     // Forward for White (towards rank 0)
-                Direction::SouthEast, // Diagonal backward-left
-                Direction::NorthEast, // Diagonal forward-left
-                Direction::NorthWest, // Diagonal forward-right
-                Direction::SouthWest, // Diagonal backward-right
+                Direction::South,     // Forward for White (towards rank 8)
+                Direction::SouthEast, // Diagonal forward-left
+                Direction::SouthWest, // Diagonal forward-right
+                Direction::NorthEast, // Diagonal backward-left
+                Direction::NorthWest, // Diagonal backward-right
             ],
         };
 
@@ -294,8 +294,8 @@ impl AttackTables {
 
         // Knight moves: two forward, one to the side
         let (rank_offset, min_rank, max_rank) = match color {
-            Color::Black => (2, 0, 6), // Black moves towards rank 8, can't move from rank 7-8
-            Color::White => (-2, 2, 8), // White moves towards rank 0, can't move from rank 0-1
+            Color::Black => (-2, 2, 8), // Black (Sente) moves towards rank 0, can't move from rank 0-1
+            Color::White => (2, 0, 6), // White (Gote) moves towards rank 8, can't move from rank 7-8
         };
 
         let new_rank = rank + rank_offset;
@@ -320,8 +320,8 @@ impl AttackTables {
         let rank = from.rank() as i8;
 
         let (start, end, step) = match color {
-            Color::Black => (rank + 1, 9, 1),   // Black moves towards rank 8
-            Color::White => (rank - 1, -1, -1), // White moves towards rank 0
+            Color::Black => (rank - 1, -1, -1), // Black (Sente) moves towards rank 0 (up)
+            Color::White => (rank + 1, 9, 1),   // White (Gote) moves towards rank 8 (down)
         };
 
         let mut r = start;
@@ -340,8 +340,8 @@ impl AttackTables {
         let rank = from.rank() as i8;
 
         let new_rank = match color {
-            Color::Black => rank + 1, // Black moves towards rank 8
-            Color::White => rank - 1, // White moves towards rank 0
+            Color::Black => rank - 1, // Black (Sente) moves towards rank 0 (up the board)
+            Color::White => rank + 1, // White (Gote) moves towards rank 8 (down the board)
         };
 
         if (0..9).contains(&new_rank) {
@@ -553,16 +553,16 @@ mod tests {
 
     #[test]
     fn test_pawn_attacks() {
-        // Black pawn
+        // Black pawn (Sente)
         let sq = Square::new(4, 4);
         let attacks = ATTACK_TABLES.pawn_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 1);
-        assert!(attacks.test(Square::new(4, 5))); // Black moves towards rank 8
+        assert!(attacks.test(Square::new(4, 3))); // Black (Sente) moves towards rank 0
 
-        // White pawn
+        // White pawn (Gote)
         let attacks = ATTACK_TABLES.pawn_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 1);
-        assert!(attacks.test(Square::new(4, 3))); // White moves towards rank 0
+        assert!(attacks.test(Square::new(4, 5))); // White (Gote) moves towards rank 8
     }
 
     #[test]
@@ -571,12 +571,24 @@ mod tests {
         let sq = Square::new(4, 4);
         let attacks = ATTACK_TABLES.knight_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 2);
+        assert!(attacks.test(Square::new(3, 2))); // 2 forward (towards rank 0), 1 left
+        assert!(attacks.test(Square::new(5, 2))); // 2 forward (towards rank 0), 1 right
+
+        // Black knight can't move from rank 0 or 1
+        let sq = Square::new(4, 1);
+        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::Black);
+        assert_eq!(attacks.count_ones(), 0);
+
+        // White knight in center
+        let sq = Square::new(4, 4);
+        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::White);
+        assert_eq!(attacks.count_ones(), 2);
         assert!(attacks.test(Square::new(3, 6))); // 2 forward (towards rank 8), 1 left
         assert!(attacks.test(Square::new(5, 6))); // 2 forward (towards rank 8), 1 right
 
-        // Black knight can't move from rank 7 or 8
+        // White knight can't move from rank 7 or 8
         let sq = Square::new(4, 7);
-        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::Black);
+        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 0);
     }
 
