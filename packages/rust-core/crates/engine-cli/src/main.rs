@@ -623,12 +623,33 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
                 loop {
                     if start.elapsed() > timeout {
-                        // Timeout - force send bestmove
+                        // Timeout - try to generate a legal move instead of resigning
                         log::warn!("Timeout waiting for bestmove after stop command");
-                        send_response(UsiResponse::BestMove {
-                            best_move: "resign".to_string(),
-                            ponder: None,
-                        })?;
+
+                        // Try to generate a legal move from current position
+                        let emergency_move = {
+                            let engine = lock_or_recover(ctx.engine);
+                            engine.generate_emergency_move()
+                        };
+
+                        match emergency_move {
+                            Ok(move_str) => {
+                                log::info!("Generated emergency move: {}", move_str);
+                                send_response(UsiResponse::BestMove {
+                                    best_move: move_str,
+                                    ponder: None,
+                                })?;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to generate emergency move: {}", e);
+                                // Only resign if we really can't generate any move
+                                send_response(UsiResponse::BestMove {
+                                    best_move: "resign".to_string(),
+                                    ponder: None,
+                                })?;
+                            }
+                        }
+
                         *ctx.searching = false;
                         break;
                     }
@@ -651,11 +672,31 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             let _ = send_response(UsiResponse::Info(info));
                         }
                         Ok(WorkerMessage::Finished) => {
-                            // Worker finished but no bestmove - send resign
-                            send_response(UsiResponse::BestMove {
-                                best_move: "resign".to_string(),
-                                ponder: None,
-                            })?;
+                            // Worker finished but no bestmove - try emergency move
+                            log::warn!("Worker finished without bestmove");
+
+                            let emergency_move = {
+                                let engine = lock_or_recover(ctx.engine);
+                                engine.generate_emergency_move()
+                            };
+
+                            match emergency_move {
+                                Ok(move_str) => {
+                                    log::info!("Generated emergency move: {}", move_str);
+                                    send_response(UsiResponse::BestMove {
+                                        best_move: move_str,
+                                        ponder: None,
+                                    })?;
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to generate emergency move: {}", e);
+                                    send_response(UsiResponse::BestMove {
+                                        best_move: "resign".to_string(),
+                                        ponder: None,
+                                    })?;
+                                }
+                            }
+
                             *ctx.searching = false;
                             break;
                         }
@@ -665,12 +706,29 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     }
                 }
             } else {
-                // Not searching - send dummy bestmove to satisfy USI protocol
-                log::debug!("Stop command received while not searching, sending resign");
-                send_response(UsiResponse::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder: None,
-                })?;
+                // Not searching - try to generate a move from current position
+                log::debug!("Stop command received while not searching");
+
+                let emergency_move = {
+                    let engine = lock_or_recover(ctx.engine);
+                    engine.generate_emergency_move()
+                };
+
+                match emergency_move {
+                    Ok(move_str) => {
+                        send_response(UsiResponse::BestMove {
+                            best_move: move_str,
+                            ponder: None,
+                        })?;
+                    }
+                    Err(_) => {
+                        // Only resign if no legal moves available
+                        send_response(UsiResponse::BestMove {
+                            best_move: "resign".to_string(),
+                            ponder: None,
+                        })?;
+                    }
+                }
             }
         }
 
@@ -752,12 +810,34 @@ fn search_worker(
                         adapter.return_engine(engine);
                         log::error!("Search preparation error: {e}");
                         let _ = tx.send(WorkerMessage::Error(e.to_string()));
-                        if let Err(e) = tx.send(WorkerMessage::BestMove {
-                            best_move: "resign".to_string(),
-                            ponder_move: None,
-                        }) {
-                            log::error!("Failed to send resign after preparation error: {e}");
+
+                        // Try to generate emergency move before resigning
+                        match adapter.generate_emergency_move() {
+                            Ok(emergency_move) => {
+                                log::info!(
+                                    "Generated emergency move after preparation error: {}",
+                                    emergency_move
+                                );
+                                if let Err(e) = tx.send(WorkerMessage::BestMove {
+                                    best_move: emergency_move,
+                                    ponder_move: None,
+                                }) {
+                                    log::error!("Failed to send emergency move: {e}");
+                                }
+                            }
+                            Err(_) => {
+                                // Only resign if no legal moves available
+                                if let Err(e) = tx.send(WorkerMessage::BestMove {
+                                    best_move: "resign".to_string(),
+                                    ponder_move: None,
+                                }) {
+                                    log::error!(
+                                        "Failed to send resign after preparation error: {e}"
+                                    );
+                                }
+                            }
                         }
+
                         let _ = tx.send(WorkerMessage::Finished);
                         return;
                     }
@@ -766,12 +846,32 @@ fn search_worker(
             Err(e) => {
                 log::warn!("Failed to take engine: {e}");
                 let _ = tx.send(WorkerMessage::Error(e.to_string()));
-                if let Err(e) = tx.send(WorkerMessage::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder_move: None,
-                }) {
-                    log::error!("Failed to send resign after engine take error: {e}");
+
+                // Try to generate emergency move from adapter
+                match adapter.generate_emergency_move() {
+                    Ok(emergency_move) => {
+                        log::info!(
+                            "Generated emergency move after engine take error: {}",
+                            emergency_move
+                        );
+                        if let Err(e) = tx.send(WorkerMessage::BestMove {
+                            best_move: emergency_move,
+                            ponder_move: None,
+                        }) {
+                            log::error!("Failed to send emergency move: {e}");
+                        }
+                    }
+                    Err(_) => {
+                        // Only resign if no legal moves available
+                        if let Err(e) = tx.send(WorkerMessage::BestMove {
+                            best_move: "resign".to_string(),
+                            ponder_move: None,
+                        }) {
+                            log::error!("Failed to send resign after engine take error: {e}");
+                        }
+                    }
                 }
+
                 let _ = tx.send(WorkerMessage::Finished);
                 return;
             }
@@ -819,23 +919,59 @@ fn search_worker(
                 adapter.cleanup_after_search(was_ponder);
             }
 
-            // Send error and resign
+            // Try to generate emergency move before sending error
+            let emergency_result = {
+                let adapter = lock_or_recover(&engine_adapter);
+                adapter.generate_emergency_move()
+            };
+
             if stop_flag.load(Ordering::Acquire) {
-                // Stopped by user - send resign
-                if let Err(e) = tx.send(WorkerMessage::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder_move: None,
-                }) {
-                    log::error!("Failed to send resign after stop: {e}");
+                // Stopped by user - try emergency move first
+                match emergency_result {
+                    Ok(emergency_move) => {
+                        log::info!("Generated emergency move after stop: {}", emergency_move);
+                        if let Err(e) = tx.send(WorkerMessage::BestMove {
+                            best_move: emergency_move,
+                            ponder_move: None,
+                        }) {
+                            log::error!("Failed to send emergency move: {e}");
+                        }
+                    }
+                    Err(_) => {
+                        // Only resign if no legal moves
+                        if let Err(e) = tx.send(WorkerMessage::BestMove {
+                            best_move: "resign".to_string(),
+                            ponder_move: None,
+                        }) {
+                            log::error!("Failed to send resign after stop: {e}");
+                        }
+                    }
                 }
             } else {
-                // Other error - send error and resign
+                // Other error - send error and try emergency move
                 let _ = tx.send(WorkerMessage::Error(e.to_string()));
-                if let Err(e) = tx.send(WorkerMessage::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder_move: None,
-                }) {
-                    log::error!("Failed to send resign after error: {e}");
+                match emergency_result {
+                    Ok(emergency_move) => {
+                        log::info!(
+                            "Generated emergency move after search error: {}",
+                            emergency_move
+                        );
+                        if let Err(e) = tx.send(WorkerMessage::BestMove {
+                            best_move: emergency_move,
+                            ponder_move: None,
+                        }) {
+                            log::error!("Failed to send emergency move: {e}");
+                        }
+                    }
+                    Err(_) => {
+                        // Only resign if no legal moves
+                        if let Err(e) = tx.send(WorkerMessage::BestMove {
+                            best_move: "resign".to_string(),
+                            ponder_move: None,
+                        }) {
+                            log::error!("Failed to send resign after error: {e}");
+                        }
+                    }
                 }
             }
         }

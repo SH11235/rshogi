@@ -637,6 +637,29 @@ impl EngineAdapter {
             }
         }
     }
+
+    /// Generate an emergency move when normal search fails or times out
+    /// Returns the first legal move found, or an error if no legal moves exist
+    pub fn generate_emergency_move(&self) -> Result<String> {
+        use engine_core::movegen::MoveGen;
+        use engine_core::shogi::MoveList;
+
+        // Get current position
+        let position = self.position.as_ref().ok_or_else(|| anyhow!("No position set"))?;
+
+        // Generate all legal moves
+        let mut generator = MoveGen::new();
+        let mut moves = MoveList::new();
+        generator.generate_all(position, &mut moves);
+
+        if moves.is_empty() {
+            return Err(anyhow!("No legal moves available (checkmate or stalemate)"));
+        }
+
+        // Return the first legal move
+        let first_move = moves[0];
+        Ok(engine_core::usi::move_to_usi(&first_move))
+    }
 }
 
 /// Validate and clamp search depth to ensure it's within valid range
