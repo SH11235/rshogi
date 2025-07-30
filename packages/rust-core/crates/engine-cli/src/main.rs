@@ -570,6 +570,8 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
         }
 
         UsiCommand::Go(params) => {
+            log::info!("Received go command with params: {:?}", params);
+
             // Stop any ongoing search
             wait_for_search_completion(
                 ctx.searching,
@@ -593,6 +595,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
             // Spawn worker thread for search with panic safety
             let handle = thread::spawn(move || {
+                log::info!("Worker thread spawned");
                 let result = std::panic::catch_unwind(|| {
                     search_worker(engine_clone, params, stop_clone, tx_clone.clone());
                 });
@@ -608,14 +611,17 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
             *ctx.worker_handle = Some(handle);
             *ctx.searching = true;
+            log::info!("Worker thread handle stored, searching = true");
 
             // Don't block - return immediately
         }
 
         UsiCommand::Stop => {
+            log::info!("Received stop command, searching = {}", *ctx.searching);
             // Signal stop to worker thread
             if *ctx.searching {
                 ctx.stop_flag.store(true, Ordering::Release);
+                log::info!("Stop flag set to true");
 
                 // Wait for bestmove with timeout to ensure we always send a response
                 let start = Instant::now();
@@ -789,6 +795,7 @@ fn search_worker(
     stop_flag: Arc<AtomicBool>,
     tx: Sender<WorkerMessage>,
 ) {
+    log::info!("Search worker thread started with params: {:?}", params);
     log::debug!("Search worker thread started");
 
     // Set up info callback
@@ -799,12 +806,18 @@ fn search_worker(
 
     // Take engine out and prepare search
     let was_ponder = params.ponder;
+    log::info!("Attempting to take engine from adapter");
     let (engine, position, limits, ponder_hit_flag) = {
         let mut adapter = lock_or_recover(&engine_adapter);
+        log::info!("Adapter lock acquired, calling take_engine");
         match adapter.take_engine() {
             Ok(engine) => {
+                log::info!("Engine taken successfully, preparing search");
                 match adapter.prepare_search(&params, stop_flag.clone()) {
-                    Ok((pos, lim, flag)) => (engine, pos, lim, flag),
+                    Ok((pos, lim, flag)) => {
+                        log::info!("Search prepared successfully");
+                        (engine, pos, lim, flag)
+                    }
                     Err(e) => {
                         // Return engine and send error
                         adapter.return_engine(engine);
@@ -844,10 +857,11 @@ fn search_worker(
                 }
             }
             Err(e) => {
-                log::warn!("Failed to take engine: {e}");
+                log::error!("Failed to take engine: {e}");
                 let _ = tx.send(WorkerMessage::Error(e.to_string()));
 
                 // Try to generate emergency move from adapter
+                log::info!("Attempting to generate emergency move after engine take failure");
                 match adapter.generate_emergency_move() {
                     Ok(emergency_move) => {
                         log::info!(
