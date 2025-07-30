@@ -24,6 +24,9 @@ pub struct TimeParameters {
     pub hard_multiplier: f64, // Default: 4.0
     pub increment_usage: f64, // Default: 0.8
 
+    // Byoyomi specific
+    pub byoyomi_soft_ratio: f64, // Default: 0.8 (80% of byoyomi time)
+
     // Game phase factors
     pub opening_factor: f64, // Default: 1.2
     pub endgame_factor: f64, // Default: 0.8
@@ -41,6 +44,7 @@ impl Default for TimeParameters {
             soft_multiplier: 1.0,
             hard_multiplier: 4.0,
             increment_usage: 0.8,
+            byoyomi_soft_ratio: 0.8,
             opening_factor: 1.2,
             endgame_factor: 0.8,
         }

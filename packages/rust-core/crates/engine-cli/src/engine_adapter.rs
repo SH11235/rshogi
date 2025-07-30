@@ -3,12 +3,13 @@
 //! This module bridges the USI protocol with the engine-core implementation,
 //! handling position management, search parameter conversion, and result formatting.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use engine_core::{
     engine::controller::{Engine, EngineType},
     search::constants::{MATE_SCORE, MAX_PLY},
     search::limits::{SearchLimits, SearchLimitsBuilder},
     shogi::Position,
+    time_management::TimeParameters,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -61,6 +62,12 @@ pub struct EngineAdapter {
     ponder: bool,
     /// Byoyomi periods (None = use default of 1)
     byoyomi_periods: Option<u32>,
+    /// Byoyomi early finish ratio (percentage)
+    byoyomi_early_finish_ratio: u8,
+    /// PV stability base threshold (ms)
+    pv_stability_base: u64,
+    /// PV stability slope per depth (ms)
+    pv_stability_slope: u64,
     /// Ponder state for managing ponder searches
     ponder_state: PonderState,
     /// Active ponder hit flag (shared with searcher during ponder)
@@ -124,6 +131,9 @@ impl EngineAdapter {
             threads: 1,
             ponder: true,
             byoyomi_periods: None,
+            byoyomi_early_finish_ratio: 80,
+            pv_stability_base: 80,
+            pv_stability_slope: 5,
             ponder_state: PonderState::default(),
             active_ponder_hit_flag: None,
         };
@@ -155,6 +165,9 @@ impl EngineAdapter {
                 MIN_BYOYOMI_PERIODS as i64,
                 MAX_BYOYOMI_PERIODS as i64,
             ),
+            EngineOption::spin("ByoyomiEarlyFinishRatio", 80, 50, 95),
+            EngineOption::spin("PVStabilityBase", 80, 10, 200),
+            EngineOption::spin("PVStabilitySlope", 5, 0, 20),
         ];
     }
 
@@ -245,8 +258,41 @@ impl EngineAdapter {
                     self.byoyomi_periods = None;
                 }
             }
+            "ByoyomiEarlyFinishRatio" => {
+                if let Some(val_str) = value {
+                    let ratio = val_str.parse::<u8>().with_context(|| {
+                        format!("Invalid value for ByoyomiEarlyFinishRatio: '{}'. Expected integer 50-95", val_str)
+                    })?;
+                    if ratio < 50 || ratio > 95 {
+                        return Err(anyhow!("ByoyomiEarlyFinishRatio must be between 50 and 95"));
+                    }
+                    self.byoyomi_early_finish_ratio = ratio;
+                }
+            }
+            "PVStabilityBase" => {
+                if let Some(val_str) = value {
+                    let base = val_str.parse::<u64>().with_context(|| {
+                        format!("Invalid value for PVStabilityBase: '{}'. Expected integer 10-200", val_str)
+                    })?;
+                    if base < 10 || base > 200 {
+                        return Err(anyhow!("PVStabilityBase must be between 10 and 200"));
+                    }
+                    self.pv_stability_base = base;
+                }
+            }
+            "PVStabilitySlope" => {
+                if let Some(val_str) = value {
+                    let slope = val_str.parse::<u64>().with_context(|| {
+                        format!("Invalid value for PVStabilitySlope: '{}'. Expected integer 0-20", val_str)
+                    })?;
+                    if slope > 20 {
+                        return Err(anyhow!("PVStabilitySlope must be between 0 and 20"));
+                    }
+                    self.pv_stability_slope = slope;
+                }
+            }
             _ => {
-                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, {}, {}", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS));
+                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, {}, {}, ByoyomiEarlyFinishRatio, PVStabilityBase, PVStabilitySlope", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS));
             }
         }
         Ok(())
@@ -328,6 +374,17 @@ impl EngineAdapter {
             builder = builder.ponder_hit_flag(flag.clone());
         }
 
+        // Create TimeParameters from engine settings
+        let time_params = TimeParameters {
+            byoyomi_soft_ratio: self.byoyomi_early_finish_ratio as f64 / 100.0,
+            pv_base_threshold_ms: self.pv_stability_base,
+            pv_depth_slope_ms: self.pv_stability_slope,
+            ..Default::default()
+        };
+        
+        // Set time parameters
+        builder = builder.time_parameters(time_params);
+        
         // Apply go parameters
         // Use periods from go command if specified, otherwise use SetOption value (or default to 1)
         let periods = params.periods.unwrap_or(self.byoyomi_periods.unwrap_or(1));
@@ -1276,6 +1333,53 @@ mod tests {
         // Test both options refer to same value
         adapter.set_option(OPT_BYOYOMI_PERIODS, Some("7")).unwrap();
         assert_eq!(adapter.byoyomi_periods, Some(7));
+    }
+
+    #[test]
+    fn test_time_parameters_creation_in_prepare_search() {
+        let params = GoParams {
+            byoyomi: Some(30000),
+            btime: Some(600000),
+            wtime: Some(600000),
+            ..Default::default()
+        };
+        let position = create_test_position();
+        
+        // Test with default values
+        let builder = SearchLimits::builder();
+        let time_params = TimeParameters {
+            byoyomi_soft_ratio: 0.8, // 80% default
+            pv_base_threshold_ms: 80, // default
+            pv_depth_slope_ms: 5, // default
+            ..Default::default()
+        };
+        let builder = builder.time_parameters(time_params);
+        let limits = apply_go_params(builder, &params, &position, 1).unwrap();
+        
+        // Verify TimeParameters were set
+        assert!(limits.time_parameters.is_some());
+        let tp = limits.time_parameters.unwrap();
+        assert_eq!(tp.byoyomi_soft_ratio, 0.8);
+        assert_eq!(tp.pv_base_threshold_ms, 80);
+        assert_eq!(tp.pv_depth_slope_ms, 5);
+        
+        // Test with custom values
+        let builder2 = SearchLimits::builder();
+        let time_params2 = TimeParameters {
+            byoyomi_soft_ratio: 0.9, // 90%
+            pv_base_threshold_ms: 100, 
+            pv_depth_slope_ms: 10,
+            ..Default::default()
+        };
+        let builder2 = builder2.time_parameters(time_params2);
+        let limits2 = apply_go_params(builder2, &params, &position, 1).unwrap();
+        
+        // Verify custom TimeParameters were set
+        assert!(limits2.time_parameters.is_some());
+        let tp2 = limits2.time_parameters.unwrap();
+        assert_eq!(tp2.byoyomi_soft_ratio, 0.9);
+        assert_eq!(tp2.pv_base_threshold_ms, 100);
+        assert_eq!(tp2.pv_depth_slope_ms, 10);
     }
 
     #[test]
