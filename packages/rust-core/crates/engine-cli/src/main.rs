@@ -616,7 +616,56 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             // Signal stop to worker thread
             if *ctx.searching {
                 ctx.stop_flag.store(true, Ordering::Release);
-                // Don't wait - bestmove will come through the channel
+                
+                // Wait for bestmove with timeout to ensure we always send a response
+                let start = Instant::now();
+                let timeout = Duration::from_millis(1000); // 1 second timeout
+                let mut bestmove_sent = false;
+                
+                loop {
+                    if start.elapsed() > timeout {
+                        // Timeout - force send bestmove
+                        log::warn!("Timeout waiting for bestmove after stop command");
+                        send_response(UsiResponse::BestMove {
+                            best_move: "resign".to_string(),
+                            ponder: None,
+                        })?;
+                        *ctx.searching = false;
+                        bestmove_sent = true;
+                        break;
+                    }
+                    
+                    // Check for bestmove message
+                    match ctx.worker_rx.try_recv() {
+                        Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
+                            send_response(UsiResponse::BestMove {
+                                best_move,
+                                ponder: ponder_move,
+                            })?;
+                            *ctx.searching = false;
+                            bestmove_sent = true;
+                            break;
+                        }
+                        Ok(WorkerMessage::Info(info)) => {
+                            // Forward info messages
+                            let _ = send_response(UsiResponse::Info(info));
+                        }
+                        Ok(WorkerMessage::Finished) => {
+                            // Worker finished but no bestmove - send resign
+                            if !bestmove_sent {
+                                send_response(UsiResponse::BestMove {
+                                    best_move: "resign".to_string(),
+                                    ponder: None,
+                                })?;
+                                *ctx.searching = false;
+                            }
+                            break;
+                        }
+                        _ => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                }
             } else {
                 // Not searching - send dummy bestmove to satisfy USI protocol
                 log::debug!("Stop command received while not searching, sending resign");
