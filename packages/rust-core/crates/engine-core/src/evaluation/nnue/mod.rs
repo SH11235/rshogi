@@ -46,11 +46,13 @@ use crate::{Color, Position};
 use super::evaluate::Evaluator;
 use accumulator::Accumulator;
 use error::{NNUEError, NNUEResult};
-use log::warn;
 use network::Network;
 use std::error::Error;
 use std::sync::Arc;
 use weights::load_weights;
+
+#[cfg(debug_assertions)]
+use log::warn;
 
 /// Scale factor for converting network output to centipawns
 ///

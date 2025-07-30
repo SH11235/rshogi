@@ -7,6 +7,8 @@ use super::features::{extract_features, halfkp_index, BonaPiece, FeatureTransfor
 use super::simd::SimdDispatcher;
 use crate::shogi::{piece_type_to_hand_index, Move};
 use crate::{Color, Piece, PieceType, Position, Square};
+
+#[cfg(debug_assertions)]
 use log::error;
 
 /// Accumulator for storing transformed features
