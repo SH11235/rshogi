@@ -116,8 +116,8 @@ fn calculate_byoyomi_time(
         (soft, hard)
     } else {
         // In byoyomi period
-        // Use 80% of period as soft limit
-        let soft = (byoyomi_ms * 4) / 5; // 80% = 4/5
+        // Use configurable ratio of period as soft limit
+        let soft = ((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64;
         let hard = byoyomi_ms;
         let overhead = params.overhead_ms;
         (soft.saturating_sub(overhead), hard.saturating_sub(overhead))
