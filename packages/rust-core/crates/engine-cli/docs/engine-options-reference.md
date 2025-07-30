@@ -1,0 +1,121 @@
+# エンジン設定オプション リファレンス
+
+## 概要
+
+このドキュメントは、将棋エンジンの設定に使用可能なすべてのUSIプロトコルオプションを記載しています。これらのオプションはUSIプロトコルの`setoption`コマンドを使用して設定できます。
+
+## 利用可能なオプション
+
+### 1. USI_Hash
+- **タイプ**: spin (数値)
+- **デフォルト**: 16
+- **範囲**: 1-1024
+- **単位**: MB
+- **説明**: ハッシュテーブル（置換表）のサイズをメガバイト単位で指定します。値が大きいほど多くの局面を記憶でき、探索効率が向上します。
+- **例**: `setoption name USI_Hash value 256`
+
+### 2. Threads
+- **タイプ**: spin (数値)
+- **デフォルト**: 1
+- **範囲**: 1-256
+- **説明**: 並列探索に使用するCPUスレッド数。マルチコアシステムでは、スレッド数を増やすことで解析速度が向上します。
+- **例**: `setoption name Threads value 4`
+
+### 3. USI_Ponder
+- **タイプ**: check (真偽値)
+- **デフォルト**: true
+- **説明**: 先読み（相手の手番中の思考）を有効にします。有効にすると、エンジンは相手の手番中も思考を続けます。
+- **例**: `setoption name USI_Ponder value false`
+
+### 4. EngineType
+- **タイプ**: combo (選択式)
+- **デフォルト**: Material
+- **値**: Material, Nnue, Enhanced, EnhancedNnue
+- **説明**: エンジンタイプを選択します。探索アルゴリズムと評価関数の両方を決定します。
+  - **EnhancedNnue** (推奨): 高度な探索技術 + NNUE評価関数
+  - **Nnue**: 基本探索 + NNUE評価関数
+  - **Enhanced**: 高度な探索技術 + 駒価値評価
+  - **Material**: 基本探索 + 駒価値評価
+- **例**: `setoption name EngineType value EnhancedNnue`
+
+### 5. ByoyomiPeriods / USI_ByoyomiPeriods
+- **タイプ**: spin (数値)
+- **デフォルト**: 1 (または "default" でエンジンのデフォルト値)
+- **範囲**: 1-10
+- **説明**: 時間制御における秒読み回数。互換性のため、両方のオプション名がサポートされています。
+- **例**: `setoption name ByoyomiPeriods value 3`
+- **特殊値**: `setoption name ByoyomiPeriods value default` (エンジンのデフォルト値を使用)
+
+### 6. ByoyomiEarlyFinishRatio
+- **タイプ**: spin (数値)
+- **デフォルト**: 80
+- **範囲**: 50-95
+- **単位**: パーセント
+- **説明**: 探索を終了する前に使用する秒読み時間の割合。安全マージンを残すためにエンジンが思考を停止するタイミングを制御します。
+- **例**: `setoption name ByoyomiEarlyFinishRatio value 85`
+
+### 7. PVStabilityBase
+- **タイプ**: spin (数値)
+- **デフォルト**: 80
+- **範囲**: 10-200
+- **単位**: ミリ秒
+- **説明**: 主要変化（PV）の安定性チェックのための基準時間閾値。最善手がまだ変化している場合、エンジンは探索を継続する可能性があります。
+- **例**: `setoption name PVStabilityBase value 100`
+
+### 8. PVStabilitySlope
+- **タイプ**: spin (数値)
+- **デフォルト**: 5
+- **範囲**: 0-20
+- **単位**: 深さ当たりのミリ秒
+- **説明**: PV安定性のための探索深さ当たりの追加時間。深い探索ほど安定化のための時間が長くなります。
+- **例**: `setoption name PVStabilitySlope value 8`
+
+## 使用例
+
+### 大会用の設定:
+```
+setoption name EngineType value EnhancedNnue
+setoption name USI_Hash value 256
+setoption name Threads value 4
+setoption name USI_Ponder value true
+setoption name ByoyomiEarlyFinishRatio value 85
+```
+
+### 解析用の設定:
+```
+setoption name EngineType value EnhancedNnue
+setoption name USI_Hash value 512
+setoption name Threads value 8
+setoption name USI_Ponder value false
+```
+
+### 低メモリ環境用の設定:
+```
+setoption name EngineType value Enhanced
+setoption name USI_Hash value 16
+setoption name Threads value 1
+```
+
+### テスト/デバッグ用の設定:
+```
+setoption name EngineType value Material
+setoption name USI_Hash value 16
+setoption name Threads value 1
+setoption name USI_Ponder value false
+```
+
+## 注意事項
+
+1. オプションが有効になるためには、`isready`コマンドの前に設定する必要があります。
+2. エンジンはオプション値を検証し、無効な設定を拒否します。
+3. 一部のオプション（EngineTypeなど）は、エンジンの動作とパフォーマンスに大きな影響を与える可能性があります。
+4. エンジンタイプの詳細については、`docs/engine-types-guide.md`を参照してください。
+
+## 時間管理オプションの影響
+
+時間管理オプション（ByoyomiEarlyFinishRatio、PVStabilityBase、PVStabilitySlope）は連携して、エンジンの時間管理方法を制御します：
+
+- **ByoyomiEarlyFinishRatio**: 早めに終了することで時間切れを防ぎます
+- **PVStabilityBase + PVStabilitySlope**: 最善手が不確定な場合に追加の思考時間を許可します
+
+これらのパラメータは、正確な時間管理が重要な秒読み時間制御において特に重要です。
