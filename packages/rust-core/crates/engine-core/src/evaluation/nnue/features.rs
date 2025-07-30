@@ -6,6 +6,8 @@ use crate::{
     shogi::{piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES},
     Color, Piece, PieceType, Position, Square,
 };
+
+#[cfg(debug_assertions)]
 use log::{error, warn};
 
 /// Maximum pieces in hand for each type (indexed as in hands array)

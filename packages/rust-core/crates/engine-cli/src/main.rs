@@ -616,12 +616,11 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             // Signal stop to worker thread
             if *ctx.searching {
                 ctx.stop_flag.store(true, Ordering::Release);
-                
+
                 // Wait for bestmove with timeout to ensure we always send a response
                 let start = Instant::now();
                 let timeout = Duration::from_millis(1000); // 1 second timeout
-                let mut bestmove_sent = false;
-                
+
                 loop {
                     if start.elapsed() > timeout {
                         // Timeout - force send bestmove
@@ -631,19 +630,20 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             ponder: None,
                         })?;
                         *ctx.searching = false;
-                        bestmove_sent = true;
                         break;
                     }
-                    
+
                     // Check for bestmove message
                     match ctx.worker_rx.try_recv() {
-                        Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
+                        Ok(WorkerMessage::BestMove {
+                            best_move,
+                            ponder_move,
+                        }) => {
                             send_response(UsiResponse::BestMove {
                                 best_move,
                                 ponder: ponder_move,
                             })?;
                             *ctx.searching = false;
-                            bestmove_sent = true;
                             break;
                         }
                         Ok(WorkerMessage::Info(info)) => {
@@ -652,13 +652,11 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                         }
                         Ok(WorkerMessage::Finished) => {
                             // Worker finished but no bestmove - send resign
-                            if !bestmove_sent {
-                                send_response(UsiResponse::BestMove {
-                                    best_move: "resign".to_string(),
-                                    ponder: None,
-                                })?;
-                                *ctx.searching = false;
-                            }
+                            send_response(UsiResponse::BestMove {
+                                best_move: "resign".to_string(),
+                                ponder: None,
+                            })?;
+                            *ctx.searching = false;
                             break;
                         }
                         _ => {

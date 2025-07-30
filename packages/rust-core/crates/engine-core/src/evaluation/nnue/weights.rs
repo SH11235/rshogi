@@ -4,11 +4,13 @@
 
 use super::features::{FeatureTransformer, FE_END};
 use super::network::Network;
-use log::debug;
 use std::error::Error;
 use std::fs::File;
 use std::io::Read;
 use std::mem;
+
+#[cfg(debug_assertions)]
+use log::debug;
 
 /// NNUE file header
 #[derive(Debug, Clone, Copy)]
