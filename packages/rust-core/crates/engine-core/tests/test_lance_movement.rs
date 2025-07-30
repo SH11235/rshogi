@@ -41,8 +41,7 @@ fn test_lance_movement_direction() {
     for target in valid_targets {
         assert!(
             lance_moves.iter().any(|m| m.to() == target),
-            "Black Lance at 4,7 should be able to move to {:?}",
-            target
+            "Black Lance at 4,7 should be able to move to {target:?}"
         );
     }
 
@@ -93,8 +92,7 @@ fn test_white_lance_movement_direction() {
     for target in valid_targets {
         assert!(
             lance_moves.iter().any(|m| m.to() == target),
-            "White Lance at 4,1 should be able to move to {:?}",
-            target
+            "White Lance at 4,1 should be able to move to {target:?}"
         );
     }
 
