@@ -261,9 +261,9 @@ impl EngineAdapter {
             "ByoyomiEarlyFinishRatio" => {
                 if let Some(val_str) = value {
                     let ratio = val_str.parse::<u8>().with_context(|| {
-                        format!("Invalid value for ByoyomiEarlyFinishRatio: '{}'. Expected integer 50-95", val_str)
+                        format!("Invalid value for ByoyomiEarlyFinishRatio: '{val_str}'. Expected integer 50-95")
                     })?;
-                    if ratio < 50 || ratio > 95 {
+                    if !(50..=95).contains(&ratio) {
                         return Err(anyhow!("ByoyomiEarlyFinishRatio must be between 50 and 95"));
                     }
                     self.byoyomi_early_finish_ratio = ratio;
@@ -272,9 +272,11 @@ impl EngineAdapter {
             "PVStabilityBase" => {
                 if let Some(val_str) = value {
                     let base = val_str.parse::<u64>().with_context(|| {
-                        format!("Invalid value for PVStabilityBase: '{}'. Expected integer 10-200", val_str)
+                        format!(
+                            "Invalid value for PVStabilityBase: '{val_str}'. Expected integer 10-200"
+                        )
                     })?;
-                    if base < 10 || base > 200 {
+                    if !(10..=200).contains(&base) {
                         return Err(anyhow!("PVStabilityBase must be between 10 and 200"));
                     }
                     self.pv_stability_base = base;
@@ -283,7 +285,9 @@ impl EngineAdapter {
             "PVStabilitySlope" => {
                 if let Some(val_str) = value {
                     let slope = val_str.parse::<u64>().with_context(|| {
-                        format!("Invalid value for PVStabilitySlope: '{}'. Expected integer 0-20", val_str)
+                        format!(
+                            "Invalid value for PVStabilitySlope: '{val_str}'. Expected integer 0-20"
+                        )
                     })?;
                     if slope > 20 {
                         return Err(anyhow!("PVStabilitySlope must be between 0 and 20"));
@@ -381,10 +385,10 @@ impl EngineAdapter {
             pv_depth_slope_ms: self.pv_stability_slope,
             ..Default::default()
         };
-        
+
         // Set time parameters
         builder = builder.time_parameters(time_params);
-        
+
         // Apply go parameters
         // Use periods from go command if specified, otherwise use SetOption value (or default to 1)
         let periods = params.periods.unwrap_or(self.byoyomi_periods.unwrap_or(1));
@@ -1344,36 +1348,36 @@ mod tests {
             ..Default::default()
         };
         let position = create_test_position();
-        
+
         // Test with default values
         let builder = SearchLimits::builder();
         let time_params = TimeParameters {
-            byoyomi_soft_ratio: 0.8, // 80% default
+            byoyomi_soft_ratio: 0.8,  // 80% default
             pv_base_threshold_ms: 80, // default
-            pv_depth_slope_ms: 5, // default
+            pv_depth_slope_ms: 5,     // default
             ..Default::default()
         };
         let builder = builder.time_parameters(time_params);
         let limits = apply_go_params(builder, &params, &position, 1).unwrap();
-        
+
         // Verify TimeParameters were set
         assert!(limits.time_parameters.is_some());
         let tp = limits.time_parameters.unwrap();
         assert_eq!(tp.byoyomi_soft_ratio, 0.8);
         assert_eq!(tp.pv_base_threshold_ms, 80);
         assert_eq!(tp.pv_depth_slope_ms, 5);
-        
+
         // Test with custom values
         let builder2 = SearchLimits::builder();
         let time_params2 = TimeParameters {
             byoyomi_soft_ratio: 0.9, // 90%
-            pv_base_threshold_ms: 100, 
+            pv_base_threshold_ms: 100,
             pv_depth_slope_ms: 10,
             ..Default::default()
         };
         let builder2 = builder2.time_parameters(time_params2);
         let limits2 = apply_go_params(builder2, &params, &position, 1).unwrap();
-        
+
         // Verify custom TimeParameters were set
         assert!(limits2.time_parameters.is_some());
         let tp2 = limits2.time_parameters.unwrap();

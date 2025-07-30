@@ -4,6 +4,7 @@
 
 use crate::shogi::ATTACK_TABLES;
 use crate::zobrist::ZOBRIST;
+#[cfg(debug_assertions)]
 use log::warn;
 
 use super::moves::Move;
