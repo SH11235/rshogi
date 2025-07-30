@@ -350,9 +350,11 @@ impl EngineAdapter {
         );
 
         // Get position
+        log::debug!("Getting current position");
         let position = self.position.clone().ok_or_else(|| {
             anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first")
         })?;
+        log::debug!("Position retrieved successfully");
 
         // Update ponder state and create flag if needed
         let ponder_hit_flag = if params.ponder {
@@ -368,6 +370,7 @@ impl EngineAdapter {
         };
 
         // Create SearchLimits
+        log::debug!("Creating SearchLimits");
         let mut builder = SearchLimits::builder();
 
         // Set stop flag
@@ -379,6 +382,7 @@ impl EngineAdapter {
         }
 
         // Create TimeParameters from engine settings
+        log::debug!("Creating TimeParameters");
         let time_params = TimeParameters {
             byoyomi_soft_ratio: self.byoyomi_early_finish_ratio as f64 / 100.0,
             pv_base_threshold_ms: self.pv_stability_base,
@@ -392,7 +396,9 @@ impl EngineAdapter {
         // Apply go parameters
         // Use periods from go command if specified, otherwise use SetOption value (or default to 1)
         let periods = params.periods.unwrap_or(self.byoyomi_periods.unwrap_or(1));
+        log::debug!("Applying go parameters with periods: {}", periods);
         let limits = apply_go_params(builder, params, &position, periods)?;
+        log::debug!("SearchLimits created successfully");
 
         Ok((position, limits, ponder_hit_flag))
     }
@@ -598,6 +604,8 @@ impl EngineAdapter {
         limits: SearchLimits,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<(String, Option<String>)> {
+        log::info!("execute_search_static called");
+
         // Set up info callback
         let (info_callback_arc, info_callback_inner) = Self::create_info_callback(info_callback);
 
@@ -610,6 +618,7 @@ impl EngineAdapter {
         };
 
         // Execute search
+        log::info!("Calling engine.search");
         let result = engine.search(&mut position, limits);
         log::info!(
             "Search completed - depth:{} nodes:{} time:{}ms",
