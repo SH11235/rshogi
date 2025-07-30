@@ -154,10 +154,10 @@ impl<'a> MoveGenImpl<'a> {
             // Check if lance can attack in the direction of king
             let can_attack = match them {
                 Color::Black => {
-                    lance_sq.rank() < king_sq.rank() && lance_sq.file() == king_sq.file()
+                    lance_sq.rank() > king_sq.rank() && lance_sq.file() == king_sq.file()
                 }
                 Color::White => {
-                    lance_sq.rank() > king_sq.rank() && lance_sq.file() == king_sq.file()
+                    lance_sq.rank() < king_sq.rank() && lance_sq.file() == king_sq.file()
                 }
             };
 
@@ -384,8 +384,8 @@ impl<'a> MoveGenImpl<'a> {
 
         // Lance moves in one direction until blocked
         let (start, end, step) = match us {
-            Color::Black => (rank + 1, 9, 1), // Black moves from rank 0 towards rank 8
-            Color::White => (rank - 1, -1, -1), // White moves from rank 8 towards rank 0
+            Color::Black => (rank - 1, -1, -1), // Black moves towards rank 0 (up the board)
+            Color::White => (rank + 1, 9, 1),   // White moves towards rank 8 (down the board)
         };
 
         let mut r = start;
@@ -976,8 +976,8 @@ impl<'a> MoveGenImpl<'a> {
         let mut lance_bb = lances;
         while let Some(lance_sq) = lance_bb.pop_lsb() {
             let can_attack = match color {
-                Color::Black => lance_sq.rank() < sq.rank() && lance_sq.file() == sq.file(),
-                Color::White => lance_sq.rank() > sq.rank() && lance_sq.file() == sq.file(),
+                Color::Black => lance_sq.rank() > sq.rank() && lance_sq.file() == sq.file(),
+                Color::White => lance_sq.rank() < sq.rank() && lance_sq.file() == sq.file(),
             };
             if can_attack {
                 let between = self.between_bb(lance_sq, sq);
@@ -1057,8 +1057,8 @@ impl<'a> MoveGenImpl<'a> {
         let mut lance_bb = lances;
         while let Some(lance_sq) = lance_bb.pop_lsb() {
             let can_attack = match color {
-                Color::Black => lance_sq.rank() < sq.rank() && lance_sq.file() == sq.file(),
-                Color::White => lance_sq.rank() > sq.rank() && lance_sq.file() == sq.file(),
+                Color::Black => lance_sq.rank() > sq.rank() && lance_sq.file() == sq.file(),
+                Color::White => lance_sq.rank() < sq.rank() && lance_sq.file() == sq.file(),
             };
             if can_attack {
                 let between = self.between_bb(lance_sq, sq);
