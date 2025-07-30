@@ -165,7 +165,9 @@ impl<E: Evaluator> Searcher<E> {
         }
 
         // Iterative deepening
+        log::debug!("Starting iterative deepening, max depth: {}", self.depth);
         for depth in 1..=self.depth {
+            log::debug!("Searching depth {depth}");
             let score = self.alpha_beta(pos, depth, -SEARCH_INF, SEARCH_INF, 0);
 
             // Handle interruption
@@ -191,7 +193,16 @@ impl<E: Evaluator> Searcher<E> {
             // Call info callback if provided
             if let Some(ref callback) = self.info_callback {
                 let elapsed = self.start_time.elapsed();
+                log::debug!(
+                    "Calling info callback: depth={}, score={}, nodes={}, time={}ms",
+                    depth,
+                    score,
+                    self.nodes,
+                    elapsed.as_millis()
+                );
                 callback(depth, score, self.nodes, elapsed, &self.pv[0]);
+            } else {
+                log::debug!("No info callback set");
             }
         }
 

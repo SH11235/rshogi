@@ -436,6 +436,7 @@ fn run_engine() -> Result<()> {
                             best_move,
                             ponder: ponder_move,
                         })?;
+                        searching = false; // Clear searching flag after sending bestmove
                     }
                     Ok(WorkerMessage::Finished) => {
                         log::debug!("Worker thread finished");
@@ -704,10 +705,12 @@ fn search_worker(
                         adapter.return_engine(engine);
                         log::error!("Search preparation error: {e}");
                         let _ = tx.send(WorkerMessage::Error(e.to_string()));
-                        let _ = tx.send(WorkerMessage::BestMove {
+                        if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: "resign".to_string(),
                             ponder_move: None,
-                        });
+                        }) {
+                            log::error!("Failed to send resign after preparation error: {e}");
+                        }
                         let _ = tx.send(WorkerMessage::Finished);
                         return;
                     }
@@ -716,10 +719,12 @@ fn search_worker(
             Err(e) => {
                 log::warn!("Failed to take engine: {e}");
                 let _ = tx.send(WorkerMessage::Error(e.to_string()));
-                let _ = tx.send(WorkerMessage::BestMove {
+                if let Err(e) = tx.send(WorkerMessage::BestMove {
                     best_move: "resign".to_string(),
                     ponder_move: None,
-                });
+                }) {
+                    log::error!("Failed to send resign after engine take error: {e}");
+                }
                 let _ = tx.send(WorkerMessage::Finished);
                 return;
             }
@@ -750,10 +755,12 @@ fn search_worker(
             }
 
             // Send best move
-            let _ = tx.send(WorkerMessage::BestMove {
+            if let Err(e) = tx.send(WorkerMessage::BestMove {
                 best_move,
                 ponder_move,
-            });
+            }) {
+                log::error!("Failed to send bestmove through channel: {e}");
+            }
         }
         Err(e) => {
             log::error!("Search error: {e}");
@@ -768,17 +775,21 @@ fn search_worker(
             // Send error and resign
             if stop_flag.load(Ordering::Acquire) {
                 // Stopped by user - send resign
-                let _ = tx.send(WorkerMessage::BestMove {
+                if let Err(e) = tx.send(WorkerMessage::BestMove {
                     best_move: "resign".to_string(),
                     ponder_move: None,
-                });
+                }) {
+                    log::error!("Failed to send resign after stop: {e}");
+                }
             } else {
                 // Other error - send error and resign
                 let _ = tx.send(WorkerMessage::Error(e.to_string()));
-                let _ = tx.send(WorkerMessage::BestMove {
+                if let Err(e) = tx.send(WorkerMessage::BestMove {
                     best_move: "resign".to_string(),
                     ponder_move: None,
-                });
+                }) {
+                    log::error!("Failed to send resign after error: {e}");
+                }
             }
         }
     }
