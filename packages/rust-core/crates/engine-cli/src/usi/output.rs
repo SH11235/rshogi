@@ -260,7 +260,7 @@ impl UsiWriter {
     }
 
     fn write_line(&self, response: &UsiResponse, flush_kind: FlushKind) -> std::io::Result<()> {
-        // Handle poisoned mutex gracefully
+        // Handle poisoned mutex gracefully - important for stdout reliability
         let mut writer = lock_or_recover_generic(&self.inner);
 
         // Write the response
@@ -279,6 +279,7 @@ impl UsiWriter {
             match flush_kind {
                 FlushKind::Immediate => {
                     writer.flush()?;
+                    // Note: Using lock_or_recover_generic for consistency, though panic is unlikely here
                     *lock_or_recover_generic(&self.last_flush) = Instant::now();
                     self.message_count.store(0, Ordering::Relaxed);
                 }
@@ -288,6 +289,7 @@ impl UsiWriter {
 
                     // Check if we should flush
                     let should_flush = {
+                        // Note: Using lock_or_recover_generic for consistency, though panic is unlikely here
                         let last_flush = *lock_or_recover_generic(&self.last_flush);
                         let elapsed = last_flush.elapsed();
 
@@ -298,6 +300,7 @@ impl UsiWriter {
 
                     if should_flush {
                         writer.flush()?;
+                        // Note: Using lock_or_recover_generic for consistency, though panic is unlikely here
                         *lock_or_recover_generic(&self.last_flush) = Instant::now();
                         self.message_count.store(0, Ordering::Relaxed);
                     }
@@ -309,7 +312,7 @@ impl UsiWriter {
     }
 
     fn flush_all(&self) -> std::io::Result<()> {
-        // Handle poisoned mutex gracefully
+        // Handle poisoned mutex gracefully - ensures final messages are sent even after panic
         let mut writer = lock_or_recover_generic(&self.inner);
         writer.flush()
     }
