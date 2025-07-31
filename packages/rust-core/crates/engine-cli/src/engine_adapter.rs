@@ -21,6 +21,45 @@ use crate::usi::{
 };
 use crate::usi::{create_position, EngineOption, GameResult, GoParams};
 
+/// Engine error types for better error handling
+#[derive(Debug)]
+pub enum EngineError {
+    /// No legal moves available (checkmate or stalemate)
+    NoLegalMoves,
+
+    /// Engine is not available or in invalid state
+    EngineNotAvailable(String),
+
+    /// Search setup failed
+    SearchSetupFailed(String),
+
+    /// Operation timed out
+    Timeout,
+
+    /// Other errors
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::NoLegalMoves => write!(f, "No legal moves available"),
+            EngineError::EngineNotAvailable(msg) => write!(f, "Engine not available: {msg}"),
+            EngineError::SearchSetupFailed(msg) => write!(f, "Search setup failed: {msg}"),
+            EngineError::Timeout => write!(f, "Operation timed out"),
+            EngineError::Other(e) => write!(f, "Other error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
+
+impl From<anyhow::Error> for EngineError {
+    fn from(e: anyhow::Error) -> Self {
+        EngineError::Other(e)
+    }
+}
+
 /// Type alias for USI info callback
 type UsiInfoCallback = Arc<dyn Fn(SearchInfo) + Send + Sync>;
 
@@ -340,7 +379,7 @@ impl EngineAdapter {
         &mut self,
         params: &GoParams,
         stop_flag: Arc<AtomicBool>,
-    ) -> Result<(Position, SearchLimits, Option<Arc<AtomicBool>>)> {
+    ) -> Result<(Position, SearchLimits, Option<Arc<AtomicBool>>), EngineError> {
         log::info!(
             "Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
             if params.ponder { "ponder" } else { "normal" },
@@ -352,7 +391,10 @@ impl EngineAdapter {
         // Get position
         log::debug!("Getting current position");
         let position = self.position.clone().ok_or_else(|| {
-            anyhow!("Position not set. Use 'position startpos' or 'position sfen ...' first")
+            EngineError::SearchSetupFailed(
+                "Position not set. Use 'position startpos' or 'position sfen ...' first"
+                    .to_string(),
+            )
         })?;
         log::debug!("Position retrieved successfully");
 
@@ -396,8 +438,10 @@ impl EngineAdapter {
         // Apply go parameters
         // Use periods from go command if specified, otherwise use SetOption value (or default to 1)
         let periods = params.periods.unwrap_or(self.byoyomi_periods.unwrap_or(1));
-        log::debug!("Applying go parameters with periods: {}", periods);
-        let limits = apply_go_params(builder, params, &position, periods)?;
+        log::debug!("Applying go parameters with periods: {periods}");
+        let limits = apply_go_params(builder, params, &position, periods).map_err(|e| {
+            EngineError::SearchSetupFailed(format!("Failed to apply go parameters: {e}"))
+        })?;
         log::debug!("SearchLimits created successfully");
 
         Ok((position, limits, ponder_hit_flag))
@@ -603,7 +647,7 @@ impl EngineAdapter {
         mut position: Position,
         limits: SearchLimits,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
-    ) -> Result<(String, Option<String>)> {
+    ) -> Result<(String, Option<String>), EngineError> {
         log::info!("execute_search_static called");
 
         // Set up info callback
@@ -629,7 +673,8 @@ impl EngineAdapter {
 
         // Process result
         let (best_move_str, ponder_move) =
-            Self::process_search_result(&result, &info_callback_arc, &position)?;
+            Self::process_search_result(&result, &info_callback_arc, &position)
+                .map_err(EngineError::Other)?;
 
         // Convert ponder move to USI format if available
         let ponder_move_str = ponder_move.map(|m| engine_core::usi::move_to_usi(&m));
@@ -647,27 +692,115 @@ impl EngineAdapter {
         }
     }
 
+    /// Validate engine state before attempting emergency move generation
+    fn validate_engine_state(&self) -> Result<(), EngineError> {
+        // Check if position is set
+        if self.position.is_none() {
+            return Err(EngineError::EngineNotAvailable("Position not set".to_string()));
+        }
+
+        // Check if we're in a valid state (not in the middle of a search)
+        // This is a simple check - could be expanded based on actual state requirements
+
+        Ok(())
+    }
+
     /// Generate an emergency move when normal search fails or times out
     /// Returns the first legal move found, or an error if no legal moves exist
-    pub fn generate_emergency_move(&self) -> Result<String> {
+    pub fn generate_emergency_move(&self) -> Result<String, EngineError> {
         use engine_core::movegen::MoveGen;
         use engine_core::shogi::MoveList;
 
-        // Get current position
-        let position = self.position.as_ref().ok_or_else(|| anyhow!("No position set"))?;
+        // Validate engine state first
+        self.validate_engine_state()?;
 
-        // Generate all legal moves
+        // Get current position
+        let position = self
+            .position
+            .as_ref()
+            .ok_or(EngineError::EngineNotAvailable("No position set".to_string()))?;
+
+        // Check if we're in check - if so, prioritize king safety
+        let in_check = position.in_check();
+
+        // Generate legal moves for the current position
         let mut generator = MoveGen::new();
         let mut moves = MoveList::new();
         generator.generate_all(position, &mut moves);
 
         if moves.is_empty() {
-            return Err(anyhow!("No legal moves available (checkmate or stalemate)"));
+            // No legal moves - this is checkmate or stalemate
+            return Err(EngineError::NoLegalMoves);
         }
 
-        // Return the first legal move
-        let first_move = moves[0];
-        Ok(engine_core::usi::move_to_usi(&first_move))
+        log::info!("Emergency move generation: {} legal moves, in_check={}", moves.len(), in_check);
+
+        // If in check and only one legal move, use it immediately
+        if in_check && moves.len() == 1 {
+            let move_str = engine_core::usi::move_to_usi(&moves[0]);
+            log::info!("Only one legal move to escape check: {move_str}");
+            return Ok(move_str);
+        }
+
+        // Select a plausible move using enhanced logic
+        let selected_move = if in_check {
+            // In check: prioritize king safety
+            Self::select_check_escape_move(position, &moves)
+        } else {
+            // Not in check: use normal heuristics
+            Self::select_plausible_move(position, &moves)
+        }
+        .ok_or_else(|| {
+            EngineError::Other(anyhow!("Failed to select move despite having legal moves"))
+        })?;
+
+        // Convert to USI format
+        let move_str = engine_core::usi::move_to_usi(&selected_move);
+
+        log::info!(
+            "Generated emergency move: {} (from {} legal moves, in_check={})",
+            move_str,
+            moves.len(),
+            in_check
+        );
+
+        Ok(move_str)
+    }
+
+    /// Select a move to escape check, prioritizing safety
+    fn select_check_escape_move(
+        position: &Position,
+        moves: &engine_core::shogi::MoveList,
+    ) -> Option<engine_core::shogi::Move> {
+        // First pass: Look for captures that also escape check
+        for i in 0..moves.len() {
+            let mv = moves[i];
+            if position.board.piece_on(mv.to()).is_some() {
+                // Verify it escapes check
+                let mut temp_pos = position.clone();
+                temp_pos.do_move(mv);
+                if !temp_pos.in_check() {
+                    return Some(mv);
+                }
+            }
+        }
+
+        // Second pass: Any move that escapes check
+        for i in 0..moves.len() {
+            let mv = moves[i];
+            let mut temp_pos = position.clone();
+            temp_pos.do_move(mv);
+            if !temp_pos.in_check() {
+                return Some(mv);
+            }
+        }
+
+        // This shouldn't happen if moves are legal, but return first move as fallback
+        if !moves.is_empty() {
+            Some(moves[0])
+        } else {
+            None
+        }
     }
 }
 
