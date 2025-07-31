@@ -9,18 +9,38 @@ use std::time::{Duration, Instant};
 
 /// Helper to spawn engine process
 fn spawn_engine() -> std::process::Child {
-    Command::new(env!("CARGO_BIN_EXE_engine-cli"))
-        .stdin(Stdio::piped())
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_engine-cli"));
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("Failed to spawn engine")
+        .stderr(Stdio::piped()) // Capture stderr instead of null
+        .env("RUST_LOG", ""); // Disable logging to avoid interference
+
+    match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("Failed to spawn engine at path: {}", env!("CARGO_BIN_EXE_engine-cli"));
+            eprintln!("Error: {e}");
+            panic!("Failed to spawn engine");
+        }
+    }
 }
 
 /// Helper to send command to engine
 fn send_command(stdin: &mut impl Write, command: &str) {
-    writeln!(stdin, "{command}").expect("Failed to write command");
-    stdin.flush().expect("Failed to flush stdin");
+    match writeln!(stdin, "{command}") {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Failed to write command '{command}': {e:?}");
+            panic!("Failed to write command: {e:?}");
+        }
+    }
+    match stdin.flush() {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Failed to flush stdin after command '{command}': {e:?}");
+            panic!("Failed to flush stdin: {e:?}");
+        }
+    }
 }
 
 /// Helper to read lines until a specific pattern or timeout
@@ -66,8 +86,23 @@ fn test_rapid_ponder_hit() {
 
     // Initialize
     send_command(stdin, "usi");
-    let _ = read_until_pattern(&mut reader, "usiok", Duration::from_secs(2))
-        .expect("Failed to get usiok");
+    match read_until_pattern(&mut reader, "usiok", Duration::from_secs(2)) {
+        Ok(_) => {}
+        Err(e) => {
+            // Check if engine crashed
+            match engine.try_wait() {
+                Ok(Some(status)) => {
+                    let mut stderr = String::new();
+                    if let Some(mut err) = engine.stderr.take() {
+                        use std::io::Read;
+                        let _ = err.read_to_string(&mut stderr);
+                    }
+                    panic!("Engine exited with status: {status:?}, stderr: {stderr}");
+                }
+                _ => panic!("Failed to get usiok: {e}"),
+            }
+        }
+    }
     send_command(stdin, "isready");
     let _ = read_until_pattern(&mut reader, "readyok", Duration::from_secs(2))
         .expect("Failed to get readyok");
@@ -76,17 +111,22 @@ fn test_rapid_ponder_hit() {
     for iteration in 0..5 {
         println!("Rapid ponder_hit test iteration {}", iteration + 1);
 
-        // Set position
-        send_command(stdin, "position startpos moves 2c2d 8g8f");
+        // Set position (using USI notation)
+        send_command(stdin, "position startpos moves 7g7f 8c8d");
 
         // Start ponder search
+        println!("Sending 'go ponder' command...");
         send_command(stdin, "go ponder btime 30000 wtime 30000");
+
+        // Flush to ensure command is sent
+        stdin.flush().expect("Failed to flush stdin after go ponder");
 
         // Give enough time for ponder to actually start
         thread::sleep(Duration::from_millis(50));
 
         // Send ponder_hit immediately
         let ponder_hit_start = Instant::now();
+        println!("Sending 'ponderhit' command...");
         send_command(stdin, "ponderhit");
 
         // Ponder_hit should be processed immediately without blocking
@@ -136,7 +176,7 @@ fn test_ponder_hit_while_mutex_locked() {
         .expect("Failed to get readyok");
 
     // Set position
-    send_command(stdin, "position startpos moves 2c2d 8g8f");
+    send_command(stdin, "position startpos moves 7g7f 3c3d");
 
     // Start ponder search
     send_command(stdin, "go ponder btime 60000 wtime 60000");
@@ -182,7 +222,7 @@ fn test_concurrent_ponder_and_position_commands() {
         .expect("Failed to get readyok");
 
     // Set initial position
-    send_command(stdin, "position startpos moves 2c2d");
+    send_command(stdin, "position startpos moves 7g7f");
 
     // Start ponder search
     send_command(stdin, "go ponder btime 30000 wtime 30000");
@@ -233,7 +273,7 @@ fn test_ponder_hit_with_stop() {
         .expect("Failed to get readyok");
 
     // Set position
-    send_command(stdin, "position startpos moves 2c2d 8g8f");
+    send_command(stdin, "position startpos moves 7g7f 3c3d");
 
     // Start ponder search
     send_command(stdin, "go ponder btime 60000 wtime 60000");
@@ -287,7 +327,7 @@ fn test_ponder_hit_stress_with_thread_timing() {
         let mut iteration = 0;
         while !stop_flag_clone.load(Ordering::Relaxed) && iteration < 10 {
             // Set position
-            send_command(stdin, "position startpos moves 2c2d 8g8f");
+            send_command(stdin, "position startpos moves 7g7f 3c3d");
 
             // Start ponder
             send_command(stdin, "go ponder btime 10000 wtime 10000");

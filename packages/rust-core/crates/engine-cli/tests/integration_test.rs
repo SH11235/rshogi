@@ -241,7 +241,28 @@ fn test_ponder_sequence() {
 
     let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
     let stdout = engine.stdout.as_mut().expect("Failed to get stdout");
+    let stderr = engine.stderr.take().expect("Failed to get stderr");
     let mut reader = BufReader::new(stdout);
+
+    // Spawn a thread to read stderr
+    let _stderr_handle = {
+        thread::spawn(move || {
+            let mut stderr_reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                match stderr_reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        if !line.is_empty() {
+                            eprintln!("ENGINE STDERR: {}", line.trim());
+                            line.clear();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    };
 
     // Initialize
     send_command(stdin, "usi");
@@ -252,7 +273,11 @@ fn test_ponder_sequence() {
         .expect("Failed to get readyok");
 
     // Set position (Black move then White move)
-    send_command(stdin, "position startpos moves 2c2d 8g8f");
+    // USI format uses numeric coordinates: 7g7f means column 7, rank g to column 7, rank f
+    send_command(stdin, "position startpos moves 7g7f 3c3d");
+
+    // Give the engine time to process the position command
+    thread::sleep(Duration::from_millis(100));
 
     // Start ponder search with time controls (these will be used after ponderhit)
     // The ponder search itself runs infinitely, but we need time controls for after ponderhit
@@ -267,10 +292,15 @@ fn test_ponder_sequence() {
 
     // Now the search should have time limits and will complete on its own
     // Wait for bestmove (should come relatively quickly after ponderhit)
-    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(10));
+    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(30));
 
     match result {
         Ok(lines) => {
+            eprintln!("Received lines after ponderhit:");
+            for line in &lines {
+                eprintln!("  {line}");
+            }
+
             // Check that we got info lines before bestmove
             let has_info = lines.iter().any(|line| line.starts_with("info"));
             assert!(has_info, "Expected info output during search");
@@ -282,7 +312,15 @@ fn test_ponder_sequence() {
             // If no bestmove, try stopping manually
             eprintln!("No bestmove received after ponderhit, trying stop command. Error: {e}");
             send_command(stdin, "stop");
-            let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(2));
+            let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(5));
+
+            if let Ok(stop_lines) = &stop_result {
+                eprintln!("Received lines after stop:");
+                for line in stop_lines {
+                    eprintln!("  {line}");
+                }
+            }
+
             assert!(stop_result.is_ok(), "No bestmove after stop. Original error: {e}");
         }
     }

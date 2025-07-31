@@ -141,7 +141,7 @@ impl TimeManager {
             pv_threshold_ms: AtomicU64::new(params.pv_base_threshold_ms),
             byoyomi_state: Mutex::new(byoyomi_state),
             pending_time_control: Mutex::new(None),
-            is_ponder: AtomicBool::new(matches!(&limits.time_control, TimeControl::Ponder)),
+            is_ponder: AtomicBool::new(matches!(&limits.time_control, TimeControl::Ponder(_))),
         });
 
         Self { inner }
@@ -155,9 +155,9 @@ impl TimeManager {
         ply: u32,
         game_phase: GamePhase,
     ) -> Self {
-        // Create ponder limits with infinite time
+        // Create ponder limits with inner time control
         let ponder_limits = TimeLimits {
-            time_control: TimeControl::Ponder,
+            time_control: TimeControl::Ponder(Box::new(pending_limits.time_control.clone())),
             moves_to_go: pending_limits.moves_to_go,
             depth: pending_limits.depth,
             nodes: pending_limits.nodes,
@@ -167,11 +167,8 @@ impl TimeManager {
         // Create TimeManager with ponder mode
         let tm = Self::new(&ponder_limits, side, ply, game_phase);
 
-        // Store the pending time control
-        {
-            let mut pending = tm.inner.pending_time_control.lock();
-            *pending = Some(pending_limits.time_control.clone());
-        }
+        // No need to store pending time control separately
+        // It's already stored inside TimeControl::Ponder(inner)
 
         // Initialize byoyomi state if pending time control is Byoyomi
         if let TimeControl::Byoyomi {
@@ -448,10 +445,15 @@ impl TimeManager {
     pub fn ponder_hit(&self, new_limits: Option<&TimeLimits>, time_already_spent_ms: u64) {
         // Check if currently pondering
         if !self.is_pondering() {
+            log::warn!("TimeManager::ponder_hit called but not pondering");
             return;
         }
 
-        // Get the actual time control from new_limits or pending_time_control
+        log::info!(
+            "TimeManager::ponder_hit called with time_already_spent_ms: {time_already_spent_ms}"
+        );
+
+        // Get the actual time control from new_limits or extract from Ponder(inner)
         let (actual_time_control, moves_to_go, params) = if let Some(limits) = new_limits {
             (
                 limits.time_control.clone(),
@@ -459,16 +461,24 @@ impl TimeManager {
                 limits.time_parameters.unwrap_or_default(),
             )
         } else {
-            // Use pending time control if no new limits provided
-            let pending = self.inner.pending_time_control.lock();
-            if let Some(ref tc) = *pending {
-                (tc.clone(), None, self.inner.params)
-            } else {
-                // Fallback: Set conservative limits
-                self.inner.soft_limit_ms.store(1000, Ordering::Release);
-                self.inner.hard_limit_ms.store(2000, Ordering::Release);
-                self.inner.is_ponder.store(false, Ordering::Release);
-                return;
+            // Extract inner time control from Ponder
+            let active_tc = self.inner.active_time_control.read();
+            match &*active_tc {
+                TimeControl::Ponder(inner) => ((**inner).clone(), None, self.inner.params),
+                _ => {
+                    // Not pondering or already converted - use pending if available
+                    drop(active_tc);
+                    let pending = self.inner.pending_time_control.lock();
+                    if let Some(ref tc) = *pending {
+                        (tc.clone(), None, self.inner.params)
+                    } else {
+                        // Fallback: Set conservative limits
+                        self.inner.soft_limit_ms.store(1000, Ordering::Release);
+                        self.inner.hard_limit_ms.store(2000, Ordering::Release);
+                        self.inner.is_ponder.store(false, Ordering::Release);
+                        return;
+                    }
+                }
             }
         };
 
@@ -497,6 +507,10 @@ impl TimeManager {
         // Update limits atomically
         self.inner.soft_limit_ms.store(adjusted_soft, Ordering::Release);
         self.inner.hard_limit_ms.store(adjusted_hard, Ordering::Release);
+
+        log::info!(
+            "TimeManager::ponder_hit - Set time limits: soft={adjusted_soft}ms, hard={adjusted_hard}ms"
+        );
 
         // Update active time control first (consistent lock order: RwLock before Mutex)
         {
@@ -1310,5 +1324,36 @@ mod tests {
         mock_advance_time(2000);
         let elapsed_final = tm.elapsed_ms();
         assert!((1999..=2001).contains(&elapsed_final)); // Should count from ponder_hit
+    }
+
+    #[test]
+    fn test_ponder_hit_clears_ponder_flag_and_sets_control() {
+        mock_set_time(0);
+
+        // Fischer inner control, 10 s each side
+        let inner_tc = TimeControl::Fischer {
+            black_ms: 10_000,
+            white_ms: 10_000,
+            increment_ms: 0,
+        };
+        let limits = TimeLimits {
+            time_control: inner_tc.clone(), // Pass the regular time control, not wrapped in Ponder
+            ..Default::default()
+        };
+        let tm = TimeManager::new_ponder(&limits, Color::Black, 0, GamePhase::Opening);
+
+        assert!(tm.is_pondering());
+
+        // Check initial active time control
+        let initial_active = tm.inner.active_time_control.read().clone();
+        eprintln!("Initial active time control: {initial_active:?}");
+        assert!(matches!(initial_active, TimeControl::Ponder(_)));
+
+        tm.ponder_hit(None, /* elapsed */ 500);
+
+        assert!(!tm.is_pondering());
+        let active = tm.inner.active_time_control.read().clone();
+        eprintln!("Active time control after ponder_hit: {active:?}");
+        assert!(matches!(active, TimeControl::Fischer { .. }));
     }
 }

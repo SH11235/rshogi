@@ -199,7 +199,7 @@ impl Engine {
 
                 // Clear TimeManager reference after search completes (only for non-ponder searches)
                 // Keep the reference during ponder mode for potential ponder_hit
-                if !matches!(limits.time_control, crate::time_management::TimeControl::Ponder) {
+                if !matches!(limits.time_control, crate::time_management::TimeControl::Ponder(_)) {
                     self.active_time_manager.lock().unwrap().take();
                 }
 

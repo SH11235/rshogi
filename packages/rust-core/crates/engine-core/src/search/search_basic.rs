@@ -45,14 +45,56 @@ pub struct Searcher<E: Evaluator> {
     stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress
     info_callback: Option<InfoCallback>,
+    /// Ponder hit flag (shared with engine adapter)
+    ponder_hit_flag: Option<Arc<AtomicBool>>,
+    /// Time manager for time-based decisions
+    time_manager: Option<Arc<crate::time_management::TimeManager>>,
 }
 
 impl<E: Evaluator> Searcher<E> {
     /// Create new searcher with limits and evaluator
     pub fn new(mut limits: SearchLimits, evaluator: Arc<E>) -> Self {
-        // Extract stop_flag and info_callback from limits
+        // Extract stop_flag, info_callback, and ponder_hit_flag from limits
         let stop_flag = limits.stop_flag.take();
         let info_callback = limits.info_callback.take();
+        let ponder_hit_flag = limits.ponder_hit_flag.take();
+
+        // Create time manager if time control is specified
+        let time_manager = match &limits.time_control {
+            crate::time_management::TimeControl::Infinite => None,
+            crate::time_management::TimeControl::Ponder(ref inner) => {
+                // For ponder mode, create TimeManager with the inner time control
+                let pending_limits = crate::time_management::TimeLimits {
+                    time_control: (**inner).clone(),
+                    moves_to_go: limits.moves_to_go,
+                    depth: limits.depth,
+                    nodes: limits.nodes,
+                    time_parameters: limits.time_parameters,
+                };
+
+                // Default game phase for basic search (could be improved)
+                let game_phase = crate::search::GamePhase::Opening;
+
+                Some(Arc::new(crate::time_management::TimeManager::new_ponder(
+                    &pending_limits,
+                    crate::Color::Black, // Will be updated when position is known
+                    0,                   // Initial ply
+                    game_phase,
+                )))
+            }
+            _ => {
+                // For other time controls, create a regular TimeManager
+                let time_limits = crate::time_management::TimeLimits::from(limits.clone());
+                let game_phase = crate::search::GamePhase::Opening;
+
+                Some(Arc::new(crate::time_management::TimeManager::new(
+                    &time_limits,
+                    crate::Color::Black, // Will be updated when position is known
+                    0,                   // Initial ply
+                    game_phase,
+                )))
+            }
+        };
 
         Searcher {
             depth: limits.depth_limit_u8(),
@@ -64,6 +106,8 @@ impl<E: Evaluator> Searcher<E> {
             evaluator,
             stop_flag,
             info_callback,
+            ponder_hit_flag,
+            time_manager,
         }
     }
 
@@ -92,6 +136,21 @@ impl<E: Evaluator> Searcher<E> {
     pub fn search(&mut self, pos: &mut Position) -> SearchResult {
         self.start_time = Instant::now();
         self.nodes = 0;
+
+        // Update TimeManager with correct side if it exists
+        if self.time_manager.is_some() {
+            // Recreate TimeManager with correct side and position info
+            let side = pos.side_to_move;
+            let ply = pos.ply;
+
+            // Preserve the existing time control from time_manager
+            if let Some(ref _tm) = self.time_manager {
+                // We can't easily extract the time control from an existing TimeManager,
+                // so we'll rely on it being created correctly in the constructor
+                // For now, just log the side
+                log::debug!("BasicSearcher: Starting search for side {side:?} at ply {ply}");
+            }
+        }
 
         let mut best_move = None;
         let mut best_score = -SEARCH_INF;
@@ -376,10 +435,35 @@ impl<E: Evaluator> Searcher<E> {
     }
 
     /// Check if search should stop
-    fn should_stop(&self) -> bool {
+    fn should_stop(&mut self) -> bool {
         // Check stop flag (use Acquire to pair with Release in GUI thread)
         if let Some(ref stop_flag) = self.stop_flag {
             if stop_flag.load(Ordering::Acquire) {
+                return true;
+            }
+        }
+
+        // Check ponder hit flag
+        if let Some(ref flag) = self.ponder_hit_flag {
+            if flag.swap(false, Ordering::Acquire) {
+                // Ponder hit detected - notify TimeManager
+                if let Some(ref tm) = self.time_manager {
+                    let elapsed = self.start_time.elapsed().as_millis() as u64;
+                    log::info!("BasicSearcher: Ponder hit detected, notifying TimeManager with elapsed: {elapsed}ms");
+                    tm.ponder_hit(None, elapsed);
+
+                    // Update time limit based on new time control
+                    let time_info = tm.get_time_info();
+                    self.time_limit = Some(Duration::from_millis(time_info.hard_limit_ms));
+                } else {
+                    log::warn!("BasicSearcher: Ponder hit detected but no TimeManager available");
+                }
+            }
+        }
+
+        // Check with TimeManager if available (for dynamic time management)
+        if let Some(ref tm) = self.time_manager {
+            if tm.should_stop(self.nodes) {
                 return true;
             }
         }

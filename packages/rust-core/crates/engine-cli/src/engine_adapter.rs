@@ -146,6 +146,11 @@ impl EngineAdapter {
         self.engine = Some(engine);
     }
 
+    /// Check if position is set
+    pub fn has_position(&self) -> bool {
+        self.position.is_some()
+    }
+
     /// Handle new game notification
     pub fn new_game(&mut self) {
         // Clear any ponder state
@@ -168,6 +173,7 @@ impl EngineAdapter {
         self.clear_ponder_state();
 
         // Clear position - safer to require re-initialization
+        log::warn!("Clearing position in force_reset_state");
         self.position = None;
 
         // If engine is None, we can't do much - it will be returned by EngineReturnGuard
@@ -266,7 +272,9 @@ impl EngineAdapter {
         sfen: Option<&str>,
         moves: &[String],
     ) -> Result<()> {
+        log::info!("Setting position - startpos: {startpos}, sfen: {sfen:?}, moves: {moves:?}");
         self.position = Some(create_position(startpos, sfen, moves)?);
+        log::info!("Position set successfully");
 
         // Clear ponder state when position changes
         self.clear_ponder_state();
@@ -382,6 +390,7 @@ impl EngineAdapter {
     /// Handle ponder hit (opponent played the expected move)
     pub fn ponder_hit(&mut self) -> Result<()> {
         if let Some(ref flag) = self.active_ponder_hit_flag {
+            log::info!("Ponder hit: Setting flag at {:p} to true", Arc::as_ptr(flag));
             flag.store(true, Ordering::Release);
 
             // Clear ponder state since we're transitioning to normal search
@@ -427,8 +436,9 @@ impl EngineAdapter {
         );
 
         // Get position
-        log::debug!("Getting current position");
+        log::debug!("Getting current position, self.position is_some: {}", self.position.is_some());
         let position = self.position.clone().ok_or_else(|| {
+            log::error!("Position is None in prepare_search!");
             EngineError::SearchSetupFailed(
                 "Position not set. Use 'position startpos' or 'position sfen ...' first"
                     .to_string(),
@@ -442,7 +452,7 @@ impl EngineAdapter {
             self.ponder_state.ponder_start_time = Some(std::time::Instant::now());
             let flag = Arc::new(AtomicBool::new(false));
             self.active_ponder_hit_flag = Some(flag.clone());
-            log::debug!("Ponder mode activated with shared flag");
+            log::info!("Ponder mode activated with shared flag at {:p}", Arc::as_ptr(&flag));
             Some(flag)
         } else {
             self.clear_ponder_state();
@@ -458,15 +468,21 @@ impl EngineAdapter {
 
         // Set ponder hit flag if available
         if let Some(ref flag) = ponder_hit_flag {
+            log::debug!("Setting ponder_hit_flag in SearchLimitsBuilder");
             builder = builder.ponder_hit_flag(flag.clone());
+        } else {
+            log::debug!("No ponder_hit_flag to set in SearchLimitsBuilder");
         }
 
         // Create TimeParameters from engine settings
         log::debug!("Creating TimeParameters");
+        // Use larger overhead for byoyomi mode to ensure we finish before GUI timeout
+        let overhead_ms = if params.byoyomi.is_some() { 200 } else { 50 };
         let time_params = TimeParameters {
             byoyomi_soft_ratio: self.byoyomi_early_finish_ratio as f64 / 100.0,
             pv_base_threshold_ms: self.pv_stability_base,
             pv_depth_slope_ms: self.pv_stability_slope,
+            overhead_ms,
             ..Default::default()
         };
 
@@ -974,11 +990,6 @@ fn get_increment_for_side(params: &GoParams, side: engine_core::shogi::Color) ->
     }
 }
 
-/// Apply ponder mode time control
-fn apply_ponder_mode(builder: SearchLimitsBuilder) -> SearchLimitsBuilder {
-    builder.ponder()
-}
-
 /// Apply infinite mode time control
 fn apply_infinite_mode(builder: SearchLimitsBuilder) -> SearchLimitsBuilder {
     builder.infinite()
@@ -996,11 +1007,11 @@ fn apply_byoyomi_mode(
     position: &Position,
     byoyomi_periods: u32,
 ) -> SearchLimitsBuilder {
-    let main_time = match position.side_to_move {
-        engine_core::shogi::Color::Black => params.btime.unwrap_or(0),
-        engine_core::shogi::Color::White => params.wtime.unwrap_or(0),
-    };
     let byoyomi = params.byoyomi.unwrap_or(0);
+    let main_time = match position.side_to_move {
+        engine_core::shogi::Color::Black => params.btime.unwrap_or(byoyomi),
+        engine_core::shogi::Color::White => params.wtime.unwrap_or(byoyomi),
+    };
     builder.byoyomi(main_time, byoyomi, byoyomi_periods)
 }
 
@@ -1093,7 +1104,34 @@ fn apply_time_control(
     let mode = infer_time_control_mode(params);
 
     match mode {
-        TimeControlMode::Ponder => apply_ponder_mode(builder),
+        TimeControlMode::Ponder => {
+            // For ponder, we need to determine what the actual time control would be
+            // if ponder was false, then use that information
+            let non_ponder_mode = {
+                let temp_params = GoParams {
+                    ponder: false,
+                    ..params.clone()
+                };
+                infer_time_control_mode(&temp_params)
+            };
+
+            // Apply the actual time control that will be used after ponder hit
+            let builder_with_time = match non_ponder_mode {
+                TimeControlMode::Infinite => apply_infinite_mode(builder),
+                TimeControlMode::FixedTime(movetime) => apply_fixed_time_mode(builder, movetime),
+                TimeControlMode::Byoyomi => {
+                    apply_byoyomi_mode(builder, params, position, byoyomi_periods)
+                }
+                TimeControlMode::Fischer => apply_fischer_mode(builder, params, position),
+                TimeControlMode::Default => apply_default_time_control(builder),
+                TimeControlMode::Ponder => unreachable!("Ponder mode should not be nested"),
+            };
+
+            // Now override with ponder mode while preserving time information
+            // This ensures the SearchLimits has the correct time information
+            // wrapped inside TimeControl::Ponder
+            builder_with_time.ponder_with_inner()
+        }
         TimeControlMode::Infinite => apply_infinite_mode(builder),
         TimeControlMode::FixedTime(movetime) => apply_fixed_time_mode(builder, movetime),
         TimeControlMode::Byoyomi => apply_byoyomi_mode(builder, params, position, byoyomi_periods),
@@ -1114,6 +1152,7 @@ fn apply_go_params(
     let builder = apply_search_limits(builder, params);
     // Use periods from go command if specified, otherwise use the provided default
     let effective_periods = params.periods.unwrap_or(byoyomi_periods);
+
     let builder = apply_time_control(builder, params, position, effective_periods);
     Ok(builder.build())
 }
@@ -1166,7 +1205,7 @@ mod tests {
         let limits = apply_go_params(builder, &params, &position, DEFAULT_BYOYOMI_PERIODS).unwrap();
 
         match limits.time_control {
-            TimeControl::Ponder => {}
+            TimeControl::Ponder(_) => {}
             _ => panic!("Expected Ponder time control"),
         }
     }
@@ -1453,7 +1492,7 @@ mod tests {
         let limits = apply_go_params(builder, &params, &position, DEFAULT_BYOYOMI_PERIODS).unwrap();
 
         match limits.time_control {
-            TimeControl::Ponder => {}
+            TimeControl::Ponder(_) => {}
             _ => panic!("Expected Ponder to take priority"),
         }
     }
@@ -1550,7 +1589,7 @@ mod tests {
         let builder = apply_ponder_mode(builder);
         let limits = builder.build();
         match limits.time_control {
-            TimeControl::Ponder => {}
+            TimeControl::Ponder(_) => {}
             _ => panic!("Expected Ponder time control"),
         }
     }
