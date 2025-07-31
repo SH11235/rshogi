@@ -6,14 +6,14 @@ mod usi;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
-use engine_adapter::EngineAdapter;
+use engine_adapter::{EngineAdapter, EngineError};
 use engine_core::engine::controller::Engine;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use usi::output::SearchInfo;
+use usi::output::{Score, SearchInfo};
 use usi::{
     ensure_flush_on_exit, flush_final, parse_usi_command, send_info_string, send_response,
     send_response_or_exit, UsiCommand, UsiResponse,
@@ -31,6 +31,68 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<T> {
         Err(poisoned) => {
             log::error!("Mutex was poisoned, attempting recovery");
             poisoned.into_inner()
+        }
+    }
+}
+
+/// Calculate dynamic timeout based on game phase and position complexity
+fn calculate_dynamic_timeout(_engine: &Arc<Mutex<EngineAdapter>>) -> Duration {
+    // For now, use a simple static timeout strategy
+    // In the future, this could be enhanced to analyze the position
+    // and adjust timeout based on game phase (opening/middlegame/endgame)
+
+    // Default timeout with some basic logic
+    let timeout_ms = 1000; // 1 second default
+
+    log::info!("Using timeout: {timeout_ms}ms");
+    Duration::from_millis(timeout_ms)
+}
+
+/// Perform fallback move generation with graduated strategy
+fn generate_fallback_move(
+    engine: &Arc<Mutex<EngineAdapter>>,
+    partial_result: Option<(String, u32, i32)>,
+) -> Result<String> {
+    // Stage 1: Use partial result if available
+    if let Some((best_move, depth, score)) = partial_result {
+        log::info!("Using partial result: move={best_move}, depth={depth}, score={score}");
+        return Ok(best_move);
+    }
+
+    // Stage 2: Try quick shallow search (depth 1-3)
+    log::info!("Attempting quick shallow search");
+    let shallow_result = {
+        let _engine = lock_or_recover(engine);
+        // Try a very quick search with minimal depth
+        // This would require implementing a quick_search method
+        // For now, skip to emergency move
+        None
+    };
+
+    if let Some(move_str) = shallow_result {
+        return Ok(move_str);
+    }
+
+    // Stage 3: Try emergency move generation
+    log::info!("Attempting emergency move generation");
+    let emergency_result = {
+        let engine = lock_or_recover(engine);
+        engine.generate_emergency_move()
+    };
+
+    match emergency_result {
+        Ok(move_str) => {
+            log::info!("Generated emergency move: {move_str}");
+            Ok(move_str)
+        }
+        Err(EngineError::NoLegalMoves) => {
+            log::error!("No legal moves available - position is checkmate or stalemate");
+            Ok("resign".to_string())
+        }
+        Err(e) => {
+            log::error!("Failed to generate fallback move: {e}");
+            // Only resign if we truly cannot generate any move
+            Ok("resign".to_string())
         }
     }
 }
@@ -89,6 +151,12 @@ enum WorkerMessage {
     BestMove {
         best_move: String,
         ponder_move: Option<String>,
+    },
+    /// Partial result available during search
+    PartialResult {
+        current_best: String,
+        depth: u32,
+        score: i32,
     },
     Finished, // Thread finished successfully
     Error(String),
@@ -189,6 +257,10 @@ fn wait_for_worker_with_timeout(
                         });
                         // Mark search as finished when bestmove is received
                         *searching = false;
+                    }
+                    Ok(WorkerMessage::PartialResult { .. }) => {
+                        // Partial results during shutdown can be ignored
+                        log::trace!("PartialResult during shutdown - ignoring");
                     }
                     Ok(WorkerMessage::Error(err)) => {
                         log::error!("Worker error during shutdown: {err}");
@@ -438,6 +510,10 @@ fn run_engine() -> Result<()> {
                         })?;
                         searching = false; // Clear searching flag after sending bestmove
                     }
+                    Ok(WorkerMessage::PartialResult { .. }) => {
+                        // Partial results are handled in stop command processing
+                        log::trace!("PartialResult received in main loop");
+                    }
                     Ok(WorkerMessage::Finished) => {
                         log::debug!("Worker thread finished");
                         searching = false;
@@ -570,7 +646,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
         }
 
         UsiCommand::Go(params) => {
-            log::info!("Received go command with params: {:?}", params);
+            log::info!("Received go command with params: {params:?}");
 
             // Stop any ongoing search
             wait_for_search_completion(
@@ -625,30 +701,26 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
                 // Wait for bestmove with timeout to ensure we always send a response
                 let start = Instant::now();
-                let timeout = Duration::from_millis(1000); // 1 second timeout
+                let timeout = calculate_dynamic_timeout(ctx.engine);
+                let mut partial_result: Option<(String, u32, i32)> = None;
 
                 loop {
                     if start.elapsed() > timeout {
-                        // Timeout - try to generate a legal move instead of resigning
+                        // Timeout - use fallback strategy
                         log::warn!("Timeout waiting for bestmove after stop command");
 
-                        // Try to generate a legal move from current position
-                        let emergency_move = {
-                            let engine = lock_or_recover(ctx.engine);
-                            engine.generate_emergency_move()
-                        };
+                        // Log timeout error
+                        log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
 
-                        match emergency_move {
+                        match generate_fallback_move(ctx.engine, partial_result) {
                             Ok(move_str) => {
-                                log::info!("Generated emergency move: {}", move_str);
                                 send_response(UsiResponse::BestMove {
                                     best_move: move_str,
                                     ponder: None,
                                 })?;
                             }
                             Err(e) => {
-                                log::error!("Failed to generate emergency move: {}", e);
-                                // Only resign if we really can't generate any move
+                                log::error!("Fallback move generation failed: {e}");
                                 send_response(UsiResponse::BestMove {
                                     best_move: "resign".to_string(),
                                     ponder: None,
@@ -677,25 +749,27 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             // Forward info messages
                             let _ = send_response(UsiResponse::Info(info));
                         }
+                        Ok(WorkerMessage::PartialResult {
+                            current_best,
+                            depth,
+                            score,
+                        }) => {
+                            // Store partial result for fallback
+                            partial_result = Some((current_best, depth, score));
+                        }
                         Ok(WorkerMessage::Finished) => {
-                            // Worker finished but no bestmove - try emergency move
+                            // Worker finished but no bestmove - use fallback strategy
                             log::warn!("Worker finished without bestmove");
 
-                            let emergency_move = {
-                                let engine = lock_or_recover(ctx.engine);
-                                engine.generate_emergency_move()
-                            };
-
-                            match emergency_move {
+                            match generate_fallback_move(ctx.engine, partial_result) {
                                 Ok(move_str) => {
-                                    log::info!("Generated emergency move: {}", move_str);
                                     send_response(UsiResponse::BestMove {
                                         best_move: move_str,
                                         ponder: None,
                                     })?;
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to generate emergency move: {}", e);
+                                    log::error!("Fallback move generation failed: {e}");
                                     send_response(UsiResponse::BestMove {
                                         best_move: "resign".to_string(),
                                         ponder: None,
@@ -712,23 +786,18 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     }
                 }
             } else {
-                // Not searching - try to generate a move from current position
+                // Not searching - use fallback strategy
                 log::debug!("Stop command received while not searching");
 
-                let emergency_move = {
-                    let engine = lock_or_recover(ctx.engine);
-                    engine.generate_emergency_move()
-                };
-
-                match emergency_move {
+                match generate_fallback_move(ctx.engine, None) {
                     Ok(move_str) => {
                         send_response(UsiResponse::BestMove {
                             best_move: move_str,
                             ponder: None,
                         })?;
                     }
-                    Err(_) => {
-                        // Only resign if no legal moves available
+                    Err(e) => {
+                        log::error!("Fallback move generation failed: {e}");
                         send_response(UsiResponse::BestMove {
                             best_move: "resign".to_string(),
                             ponder: None,
@@ -795,13 +864,55 @@ fn search_worker(
     stop_flag: Arc<AtomicBool>,
     tx: Sender<WorkerMessage>,
 ) {
-    log::info!("Search worker thread started with params: {:?}", params);
+    log::info!("Search worker thread started with params: {params:?}");
     log::debug!("Search worker thread started");
 
-    // Set up info callback
+    // Set up info callback with partial result tracking
     let tx_info = tx.clone();
+    let tx_partial = tx.clone();
+    let last_partial_depth = Arc::new(Mutex::new(0u32));
     let info_callback = move |info: SearchInfo| {
-        let _ = tx_info.send(WorkerMessage::Info(info));
+        // Always send the info message
+        let _ = tx_info.send(WorkerMessage::Info(info.clone()));
+
+        // Send partial result at certain depth intervals
+        if let (Some(depth), Some(score), Some(pv)) =
+            (info.depth, info.score.as_ref(), info.pv.first())
+        {
+            // Check if we should send a partial result
+            let should_send = {
+                let mut last_depth = last_partial_depth.lock().unwrap();
+                if depth >= *last_depth + 5 || (depth >= 10 && depth > *last_depth) {
+                    *last_depth = depth;
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if should_send {
+                let score_value = match score {
+                    Score::Cp(cp) => *cp,
+                    Score::Mate(mate) => {
+                        // Convert mate score to centipawn equivalent
+                        if *mate > 0 {
+                            30000 - (*mate * 100)
+                        } else {
+                            -30000 - (*mate * 100)
+                        }
+                    }
+                };
+
+                log::debug!(
+                    "Sending partial result: move={pv}, depth={depth}, score={score_value}"
+                );
+                let _ = tx_partial.send(WorkerMessage::PartialResult {
+                    current_best: pv.clone(),
+                    depth,
+                    score: score_value,
+                });
+            }
+        }
     };
 
     // Take engine out and prepare search
@@ -828,8 +939,7 @@ fn search_worker(
                         match adapter.generate_emergency_move() {
                             Ok(emergency_move) => {
                                 log::info!(
-                                    "Generated emergency move after preparation error: {}",
-                                    emergency_move
+                                    "Generated emergency move after preparation error: {emergency_move}"
                                 );
                                 if let Err(e) = tx.send(WorkerMessage::BestMove {
                                     best_move: emergency_move,
@@ -865,8 +975,7 @@ fn search_worker(
                 match adapter.generate_emergency_move() {
                     Ok(emergency_move) => {
                         log::info!(
-                            "Generated emergency move after engine take error: {}",
-                            emergency_move
+                            "Generated emergency move after engine take error: {emergency_move}"
                         );
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: emergency_move,
@@ -943,7 +1052,7 @@ fn search_worker(
                 // Stopped by user - try emergency move first
                 match emergency_result {
                     Ok(emergency_move) => {
-                        log::info!("Generated emergency move after stop: {}", emergency_move);
+                        log::info!("Generated emergency move after stop: {emergency_move}");
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: emergency_move,
                             ponder_move: None,
@@ -966,10 +1075,7 @@ fn search_worker(
                 let _ = tx.send(WorkerMessage::Error(e.to_string()));
                 match emergency_result {
                     Ok(emergency_move) => {
-                        log::info!(
-                            "Generated emergency move after search error: {}",
-                            emergency_move
-                        );
+                        log::info!("Generated emergency move after search error: {emergency_move}");
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: emergency_move,
                             ponder_move: None,
