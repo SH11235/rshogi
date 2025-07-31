@@ -838,10 +838,19 @@ impl EngineAdapter {
         // Create minimal search limits - prioritize depth for reliability
         // Note: We set depth=3 as primary constraint for quick shallow search.
         // The 100ms time limit acts as a safety net to prevent hanging.
-        // Engine implementations should respect both constraints:
-        // - Stop at depth 3 (primary goal)
-        // - Or stop at 100ms if depth 3 takes too long (safety)
-        // In practice, depth 3 should complete well within 100ms.
+        //
+        // IMPORTANT: SearchLimits design allows both depth and time constraints.
+        // They work independently - the search stops when EITHER limit is reached:
+        // - Stop at depth 3 (primary goal for consistent quality)
+        // - OR stop at 100ms if depth 3 takes too long (safety against hanging)
+        //
+        // The builder maintains both values separately:
+        // - depth is stored in its own field
+        // - fixed_time_ms sets the time_control field to FixedTime
+        // The order of builder calls doesn't matter - both constraints remain active.
+        //
+        // In practice, depth 3 should complete well within 100ms, making this
+        // primarily a depth-limited search with timeout protection.
         let limits = SearchLimits::builder()
             .depth(3)
             .fixed_time_ms(100)
