@@ -25,12 +25,16 @@ const CHANNEL_SIZE: usize = 1024;
 const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Helper function to lock a mutex with recovery for Poisoned state
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<T> {
+fn lock_or_recover(mutex: &Mutex<EngineAdapter>) -> MutexGuard<EngineAdapter> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             log::error!("Mutex was poisoned, attempting recovery");
-            poisoned.into_inner()
+            let mut guard = poisoned.into_inner();
+
+            // Force reset engine state to safe defaults
+            guard.force_reset_state();
+            guard
         }
     }
 }
@@ -138,9 +142,26 @@ impl Drop for EngineReturnGuard {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.take() {
             log::debug!("EngineReturnGuard: returning engine");
-            if let Err(e) = self.tx.try_send(WorkerMessage::EngineReturn(engine)) {
-                log::warn!("Failed to return engine through channel: {e:?}");
+
+            // Try to return engine through channel
+            match self.tx.try_send(WorkerMessage::EngineReturn(engine)) {
+                Ok(()) => {
+                    log::debug!("Engine returned successfully through channel");
+                }
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    // Channel is full - this shouldn't happen with unbounded channel
+                    log::error!("Channel full, cannot return engine");
+                    // Engine will be dropped here, which is safe
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    // Channel is disconnected - main thread has exited
+                    log::warn!("Channel disconnected, cannot return engine");
+                    // Engine will be dropped here, which is safe
+                }
             }
+
+            // Always try to send Finished message to signal completion
+            let _ = self.tx.try_send(WorkerMessage::Finished);
         }
     }
 }
@@ -250,13 +271,17 @@ fn wait_for_worker_with_timeout(
                         log::trace!("Received info during shutdown: {info:?}");
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
-                        // Forward bestmove to stdout instead of discarding it
-                        send_response_or_exit(UsiResponse::BestMove {
-                            best_move,
-                            ponder: ponder_move,
-                        });
-                        // Mark search as finished when bestmove is received
-                        *searching = false;
+                        // Only forward bestmove if we're still searching
+                        if *searching {
+                            send_response_or_exit(UsiResponse::BestMove {
+                                best_move,
+                                ponder: ponder_move,
+                            });
+                            // Mark search as finished when bestmove is received
+                            *searching = false;
+                        } else {
+                            log::warn!("Ignoring late bestmove during shutdown: {best_move}");
+                        }
                     }
                     Ok(WorkerMessage::PartialResult { .. }) => {
                         // Partial results during shutdown can be ignored
@@ -504,11 +529,17 @@ fn run_engine() -> Result<()> {
                         send_response(UsiResponse::Info(info))?;
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
-                        send_response(UsiResponse::BestMove {
-                            best_move,
-                            ponder: ponder_move,
-                        })?;
-                        searching = false; // Clear searching flag after sending bestmove
+                        // Only send bestmove if we're still searching
+                        // This prevents double bestmove when stop command times out
+                        if searching {
+                            send_response(UsiResponse::BestMove {
+                                best_move,
+                                ponder: ponder_move,
+                            })?;
+                            searching = false; // Clear searching flag after sending bestmove
+                        } else {
+                            log::warn!("Ignoring late bestmove: {best_move} (searching=false)");
+                        }
                     }
                     Ok(WorkerMessage::PartialResult { .. }) => {
                         // Partial results are handled in stop command processing
