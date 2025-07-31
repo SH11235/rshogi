@@ -1,5 +1,6 @@
 //! USI protocol output formatting
 
+use crate::utils::lock_or_recover_generic;
 use once_cell::sync::Lazy;
 use std::fmt;
 use std::io::{BufWriter, Write};
@@ -260,14 +261,7 @@ impl UsiWriter {
 
     fn write_line(&self, response: &UsiResponse, flush_kind: FlushKind) -> std::io::Result<()> {
         // Handle poisoned mutex gracefully
-        let mut writer = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                // Recover from poisoned state
-                log::warn!("stdout-write: recovering from poisoned mutex");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer = lock_or_recover_generic(&self.inner);
 
         // Write the response
         writeln!(writer, "{response}")?;
@@ -285,7 +279,7 @@ impl UsiWriter {
             match flush_kind {
                 FlushKind::Immediate => {
                     writer.flush()?;
-                    *self.last_flush.lock().unwrap() = Instant::now();
+                    *lock_or_recover_generic(&self.last_flush) = Instant::now();
                     self.message_count.store(0, Ordering::Relaxed);
                 }
                 FlushKind::Buffered => {
@@ -294,7 +288,7 @@ impl UsiWriter {
 
                     // Check if we should flush
                     let should_flush = {
-                        let last_flush = *self.last_flush.lock().unwrap();
+                        let last_flush = *lock_or_recover_generic(&self.last_flush);
                         let elapsed = last_flush.elapsed();
 
                         // Flush based on configurable thresholds
@@ -304,7 +298,7 @@ impl UsiWriter {
 
                     if should_flush {
                         writer.flush()?;
-                        *self.last_flush.lock().unwrap() = Instant::now();
+                        *lock_or_recover_generic(&self.last_flush) = Instant::now();
                         self.message_count.store(0, Ordering::Relaxed);
                     }
                 }
@@ -316,14 +310,7 @@ impl UsiWriter {
 
     fn flush_all(&self) -> std::io::Result<()> {
         // Handle poisoned mutex gracefully
-        let mut writer = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                // Recover from poisoned state
-                log::warn!("stdout-write: recovering from poisoned mutex in flush_all");
-                poisoned.into_inner()
-            }
-        };
+        let mut writer = lock_or_recover_generic(&self.inner);
         writer.flush()
     }
 
