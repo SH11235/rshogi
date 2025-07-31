@@ -21,6 +21,12 @@ use crate::usi::{
 };
 use crate::usi::{create_position, EngineOption, GameResult, GoParams};
 
+/// Time management constants for byoyomi mode
+/// These values ensure the engine finishes thinking before GUI timeout
+const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
+const DEFAULT_OVERHEAD_MS: u64 = 50; // Overhead for non-byoyomi modes
+const BYOYOMI_ADDITIONAL_SAFETY_MS: u64 = 500; // Additional safety margin for byoyomi hard limit
+
 /// Engine error types for better error handling
 #[derive(Debug)]
 pub enum EngineError {
@@ -477,13 +483,17 @@ impl EngineAdapter {
         // Create TimeParameters from engine settings
         log::debug!("Creating TimeParameters");
         // Use larger overhead for byoyomi mode to ensure we finish before GUI timeout
-        let overhead_ms = if params.byoyomi.is_some() { 500 } else { 50 };
+        let overhead_ms = if params.byoyomi.is_some() {
+            BYOYOMI_OVERHEAD_MS
+        } else {
+            DEFAULT_OVERHEAD_MS
+        };
         let time_params = TimeParameters {
             byoyomi_soft_ratio: self.byoyomi_early_finish_ratio as f64 / 100.0,
             pv_base_threshold_ms: self.pv_stability_base,
             pv_depth_slope_ms: self.pv_stability_slope,
             overhead_ms,
-            byoyomi_hard_limit_reduction_ms: 300, // Additional safety margin for byoyomi
+            byoyomi_hard_limit_reduction_ms: BYOYOMI_ADDITIONAL_SAFETY_MS,
             ..Default::default()
         };
 
