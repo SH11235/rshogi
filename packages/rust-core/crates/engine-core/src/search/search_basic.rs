@@ -124,11 +124,13 @@ impl<E: Evaluator> Searcher<E> {
     /// Increment node count and check if search should stop
     #[inline]
     fn bump_nodes_and_check(&mut self) -> bool {
-        // Check limits BEFORE incrementing to avoid exceeding
-        if self.should_stop() {
+        self.nodes += 1;
+
+        // Check more frequently - every 10 nodes for extreme responsiveness
+        if self.nodes % 10 == 0 && self.should_stop() {
             return false;
         }
-        self.nodes += 1;
+
         true
     }
 
@@ -319,8 +321,9 @@ impl<E: Evaluator> Searcher<E> {
         let mut best_score = -SEARCH_INF;
 
         // Search all moves
-        for &mv in moves.as_slice() {
+        for (move_idx, &mv) in moves.as_slice().iter().enumerate() {
             // Check if we should stop before processing each move
+            // Check every single move for maximum responsiveness
             if self.should_stop() {
                 return SEARCH_INTERRUPTED;
             }
@@ -400,8 +403,8 @@ impl<E: Evaluator> Searcher<E> {
         gen.generate_captures(pos, &mut moves);
 
         // Search captures
-        for &mv in moves.as_slice() {
-            // Check if we should stop before processing each move
+        for (move_idx, &mv) in moves.as_slice().iter().enumerate() {
+            // Check if we should stop every move
             if self.should_stop() {
                 return SEARCH_INTERRUPTED;
             }
