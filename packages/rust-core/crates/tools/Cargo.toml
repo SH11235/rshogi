@@ -74,11 +74,3 @@ path = "src/bin/sse41_only_test.rs"
 [[bin]]
 name = "generate_training_data"
 path = "src/bin/generate_training_data.rs"
-
-[[bin]]
-name = "generate_training_data_batch"
-path = "src/bin/generate_training_data_batch.rs"
-
-[[bin]]
-name = "debug_training_data"
-path = "src/bin/debug_training_data.rs"
