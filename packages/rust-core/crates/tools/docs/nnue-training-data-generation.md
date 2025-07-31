@@ -11,7 +11,7 @@
 1. 最適なパフォーマンスのために、リリースモードでツールをビルドします：
 ```bash
 cd packages/rust-core
-cargo build --release --bin generate_training_data --bin generate_training_data_batch --bin debug_training_data
+cargo build --release --bin generate_training_data
 ```
 
 ## 使用方法
@@ -27,19 +27,31 @@ cd packages/rust-core
 ### 基本コマンド
 
 ```bash
-./target/release/generate_training_data <入力SFENファイル> <出力学習データファイル>
+./target/release/generate_training_data <入力SFENファイル> <出力学習データファイル> [バッチサイズ] [再開行番号]
 ```
+
+パラメータ：
+- `バッチサイズ`: 並列処理する局面数（デフォルト: 100）
+- `再開行番号`: 処理を再開する行番号（デフォルト: 0 = 自動検出）
 
 ### 30,000局面の処理（24手目）
 
 ```bash
+# デフォルト設定（100局面ずつ処理）
 ./target/release/generate_training_data crates/engine-cli/start_sfens_ply24.txt training_data_ply24.txt
+
+# 大きめのバッチサイズ（500局面ずつ）
+./target/release/generate_training_data crates/engine-cli/start_sfens_ply24.txt training_data_ply24.txt 500
 ```
 
 ### 30,000局面の処理（32手目）
 
 ```bash
-./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt
+# 安定性重視（100局面ずつ処理）
+./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 100
+
+# 中断後の再開（自動的に続きから）
+./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 100
 ```
 
 ## 入力形式
@@ -78,41 +90,34 @@ sfen +R1G4nl/1g4+Ss1/1kspp2p1/ppp2pS1p/4n4/P4Gp1P/1P1PP1P2/1+n2K2R1/7NL w G2P2b2
 1. 専用ツール（例：`make_kifu32bin`）を使用してデータをNNUEバイナリ形式に変換
 2. NNUE学習ツールを使用してニューラルネットワークの重みを作成
 
+## 主な特徴
+
+- **中断・再開対応**：処理が途中で止まっても、同じコマンドで続きから再開
+- **メモリ効率的**：バッチサイズごとに処理してファイルに書き込み
+- **進捗表示**：各バッチの処理状況をリアルタイムで表示
+- **柔軟な設定**：バッチサイズや再開位置を指定可能
+
 ## トラブルシューティング
 
 ### 処理が途中で止まる場合
 
-並列処理のスレッド数を制限して実行してください：
+1. **バッチサイズを小さくする**：
 ```bash
-# スレッド数を8に制限
-RAYON_NUM_THREADS=8 ./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt
-
-# さらに少なくする場合（4スレッド）
-RAYON_NUM_THREADS=4 ./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt
+# 50局面ずつ処理（より安定）
+./target/release/generate_training_data input.txt output.txt 50
 ```
 
-### バッチ処理版の使用
-
-メモリ効率を改善したバッチ処理版も利用可能です：
-
+2. **スレッド数を制限する**：
 ```bash
-# バッチ処理版のビルド
-cargo build --release --bin generate_training_data_batch
-
-# デフォルトバッチサイズ（1000）で実行
-./target/release/generate_training_data_batch crates/engine-cli/start_sfens_ply24.txt training_data_ply24.txt
-
-# バッチサイズを指定して実行（例：500局面ずつ処理）
-./target/release/generate_training_data_batch crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 500
-
-# より大きなバッチサイズ（メモリに余裕がある場合）
-./target/release/generate_training_data_batch crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 2000
+# スレッド数を4に制限
+RAYON_NUM_THREADS=4 ./target/release/generate_training_data input.txt output.txt
 ```
 
-バッチ処理版の利点：
-- メモリ使用量が一定に保たれる
-- 各バッチごとに進捗表示
-- 大規模なファイルでも安定して処理可能
+3. **処理を再開する**：
+```bash
+# 同じコマンドを実行すると自動的に続きから処理
+./target/release/generate_training_data input.txt output.txt
+```
 
 ### メモリ不足の場合
 

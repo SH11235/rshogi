@@ -44,11 +44,14 @@ cargo build --release --bin <ツール名>
 
 ### NNUE学習データの生成
 ```bash
-# 24手目の30,000局面を処理
+# 24手目の30,000局面を処理（100局面ずつ）
 ./target/release/generate_training_data crates/engine-cli/start_sfens_ply24.txt training_data_ply24.txt
 
-# 32手目の30,000局面を処理
-./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt
+# 32手目の30,000局面を処理（500局面ずつ、メモリ効率重視）
+./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 500
+
+# 中断後の再開（同じコマンドで自動的に続きから）
+./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 500
 ```
 
 ### 定跡データの検証
