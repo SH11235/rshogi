@@ -1220,12 +1220,14 @@ fn search_worker(
     let mut engine_guard = EngineReturnGuard::new(engine, tx.clone(), search_id);
 
     // Execute search without holding the lock
+    log::info!("Calling execute_search_static");
     let result = EngineAdapter::execute_search_static(
         &mut engine_guard,
         position,
         limits,
         Box::new(info_callback),
     );
+    log::info!("execute_search_static returned: {:?}", result.is_ok());
 
     // Handle result
     match result {

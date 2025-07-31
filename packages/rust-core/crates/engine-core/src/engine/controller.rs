@@ -116,19 +116,25 @@ impl Engine {
 
     /// Search for best move in position
     pub fn search(&self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
+        log::info!("Engine::search called with engine_type: {:?}", self.engine_type);
         match self.engine_type {
             EngineType::Material => {
                 let mut searcher = Searcher::new(limits, self.material_evaluator.clone());
                 searcher.search(pos)
             }
             EngineType::Nnue => {
+                log::info!("Creating NNUE searcher");
                 let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
                     evaluator: self.nnue_evaluator.clone(),
                 });
                 let mut searcher = Searcher::new(limits, nnue_proxy);
-                searcher.search(pos)
+                log::info!("Starting NNUE search");
+                let result = searcher.search(pos);
+                log::info!("NNUE search completed");
+                result
             }
             EngineType::Enhanced | EngineType::EnhancedNnue => {
+                log::info!("Starting Enhanced search (type: {:?})", self.engine_type);
                 // Record start time
                 let start_time = std::time::Instant::now();
 
@@ -157,8 +163,14 @@ impl Engine {
 
                     if let Some(enhanced_searcher) = enhanced_guard.as_mut() {
                         // Run enhanced search with limits (this creates TimeManager internally)
+                        log::info!("Running enhanced_searcher.search_with_limits");
                         let (best_move, score) =
                             enhanced_searcher.search_with_limits(pos, limits.clone());
+                        log::info!(
+                            "Enhanced search returned: move={:?}, score={}",
+                            best_move.is_some(),
+                            score
+                        );
 
                         // Get nodes count
                         let nodes = enhanced_searcher.nodes();
