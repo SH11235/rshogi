@@ -201,7 +201,7 @@ impl EngineAdapter {
     /// Create a new engine adapter
     pub fn new() -> Self {
         let mut adapter = Self {
-            engine: Some(Engine::new(EngineType::Material)), // Start with simplest for compatibility
+            engine: Some(Engine::new(EngineType::Material)), // Default to Material for stability
             position: None,
             options: Vec::new(),
             hash_size: 16,
@@ -228,11 +228,11 @@ impl EngineAdapter {
             EngineOption::check("USI_Ponder", true),
             EngineOption::combo(
                 "EngineType",
-                "Material".to_string(),
+                "Material".to_string(), // Default to Material for stability
                 vec![
                     "Material".to_string(),
+                    "Enhanced".to_string(), // Put Enhanced before NNUE types
                     "Nnue".to_string(),
-                    "Enhanced".to_string(),
                     "EnhancedNnue".to_string(),
                 ],
             ),
@@ -687,6 +687,7 @@ impl EngineAdapter {
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<(String, Option<String>), EngineError> {
         log::info!("execute_search_static called");
+        log::info!("Search starting...");
 
         // Set up info callback
         let (info_callback_arc, info_callback_inner) = Self::create_info_callback(info_callback);
@@ -703,10 +704,11 @@ impl EngineAdapter {
         log::info!("Calling engine.search");
         let result = engine.search(&mut position, limits);
         log::info!(
-            "Search completed - depth:{} nodes:{} time:{}ms",
+            "Search completed - depth:{} nodes:{} time:{}ms bestmove:{}",
             result.stats.depth,
             result.stats.nodes,
-            result.stats.elapsed.as_millis()
+            result.stats.elapsed.as_millis(),
+            result.best_move.is_some()
         );
 
         // Process result
