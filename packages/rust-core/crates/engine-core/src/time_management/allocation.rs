@@ -45,8 +45,14 @@ pub fn calculate_time_allocation(
             (u64::MAX, u64::MAX)
         }
 
-        TimeControl::Infinite | TimeControl::Ponder => {
-            // No time limits for infinite/ponder
+        TimeControl::Infinite => {
+            // No time limits for infinite
+            (u64::MAX, u64::MAX)
+        }
+
+        TimeControl::Ponder(_) => {
+            // No time limits during ponder
+            // The inner time control will be used after ponderhit
             (u64::MAX, u64::MAX)
         }
     }

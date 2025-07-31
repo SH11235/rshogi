@@ -593,44 +593,44 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut stdout = stdout.lock();
 
     // Main event loop
+    let mut should_quit = false;
     loop {
-        select! {
-            recv(cmd_rx) -> msg => {
-                match msg {
-                    Ok(cmd) => {
-                        log::debug!("USI command received: {cmd:?}");
+        // First, drain all pending commands to ensure FIFO ordering
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            log::debug!("USI command received: {cmd:?}");
 
-                        // Check if it's quit command
-                        if matches!(cmd, UsiCommand::Quit) {
-                            // Handle quit
-                            stop_flag.store(true, Ordering::Release);
-                            break;
-                        }
-
-                        // Handle other commands
-                        let mut ctx = CommandContext {
-                            engine: &engine,
-                            stop_flag: &stop_flag,
-                            worker_tx: &worker_tx,
-                            worker_rx: &worker_rx,
-                            worker_handle: &mut worker_handle,
-                            search_state: &mut search_state,
-                            bestmove_sent: &mut bestmove_sent,
-                            stdout: &mut stdout,
-                            current_search_timeout: &mut current_search_timeout,
-                            search_id_counter: &mut search_id_counter,
-                            current_search_id: &mut current_search_id,
-                            allow_null_move,
-                        };
-                        handle_command(cmd, &mut ctx)?;
-                    }
-                    Err(_) => {
-                        log::debug!("Command channel closed");
-                        break;
-                    }
-                }
+            // Check if it's quit command
+            if matches!(cmd, UsiCommand::Quit) {
+                // Handle quit
+                stop_flag.store(true, Ordering::Release);
+                should_quit = true;
+                break;
             }
 
+            // Handle other commands
+            let mut ctx = CommandContext {
+                engine: &engine,
+                stop_flag: &stop_flag,
+                worker_tx: &worker_tx,
+                worker_rx: &worker_rx,
+                worker_handle: &mut worker_handle,
+                search_state: &mut search_state,
+                bestmove_sent: &mut bestmove_sent,
+                stdout: &mut stdout,
+                current_search_timeout: &mut current_search_timeout,
+                search_id_counter: &mut search_id_counter,
+                current_search_id: &mut current_search_id,
+                allow_null_move,
+            };
+            handle_command(cmd, &mut ctx)?;
+        }
+
+        if should_quit {
+            break;
+        }
+
+        // Then handle worker messages with timeout
+        select! {
             recv(worker_rx) -> msg => {
                 match msg {
                     Ok(WorkerMessage::Info(info)) => {
@@ -711,6 +711,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
             }
 
             default(Duration::from_millis(5)) => {
+                // Check for new commands before idling
+                if !cmd_rx.is_empty() {
+                    continue; // Process commands first
+                }
                 // Idle - prevents busy loop
             }
         }
@@ -779,6 +783,9 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             sfen,
             moves,
         } => {
+            log::info!(
+                "Handling position command - startpos: {startpos}, sfen: {sfen:?}, moves: {moves:?}"
+            );
             // Wait for any ongoing search to complete before updating position
             wait_for_search_completion(
                 ctx.search_state,
@@ -792,12 +799,13 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.set_position(startpos, sfen.as_deref(), &moves)?;
+            log::info!("Position command completed");
         }
 
         UsiCommand::Go(params) => {
             log::info!("Received go command with params: {params:?}");
 
-            // Stop any ongoing search
+            // Stop any ongoing search and ensure engine is available
             wait_for_search_completion(
                 ctx.search_state,
                 ctx.bestmove_sent,
@@ -808,6 +816,9 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.stdout,
             )?;
 
+            // Add a small delay to ensure clean state transition
+            thread::sleep(Duration::from_millis(10));
+
             // Reset stop flag and bestmove_sent flag
             ctx.stop_flag.store(false, Ordering::Release);
             *ctx.bestmove_sent = false; // Reset for new search
@@ -816,6 +827,19 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             if !ctx.search_state.can_start_search() {
                 log::error!("Cannot start search in state: {:?}", ctx.search_state);
                 return Err(anyhow!("Invalid state for starting search"));
+            }
+
+            // Verify position is set before starting search
+            {
+                let engine = lock_or_recover_adapter(ctx.engine);
+                if !engine.has_position() {
+                    log::error!("Cannot start search: position not set");
+                    send_response(UsiResponse::BestMove {
+                        best_move: "resign".to_string(),
+                        ponder: None,
+                    })?;
+                    return Ok(());
+                }
             }
 
             // Increment search ID for new search
@@ -1365,23 +1389,20 @@ mod tests {
         let mut finished_count = 0;
 
         while let Ok(msg) = rx.try_recv() {
-            match msg {
-                WorkerMessage::Finished {
-                    from_guard,
-                    search_id: msg_id,
-                } => {
-                    if msg_id == current_search_id && search_state != SearchState::Idle {
-                        finished_count += 1;
-                        search_state = SearchState::Idle;
-                        println!(
-                            "Processed Finished message {} (from_guard: {})",
-                            finished_count, from_guard
-                        );
-                    } else {
-                        println!("Ignored duplicate Finished message (from_guard: {})", from_guard);
-                    }
+            if let WorkerMessage::Finished {
+                from_guard,
+                search_id: msg_id,
+            } = msg
+            {
+                if msg_id == current_search_id && search_state != SearchState::Idle {
+                    finished_count += 1;
+                    search_state = SearchState::Idle;
+                    println!(
+                        "Processed Finished message {finished_count} (from_guard: {from_guard})"
+                    );
+                } else {
+                    println!("Ignored duplicate Finished message (from_guard: {from_guard})");
                 }
-                _ => {}
             }
         }
 
@@ -1414,17 +1435,15 @@ mod tests {
         let mut processed_ids = Vec::new();
 
         while let Ok(msg) = rx.try_recv() {
-            match msg {
-                WorkerMessage::Finished {
-                    from_guard: _,
-                    search_id,
-                } => {
-                    if search_id == current_search_id && search_state != SearchState::Idle {
-                        search_state = SearchState::Idle;
-                        processed_ids.push(search_id);
-                    }
+            if let WorkerMessage::Finished {
+                from_guard: _,
+                search_id,
+            } = msg
+            {
+                if search_id == current_search_id && search_state != SearchState::Idle {
+                    search_state = SearchState::Idle;
+                    processed_ids.push(search_id);
                 }
-                _ => {}
             }
         }
 
@@ -1456,7 +1475,7 @@ mod tests {
                 if i % 7 == 0 {
                     tx_clone
                         .send(WorkerMessage::BestMove {
-                            best_move: format!("7g7f_{}", i),
+                            best_move: format!("7g7f_{i}"),
                             ponder_move: None,
                             search_id,
                         })
@@ -1495,7 +1514,7 @@ mod tests {
 
         // Each search should have received messages
         for i in 0..3 {
-            assert!(finished_per_search[i] > 0, "Search {} should have Finished messages", i);
+            assert!(finished_per_search[i] > 0, "Search {i} should have Finished messages");
         }
     }
 }

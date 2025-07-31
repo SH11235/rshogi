@@ -53,7 +53,7 @@ impl SearchLimits {
                 // Return None for now, enhanced search will handle properly
                 None
             }
-            TimeControl::FixedNodes { .. } | TimeControl::Infinite | TimeControl::Ponder => None,
+            TimeControl::FixedNodes { .. } | TimeControl::Infinite | TimeControl::Ponder(_) => None,
         }
     }
 
@@ -174,9 +174,20 @@ impl SearchLimitsBuilder {
         self
     }
 
-    /// Set Ponder mode
+    /// Set Ponder mode (legacy - loses time control information)
     pub fn ponder(mut self) -> Self {
-        self.time_control = TimeControl::Ponder;
+        // Create a dummy inner time control for backward compatibility
+        let inner = Box::new(TimeControl::Infinite);
+        self.time_control = TimeControl::Ponder(inner);
+        self
+    }
+
+    /// Set Ponder mode with inner time control
+    /// This preserves the existing time control settings for use after ponderhit
+    pub fn ponder_with_inner(mut self) -> Self {
+        // Take the current time control and wrap it in Ponder
+        let inner = Box::new(self.time_control.clone());
+        self.time_control = TimeControl::Ponder(inner);
         self
     }
 

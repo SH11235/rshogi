@@ -33,7 +33,8 @@ pub enum TimeControl {
     /// No time limit
     Infinite,
     /// Pondering (thinking on opponent's time)
-    Ponder,
+    /// Contains the inner time control that will be used after ponderhit
+    Ponder(Box<TimeControl>),
 }
 
 /// Time limits combining time control with other constraints
