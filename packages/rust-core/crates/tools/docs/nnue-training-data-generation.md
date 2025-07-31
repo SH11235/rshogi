@@ -11,7 +11,7 @@
 1. 最適なパフォーマンスのために、リリースモードでツールをビルドします：
 ```bash
 cd packages/rust-core
-cargo build --release --bin generate_training_data
+cargo build --release --bin generate_training_data --bin generate_training_data_batch --bin debug_training_data
 ```
 
 ## 使用方法
