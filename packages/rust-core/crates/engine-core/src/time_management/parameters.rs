@@ -46,7 +46,7 @@ impl Default for TimeParameters {
             hard_multiplier: 4.0,
             increment_usage: 0.8,
             byoyomi_soft_ratio: 0.8,
-            byoyomi_hard_limit_reduction_ms: 300,
+            byoyomi_hard_limit_reduction_ms: 500,
             opening_factor: 1.2,
             endgame_factor: 0.8,
         }
