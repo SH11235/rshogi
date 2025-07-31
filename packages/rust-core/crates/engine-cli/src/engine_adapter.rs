@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use crate::usi::output::{Score, SearchInfo};
 use crate::usi::{
-    clamp_periods, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_PERIODS,
+    clamp_periods, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_PERIODS,
     OPT_USI_BYOYOMI_PERIODS,
 };
-use crate::usi::{create_position, EngineOption, GameResult, GoParams};
+use crate::usi::{create_position, GameResult, GoParams};
 
 /// Time management constants for byoyomi mode
 /// These values ensure the engine finishes thinking before GUI timeout
@@ -248,6 +248,7 @@ impl EngineAdapter {
                     "EnhancedNnue".to_string(),
                 ],
             ),
+            EngineOption::filename("EvalFile", "".to_string()), // Add EvalFile option
             EngineOption::spin(
                 OPT_BYOYOMI_PERIODS,
                 1,
@@ -386,8 +387,40 @@ impl EngineAdapter {
                     self.pv_stability_slope = slope;
                 }
             }
+            "EvalFile" => {
+                if let Some(path) = value {
+                    if !path.is_empty() {
+                        // Only load NNUE weights if using NNUE engine type
+                        if let Some(ref mut engine) = self.engine {
+                            let engine_type = engine.get_engine_type();
+                            if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
+                                log::info!("Loading NNUE weights from: {path}");
+                                match engine.load_nnue_weights(path) {
+                                    Ok(()) => {
+                                        log::info!("NNUE weights loaded successfully");
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to load NNUE weights: {e}");
+                                        return Err(anyhow!(
+                                            "Failed to load NNUE weights from '{}': {}",
+                                            path,
+                                            e
+                                        ));
+                                    }
+                                }
+                            } else {
+                                log::debug!(
+                                    "EvalFile option ignored for non-NNUE engine type: {engine_type:?}"
+                                );
+                            }
+                        } else {
+                            return Err(anyhow!("Engine is currently in use"));
+                        }
+                    }
+                }
+            }
             _ => {
-                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, {}, {}, ByoyomiEarlyFinishRatio, PVStabilityBase, PVStabilitySlope", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS));
+                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, EvalFile, {}, {}, ByoyomiEarlyFinishRatio, PVStabilityBase, PVStabilitySlope", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS));
             }
         }
         Ok(())
