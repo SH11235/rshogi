@@ -762,7 +762,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             {
                 let engine = lock_or_recover_adapter(ctx.engine);
                 for option in engine.get_options() {
-                    send_response(UsiResponse::Option(option.to_usi_string()))?;
+                    send_response(UsiResponse::Option(option.to_string()))?;
                 }
             }
 

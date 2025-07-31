@@ -2,11 +2,13 @@
 
 pub mod commands;
 pub mod conversion;
+pub mod options;
 pub mod output;
 pub mod parser;
 
-pub use commands::{EngineOption, GameResult, GoParams, UsiCommand};
+pub use commands::{GameResult, GoParams, UsiCommand};
 pub use conversion::create_position;
+pub use options::EngineOption;
 pub use output::{
     ensure_flush_on_exit, flush_final, send_info_string, send_response, send_response_or_exit,
     UsiResponse,
