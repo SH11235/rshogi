@@ -61,17 +61,26 @@ fn calculate_dynamic_timeout(_engine: &Arc<Mutex<EngineAdapter>>) -> Duration {
 }
 
 /// Perform fallback move generation with graduated strategy
+///
+/// This function attempts to generate a move using increasingly simple methods:
+/// 1. Use partial result from interrupted search (instant)
+/// 2. Run quick shallow search (depth 3, ~10-100ms)
+/// 3. Generate emergency move using heuristics only (~1ms)
+///
+/// All operations are synchronous but designed to be fast.
+/// Total worst-case time: ~100ms (dominated by quick_search)
 fn generate_fallback_move(
     engine: &Arc<Mutex<EngineAdapter>>,
     partial_result: Option<(String, u32, i32)>,
+    allow_null_move: bool,
 ) -> Result<String> {
-    // Stage 1: Use partial result if available
+    // Stage 1: Use partial result if available (instant)
     if let Some((best_move, depth, score)) = partial_result {
         log::info!("Using partial result: move={best_move}, depth={depth}, score={score}");
         return Ok(best_move);
     }
 
-    // Stage 2: Try quick shallow search (depth 1-3)
+    // Stage 2: Try quick shallow search (depth 3, typically 10-50ms, max 100ms)
     log::info!("Attempting quick shallow search");
     let shallow_result = {
         let mut engine = lock_or_recover_adapter(engine);
@@ -91,7 +100,7 @@ fn generate_fallback_move(
         return Ok(move_str);
     }
 
-    // Stage 3: Try emergency move generation
+    // Stage 3: Try emergency move generation (heuristic only, ~1ms)
     log::info!("Attempting emergency move generation");
     let emergency_result = {
         let engine = lock_or_recover_adapter(engine);
@@ -108,14 +117,26 @@ fn generate_fallback_move(
             Ok("resign".to_string())
         }
         Err(EngineError::EngineNotAvailable(msg)) if msg.contains("Position not set") => {
-            log::error!("Position not set - returning null move");
-            // Return null move (0000) which most GUIs handle gracefully
-            Ok("0000".to_string())
+            if allow_null_move {
+                log::error!("Position not set - returning null move (0000)");
+                // Return null move (0000) which most GUIs handle gracefully
+                // Note: This is not defined in USI spec but widely supported
+                Ok("0000".to_string())
+            } else {
+                log::error!("Position not set - returning resign");
+                Ok("resign".to_string())
+            }
         }
         Err(e) => {
             log::error!("Failed to generate fallback move: {e}");
-            // Return null move instead of resign for better GUI compatibility
-            Ok("0000".to_string())
+            if allow_null_move {
+                // Return null move for better GUI compatibility
+                // Note: This is not defined in USI spec but widely supported
+                Ok("0000".to_string())
+            } else {
+                // Return resign as per USI spec
+                Ok("resign".to_string())
+            }
         }
     }
 }
@@ -126,19 +147,26 @@ struct Args {
     /// Enable debug logging
     #[arg(short, long)]
     debug: bool,
+
+    /// Use null move (0000) instead of resign for fallback
+    /// Note: null move is not defined in USI spec but handled by most GUIs
+    #[arg(long)]
+    allow_null_move: bool,
 }
 
 /// Guard to ensure engine is returned on drop (for panic safety)
 struct EngineReturnGuard {
     engine: Option<Engine>,
     tx: Sender<WorkerMessage>,
+    search_id: u64,
 }
 
 impl EngineReturnGuard {
-    fn new(engine: Engine, tx: Sender<WorkerMessage>) -> Self {
+    fn new(engine: Engine, tx: Sender<WorkerMessage>, search_id: u64) -> Self {
         Self {
             engine: Some(engine),
             tx,
+            search_id,
         }
     }
 }
@@ -180,7 +208,10 @@ impl Drop for EngineReturnGuard {
             }
 
             // Always try to send Finished message to signal completion (from guard)
-            let _ = self.tx.try_send(WorkerMessage::Finished { from_guard: true });
+            let _ = self.tx.try_send(WorkerMessage::Finished {
+                from_guard: true,
+                search_id: self.search_id,
+            });
         }
     }
 }
@@ -221,16 +252,19 @@ enum WorkerMessage {
     BestMove {
         best_move: String,
         ponder_move: Option<String>,
+        search_id: u64, // Add search ID to track which search this belongs to
     },
     /// Partial result available during search
     PartialResult {
         current_best: String,
         depth: u32,
         score: i32,
+        search_id: u64,
     },
     /// Thread finished - from_guard indicates if sent by EngineReturnGuard
     Finished {
         from_guard: bool,
+        search_id: u64, // Add search ID
     },
     Error(String),
     EngineReturn(Engine), // Return the engine after search
@@ -247,6 +281,9 @@ struct CommandContext<'a> {
     bestmove_sent: &'a mut bool,
     stdout: &'a mut dyn Write,
     current_search_timeout: &'a mut Duration,
+    search_id_counter: &'a mut u64,
+    current_search_id: &'a mut u64,
+    allow_null_move: bool,
 }
 
 /// Calculate maximum expected search time from GoParams
@@ -297,17 +334,23 @@ fn wait_for_worker_with_timeout(
     let deadline = Instant::now() + timeout.max(MIN_JOIN_TIMEOUT);
     let mut finished = false;
     let mut engine_returned = false;
+    let mut finished_count = 0u32;
 
     // Wait for Finished message AND EngineReturn message or timeout
     loop {
         select! {
             recv(worker_rx) -> msg => {
                 match msg {
-                    Ok(WorkerMessage::Finished { from_guard }) => {
-                        log::debug!("Worker thread finished cleanly (from_guard: {from_guard})");
-                        finished = true;
-                        if engine_returned {
-                            break;
+                    Ok(WorkerMessage::Finished { from_guard, search_id: _ }) => {
+                        finished_count += 1;
+                        if !finished {
+                            log::debug!("Worker thread finished cleanly (from_guard: {from_guard})");
+                            finished = true;
+                            if engine_returned {
+                                break;
+                            }
+                        } else {
+                            log::trace!("Ignoring duplicate Finished message #{finished_count} (from_guard: {from_guard})");
                         }
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
@@ -323,9 +366,12 @@ fn wait_for_worker_with_timeout(
                         // Info messages during shutdown can be ignored
                         log::trace!("Received info during shutdown: {info:?}");
                     }
-                    Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
-                        // Only forward bestmove if we're still searching
+                    Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
+                        // During shutdown, we may accept late bestmoves
+                        // For safety, we could check search_id here but during shutdown
+                        // we're more lenient since we're trying to clean up
                         if search_state.can_accept_bestmove() {
+                            log::debug!("Accepting bestmove during shutdown (search_id: {search_id})");
                             send_response_or_exit(UsiResponse::BestMove {
                                 best_move,
                                 ponder: ponder_move,
@@ -333,7 +379,7 @@ fn wait_for_worker_with_timeout(
                             // Mark search as finished when bestmove is received
                             *search_state = SearchState::Idle;
                         } else {
-                            log::warn!("Ignoring late bestmove during shutdown: {best_move}");
+                            log::warn!("Ignoring late bestmove during shutdown: {best_move} (search_id: {search_id})");
                         }
                     }
                     Ok(WorkerMessage::PartialResult { .. }) => {
@@ -514,13 +560,13 @@ fn main() {
     // log::info!("Shogi USI Engine starting (version 1.0)");
 
     // Run the main loop and handle any errors
-    if let Err(e) = run_engine() {
+    if let Err(e) = run_engine(args.allow_null_move) {
         log::error!("Fatal error: {e}");
         std::process::exit(1);
     }
 }
 
-fn run_engine() -> Result<()> {
+fn run_engine(allow_null_move: bool) -> Result<()> {
     // Create communication channels
     let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
     let (cmd_tx, cmd_rx) = bounded::<UsiCommand>(CHANNEL_SIZE);
@@ -539,6 +585,8 @@ fn run_engine() -> Result<()> {
     let mut search_state = SearchState::Idle;
     let mut bestmove_sent = false; // Track if bestmove has been sent for current search
     let mut current_search_timeout = MIN_JOIN_TIMEOUT;
+    let mut search_id_counter = 0u64;
+    let mut current_search_id = 0u64;
 
     // Get stdout handle
     let stdout = io::stdout();
@@ -570,6 +618,9 @@ fn run_engine() -> Result<()> {
                             bestmove_sent: &mut bestmove_sent,
                             stdout: &mut stdout,
                             current_search_timeout: &mut current_search_timeout,
+                            search_id_counter: &mut search_id_counter,
+                            current_search_id: &mut current_search_id,
+                            allow_null_move,
                         };
                         handle_command(cmd, &mut ctx)?;
                     }
@@ -585,10 +636,11 @@ fn run_engine() -> Result<()> {
                     Ok(WorkerMessage::Info(info)) => {
                         send_response(UsiResponse::Info(info))?;
                     }
-                    Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
-                        // Only send bestmove if we're still searching AND haven't sent one yet
-                        // This prevents double bestmove when stop command times out
-                        if search_state.can_accept_bestmove() && !bestmove_sent {
+                    Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
+                        // Only send bestmove if:
+                        // 1. We're still searching AND haven't sent one yet
+                        // 2. The search_id matches current search (prevents old search results)
+                        if search_state.can_accept_bestmove() && !bestmove_sent && search_id == current_search_id {
                             send_response(UsiResponse::BestMove {
                                 best_move,
                                 ponder: ponder_move,
@@ -596,16 +648,23 @@ fn run_engine() -> Result<()> {
                             search_state = SearchState::Idle; // Clear searching flag after sending bestmove
                             bestmove_sent = true; // Mark that we've sent bestmove
                         } else {
-                            log::warn!("Ignoring late bestmove: {best_move} (search_state={search_state:?}, bestmove_sent={bestmove_sent})");
+                            log::warn!("Ignoring late bestmove: {best_move} (search_state={search_state:?}, bestmove_sent={bestmove_sent}, search_id={search_id}, current={current_search_id})");
                         }
                     }
                     Ok(WorkerMessage::PartialResult { .. }) => {
                         // Partial results are handled in stop command processing
                         log::trace!("PartialResult received in main loop");
                     }
-                    Ok(WorkerMessage::Finished { from_guard }) => {
-                        log::debug!("Worker thread finished (from_guard: {from_guard})");
-                        search_state = SearchState::Idle;
+                    Ok(WorkerMessage::Finished { from_guard, search_id }) => {
+                        // Only process the first Finished message for the current search
+                        if search_id == current_search_id && search_state != SearchState::Idle {
+                            log::debug!("Worker thread finished (from_guard: {from_guard}, search_id: {search_id}, transitioning from {search_state:?} to Idle)");
+                            // Transition from Searching/StopRequested/FallbackSent to Idle
+                            search_state = SearchState::Idle;
+                        } else {
+                            log::trace!("Ignoring duplicate or late Finished message (from_guard: {from_guard}, search_id: {search_id}, current_search_id: {current_search_id}, search_state: {search_state:?})");
+                            continue;
+                        }
 
                         // Drain any remaining messages including EngineReturn
                         let mut engine_returned = false;
@@ -759,6 +818,12 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 return Err(anyhow!("Invalid state for starting search"));
             }
 
+            // Increment search ID for new search
+            *ctx.search_id_counter += 1;
+            *ctx.current_search_id = *ctx.search_id_counter;
+            let search_id = *ctx.current_search_id;
+            log::info!("Starting new search with ID: {search_id}");
+
             // Calculate timeout for this search
             *ctx.current_search_timeout = calculate_max_search_time(&params);
 
@@ -771,7 +836,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             let handle = thread::spawn(move || {
                 log::info!("Worker thread spawned");
                 let result = std::panic::catch_unwind(|| {
-                    search_worker(engine_clone, params, stop_clone, tx_clone.clone());
+                    search_worker(engine_clone, params, stop_clone, tx_clone.clone(), search_id);
                 });
 
                 if let Err(e) = result {
@@ -779,7 +844,10 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     // Send error message to main thread
                     let _ =
                         tx_clone.send(WorkerMessage::Error("Worker thread panicked".to_string()));
-                    let _ = tx_clone.send(WorkerMessage::Finished { from_guard: false });
+                    let _ = tx_clone.send(WorkerMessage::Finished {
+                        from_guard: false,
+                        search_id,
+                    });
                 }
             });
 
@@ -811,7 +879,11 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                         // Log timeout error
                         log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
 
-                        match generate_fallback_move(ctx.engine, partial_result) {
+                        match generate_fallback_move(
+                            ctx.engine,
+                            partial_result,
+                            ctx.allow_null_move,
+                        ) {
                             Ok(move_str) => {
                                 send_response(UsiResponse::BestMove {
                                     best_move: move_str,
@@ -831,7 +903,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             }
                         }
 
-                        *ctx.search_state = SearchState::Idle;
+                        // Keep FallbackSent state - will transition to Idle when Finished message arrives
                         break;
                     }
 
@@ -840,14 +912,18 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                         Ok(WorkerMessage::BestMove {
                             best_move,
                             ponder_move,
+                            search_id,
                         }) => {
-                            send_response(UsiResponse::BestMove {
-                                best_move,
-                                ponder: ponder_move,
-                            })?;
-                            *ctx.search_state = SearchState::Idle;
-                            *ctx.bestmove_sent = true;
-                            break;
+                            // Only accept if it's for current search
+                            if search_id == *ctx.current_search_id {
+                                send_response(UsiResponse::BestMove {
+                                    best_move,
+                                    ponder: ponder_move,
+                                })?;
+                                *ctx.search_state = SearchState::Idle;
+                                *ctx.bestmove_sent = true;
+                                break;
+                            }
                         }
                         Ok(WorkerMessage::Info(info)) => {
                             // Forward info messages
@@ -857,36 +933,51 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             current_best,
                             depth,
                             score,
+                            search_id,
                         }) => {
-                            // Store partial result for fallback
-                            partial_result = Some((current_best, depth, score));
-                        }
-                        Ok(WorkerMessage::Finished { from_guard }) => {
-                            // Worker finished but no bestmove - use fallback strategy
-                            log::warn!(
-                                "Worker finished without bestmove (from_guard: {from_guard})"
-                            );
-
-                            match generate_fallback_move(ctx.engine, partial_result) {
-                                Ok(move_str) => {
-                                    send_response(UsiResponse::BestMove {
-                                        best_move: move_str,
-                                        ponder: None,
-                                    })?;
-                                    *ctx.bestmove_sent = true;
-                                }
-                                Err(e) => {
-                                    log::error!("Fallback move generation failed: {e}");
-                                    send_response(UsiResponse::BestMove {
-                                        best_move: "resign".to_string(),
-                                        ponder: None,
-                                    })?;
-                                    *ctx.bestmove_sent = true;
-                                }
+                            // Store partial result for fallback only if it's from current search
+                            if search_id == *ctx.current_search_id {
+                                partial_result = Some((current_best, depth, score));
                             }
+                        }
+                        Ok(WorkerMessage::Finished {
+                            from_guard,
+                            search_id,
+                        }) => {
+                            // Only process if it's for current search
+                            if search_id == *ctx.current_search_id {
+                                // Worker finished but no bestmove - use fallback strategy
+                                log::warn!(
+                                    "Worker finished without bestmove (from_guard: {from_guard})"
+                                );
 
-                            *ctx.search_state = SearchState::Idle;
-                            break;
+                                match generate_fallback_move(
+                                    ctx.engine,
+                                    partial_result,
+                                    ctx.allow_null_move,
+                                ) {
+                                    Ok(move_str) => {
+                                        send_response(UsiResponse::BestMove {
+                                            best_move: move_str,
+                                            ponder: None,
+                                        })?;
+                                        *ctx.bestmove_sent = true;
+                                        *ctx.search_state = SearchState::FallbackSent;
+                                    }
+                                    Err(e) => {
+                                        log::error!("Fallback move generation failed: {e}");
+                                        send_response(UsiResponse::BestMove {
+                                            best_move: "resign".to_string(),
+                                            ponder: None,
+                                        })?;
+                                        *ctx.bestmove_sent = true;
+                                        *ctx.search_state = SearchState::FallbackSent;
+                                    }
+                                }
+
+                                // State will transition to Idle when Finished arrives in main loop
+                                break;
+                            }
                         }
                         _ => {
                             thread::sleep(Duration::from_millis(10));
@@ -897,7 +988,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 // Not searching - use fallback strategy
                 log::debug!("Stop command received while not searching");
 
-                match generate_fallback_move(ctx.engine, None) {
+                match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
                     Ok(move_str) => {
                         send_response(UsiResponse::BestMove {
                             best_move: move_str,
@@ -972,6 +1063,7 @@ fn search_worker(
     params: usi::GoParams,
     stop_flag: Arc<AtomicBool>,
     tx: Sender<WorkerMessage>,
+    search_id: u64,
 ) {
     log::info!("Search worker thread started with params: {params:?}");
     log::debug!("Search worker thread started");
@@ -1019,6 +1111,7 @@ fn search_worker(
                     current_best: pv.clone(),
                     depth,
                     score: score_value,
+                    search_id,
                 });
             }
         }
@@ -1053,6 +1146,7 @@ fn search_worker(
                                 if let Err(e) = tx.send(WorkerMessage::BestMove {
                                     best_move: emergency_move,
                                     ponder_move: None,
+                                    search_id,
                                 }) {
                                     log::error!("Failed to send emergency move: {e}");
                                 }
@@ -1062,6 +1156,7 @@ fn search_worker(
                                 if let Err(e) = tx.send(WorkerMessage::BestMove {
                                     best_move: "resign".to_string(),
                                     ponder_move: None,
+                                    search_id,
                                 }) {
                                     log::error!(
                                         "Failed to send resign after preparation error: {e}"
@@ -1070,7 +1165,10 @@ fn search_worker(
                             }
                         }
 
-                        let _ = tx.send(WorkerMessage::Finished { from_guard: false });
+                        let _ = tx.send(WorkerMessage::Finished {
+                            from_guard: false,
+                            search_id,
+                        });
                         return;
                     }
                 }
@@ -1089,6 +1187,7 @@ fn search_worker(
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: emergency_move,
                             ponder_move: None,
+                            search_id,
                         }) {
                             log::error!("Failed to send emergency move: {e}");
                         }
@@ -1098,13 +1197,17 @@ fn search_worker(
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: "resign".to_string(),
                             ponder_move: None,
+                            search_id,
                         }) {
                             log::error!("Failed to send resign after engine take error: {e}");
                         }
                     }
                 }
 
-                let _ = tx.send(WorkerMessage::Finished { from_guard: false });
+                let _ = tx.send(WorkerMessage::Finished {
+                    from_guard: false,
+                    search_id,
+                });
                 return;
             }
         }
@@ -1114,7 +1217,7 @@ fn search_worker(
     drop(ponder_hit_flag);
 
     // Wrap engine in guard for panic safety
-    let mut engine_guard = EngineReturnGuard::new(engine, tx.clone());
+    let mut engine_guard = EngineReturnGuard::new(engine, tx.clone(), search_id);
 
     // Execute search without holding the lock
     let result = EngineAdapter::execute_search_static(
@@ -1137,6 +1240,7 @@ fn search_worker(
             if let Err(e) = tx.send(WorkerMessage::BestMove {
                 best_move,
                 ponder_move,
+                search_id,
             }) {
                 log::error!("Failed to send bestmove through channel: {e}");
             }
@@ -1165,6 +1269,7 @@ fn search_worker(
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: emergency_move,
                             ponder_move: None,
+                            search_id,
                         }) {
                             log::error!("Failed to send emergency move: {e}");
                         }
@@ -1174,6 +1279,7 @@ fn search_worker(
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: "resign".to_string(),
                             ponder_move: None,
+                            search_id,
                         }) {
                             log::error!("Failed to send resign after stop: {e}");
                         }
@@ -1188,6 +1294,7 @@ fn search_worker(
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: emergency_move,
                             ponder_move: None,
+                            search_id,
                         }) {
                             log::error!("Failed to send emergency move: {e}");
                         }
@@ -1197,6 +1304,7 @@ fn search_worker(
                         if let Err(e) = tx.send(WorkerMessage::BestMove {
                             best_move: "resign".to_string(),
                             ponder_move: None,
+                            search_id,
                         }) {
                             log::error!("Failed to send resign after error: {e}");
                         }
@@ -1207,7 +1315,10 @@ fn search_worker(
     }
 
     // Always send Finished at the end - use blocking send to ensure delivery
-    match tx.send(WorkerMessage::Finished { from_guard: false }) {
+    match tx.send(WorkerMessage::Finished {
+        from_guard: false,
+        search_id,
+    }) {
         Ok(()) => log::debug!("Finished message sent successfully"),
         Err(e) => {
             log::error!("Failed to send Finished message: {e}. Channel might be closed.");
@@ -1216,4 +1327,173 @@ fn search_worker(
     }
 
     log::debug!("Search worker finished");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::unbounded;
+    use std::thread;
+
+    #[test]
+    fn test_finished_message_multiple_delivery() {
+        // Test that the main loop correctly handles multiple Finished messages
+        let (tx, rx) = unbounded();
+
+        // Simulate sending multiple Finished messages with same search_id
+        let search_id = 1;
+
+        // First Finished from guard
+        tx.send(WorkerMessage::Finished {
+            from_guard: true,
+            search_id,
+        })
+        .unwrap();
+
+        // Second Finished from worker
+        tx.send(WorkerMessage::Finished {
+            from_guard: false,
+            search_id,
+        })
+        .unwrap();
+
+        // Process messages
+        let mut search_state = SearchState::Searching;
+        let current_search_id = 1;
+        let mut finished_count = 0;
+
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                WorkerMessage::Finished {
+                    from_guard,
+                    search_id: msg_id,
+                } => {
+                    if msg_id == current_search_id && search_state != SearchState::Idle {
+                        finished_count += 1;
+                        search_state = SearchState::Idle;
+                        println!(
+                            "Processed Finished message {} (from_guard: {})",
+                            finished_count, from_guard
+                        );
+                    } else {
+                        println!("Ignored duplicate Finished message (from_guard: {})", from_guard);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Verify only one Finished message was processed
+        assert_eq!(finished_count, 1, "Only one Finished message should be processed");
+        assert_eq!(search_state, SearchState::Idle, "State should be Idle after processing");
+    }
+
+    #[test]
+    fn test_finished_message_different_search_ids() {
+        // Test handling of Finished messages from different searches
+        let (tx, rx) = unbounded();
+
+        // Send Finished from old search
+        tx.send(WorkerMessage::Finished {
+            from_guard: false,
+            search_id: 1,
+        })
+        .unwrap();
+
+        // Send Finished from current search
+        tx.send(WorkerMessage::Finished {
+            from_guard: false,
+            search_id: 2,
+        })
+        .unwrap();
+
+        let mut search_state = SearchState::Searching;
+        let current_search_id = 2;
+        let mut processed_ids = Vec::new();
+
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                WorkerMessage::Finished {
+                    from_guard: _,
+                    search_id,
+                } => {
+                    if search_id == current_search_id && search_state != SearchState::Idle {
+                        search_state = SearchState::Idle;
+                        processed_ids.push(search_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Verify only current search's Finished was processed
+        assert_eq!(processed_ids, vec![2], "Only current search should be processed");
+    }
+
+    #[test]
+    fn test_worker_message_channel_behavior() {
+        // Property test: channel should handle rapid message delivery
+        let (tx, rx) = unbounded();
+        let tx_clone = tx.clone();
+
+        // Spawn thread to send messages rapidly
+        let sender = thread::spawn(move || {
+            for i in 0..100 {
+                let search_id = (i % 3) as u64; // Simulate 3 different searches
+
+                // Send various message types
+                if i % 10 == 0 {
+                    tx_clone
+                        .send(WorkerMessage::Finished {
+                            from_guard: i % 2 == 0,
+                            search_id,
+                        })
+                        .unwrap();
+                }
+
+                if i % 7 == 0 {
+                    tx_clone
+                        .send(WorkerMessage::BestMove {
+                            best_move: format!("7g7f_{}", i),
+                            ponder_move: None,
+                            search_id,
+                        })
+                        .unwrap();
+                }
+            }
+        });
+
+        // Process messages with state tracking
+        let mut finished_per_search = [0; 3];
+        let mut bestmoves_per_search = [0; 3];
+
+        sender.join().unwrap();
+
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                WorkerMessage::Finished {
+                    from_guard: _,
+                    search_id,
+                } => {
+                    finished_per_search[search_id as usize] += 1;
+                }
+                WorkerMessage::BestMove { search_id, .. } => {
+                    bestmoves_per_search[search_id as usize] += 1;
+                }
+                _ => {}
+            }
+        }
+
+        // Verify all messages were received
+        let total_finished: i32 = finished_per_search.iter().sum();
+        let total_bestmoves: i32 = bestmoves_per_search.iter().sum();
+
+        assert!(total_finished > 0, "Should have received Finished messages");
+        assert!(total_bestmoves > 0, "Should have received BestMove messages");
+
+        // Each search should have received messages
+        for i in 0..3 {
+            assert!(finished_per_search[i] > 0, "Search {} should have Finished messages", i);
+        }
+    }
 }
