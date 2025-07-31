@@ -16,6 +16,7 @@ flate2 = "1.0"
 criterion = { version = "0.6", features = ["html_reports"] }
 rand = { workspace = true }
 rand_xoshiro = { workspace = true }
+rayon = "1.10"
 
 # Binary definitions
 [[bin]]
@@ -69,3 +70,15 @@ path = "src/bin/simd_check.rs"
 [[bin]]
 name = "sse41_only_test"
 path = "src/bin/sse41_only_test.rs"
+
+[[bin]]
+name = "generate_training_data"
+path = "src/bin/generate_training_data.rs"
+
+[[bin]]
+name = "generate_training_data_batch"
+path = "src/bin/generate_training_data_batch.rs"
+
+[[bin]]
+name = "debug_training_data"
+path = "src/bin/debug_training_data.rs"

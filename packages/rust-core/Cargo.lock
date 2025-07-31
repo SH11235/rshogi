@@ -1142,6 +1142,7 @@ dependencies = [
  "log",
  "rand",
  "rand_xoshiro",
+ "rayon",
  "serde",
  "serde_json",
 ]
