@@ -134,7 +134,7 @@ mod tests {
             // Poison the mutex
             let handle = thread::spawn(move || {
                 let _guard = mutex_clone.lock().unwrap();
-                panic!("Panic #{}", i);
+                panic!("Panic #{i}");
             });
 
             let _ = handle.join();
