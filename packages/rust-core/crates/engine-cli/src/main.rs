@@ -2,8 +2,9 @@
 
 mod engine_adapter;
 mod usi;
+mod utils;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::{EngineAdapter, EngineError};
@@ -18,22 +19,29 @@ use usi::{
     ensure_flush_on_exit, flush_final, parse_usi_command, send_info_string, send_response,
     send_response_or_exit, UsiCommand, UsiResponse,
 };
+use utils::lock_or_recover_generic;
 
 // Constants for timeout and channel management
 const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const CHANNEL_SIZE: usize = 1024;
 const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// Helper function to lock a mutex with recovery for Poisoned state
-fn lock_or_recover(mutex: &Mutex<EngineAdapter>) -> MutexGuard<EngineAdapter> {
+/// Specialized lock_or_recover for EngineAdapter with state reset
+fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<EngineAdapter> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            log::error!("Mutex was poisoned, attempting recovery");
+            log::error!("EngineAdapter mutex was poisoned, attempting recovery with state reset");
             let mut guard = poisoned.into_inner();
 
             // Force reset engine state to safe defaults
             guard.force_reset_state();
+
+            // Try to notify GUI about the reset
+            let _ = send_info_string(
+                "Engine state reset due to error recovery. Please send 'isready' to reinitialize.",
+            );
+
             guard
         }
     }
@@ -66,11 +74,17 @@ fn generate_fallback_move(
     // Stage 2: Try quick shallow search (depth 1-3)
     log::info!("Attempting quick shallow search");
     let shallow_result = {
-        let _engine = lock_or_recover(engine);
-        // Try a very quick search with minimal depth
-        // This would require implementing a quick_search method
-        // For now, skip to emergency move
-        None
+        let mut engine = lock_or_recover_adapter(engine);
+        match engine.quick_search() {
+            Ok(move_str) => {
+                log::info!("Quick search successful: {move_str}");
+                Some(move_str)
+            }
+            Err(e) => {
+                log::warn!("Quick search failed: {e}");
+                None
+            }
+        }
     };
 
     if let Some(move_str) = shallow_result {
@@ -80,7 +94,7 @@ fn generate_fallback_move(
     // Stage 3: Try emergency move generation
     log::info!("Attempting emergency move generation");
     let emergency_result = {
-        let engine = lock_or_recover(engine);
+        let engine = lock_or_recover_adapter(engine);
         engine.generate_emergency_move()
     };
 
@@ -93,10 +107,15 @@ fn generate_fallback_move(
             log::error!("No legal moves available - position is checkmate or stalemate");
             Ok("resign".to_string())
         }
+        Err(EngineError::EngineNotAvailable(msg)) if msg.contains("Position not set") => {
+            log::error!("Position not set - returning null move");
+            // Return null move (0000) which most GUIs handle gracefully
+            Ok("0000".to_string())
+        }
         Err(e) => {
             log::error!("Failed to generate fallback move: {e}");
-            // Only resign if we truly cannot generate any move
-            Ok("resign".to_string())
+            // Return null move instead of resign for better GUI compatibility
+            Ok("0000".to_string())
         }
     }
 }
@@ -160,9 +179,39 @@ impl Drop for EngineReturnGuard {
                 }
             }
 
-            // Always try to send Finished message to signal completion
-            let _ = self.tx.try_send(WorkerMessage::Finished);
+            // Always try to send Finished message to signal completion (from guard)
+            let _ = self.tx.try_send(WorkerMessage::Finished { from_guard: true });
         }
+    }
+}
+
+/// Search state management - tracks the current state of the search
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchState {
+    /// No search is active
+    Idle,
+    /// Search is actively running
+    Searching,
+    /// Stop has been requested but search is still running
+    StopRequested,
+    /// Fallback move has been sent due to timeout/error
+    FallbackSent,
+}
+
+impl SearchState {
+    /// Check if we're in any searching state
+    fn is_searching(&self) -> bool {
+        matches!(self, SearchState::Searching | SearchState::StopRequested)
+    }
+
+    /// Check if we can start a new search
+    fn can_start_search(&self) -> bool {
+        matches!(self, SearchState::Idle)
+    }
+
+    /// Check if we should accept a bestmove
+    fn can_accept_bestmove(&self) -> bool {
+        matches!(self, SearchState::Searching | SearchState::StopRequested)
     }
 }
 
@@ -179,7 +228,10 @@ enum WorkerMessage {
         depth: u32,
         score: i32,
     },
-    Finished, // Thread finished successfully
+    /// Thread finished - from_guard indicates if sent by EngineReturnGuard
+    Finished {
+        from_guard: bool,
+    },
     Error(String),
     EngineReturn(Engine), // Return the engine after search
 }
@@ -191,7 +243,8 @@ struct CommandContext<'a> {
     worker_tx: &'a Sender<WorkerMessage>,
     worker_rx: &'a Receiver<WorkerMessage>,
     worker_handle: &'a mut Option<JoinHandle<()>>,
-    searching: &'a mut bool,
+    search_state: &'a mut SearchState,
+    bestmove_sent: &'a mut bool,
     stdout: &'a mut dyn Write,
     current_search_timeout: &'a mut Duration,
 }
@@ -237,7 +290,7 @@ fn wait_for_worker_with_timeout(
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
-    searching: &mut bool,
+    search_state: &mut SearchState,
     _stdout: &mut dyn Write,
     timeout: Duration,
 ) -> Result<()> {
@@ -250,8 +303,8 @@ fn wait_for_worker_with_timeout(
         select! {
             recv(worker_rx) -> msg => {
                 match msg {
-                    Ok(WorkerMessage::Finished) => {
-                        log::debug!("Worker thread finished cleanly");
+                    Ok(WorkerMessage::Finished { from_guard }) => {
+                        log::debug!("Worker thread finished cleanly (from_guard: {from_guard})");
                         finished = true;
                         if engine_returned {
                             break;
@@ -259,7 +312,7 @@ fn wait_for_worker_with_timeout(
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
-                        let mut adapter = lock_or_recover(engine);
+                        let mut adapter = lock_or_recover_adapter(engine);
                         adapter.return_engine(returned_engine);
                         engine_returned = true;
                         if finished {
@@ -272,13 +325,13 @@ fn wait_for_worker_with_timeout(
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
                         // Only forward bestmove if we're still searching
-                        if *searching {
+                        if search_state.can_accept_bestmove() {
                             send_response_or_exit(UsiResponse::BestMove {
                                 best_move,
                                 ponder: ponder_move,
                             });
                             // Mark search as finished when bestmove is received
-                            *searching = false;
+                            *search_state = SearchState::Idle;
                         } else {
                             log::warn!("Ignoring late bestmove during shutdown: {best_move}");
                         }
@@ -316,14 +369,14 @@ fn wait_for_worker_with_timeout(
         }
     }
 
-    *searching = false;
+    *search_state = SearchState::Idle;
 
     // Drain any remaining messages in worker_rx
     while let Ok(msg) = worker_rx.try_recv() {
         match msg {
             WorkerMessage::EngineReturn(returned_engine) => {
                 log::debug!("Engine returned during drain");
-                let mut adapter = lock_or_recover(engine);
+                let mut adapter = lock_or_recover_adapter(engine);
                 adapter.return_engine(returned_engine);
             }
             _ => {
@@ -337,20 +390,22 @@ fn wait_for_worker_with_timeout(
 
 /// Wait for any ongoing search to complete
 fn wait_for_search_completion(
-    searching: &mut bool,
+    search_state: &mut SearchState,
+    _bestmove_sent: &mut bool,
     stop_flag: &Arc<AtomicBool>,
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
     stdout: &mut dyn Write,
 ) -> Result<()> {
-    if *searching {
+    if search_state.is_searching() {
+        *search_state = SearchState::StopRequested;
         stop_flag.store(true, Ordering::Release);
         wait_for_worker_with_timeout(
             worker_handle,
             worker_rx,
             engine,
-            searching,
+            search_state,
             stdout,
             MIN_JOIN_TIMEOUT,
         )?;
@@ -481,7 +536,8 @@ fn run_engine() -> Result<()> {
 
     // Store active worker thread handle
     let mut worker_handle: Option<JoinHandle<()>> = None;
-    let mut searching = false;
+    let mut search_state = SearchState::Idle;
+    let mut bestmove_sent = false; // Track if bestmove has been sent for current search
     let mut current_search_timeout = MIN_JOIN_TIMEOUT;
 
     // Get stdout handle
@@ -510,7 +566,8 @@ fn run_engine() -> Result<()> {
                             worker_tx: &worker_tx,
                             worker_rx: &worker_rx,
                             worker_handle: &mut worker_handle,
-                            searching: &mut searching,
+                            search_state: &mut search_state,
+                            bestmove_sent: &mut bestmove_sent,
                             stdout: &mut stdout,
                             current_search_timeout: &mut current_search_timeout,
                         };
@@ -529,25 +586,26 @@ fn run_engine() -> Result<()> {
                         send_response(UsiResponse::Info(info))?;
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move }) => {
-                        // Only send bestmove if we're still searching
+                        // Only send bestmove if we're still searching AND haven't sent one yet
                         // This prevents double bestmove when stop command times out
-                        if searching {
+                        if search_state.can_accept_bestmove() && !bestmove_sent {
                             send_response(UsiResponse::BestMove {
                                 best_move,
                                 ponder: ponder_move,
                             })?;
-                            searching = false; // Clear searching flag after sending bestmove
+                            search_state = SearchState::Idle; // Clear searching flag after sending bestmove
+                            bestmove_sent = true; // Mark that we've sent bestmove
                         } else {
-                            log::warn!("Ignoring late bestmove: {best_move} (searching=false)");
+                            log::warn!("Ignoring late bestmove: {best_move} (search_state={search_state:?}, bestmove_sent={bestmove_sent})");
                         }
                     }
                     Ok(WorkerMessage::PartialResult { .. }) => {
                         // Partial results are handled in stop command processing
                         log::trace!("PartialResult received in main loop");
                     }
-                    Ok(WorkerMessage::Finished) => {
-                        log::debug!("Worker thread finished");
-                        searching = false;
+                    Ok(WorkerMessage::Finished { from_guard }) => {
+                        log::debug!("Worker thread finished (from_guard: {from_guard})");
+                        search_state = SearchState::Idle;
 
                         // Drain any remaining messages including EngineReturn
                         let mut engine_returned = false;
@@ -561,7 +619,7 @@ fn run_engine() -> Result<()> {
                                 }
                                 Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                                     log::debug!("Engine returned after Finished");
-                                    let mut adapter = lock_or_recover(&engine);
+                                    let mut adapter = lock_or_recover_adapter(&engine);
                                     adapter.return_engine(returned_engine);
                                     engine_returned = true;
                                 }
@@ -584,7 +642,7 @@ fn run_engine() -> Result<()> {
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
-                        let mut adapter = lock_or_recover(&engine);
+                        let mut adapter = lock_or_recover_adapter(&engine);
                         adapter.return_engine(returned_engine);
                     }
                     Err(_) => {
@@ -604,12 +662,12 @@ fn run_engine() -> Result<()> {
 
     // Stop any ongoing search with timeout
     stop_flag.store(true, Ordering::Release);
-    if searching {
+    if search_state.is_searching() {
         wait_for_worker_with_timeout(
             &mut worker_handle,
             &worker_rx,
             &engine,
-            &mut searching,
+            &mut search_state,
             &mut stdout,
             MIN_JOIN_TIMEOUT,
         )?;
@@ -639,7 +697,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
             // Send available options
             {
-                let engine = lock_or_recover(ctx.engine);
+                let engine = lock_or_recover_adapter(ctx.engine);
                 for option in engine.get_options() {
                     send_response(UsiResponse::Option(option.to_usi_string()))?;
                 }
@@ -651,7 +709,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
         UsiCommand::IsReady => {
             // Initialize engine if needed
             {
-                let mut engine = lock_or_recover(ctx.engine);
+                let mut engine = lock_or_recover_adapter(ctx.engine);
                 engine.initialize()?;
             }
             send_response(UsiResponse::ReadyOk)?;
@@ -664,7 +722,8 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
         } => {
             // Wait for any ongoing search to complete before updating position
             wait_for_search_completion(
-                ctx.searching,
+                ctx.search_state,
+                ctx.bestmove_sent,
                 ctx.stop_flag,
                 ctx.worker_handle,
                 ctx.worker_rx,
@@ -672,7 +731,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.stdout,
             )?;
 
-            let mut engine = lock_or_recover(ctx.engine);
+            let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.set_position(startpos, sfen.as_deref(), &moves)?;
         }
 
@@ -681,7 +740,8 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
             // Stop any ongoing search
             wait_for_search_completion(
-                ctx.searching,
+                ctx.search_state,
+                ctx.bestmove_sent,
                 ctx.stop_flag,
                 ctx.worker_handle,
                 ctx.worker_rx,
@@ -689,8 +749,15 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 ctx.stdout,
             )?;
 
-            // Reset stop flag
+            // Reset stop flag and bestmove_sent flag
             ctx.stop_flag.store(false, Ordering::Release);
+            *ctx.bestmove_sent = false; // Reset for new search
+
+            // Verify we can start a new search (defensive check)
+            if !ctx.search_state.can_start_search() {
+                log::error!("Cannot start search in state: {:?}", ctx.search_state);
+                return Err(anyhow!("Invalid state for starting search"));
+            }
 
             // Calculate timeout for this search
             *ctx.current_search_timeout = calculate_max_search_time(&params);
@@ -712,23 +779,24 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     // Send error message to main thread
                     let _ =
                         tx_clone.send(WorkerMessage::Error("Worker thread panicked".to_string()));
-                    let _ = tx_clone.send(WorkerMessage::Finished);
+                    let _ = tx_clone.send(WorkerMessage::Finished { from_guard: false });
                 }
             });
 
             *ctx.worker_handle = Some(handle);
-            *ctx.searching = true;
-            log::info!("Worker thread handle stored, searching = true");
+            *ctx.search_state = SearchState::Searching;
+            log::info!("Worker thread handle stored, search_state = Searching");
 
             // Don't block - return immediately
         }
 
         UsiCommand::Stop => {
-            log::info!("Received stop command, searching = {}", *ctx.searching);
+            log::info!("Received stop command, search_state = {:?}", *ctx.search_state);
             // Signal stop to worker thread
-            if *ctx.searching {
+            if ctx.search_state.is_searching() {
+                *ctx.search_state = SearchState::StopRequested;
                 ctx.stop_flag.store(true, Ordering::Release);
-                log::info!("Stop flag set to true");
+                log::info!("Stop flag set to true, search_state = StopRequested");
 
                 // Wait for bestmove with timeout to ensure we always send a response
                 let start = Instant::now();
@@ -749,6 +817,8 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                     best_move: move_str,
                                     ponder: None,
                                 })?;
+                                *ctx.bestmove_sent = true;
+                                *ctx.search_state = SearchState::FallbackSent;
                             }
                             Err(e) => {
                                 log::error!("Fallback move generation failed: {e}");
@@ -756,10 +826,12 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                     best_move: "resign".to_string(),
                                     ponder: None,
                                 })?;
+                                *ctx.bestmove_sent = true;
+                                *ctx.search_state = SearchState::FallbackSent;
                             }
                         }
 
-                        *ctx.searching = false;
+                        *ctx.search_state = SearchState::Idle;
                         break;
                     }
 
@@ -773,7 +845,8 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                 best_move,
                                 ponder: ponder_move,
                             })?;
-                            *ctx.searching = false;
+                            *ctx.search_state = SearchState::Idle;
+                            *ctx.bestmove_sent = true;
                             break;
                         }
                         Ok(WorkerMessage::Info(info)) => {
@@ -788,9 +861,11 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             // Store partial result for fallback
                             partial_result = Some((current_best, depth, score));
                         }
-                        Ok(WorkerMessage::Finished) => {
+                        Ok(WorkerMessage::Finished { from_guard }) => {
                             // Worker finished but no bestmove - use fallback strategy
-                            log::warn!("Worker finished without bestmove");
+                            log::warn!(
+                                "Worker finished without bestmove (from_guard: {from_guard})"
+                            );
 
                             match generate_fallback_move(ctx.engine, partial_result) {
                                 Ok(move_str) => {
@@ -798,6 +873,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                         best_move: move_str,
                                         ponder: None,
                                     })?;
+                                    *ctx.bestmove_sent = true;
                                 }
                                 Err(e) => {
                                     log::error!("Fallback move generation failed: {e}");
@@ -805,10 +881,11 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                         best_move: "resign".to_string(),
                                         ponder: None,
                                     })?;
+                                    *ctx.bestmove_sent = true;
                                 }
                             }
 
-                            *ctx.searching = false;
+                            *ctx.search_state = SearchState::Idle;
                             break;
                         }
                         _ => {
@@ -840,7 +917,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
         UsiCommand::PonderHit => {
             // Handle ponder hit
-            let mut engine = lock_or_recover(ctx.engine);
+            let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.ponder_hit() {
                 Ok(()) => log::debug!("Ponder hit successfully processed"),
                 Err(e) => log::debug!("Ponder hit ignored: {e}"),
@@ -848,7 +925,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
         }
 
         UsiCommand::SetOption { name, value } => {
-            let mut engine = lock_or_recover(ctx.engine);
+            let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.set_option(&name, value.as_deref())?;
         }
 
@@ -857,7 +934,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             ctx.stop_flag.store(true, Ordering::Release);
 
             // Notify engine of game result
-            let mut engine = lock_or_recover(ctx.engine);
+            let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.game_over(result);
         }
 
@@ -865,7 +942,8 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             // ShogiGUI extension - new game notification
             // Stop any ongoing search
             wait_for_search_completion(
-                ctx.searching,
+                ctx.search_state,
+                ctx.bestmove_sent,
                 ctx.stop_flag,
                 ctx.worker_handle,
                 ctx.worker_rx,
@@ -874,7 +952,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             )?;
 
             // Reset engine state for new game
-            let mut engine = lock_or_recover(ctx.engine);
+            let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.new_game();
             log::debug!("New game started");
         }
@@ -912,7 +990,7 @@ fn search_worker(
         {
             // Check if we should send a partial result
             let should_send = {
-                let mut last_depth = last_partial_depth.lock().unwrap();
+                let mut last_depth = lock_or_recover_generic(&last_partial_depth);
                 if depth >= *last_depth + 5 || (depth >= 10 && depth > *last_depth) {
                     *last_depth = depth;
                     true
@@ -950,7 +1028,7 @@ fn search_worker(
     let was_ponder = params.ponder;
     log::info!("Attempting to take engine from adapter");
     let (engine, position, limits, ponder_hit_flag) = {
-        let mut adapter = lock_or_recover(&engine_adapter);
+        let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::info!("Adapter lock acquired, calling take_engine");
         match adapter.take_engine() {
             Ok(engine) => {
@@ -992,7 +1070,7 @@ fn search_worker(
                             }
                         }
 
-                        let _ = tx.send(WorkerMessage::Finished);
+                        let _ = tx.send(WorkerMessage::Finished { from_guard: false });
                         return;
                     }
                 }
@@ -1026,7 +1104,7 @@ fn search_worker(
                     }
                 }
 
-                let _ = tx.send(WorkerMessage::Finished);
+                let _ = tx.send(WorkerMessage::Finished { from_guard: false });
                 return;
             }
         }
@@ -1051,7 +1129,7 @@ fn search_worker(
         Ok((best_move, ponder_move)) => {
             // Clean up ponder state if needed
             {
-                let mut adapter = lock_or_recover(&engine_adapter);
+                let mut adapter = lock_or_recover_adapter(&engine_adapter);
                 adapter.cleanup_after_search(was_ponder);
             }
 
@@ -1069,13 +1147,13 @@ fn search_worker(
 
             // Clean up ponder state if needed
             {
-                let mut adapter = lock_or_recover(&engine_adapter);
+                let mut adapter = lock_or_recover_adapter(&engine_adapter);
                 adapter.cleanup_after_search(was_ponder);
             }
 
             // Try to generate emergency move before sending error
             let emergency_result = {
-                let adapter = lock_or_recover(&engine_adapter);
+                let adapter = lock_or_recover_adapter(&engine_adapter);
                 adapter.generate_emergency_move()
             };
 
@@ -1129,7 +1207,7 @@ fn search_worker(
     }
 
     // Always send Finished at the end - use blocking send to ensure delivery
-    match tx.send(WorkerMessage::Finished) {
+    match tx.send(WorkerMessage::Finished { from_guard: false }) {
         Ok(()) => log::debug!("Finished message sent successfully"),
         Err(e) => {
             log::error!("Failed to send Finished message: {e}. Channel might be closed.");

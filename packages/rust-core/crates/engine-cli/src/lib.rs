@@ -2,3 +2,4 @@
 
 pub mod engine_adapter;
 pub mod usi;
+pub mod utils;

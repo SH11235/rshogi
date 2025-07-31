@@ -175,7 +175,27 @@ impl EngineAdapter {
             log::error!("Engine is not available during reset - will be returned by guard");
         }
 
-        log::info!("Engine state reset completed");
+        // TODO: Add engine hard reset when API is available
+        // This would clear:
+        // - NNUE cache and network state
+        // - Transposition table (hash table)
+        // - History tables
+        // - Killer moves
+        // - Any other search-related state
+        //
+        // Implementation example:
+        // if let Some(ref mut engine) = self.engine {
+        //     engine.hard_reset()?; // Clear all internal state
+        // }
+        //
+        // Alternative: recreate the engine entirely
+        // if self.engine.is_some() {
+        //     self.engine = Some(Engine::new(self.threads));
+        // }
+
+        // Try to notify GUI about the reset - we can't use USI response here
+        // since we're in the adapter layer, so we'll rely on the caller to handle this
+        log::info!("Engine state reset completed - please send 'isready' to reinitialize");
     }
 
     /// Create a new engine adapter
@@ -780,6 +800,63 @@ impl EngineAdapter {
             move_str,
             moves.len(),
             in_check
+        );
+
+        Ok(move_str)
+    }
+
+    /// Perform a quick shallow search (depth 1-3) for emergency situations
+    /// This is used as a fallback when the main search fails or times out
+    pub fn quick_search(&mut self) -> Result<String, EngineError> {
+        use engine_core::search::limits::SearchLimits;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        // Validate engine state first
+        self.validate_engine_state()?;
+
+        // Get current position
+        let mut position = self
+            .position
+            .as_ref()
+            .ok_or(EngineError::EngineNotAvailable("No position set".to_string()))?
+            .clone();
+
+        // Check if engine is available
+        let engine = self.engine.as_mut().ok_or(EngineError::EngineNotAvailable(
+            "Engine not available for quick search".to_string(),
+        ))?;
+
+        // Create a stop flag for emergency timeout
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Create minimal search limits - depth 3, 100ms timeout
+        let limits = SearchLimits::builder()
+            .depth(3)
+            .fixed_time_ms(100)
+            .stop_flag(stop_flag.clone())
+            .build();
+
+        log::info!("Starting quick search (depth 3, 100ms timeout)");
+
+        // Execute search
+        let result = engine.search(&mut position, limits);
+
+        // Check if we found a move
+        if result.best_move.is_none() {
+            return Err(EngineError::NoLegalMoves);
+        }
+
+        // Convert to USI format
+        let best_move = result.best_move.unwrap();
+        let move_str = engine_core::usi::move_to_usi(&best_move);
+
+        log::info!(
+            "Quick search completed: {} (depth:{} nodes:{} score:{})",
+            move_str,
+            result.stats.depth,
+            result.stats.nodes,
+            result.score
         );
 
         Ok(move_str)
