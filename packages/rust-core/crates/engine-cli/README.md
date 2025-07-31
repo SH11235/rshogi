@@ -26,6 +26,13 @@ cargo run -p engine-cli
 ./target/release/engine-cli
 ```
 
+### コマンドラインオプション
+
+- `--debug` / `-d` - デバッグログを有効化
+- `--allow-null-move` - エラー時にnull move（0000）を送信（デフォルト: 無効）
+
+詳細は[エンジンオプションリファレンス](docs/engine-options-reference.md#コマンドラインオプション)を参照してください。
+
 ## テスト
 
 ### ユニットテスト
