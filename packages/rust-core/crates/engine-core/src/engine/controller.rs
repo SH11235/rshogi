@@ -242,6 +242,11 @@ impl Engine {
         Ok(())
     }
 
+    /// Get current engine type
+    pub fn get_engine_type(&self) -> EngineType {
+        self.engine_type
+    }
+
     /// Set engine type
     pub fn set_engine_type(&mut self, engine_type: EngineType) {
         self.engine_type = engine_type;
