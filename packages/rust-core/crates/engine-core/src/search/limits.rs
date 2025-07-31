@@ -86,6 +86,12 @@ impl SearchLimits {
 /// The builder follows the "last write wins" principle for time control settings.
 /// For example, calling `fixed_time_ms(1000).fixed_nodes(10000)` will result in
 /// `FixedNodes` time control, overwriting the previous `FixedTime` setting.
+///
+/// Note: `depth` and time control settings (like `fixed_time_ms`) are independent:
+/// - `depth` sets a maximum search depth
+/// - Time control settings (fixed_time_ms, fixed_nodes, etc.) set time/resource limits
+/// - When both are set, the search stops when EITHER limit is reached first
+/// - Example: `.depth(10).fixed_time_ms(5000)` searches up to depth 10 OR 5 seconds
 pub struct SearchLimitsBuilder {
     time_control: TimeControl,
     moves_to_go: Option<u32>,
@@ -114,12 +120,18 @@ impl Default for SearchLimitsBuilder {
 
 impl SearchLimitsBuilder {
     /// Set search depth
+    ///
+    /// This sets a maximum depth for the search. Can be combined with time controls.
+    /// When both depth and time limits are set, the search stops at whichever is reached first.
     pub fn depth(mut self, depth: u32) -> Self {
         self.depth = Some(depth);
         self
     }
 
     /// Set fixed time per move in milliseconds
+    ///
+    /// This sets the time_control field but does NOT affect the depth field.
+    /// Can be combined with depth limits - the search stops at whichever limit is reached first.
     pub fn fixed_time_ms(mut self, ms: u64) -> Self {
         self.time_control = TimeControl::FixedTime { ms_per_move: ms };
         self
