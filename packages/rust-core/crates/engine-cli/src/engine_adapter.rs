@@ -160,6 +160,24 @@ impl EngineAdapter {
         log::debug!("New game started - cleared ponder state and position");
     }
 
+    /// Force reset engine state to safe defaults (used for panic recovery)
+    pub fn force_reset_state(&mut self) {
+        log::warn!("Force resetting engine state due to error recovery");
+
+        // Clear all ponder state
+        self.clear_ponder_state();
+
+        // Clear position - safer to require re-initialization
+        self.position = None;
+
+        // If engine is None, we can't do much - it will be returned by EngineReturnGuard
+        if self.engine.is_none() {
+            log::error!("Engine is not available during reset - will be returned by guard");
+        }
+
+        log::info!("Engine state reset completed");
+    }
+
     /// Create a new engine adapter
     pub fn new() -> Self {
         let mut adapter = Self {
