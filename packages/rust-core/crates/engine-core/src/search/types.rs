@@ -101,10 +101,12 @@ pub struct SearchState {
 /// including killer moves, current move being searched, and various flags.
 #[derive(Clone, Default)]
 pub struct SearchStack {
+    /// Current ply (depth) in the search tree
+    pub ply: u16,
     /// Current move being searched
     pub current_move: Option<Move>,
-    /// Static evaluation
-    pub static_eval: i32,
+    /// Static evaluation at this position (cached)
+    pub static_eval: Option<i32>,
     /// Killer moves (quiet moves that caused beta cutoffs)
     pub killers: [Option<Move>; 2],
     /// Move count at this ply
@@ -115,6 +117,51 @@ pub struct SearchStack {
     pub null_move: bool,
     /// In check flag
     pub in_check: bool,
+    /// Threat move (from null move search)
+    pub threat_move: Option<Move>,
+    /// History score of current move
+    pub history_score: i32,
+    /// Excluded move (for singular extension)
+    pub excluded_move: Option<Move>,
+}
+
+impl SearchStack {
+    /// Create a new search stack entry for the given ply
+    pub fn new(ply: u16) -> Self {
+        Self {
+            ply,
+            ..Default::default()
+        }
+    }
+
+    /// Update killers (convenience method)
+    pub fn update_killers(&mut self, mv: Move) {
+        if mv.is_capture_hint() {
+            return;
+        }
+
+        // Don't store the same move twice
+        if self.killers[0] == Some(mv) {
+            return;
+        }
+
+        // Shift killers and add new one
+        self.killers[1] = self.killers[0];
+        self.killers[0] = Some(mv);
+    }
+
+    /// Check if a move is a killer move
+    pub fn is_killer(&self, mv: Move) -> bool {
+        self.killers[0] == Some(mv) || self.killers[1] == Some(mv)
+    }
+
+    /// Clear for new node
+    pub fn clear_for_new_node(&mut self) {
+        self.current_move = None;
+        self.move_count = 0;
+        self.excluded_move = None;
+        // Note: We keep killers, static_eval, threat_move as they may be useful
+    }
 }
 
 impl SearchState {

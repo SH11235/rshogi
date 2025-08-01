@@ -13,6 +13,7 @@ use crate::{
     search::{
         history::History,
         tt::{NodeType, TranspositionTable},
+        types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
     },
     shogi::{Move, Position},
@@ -73,6 +74,9 @@ pub struct UnifiedSearcher<
 
     /// Time manager reference for ponder hit handling
     time_manager: Option<Arc<crate::time_management::TimeManager>>,
+
+    /// Search stack for tracking state at each ply
+    search_stack: Vec<SearchStack>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -83,6 +87,10 @@ where
     /// Create a new unified searcher
     pub fn new(evaluator: E) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
+        let mut search_stack = Vec::with_capacity(128);
+        for ply in 0..128 {
+            search_stack.push(SearchStack::new(ply as u16));
+        }
 
         Self {
             evaluator: Arc::new(evaluator),
@@ -97,12 +105,17 @@ where
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
             time_manager: None,
+            search_stack,
         }
     }
 
     /// Create a new unified searcher with an already Arc-wrapped evaluator
     pub fn with_arc(evaluator: Arc<E>) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
+        let mut search_stack = Vec::with_capacity(128);
+        for ply in 0..128 {
+            search_stack.push(SearchStack::new(ply as u16));
+        }
 
         Self {
             evaluator,
@@ -117,6 +130,7 @@ where
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
             time_manager: None,
+            search_stack,
         }
     }
 
