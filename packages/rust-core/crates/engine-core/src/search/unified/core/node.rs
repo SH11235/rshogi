@@ -84,8 +84,13 @@ where
                 0
             };
 
-            // Null window search
-            let reduced_depth = depth.saturating_sub(1 + reduction);
+            // Null window search with safe depth calculation
+            // Ensure we have at least depth 1 for the search
+            let reduced_depth = if depth > 1 + reduction {
+                depth - 1 - reduction
+            } else {
+                1
+            };
             score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, ply + 1);
 
             // Re-search if needed
