@@ -301,6 +301,10 @@ where
     // Check time limits in quiescence search (especially important for FixedNodes)
     let event_interval = get_event_poll_interval(searcher);
     if (searcher.stats.nodes & event_interval) == 0 {
+        // Check both context stop flag and time manager
+        if searcher.context.should_stop() {
+            return alpha;
+        }
         if let Some(ref tm) = searcher.time_manager {
             if tm.should_stop(searcher.stats.nodes) {
                 searcher.context.stop();
