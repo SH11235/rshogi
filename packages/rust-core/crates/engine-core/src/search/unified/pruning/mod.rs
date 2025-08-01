@@ -123,33 +123,57 @@ pub fn razoring_margin(depth: u8) -> i32 {
 }
 
 /// Calculate LMR reduction
+/// More aggressive reduction table based on modern engine practices
 pub fn lmr_reduction(depth: u8, moves_searched: u32) -> u8 {
-    // More sophisticated reduction table based on depth and move count
+    // No reduction for first few moves or shallow depths
+    if depth < 3 || moves_searched < 4 {
+        return 0;
+    }
+
+    // More aggressive reduction table
     match (depth, moves_searched) {
-        (d, m) if d >= 8 && m >= 16 => 4,
-        (d, m) if d >= 6 && m >= 12 => 3,
-        (d, m) if d >= 5 && m >= 8 => 2,
+        // Very deep searches with many moves - maximum reduction
+        (d, m) if d >= 10 && m >= 20 => 6,
+        (d, m) if d >= 9 && m >= 18 => 5,
+        (d, m) if d >= 8 && m >= 16 => 5,
+
+        // Deep searches - significant reduction
+        (d, m) if d >= 7 && m >= 14 => 4,
+        (d, m) if d >= 6 && m >= 12 => 4,
+        (d, m) if d >= 6 && m >= 8 => 3,
+
+        // Medium depth - moderate reduction
+        (d, m) if d >= 5 && m >= 10 => 3,
+        (d, m) if d >= 5 && m >= 6 => 3,
+        (d, m) if d >= 4 && m >= 8 => 3,
         (d, m) if d >= 4 && m >= 4 => 2,
+
+        // Shallow depth - light reduction
+        (d, m) if d >= 3 && m >= 6 => 2,
         (d, m) if d >= 3 && m >= 4 => 1,
+
         _ => 0,
     }
 }
 
 /// Calculate LMR reduction with logarithmic formula (alternative implementation)
 /// This provides smoother reduction based on depth and move count
+/// Can be enabled by switching the function call in node.rs for A/B testing
 #[allow(dead_code)]
 pub fn lmr_reduction_formula(depth: u8, moves_searched: u32) -> u8 {
     if depth < 3 || moves_searched < 4 {
         return 0;
     }
 
-    // Formula similar to Stockfish: log(depth) * log(moves)
+    // More aggressive formula: log(depth) * log(moves) / 1.5
+    // The divisor is reduced from 2.0 to 1.5 for more aggressive pruning
     let depth_factor = (depth as f32).ln();
     let moves_factor = (moves_searched as f32).ln();
-    let reduction = (depth_factor * moves_factor / 2.0) as u8;
+    let reduction = (depth_factor * moves_factor / 1.5) as u8;
 
-    // Cap the reduction to avoid over-reducing
-    reduction.min(depth.saturating_sub(2))
+    // Cap the reduction more aggressively
+    // Allow reduction up to depth-1 for very late moves
+    reduction.min(depth.saturating_sub(1))
 }
 
 /// Check if score is a mate score
