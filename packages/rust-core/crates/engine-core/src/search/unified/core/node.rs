@@ -18,6 +18,11 @@ pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const 
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // Check stop flag at the beginning
+    if searcher.context.should_stop() {
+        return alpha;
+    }
+
     let original_alpha = alpha;
     let hash = pos.zobrist_hash;
     let mut best_move = None;
@@ -60,6 +65,10 @@ where
 
     // Search moves
     for &mv in ordered_moves.iter() {
+        // Check stop flag before searching each move
+        if searcher.context.should_stop() {
+            break;
+        }
         // Update current move in search stack
         if crate::search::types::SearchStack::is_valid_ply(ply) {
             searcher.search_stack[ply as usize].current_move = Some(mv);
