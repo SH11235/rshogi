@@ -606,6 +606,34 @@ impl Board {
         }
     }
 
+    /// Get pieces of specific type and color
+    pub fn pieces_of_type_and_color(&self, piece_type: PieceType, color: Color) -> Bitboard {
+        self.piece_bb[color as usize][piece_type as usize]
+    }
+
+    /// Check if a square is attacked by a specific color
+    pub fn is_attacked_by(&self, sq: Square, by_color: Color) -> bool {
+        use crate::shogi::ATTACK_TABLES;
+
+        // Check attacks from each piece type
+        // King attacks
+        let king_attacks = ATTACK_TABLES.king_attacks[sq.index()];
+        if !(king_attacks & self.piece_bb[by_color as usize][PieceType::King as usize]).is_empty() {
+            return true;
+        }
+
+        // Gold attacks (includes promoted pieces)
+        let gold_attacks = ATTACK_TABLES.gold_attacks[by_color as usize][sq.index()];
+        if !(gold_attacks & self.piece_bb[by_color as usize][PieceType::Gold as usize]).is_empty() {
+            return true;
+        }
+
+        // TODO: Add checks for other piece types (rook, bishop, silver, knight, lance, pawn)
+        // For now, this is a simplified implementation
+
+        false
+    }
+
     /// Find king square
     pub fn king_square(&self, color: Color) -> Option<Square> {
         let mut bb = self.piece_bb[color as usize][PieceType::King as usize];
@@ -873,6 +901,9 @@ impl Position {
         pos.hash = pos.compute_hash();
         pos.zobrist_hash = pos.hash;
 
+        // Set initial ply to 1
+        pos.ply = 1;
+
         pos
     }
 
@@ -1031,6 +1062,18 @@ impl Position {
         self.ply += 1;
 
         undo_info
+    }
+
+    /// Check if the current side to move is in check
+    pub fn is_in_check(&self) -> bool {
+        // Get the king square for the side to move
+        if let Some(king_sq) = self.board.king_square(self.side_to_move) {
+            // Check if the king is attacked by the opponent
+            self.board.is_attacked_by(king_sq, self.side_to_move.opposite())
+        } else {
+            // No king on board - shouldn't happen in a legal position
+            false
+        }
     }
 
     /// Check if position is draw (simplified check)

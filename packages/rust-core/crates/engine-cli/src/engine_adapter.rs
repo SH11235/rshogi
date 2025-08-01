@@ -997,7 +997,7 @@ impl EngineAdapter {
 }
 
 /// Validate and clamp search depth to ensure it's within valid range
-fn validate_and_clamp_depth(depth: u32) -> u32 {
+fn validate_and_clamp_depth(depth: u32) -> u8 {
     // Ensure minimum depth of 1 to prevent "no search" scenario
     let safe_depth = if depth == 0 {
         log::warn!("Depth 0 is not supported, using minimum depth of 1");
@@ -1013,7 +1013,7 @@ fn validate_and_clamp_depth(depth: u32) -> u32 {
             "Depth {safe_depth} exceeds maximum supported depth {MAX_PLY}, clamping to {clamped_depth}"
         );
     }
-    clamped_depth
+    clamped_depth as u8
 }
 
 /// Check if the go parameters represent Fischer time control disguised as byoyomi
@@ -1520,7 +1520,7 @@ mod tests {
         let limits = apply_go_params(builder, &params, &position, DEFAULT_BYOYOMI_PERIODS).unwrap();
 
         // Depth should be clamped to MAX_PLY
-        assert_eq!(limits.depth, Some(MAX_PLY as u32));
+        assert_eq!(limits.depth, Some(MAX_PLY as u8));
     }
 
     #[test]
@@ -1549,7 +1549,7 @@ mod tests {
 
     #[test]
     fn test_validate_and_clamp_depth_exceeds_max() {
-        assert_eq!(validate_and_clamp_depth(200), MAX_PLY as u32);
+        assert_eq!(validate_and_clamp_depth(200), MAX_PLY as u8);
     }
 
     #[test]
