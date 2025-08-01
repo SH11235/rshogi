@@ -114,7 +114,7 @@ mod tests {
 
         pos.board.rebuild_occupancy_bitboards();
 
-        let evaluator = Arc::new(MaterialEvaluator);
+        let evaluator = MaterialEvaluator;
         let limits = SearchLimitsBuilder::default().depth(3).build();
         let mut searcher = Searcher::new(evaluator);
 
@@ -122,5 +122,20 @@ mod tests {
 
         // Should find a rook move
         assert!(result.best_move.is_some());
+    }
+
+    #[test]
+    fn test_search_with_arc() {
+        // Test the with_arc() constructor for backward compatibility
+        let mut pos = Position::startpos();
+        let evaluator = Arc::new(MaterialEvaluator);
+        let limits = SearchLimitsBuilder::default().depth(3).build();
+        let mut searcher = Searcher::with_arc(evaluator);
+
+        let result = searcher.search(&mut pos, limits);
+
+        assert!(result.best_move.is_some());
+        assert!(result.stats.nodes > 0);
+        assert!(result.score.abs() < 1000); // Should be relatively balanced
     }
 }

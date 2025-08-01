@@ -63,6 +63,9 @@ pub struct UnifiedSearcher<
 
     /// Search context
     context: context::SearchContext,
+
+    /// Time manager reference for ponder hit handling
+    time_manager: Option<Arc<crate::time_management::TimeManager>>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -87,6 +90,7 @@ where
             pv_table: core::PVTable::new(),
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
+            time_manager: None,
         }
     }
 
@@ -107,6 +111,7 @@ where
             pv_table: core::PVTable::new(),
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
+            time_manager: None,
         }
     }
 
@@ -119,6 +124,32 @@ where
 
         let start_time = Instant::now();
 
+        // Create TimeManager if needed
+        use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
+        if !matches!(limits.time_control, TimeControl::Infinite | TimeControl::FixedNodes { .. }) {
+            // Convert SearchLimits to TimeLimits
+            let time_limits: TimeLimits = limits.clone().into();
+
+            // Estimate game phase from position
+            let game_phase = if pos.ply <= 40 {
+                GamePhase::Opening
+            } else if pos.ply <= 120 {
+                GamePhase::MiddleGame
+            } else {
+                GamePhase::EndGame
+            };
+
+            let time_manager = Arc::new(TimeManager::new(
+                &time_limits,
+                pos.side_to_move,
+                pos.ply.into(), // Convert u16 to u32
+                game_phase,
+            ));
+            self.time_manager = Some(time_manager);
+        } else {
+            self.time_manager = None;
+        }
+
         // Initialize search context with limits
         self.context.set_limits(limits);
 
@@ -128,6 +159,18 @@ where
         let mut depth = 1;
 
         while depth <= self.context.max_depth() && !self.context.should_stop() {
+            // Process events including ponder hit
+            self.context.process_events(&self.time_manager);
+
+            // Check time limits via TimeManager
+            if let Some(ref tm) = self.time_manager {
+                if tm.should_stop(self.stats.nodes) {
+                    log::info!("TimeManager signaled stop after {} nodes", self.stats.nodes);
+                    self.context.stop();
+                    break;
+                }
+            }
+
             // Search at current depth
             let (score, pv) = self.search_root(pos, depth);
 
