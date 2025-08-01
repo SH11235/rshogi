@@ -29,6 +29,7 @@ jobs:
     name: NNUE & Enhanced Engine Tests
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    timeout-minutes: 30  # Increase timeout for large tests
     strategy:
       fail-fast: false
       matrix:
