@@ -29,11 +29,15 @@ use std::{sync::Arc, time::Instant};
 ///
 /// # Examples
 /// ```
+/// use engine_core::search::unified::UnifiedSearcher;
+/// use engine_core::evaluation::evaluate::MaterialEvaluator;
+/// use engine_core::evaluation::nnue::NNUEEvaluator;
+///
 /// // Basic searcher with minimal features
 /// type BasicSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
 ///
 /// // Enhanced searcher with all features
-/// type EnhancedSearcher = UnifiedSearcher<NnueEvaluator, true, true, 16>;
+/// type EnhancedSearcher = UnifiedSearcher<NNUEEvaluator, true, true, 16>;
 /// ```
 pub struct UnifiedSearcher<
     E,
