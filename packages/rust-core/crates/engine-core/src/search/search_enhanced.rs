@@ -83,11 +83,9 @@ where
         // Time manager is handled internally by UnifiedSearcher
     }
 
-    /// Get current depth (no-op, returns 0)
+    /// Get current depth
     pub fn current_depth(&self) -> u8 {
-        // UnifiedSearcher doesn't expose current depth
-        // Return 0 for backward compatibility
-        0
+        self.searcher.current_depth()
     }
 
     /// Legacy search interface

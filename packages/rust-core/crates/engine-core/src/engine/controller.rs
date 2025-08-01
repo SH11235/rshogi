@@ -125,7 +125,7 @@ impl Engine {
         log::info!("Engine::search called with engine_type: {:?}", self.engine_type);
         match self.engine_type {
             EngineType::Material => {
-                let mut searcher = Searcher::new(self.material_evaluator.clone());
+                let mut searcher = Searcher::with_arc(self.material_evaluator.clone());
                 searcher.search(pos, limits)
             }
             EngineType::Nnue => {
@@ -133,7 +133,7 @@ impl Engine {
                 let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
                     evaluator: self.nnue_evaluator.clone(),
                 });
-                let mut searcher = Searcher::new(nnue_proxy);
+                let mut searcher = Searcher::with_arc(nnue_proxy);
                 log::info!("Starting NNUE search");
                 let result = searcher.search(pos, limits);
                 log::info!("NNUE search completed");
