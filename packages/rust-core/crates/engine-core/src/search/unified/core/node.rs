@@ -228,48 +228,27 @@ where
                             None
                         };
 
-                        if let Ok(mut history) = searcher.history.lock() {
-                            // Update history for the cutoff move
-                            history.update_cutoff(pos.side_to_move, mv, depth as i32, prev_move);
+                        match searcher.history.lock() {
+                            Ok(mut history) => {
+                                // Update history for the cutoff move
+                                history.update_cutoff(
+                                    pos.side_to_move,
+                                    mv,
+                                    depth as i32,
+                                    prev_move,
+                                );
 
-                            // Update counter move history
-                            if let Some(prev_mv) = prev_move {
-                                history.counter_moves.update(pos.side_to_move, prev_mv, mv);
-                            }
-
-                            // Update capture history if it's a capture
-                            if mv.is_capture_hint() {
-                                if let (Some(attacker), Some(victim)) =
-                                    (mv.piece_type(), mv.captured_piece_type())
-                                {
-                                    history.capture.update_good(
-                                        pos.side_to_move,
-                                        attacker,
-                                        victim,
-                                        depth as i32,
-                                    );
+                                // Update counter move history
+                                if let Some(prev_mv) = prev_move {
+                                    history.counter_moves.update(pos.side_to_move, prev_mv, mv);
                                 }
-                            }
 
-                            // Penalize quiet moves that didn't cause cutoff
-                            for &quiet_mv in quiet_moves_tried.iter() {
-                                if quiet_mv != mv {
-                                    history.update_quiet(
-                                        pos.side_to_move,
-                                        quiet_mv,
-                                        depth as i32,
-                                        prev_move,
-                                    );
-                                }
-                            }
-
-                            // Penalize captures that didn't cause cutoff
-                            for &capture_mv in captures_tried.iter() {
-                                if capture_mv != mv {
+                                // Update capture history if it's a capture
+                                if mv.is_capture_hint() {
                                     if let (Some(attacker), Some(victim)) =
-                                        (capture_mv.piece_type(), capture_mv.captured_piece_type())
+                                        (mv.piece_type(), mv.captured_piece_type())
                                     {
-                                        history.capture.update_bad(
+                                        history.capture.update_good(
                                             pos.side_to_move,
                                             attacker,
                                             victim,
@@ -277,6 +256,44 @@ where
                                         );
                                     }
                                 }
+
+                                // Limit the number of moves to update for performance
+                                const MAX_MOVES_TO_UPDATE: usize = 16;
+
+                                // Penalize quiet moves that didn't cause cutoff
+                                for &quiet_mv in quiet_moves_tried.iter().take(MAX_MOVES_TO_UPDATE)
+                                {
+                                    if quiet_mv != mv {
+                                        history.update_quiet(
+                                            pos.side_to_move,
+                                            quiet_mv,
+                                            depth as i32,
+                                            prev_move,
+                                        );
+                                    }
+                                }
+
+                                // Penalize captures that didn't cause cutoff
+                                for &capture_mv in captures_tried.iter().take(MAX_MOVES_TO_UPDATE) {
+                                    if capture_mv != mv {
+                                        if let (Some(attacker), Some(victim)) = (
+                                            capture_mv.piece_type(),
+                                            capture_mv.captured_piece_type(),
+                                        ) {
+                                            history.capture.update_bad(
+                                                pos.side_to_move,
+                                                attacker,
+                                                victim,
+                                                depth as i32,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to acquire history lock for updates: {e}");
+                                // Fallback: Just update stats without history heuristics
+                                // This ensures search continues to function even if history is unavailable
                             }
                         }
                     }
