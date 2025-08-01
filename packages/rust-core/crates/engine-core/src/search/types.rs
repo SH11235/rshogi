@@ -95,6 +95,28 @@ pub struct SearchState {
     pub score: i32,
 }
 
+/// Search stack entry for tracking search state at each ply
+///
+/// This structure is used to track the state of the search at each depth level,
+/// including killer moves, current move being searched, and various flags.
+#[derive(Clone, Default)]
+pub struct SearchStack {
+    /// Current move being searched
+    pub current_move: Option<Move>,
+    /// Static evaluation
+    pub static_eval: i32,
+    /// Killer moves (quiet moves that caused beta cutoffs)
+    pub killers: [Option<Move>; 2],
+    /// Move count at this ply
+    pub move_count: u32,
+    /// PV node flag
+    pub pv: bool,
+    /// Null move tried flag
+    pub null_move: bool,
+    /// In check flag
+    pub in_check: bool,
+}
+
 impl SearchState {
     /// Determine node type based on original bounds and final score
     pub fn node_type(&self) -> NodeType {

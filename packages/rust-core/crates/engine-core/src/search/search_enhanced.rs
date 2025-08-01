@@ -12,25 +12,8 @@ use std::sync::Arc;
 
 // Re-export types that were previously defined here for backward compatibility
 // GamePhase is now in time_management module
-
-/// Search stack entry - now just a re-export for backward compatibility
-#[derive(Clone, Default)]
-pub struct SearchStack {
-    /// Current move being searched
-    pub current_move: Option<Move>,
-    /// Static evaluation
-    pub static_eval: i32,
-    /// Killer moves
-    pub killers: [Option<Move>; 2],
-    /// Move count
-    pub move_count: u32,
-    /// PV node flag
-    pub pv: bool,
-    /// Null move tried flag
-    pub null_move: bool,
-    /// In check flag
-    pub in_check: bool,
-}
+// SearchStack is now in types module, re-export for compatibility
+pub use crate::search::types::SearchStack;
 
 /// Enhanced searcher using unified searcher with pruning enabled
 pub struct EnhancedSearcher<E>
