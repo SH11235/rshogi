@@ -164,6 +164,15 @@ impl SearchStack {
         self.excluded_move = None;
         // Note: We keep killers, static_eval, threat_move as they may be useful
     }
+
+    /// Check if ply is within valid range for SearchStack access
+    ///
+    /// Since SearchStack is pre-allocated with 128 elements and MAX_PLY is 127,
+    /// this is essentially a compile-time constant check.
+    #[inline(always)]
+    pub fn is_valid_ply(ply: u16) -> bool {
+        ply < 128 // SearchStack size is hardcoded to 128 in UnifiedSearcher::new()
+    }
 }
 
 impl SearchState {
