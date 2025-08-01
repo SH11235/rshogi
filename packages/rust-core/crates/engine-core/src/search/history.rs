@@ -2,7 +2,7 @@
 //!
 //! Tracks the success rate of moves in different contexts to improve move ordering
 
-use crate::{shogi::Move, Color, Square};
+use crate::{shogi::Move, Color, PieceType, Square};
 
 /// Maximum history score
 const MAX_HISTORY_SCORE: i32 = 10000;
@@ -248,6 +248,71 @@ impl ContinuationHistory {
     }
 }
 
+/// Capture history - tracks success of captures by piece types
+#[derive(Clone)]
+pub struct CaptureHistory {
+    /// [color][attacker_piece][victim_piece] -> score
+    scores: [[[i32; 8]; 8]; 2],
+}
+
+impl Default for CaptureHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CaptureHistory {
+    /// Create new capture history
+    pub fn new() -> Self {
+        CaptureHistory {
+            scores: [[[0; 8]; 8]; 2],
+        }
+    }
+
+    /// Get capture history score
+    pub fn get(&self, color: Color, attacker: PieceType, victim: PieceType) -> i32 {
+        self.scores[color as usize][attacker as usize][victim as usize]
+    }
+
+    /// Update capture history with bonus
+    pub fn update_good(
+        &mut self,
+        color: Color,
+        attacker: PieceType,
+        victim: PieceType,
+        depth: i32,
+    ) {
+        let bonus = depth * depth;
+        let score = &mut self.scores[color as usize][attacker as usize][victim as usize];
+        *score += bonus - (*score * bonus.abs() / MAX_HISTORY_SCORE);
+        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+    }
+
+    /// Update capture history with penalty
+    pub fn update_bad(&mut self, color: Color, attacker: PieceType, victim: PieceType, depth: i32) {
+        let penalty = -(depth * depth);
+        let score = &mut self.scores[color as usize][attacker as usize][victim as usize];
+        *score += penalty - (*score * penalty.abs() / MAX_HISTORY_SCORE);
+        *score = (*score).clamp(-MAX_HISTORY_SCORE, MAX_HISTORY_SCORE);
+    }
+
+    /// Age all capture history scores
+    pub fn age_scores(&mut self) {
+        for color_scores in &mut self.scores {
+            for attacker_scores in color_scores {
+                for score in attacker_scores {
+                    *score /= HISTORY_AGING_DIVISOR;
+                }
+            }
+        }
+    }
+
+    /// Clear all capture history
+    pub fn clear(&mut self) {
+        self.scores = [[[0; 8]; 8]; 2];
+    }
+}
+
 /// Combined history tables for move ordering
 #[derive(Clone)]
 pub struct History {
@@ -257,6 +322,8 @@ pub struct History {
     pub counter_moves: CounterMoveHistory,
     /// Continuation history (2-ply)
     pub continuation: ContinuationHistory,
+    /// Capture history
+    pub capture: CaptureHistory,
 }
 
 impl Default for History {
@@ -272,6 +339,7 @@ impl History {
             butterfly: ButterflyHistory::new(),
             counter_moves: CounterMoveHistory::new(),
             continuation: ContinuationHistory::new(),
+            capture: CaptureHistory::new(),
         }
     }
 
@@ -350,6 +418,7 @@ impl History {
     pub fn age_all(&mut self) {
         self.butterfly.age_scores();
         self.continuation.age_scores();
+        self.capture.age_scores();
     }
 
     /// Clear all history tables
@@ -357,6 +426,7 @@ impl History {
         self.butterfly.clear();
         self.counter_moves.clear();
         self.continuation.clear();
+        self.capture.clear();
     }
 }
 
@@ -437,5 +507,30 @@ mod tests {
 
         // Score should be clamped to MAX_HISTORY_SCORE
         assert!(history.get(color, mv) <= MAX_HISTORY_SCORE);
+    }
+
+    #[test]
+    fn test_capture_history() {
+        let mut history = CaptureHistory::new();
+        let color = Color::Black;
+        let attacker = PieceType::Knight;
+        let victim = PieceType::Silver;
+
+        // Initial score should be 0
+        assert_eq!(history.get(color, attacker, victim), 0);
+
+        // Update with good capture
+        history.update_good(color, attacker, victim, 4);
+        assert!(history.get(color, attacker, victim) > 0);
+
+        // Update with bad capture
+        history.update_bad(color, attacker, victim, 2);
+        let score = history.get(color, attacker, victim);
+        assert!(score > 0); // Should still be positive but reduced
+
+        // Test aging
+        let old_score = history.get(color, attacker, victim);
+        history.age_scores();
+        assert_eq!(history.get(color, attacker, victim), old_score / 2);
     }
 }
