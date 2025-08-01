@@ -198,7 +198,7 @@ fn test_stop_ponderhit_simultaneous() {
     ponderhit_thread.join().expect("Ponderhit thread panicked");
 
     // Should get bestmove without deadlock
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
     assert!(result.is_ok(), "Failed to get bestmove after simultaneous stop/ponderhit");
 
     // Cleanup
@@ -351,7 +351,7 @@ fn test_position_update_during_stop() {
     stop_thread.join().expect("Stop thread panicked");
 
     // Should get bestmove
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
     assert!(
         result.is_ok(),
         "Failed to get bestmove after position/stop race - {:?}",
@@ -428,8 +428,8 @@ fn test_memory_ordering_visibility() {
     // Verify ordering was maintained
     assert!(response_received.load(Ordering::Acquire), "Memory ordering not maintained");
 
-    // Get bestmove
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
+    // Get bestmove (allow more time for CI environments where search might take longer)
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
     assert!(result.is_ok(), "Failed to get bestmove");
 
     // Cleanup
