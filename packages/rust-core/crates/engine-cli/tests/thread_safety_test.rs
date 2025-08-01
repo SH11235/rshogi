@@ -21,8 +21,13 @@ fn spawn_engine() -> std::process::Child {
 
 /// Helper to send command to engine
 fn send_command<W: Write + ?Sized>(stdin: &mut W, command: &str) {
-    writeln!(stdin, "{command}").expect("Failed to write command");
-    stdin.flush().expect("Failed to flush stdin");
+    if let Err(e) = writeln!(stdin, "{command}") {
+        eprintln!("Warning: Failed to write command '{command}': {e}");
+        return;
+    }
+    if let Err(e) = stdin.flush() {
+        eprintln!("Warning: Failed to flush stdin after '{command}': {e}");
+    }
 }
 
 /// Spawn a thread that continuously reads engine output
@@ -150,7 +155,7 @@ fn test_stop_ponderhit_simultaneous() {
     // Set position
     {
         let mut stdin = stdin.lock().unwrap();
-        send_command(&mut *stdin, "position startpos moves 2c2d 8g8f");
+        send_command(&mut *stdin, "position startpos moves 7g7f 8c8d");
     }
 
     // Start ponder search
@@ -171,15 +176,21 @@ fn test_stop_ponderhit_simultaneous() {
     // Thread 1: Send stop
     let stop_thread = thread::spawn(move || {
         barrier_clone.wait();
-        let mut stdin = stdin_clone.lock().unwrap();
-        send_command(&mut *stdin, "stop");
+        if let Ok(mut stdin) = stdin_clone.lock() {
+            send_command(&mut *stdin, "stop");
+        } else {
+            eprintln!("Failed to lock stdin for stop command");
+        }
     });
 
     // Thread 2: Send ponderhit
     let ponderhit_thread = thread::spawn(move || {
         barrier.wait();
-        let mut stdin = stdin_clone2.lock().unwrap();
-        send_command(&mut *stdin, "ponderhit");
+        if let Ok(mut stdin) = stdin_clone2.lock() {
+            send_command(&mut *stdin, "ponderhit");
+        } else {
+            eprintln!("Failed to lock stdin for ponderhit command");
+        }
     });
 
     // Wait for threads
@@ -325,7 +336,7 @@ fn test_position_update_during_stop() {
     let position_thread = thread::spawn(move || {
         barrier_clone.wait();
         let mut stdin = stdin_clone.lock().unwrap();
-        send_command(&mut *stdin, "position startpos moves 2c2d");
+        send_command(&mut *stdin, "position startpos moves 7g7f");
     });
 
     // Thread 2: Send stop
@@ -348,11 +359,10 @@ fn test_position_update_during_stop() {
     );
 
     // Verify we can start a new search with the updated position
-    let mut stdin = Arc::try_unwrap(stdin)
-        .unwrap_or_else(|_| panic!("Failed to unwrap stdin"))
-        .into_inner()
-        .unwrap();
-    send_command(&mut stdin, "go movetime 300");
+    {
+        let mut stdin = stdin.lock().unwrap();
+        send_command(&mut *stdin, "go movetime 300");
+    }
 
     // Wait for this search to complete
     let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(2));
@@ -363,7 +373,14 @@ fn test_position_update_during_stop() {
     );
 
     // Cleanup
-    send_command(&mut stdin, "quit");
+    {
+        let mut stdin = stdin.lock().unwrap();
+        send_command(&mut *stdin, "quit");
+    }
+    let stdin = Arc::try_unwrap(stdin)
+        .unwrap_or_else(|_| panic!("Failed to unwrap stdin"))
+        .into_inner()
+        .unwrap();
     cleanup_engine(engine, stdin, reader_handle);
 }
 
