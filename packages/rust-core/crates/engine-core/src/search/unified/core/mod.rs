@@ -46,13 +46,9 @@ where
             _ => 0x3FF,        // default 1024 nodes
         }
     } else {
-        // For depth-only searches without TimeManager, use frequent polling
-        // to ensure responsive termination
-        if searcher.context.limits().depth.is_some() {
-            0x3F // Check every 64 nodes for depth-limited searches
-        } else {
-            0x3FF // default 1024 nodes for truly infinite searches
-        }
+        // For searches without TimeManager (infinite search, depth-only, etc)
+        // Use more frequent polling to ensure responsive stop command handling
+        0x7F // Check every 128 nodes for better responsiveness
     }
 }
 
