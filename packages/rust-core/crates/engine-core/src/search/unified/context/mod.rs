@@ -94,6 +94,8 @@ impl SearchContext {
     }
 
     /// Check if search should stop
+    ///
+    /// This method only checks stop flags. Time management is handled by TimeManager.
     pub fn should_stop(&self) -> bool {
         // Check external stop flag
         if let Some(ref stop_flag) = self.limits.stop_flag {
@@ -103,36 +105,7 @@ impl SearchContext {
         }
 
         // Check internal stop flag
-        if self.internal_stop.load(Ordering::Relaxed) {
-            return true;
-        }
-
-        // Check time limit based on time control
-        use crate::time_management::TimeControl;
-        match &self.limits.time_control {
-            TimeControl::FixedTime { ms_per_move } => {
-                let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
-                if elapsed_ms >= *ms_per_move {
-                    self.internal_stop.store(true, Ordering::Relaxed);
-                    return true;
-                }
-            }
-            TimeControl::Fischer { .. } | TimeControl::Byoyomi { .. } => {
-                // TODO: Implement time management for these modes
-            }
-            TimeControl::FixedNodes { .. } => {
-                // TODO: Implement node limit checking
-            }
-            TimeControl::Ponder(_) => {
-                // For ponder mode, no time limit unless ponder hit has occurred
-                // Time limits will be enforced after convert_from_ponder()
-            }
-            TimeControl::Infinite => {
-                // No time limit
-            }
-        }
-
-        false
+        self.internal_stop.load(Ordering::Relaxed)
     }
 
     /// Get maximum search depth
