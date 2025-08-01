@@ -39,18 +39,16 @@ where
     // For time-based controls, use adaptive intervals based on soft limit
     if let Some(tm) = &searcher.time_manager {
         match tm.soft_limit_ms() {
-            0..=50 => 0x3F,    // ≤50ms → 64 nodes
-            51..=500 => 0x1FF, // ≤0.5s → 512 nodes
+            0..=50 => 0x1F,    // ≤50ms → 32 nodes
+            51..=100 => 0x3F,  // ≤100ms → 64 nodes
+            101..=200 => 0x7F, // ≤200ms → 128 nodes
+            201..=500 => 0xFF, // ≤0.5s → 256 nodes
             _ => 0x3FF,        // default 1024 nodes
         }
     } else {
-        // For depth-only searches without TimeManager, use frequent polling
-        // to ensure responsive termination
-        if searcher.context.limits().depth.is_some() {
-            0x3F // Check every 64 nodes for depth-limited searches
-        } else {
-            0x3FF // default 1024 nodes for truly infinite searches
-        }
+        // For searches without TimeManager (infinite search, depth-only, etc)
+        // Use more frequent polling to ensure responsive stop command handling
+        0x7F // Check every 128 nodes for better responsiveness
     }
 }
 
@@ -83,7 +81,7 @@ where
 
     // Order moves
     let ordered_moves = if USE_TT || USE_PRUNING {
-        searcher.ordering.order_moves(pos, &moves, None, 0)
+        searcher.ordering.order_moves(pos, &moves, None, &searcher.search_stack, 0)
     } else {
         moves.as_slice().to_vec()
     };

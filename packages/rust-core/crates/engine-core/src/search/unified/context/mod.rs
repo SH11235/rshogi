@@ -99,13 +99,14 @@ impl SearchContext {
     pub fn should_stop(&self) -> bool {
         // Check external stop flag
         if let Some(ref stop_flag) = self.limits.stop_flag {
-            if stop_flag.load(Ordering::Relaxed) {
+            // Use Acquire ordering for better responsiveness to stop commands
+            if stop_flag.load(Ordering::Acquire) {
                 return true;
             }
         }
 
         // Check internal stop flag
-        self.internal_stop.load(Ordering::Relaxed)
+        self.internal_stop.load(Ordering::Acquire)
     }
 
     /// Get maximum search depth
@@ -115,7 +116,8 @@ impl SearchContext {
 
     /// Signal internal stop
     pub fn stop(&self) {
-        self.internal_stop.store(true, Ordering::Relaxed);
+        // Use Release ordering to ensure the stop signal is visible to other threads quickly
+        self.internal_stop.store(true, Ordering::Release);
     }
 
     /// Get elapsed time

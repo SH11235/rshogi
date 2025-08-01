@@ -13,6 +13,7 @@ use crate::{
     search::{
         history::History,
         tt::{NodeType, TranspositionTable},
+        types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
     },
     shogi::{Move, Position},
@@ -73,6 +74,9 @@ pub struct UnifiedSearcher<
 
     /// Time manager reference for ponder hit handling
     time_manager: Option<Arc<crate::time_management::TimeManager>>,
+
+    /// Search stack for tracking state at each ply
+    search_stack: Vec<SearchStack>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -83,6 +87,12 @@ where
     /// Create a new unified searcher
     pub fn new(evaluator: E) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
+        // Pre-allocate search stack for maximum search depth
+        // This is a small amount of memory (8KB) and avoids dynamic allocation during search
+        let mut search_stack = Vec::with_capacity(crate::search::constants::MAX_PLY + 1);
+        for ply in 0..=crate::search::constants::MAX_PLY {
+            search_stack.push(SearchStack::new(ply as u16));
+        }
 
         Self {
             evaluator: Arc::new(evaluator),
@@ -97,12 +107,18 @@ where
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
             time_manager: None,
+            search_stack,
         }
     }
 
     /// Create a new unified searcher with an already Arc-wrapped evaluator
     pub fn with_arc(evaluator: Arc<E>) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
+        // Pre-allocate search stack for maximum search depth
+        let mut search_stack = Vec::with_capacity(crate::search::constants::MAX_PLY + 1);
+        for ply in 0..=crate::search::constants::MAX_PLY {
+            search_stack.push(SearchStack::new(ply as u16));
+        }
 
         Self {
             evaluator,
@@ -117,6 +133,7 @@ where
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
             time_manager: None,
+            search_stack,
         }
     }
 
@@ -381,7 +398,7 @@ mod tests {
         let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
         let mut pos = Position::startpos();
 
-        // 100msの時間制限で、深さ3（より浅い深さで確実に停止）
+        // 100msの時間制限で、深さ3に制限
         let limits = SearchLimitsBuilder::default().fixed_time_ms(100).depth(3).build();
 
         let start = Instant::now();
@@ -389,12 +406,15 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.best_move.is_some());
+
+        // 時間制限が効いていることを確認（マージンを持たせる）
         assert!(
             elapsed.as_millis() < 200,
-            "Should stop around 100ms, but took {}ms",
-            elapsed.as_millis()
+            "Should stop around 100ms, but took {}ms (depth reached: {}, nodes: {})",
+            elapsed.as_millis(),
+            result.stats.depth,
+            result.stats.nodes
         );
-        // 時間制限に少し余裕を持たせる（100ms→200ms）
     }
 
     #[test]
