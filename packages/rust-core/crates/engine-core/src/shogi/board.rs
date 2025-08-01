@@ -901,8 +901,8 @@ impl Position {
         pos.hash = pos.compute_hash();
         pos.zobrist_hash = pos.hash;
 
-        // Set initial ply to 1
-        pos.ply = 1;
+        // Set initial ply to 0
+        pos.ply = 0;
 
         pos
     }
