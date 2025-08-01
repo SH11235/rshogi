@@ -3,19 +3,13 @@
 //! Implements various move ordering heuristics
 
 use crate::{
-    search::history::History,
+    search::{history::History, types::SearchStack},
     shogi::{Move, MoveList, Position},
 };
 use std::sync::{Arc, Mutex};
 
-const KILLER_SLOTS: usize = 2;
-const MAX_PLY: usize = 127;
-
 /// Move ordering state
 pub struct MoveOrdering {
-    /// Killer moves table [ply][slot]
-    killers: [[Option<Move>; KILLER_SLOTS]; MAX_PLY],
-
     /// History heuristic reference (thread-safe)
     history: Arc<Mutex<History>>,
 }
@@ -23,24 +17,22 @@ pub struct MoveOrdering {
 impl MoveOrdering {
     /// Create new move ordering
     pub fn new(history: Arc<Mutex<History>>) -> Self {
-        Self {
-            killers: [[None; KILLER_SLOTS]; MAX_PLY],
-            history,
-        }
+        Self { history }
     }
 
-    /// Order moves for search
+    /// Order moves for search using SearchStack
     pub fn order_moves(
         &self,
         pos: &Position,
         moves: &MoveList,
         tt_move: Option<Move>,
+        search_stack: &[SearchStack],
         ply: u16,
     ) -> Vec<Move> {
         let mut scored_moves = Vec::with_capacity(moves.len());
 
         for &mv in moves.as_slice().iter() {
-            let score = self.score_move(pos, mv, tt_move, ply);
+            let score = self.score_move(pos, mv, tt_move, search_stack, ply);
             scored_moves.push((mv, score));
         }
 
@@ -52,8 +44,15 @@ impl MoveOrdering {
         scored_moves.into_iter().map(|(mv, _)| mv).collect()
     }
 
-    /// Score a single move
-    fn score_move(&self, pos: &Position, mv: Move, tt_move: Option<Move>, ply: u16) -> i32 {
+    /// Score a single move using SearchStack
+    fn score_move(
+        &self,
+        pos: &Position,
+        mv: Move,
+        tt_move: Option<Move>,
+        search_stack: &[SearchStack],
+        ply: u16,
+    ) -> i32 {
         // TT move gets highest priority
         if Some(mv) == tt_move {
             return 1_000_000;
@@ -67,9 +66,10 @@ impl MoveOrdering {
             return 100_000 + victim_value * 10 - attacker_value;
         }
 
-        // Killer moves
-        if ply < MAX_PLY as u16 {
-            for (slot, &killer) in self.killers[ply as usize].iter().enumerate() {
+        // Killer moves from SearchStack
+        if crate::search::types::SearchStack::is_valid_ply(ply) {
+            let stack_entry = &search_stack[ply as usize];
+            for (slot, &killer) in stack_entry.killers.iter().enumerate() {
                 if Some(mv) == killer {
                     return 90_000 - slot as i32;
                 }
@@ -77,32 +77,19 @@ impl MoveOrdering {
         }
 
         // History heuristic
-        let history_score = if let Ok(history) = self.history.lock() {
-            history.get_score(pos.side_to_move, mv, None)
-        } else {
-            0
+        let history_score = match self.history.lock() {
+            Ok(history) => history.get_score(pos.side_to_move, mv, None),
+            Err(e) => {
+                // Mutex poisoning indicates a panic in another thread holding the lock.
+                // This should be extremely rare in production, but log it for debugging.
+                // Impact: Move ordering quality may degrade slightly, but search remains correct.
+                log::error!("Failed to acquire history lock in move ordering: {e}");
+                0 // Fallback to neutral score (won't affect correctness, only efficiency)
+            }
         };
 
         // Base score with history
         10_000 + history_score
-    }
-
-    /// Update killer moves
-    pub fn update_killers(&mut self, mv: Move, ply: u16) {
-        if ply >= MAX_PLY as u16 || mv.is_capture_hint() {
-            return;
-        }
-
-        let ply_idx = ply as usize;
-
-        // Don't store the same move twice
-        if self.killers[ply_idx][0] == Some(mv) {
-            return;
-        }
-
-        // Shift killers and add new one
-        self.killers[ply_idx][1] = self.killers[ply_idx][0];
-        self.killers[ply_idx][0] = Some(mv);
     }
 
     /// Get piece value for MVV-LVA

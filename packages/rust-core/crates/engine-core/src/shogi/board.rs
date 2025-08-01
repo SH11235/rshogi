@@ -3328,7 +3328,7 @@ mod tests {
     #[test]
     fn test_get_lance_attackers_performance() {
         // Skip test in CI environment
-        if std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok() {
+        if crate::util::is_ci_environment() {
             println!("Skipping performance test in CI environment");
             return;
         }

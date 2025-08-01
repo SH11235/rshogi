@@ -24,8 +24,12 @@ where
     let mut best_score = -SEARCH_INF;
     let mut moves_searched = 0;
 
-    // Check if in check
+    // Check if in check and update search stack
     let in_check = pos.is_in_check();
+    if crate::search::types::SearchStack::is_valid_ply(ply) {
+        searcher.search_stack[ply as usize].in_check = in_check;
+        searcher.search_stack[ply as usize].clear_for_new_node();
+    }
 
     // Generate moves
     let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
@@ -49,13 +53,19 @@ where
 
     // Order moves
     let ordered_moves = if USE_TT || USE_PRUNING {
-        searcher.ordering.order_moves(pos, &moves, tt_move, ply)
+        searcher.ordering.order_moves(pos, &moves, tt_move, &searcher.search_stack, ply)
     } else {
         moves.as_slice().to_vec()
     };
 
     // Search moves
     for &mv in ordered_moves.iter() {
+        // Update current move in search stack
+        if crate::search::types::SearchStack::is_valid_ply(ply) {
+            searcher.search_stack[ply as usize].current_move = Some(mv);
+            searcher.search_stack[ply as usize].move_count = moves_searched + 1;
+        }
+
         // Make move
         let undo_info = pos.do_move(mv);
         searcher.stats.nodes += 1;
@@ -74,7 +84,12 @@ where
                 0
             };
 
-            // Null window search
+            // Null window search with safe depth calculation
+            // Calculate reduced depth safely to avoid underflow
+            // Using saturating_sub(1 + reduction) is more robust than chained saturating_sub
+            // NOTE: We intentionally allow reduced_depth to become 0, which triggers
+            // quiescence search. Using .max(1) would prevent proper quiescence search
+            // and can lead to illegal move generation (e.g., king captures).
             let reduced_depth = depth.saturating_sub(1 + reduction);
             score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, ply + 1);
 
@@ -106,7 +121,10 @@ where
                 if alpha >= beta {
                     // Beta cutoff - update killers and history
                     if USE_PRUNING {
-                        searcher.ordering.update_killers(mv, ply);
+                        // Update killers in SearchStack
+                        if crate::search::types::SearchStack::is_valid_ply(ply) {
+                            searcher.search_stack[ply as usize].update_killers(mv);
+                        }
                         if let Ok(mut history) = searcher.history.lock() {
                             history.update_cutoff(pos.side_to_move, mv, depth as i32, None);
                         }
@@ -117,7 +135,9 @@ where
         }
 
         // Futility pruning
-        if USE_PRUNING && can_prune(searcher, pos, depth, alpha, beta, moves_searched, in_check) {
+        if USE_PRUNING
+            && can_prune(searcher, pos, depth, alpha, beta, moves_searched, in_check, ply)
+        {
             break;
         }
     }
@@ -153,14 +173,16 @@ fn calculate_reduction(depth: u8, moves_searched: u32) -> u8 {
 }
 
 /// Check if we can prune remaining moves
+#[allow(clippy::too_many_arguments)]
 fn can_prune<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
-    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
     pos: &Position,
     depth: u8,
     alpha: i32,
     beta: i32,
     moves_searched: u32,
     in_check: bool,
+    ply: u16,
 ) -> bool
 where
     E: Evaluator + Send + Sync + 'static,
@@ -180,7 +202,20 @@ where
 
     // Futility margin
     let margin = 200 * depth as i32;
-    let eval = searcher.evaluator.evaluate(pos);
+
+    // Get static eval - use cached value if available
+    let eval = if crate::search::types::SearchStack::is_valid_ply(ply) {
+        let stack_entry = &mut searcher.search_stack[ply as usize];
+        if let Some(cached_eval) = stack_entry.static_eval {
+            cached_eval
+        } else {
+            let eval = searcher.evaluator.evaluate(pos);
+            stack_entry.static_eval = Some(eval);
+            eval
+        }
+    } else {
+        searcher.evaluator.evaluate(pos)
+    };
 
     eval + margin < alpha
 }
