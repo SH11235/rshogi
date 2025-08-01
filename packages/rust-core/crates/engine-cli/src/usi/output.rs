@@ -190,13 +190,13 @@ const MAX_STDOUT_ERRORS: u32 = 5;
 const MAX_RETRY_ATTEMPTS: u32 = 8; // Increased for buffered writes
 
 // Buffering configuration
-#[cfg(any(feature = "buffered-io", test))]
+#[cfg(feature = "buffered-io")]
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 100;
-#[cfg(any(feature = "buffered-io", test))]
+#[cfg(feature = "buffered-io")]
 const DEFAULT_FLUSH_MESSAGE_COUNT: u32 = 10;
 
 /// Get flush interval from environment variable (for testing)
-#[cfg(any(feature = "buffered-io", test))]
+#[cfg(feature = "buffered-io")]
 fn get_flush_interval_ms() -> u64 {
     const MAX_FLUSH_INTERVAL: u64 = 10_000; // 10秒
 
@@ -214,7 +214,7 @@ fn get_flush_interval_ms() -> u64 {
 }
 
 /// Get flush message count from environment variable (for testing)
-#[cfg(any(feature = "buffered-io", test))]
+#[cfg(feature = "buffered-io")]
 fn get_flush_message_count() -> u32 {
     const MAX_FLUSH_MESSAGE_COUNT: u32 = 1000; // 1000メッセージ
 

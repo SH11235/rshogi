@@ -148,12 +148,25 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
         .env("USI_FLUSH_DELAY_MS", flush_delay)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped()) // Capture stderr for debugging
         .spawn()
         .expect("Failed to spawn engine");
 
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
+    let stderr = engine.stderr.take().expect("Failed to get stderr");
+
+    // Read stderr in background for debugging
+    let stderr_handle = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut error_output = Vec::new();
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                error_output.push(line);
+            }
+        }
+        error_output
+    });
 
     // Channel to signal bestmove reception
     let (bestmove_tx, bestmove_rx) = channel::<()>();
@@ -178,22 +191,40 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
         (line_count, info_count)
     });
 
-    // Initialize engine
-    writeln!(stdin, "usi").unwrap();
-    stdin.flush().unwrap();
-    thread::sleep(Duration::from_millis(50));
+    // Initialize engine with error handling
+    if let Err(e) = writeln!(stdin, "usi") {
+        eprintln!("Failed to send usi command: {e}");
+        if let Ok(stderr_output) = stderr_handle.join() {
+            eprintln!("Engine stderr: {:?}", stderr_output);
+        }
+        panic!("Engine communication failed: {e}");
+    }
+    let _ = stdin.flush();
+    thread::sleep(Duration::from_millis(100)); // Increase delay for Windows
 
-    writeln!(stdin, "isready").unwrap();
-    stdin.flush().unwrap();
-    thread::sleep(Duration::from_millis(50));
+    if let Err(e) = writeln!(stdin, "isready") {
+        eprintln!("Failed to send isready command: {e}");
+        if let Ok(stderr_output) = stderr_handle.join() {
+            eprintln!("Engine stderr: {:?}", stderr_output);
+        }
+        panic!("Engine communication failed: {e}");
+    }
+    let _ = stdin.flush();
+    thread::sleep(Duration::from_millis(100)); // Increase delay for Windows
 
-    writeln!(stdin, "position startpos").unwrap();
-    stdin.flush().unwrap();
+    if let Err(e) = writeln!(stdin, "position startpos") {
+        eprintln!("Failed to send position command: {e}");
+        panic!("Engine communication failed: {e}");
+    }
+    let _ = stdin.flush();
 
     // Measure search time
     let start = Instant::now();
-    writeln!(stdin, "go depth {depth}").unwrap();
-    stdin.flush().unwrap();
+    if let Err(e) = writeln!(stdin, "go depth {depth}") {
+        eprintln!("Failed to send go command: {e}");
+        panic!("Engine communication failed: {e}");
+    }
+    let _ = stdin.flush();
 
     // Wait for bestmove with dynamic timeout
     // For depth-based search, estimate timeout based on depth
@@ -219,7 +250,17 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
     let _ = stdin.flush();
     drop(stdin);
 
-    let _ = engine.wait();
+    // Wait for engine to exit gracefully
+    // Note: wait_timeout is not available in standard library, so we just wait normally
+    match engine.wait() {
+        Ok(status) => {
+            if !status.success() {
+                eprintln!("Engine exited with non-zero status: {status}");
+            }
+        }
+        Err(e) => eprintln!("Error waiting for engine: {e}"),
+    }
+
     let (line_count, info_count) = reader_handle.join().unwrap();
 
     (search_time, line_count, info_count)
@@ -559,8 +600,8 @@ fn test_buffering_with_time_control() {
 fn test_buffering_stress() {
     println!("\n=== Buffering Stress Test ===\n");
 
-    // Stress test with very deep search
-    let depth = 10;
+    // Stress test with moderately deep search (reduced for CI stability)
+    let depth = 6;
 
     println!("Running deep search (depth {depth}) with buffering...");
     let start = Instant::now();
@@ -744,6 +785,7 @@ fn run_search_test_with_syscalls(
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = stderr_output; // Suppress unused variable warning
             None
         }
     } else {

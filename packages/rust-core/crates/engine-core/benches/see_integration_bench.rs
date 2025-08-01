@@ -8,11 +8,11 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::evaluate::MaterialEvaluator;
-use engine_core::search::search_enhanced::EnhancedSearcher;
+use engine_core::search::unified::UnifiedSearcher;
+use engine_core::search::SearchLimitsBuilder;
 use engine_core::shogi::{Move, MoveList};
 use engine_core::{Color, MoveGen, Piece, PieceType, Position, Square};
 use std::hint::black_box;
-use std::sync::Arc;
 use std::time::Duration;
 
 // Remove the static searcher - we'll create it once per benchmark function instead
@@ -113,7 +113,7 @@ fn bench_search_with_see(c: &mut Criterion) {
     ];
 
     // Create a single evaluator instance
-    let evaluator = Arc::new(MaterialEvaluator);
+    let evaluator = MaterialEvaluator;
 
     for (name, pos) in positions {
         group.bench_with_input(BenchmarkId::from_parameter(name), &pos, |b, pos| {
@@ -121,18 +121,18 @@ fn bench_search_with_see(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: Create new searcher and clone position
-                    let searcher = EnhancedSearcher::new(2, evaluator.clone());
+                    let searcher =
+                        UnifiedSearcher::<MaterialEvaluator, true, true, 2>::new(evaluator.clone());
                     let pos_clone = pos.clone();
                     (searcher, pos_clone)
                 },
                 |(mut searcher, mut pos_clone)| {
                     // Measurement: Run search
-                    black_box(searcher.search(
-                        &mut pos_clone,
-                        4, // Reduced depth for benchmarking
-                        None,
-                        Some(1_000), // Reduced node limit
-                    ))
+                    let limits = SearchLimitsBuilder::default()
+                        .depth(4) // Reduced depth for benchmarking
+                        .nodes(1_000) // Reduced node limit
+                        .build();
+                    black_box(searcher.search(&mut pos_clone, limits))
                 },
                 criterion::BatchSize::SmallInput,
             );
@@ -150,7 +150,7 @@ fn bench_move_ordering(c: &mut Criterion) {
     group.sample_size(50);
     group.measurement_time(Duration::from_secs(3));
 
-    let evaluator = Arc::new(MaterialEvaluator);
+    let evaluator = MaterialEvaluator;
     let positions = vec![
         ("many_captures", create_many_captures_position()),
         ("quiet_position", create_quiet_position()),
@@ -163,13 +163,15 @@ fn bench_move_ordering(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: Create new searcher and clone position
-                    let searcher = EnhancedSearcher::new(1, evaluator.clone());
+                    let searcher =
+                        UnifiedSearcher::<MaterialEvaluator, true, true, 1>::new(evaluator.clone());
                     let pos_clone = pos.clone();
                     (searcher, pos_clone)
                 },
                 |(mut searcher, mut pos_clone)| {
                     // Measurement: Run search and measure cutoff efficiency
-                    let result = searcher.search(&mut pos_clone, 3, None, Some(500));
+                    let limits = SearchLimitsBuilder::default().depth(3).nodes(500).build();
+                    let result = searcher.search(&mut pos_clone, limits);
 
                     // Return both result and mock stats for analysis
                     black_box((result, get_mock_stats()))

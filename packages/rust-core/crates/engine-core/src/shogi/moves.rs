@@ -298,6 +298,12 @@ impl MoveList {
         &mut self.moves
     }
 
+    /// Iterator over moves
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<Move> {
+        self.moves.iter()
+    }
+
     /// Convert to vector
     #[inline]
     pub fn into_vec(self) -> Vec<Move> {

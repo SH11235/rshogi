@@ -12,7 +12,7 @@ use super::types::InfoCallback;
 pub struct SearchLimits {
     pub time_control: TimeControl,
     pub moves_to_go: Option<u32>,
-    pub depth: Option<u32>,
+    pub depth: Option<u8>,
     pub nodes: Option<u64>,
     pub time_parameters: Option<TimeParameters>,
     /// Stop flag for interrupting search (temporarily kept for compatibility)
@@ -71,11 +71,7 @@ impl SearchLimits {
     /// Get depth limit (u8 for basic search compatibility)
     pub fn depth_limit_u8(&self) -> u8 {
         match self.depth {
-            Some(d) if d > 255 => {
-                log::warn!("Search depth {d} exceeds u8 maximum (255), clamping to 255");
-                255
-            }
-            Some(d) => d as u8,
+            Some(d) => d,
             None => DEFAULT_SEARCH_DEPTH,
         }
     }
@@ -95,7 +91,7 @@ impl SearchLimits {
 pub struct SearchLimitsBuilder {
     time_control: TimeControl,
     moves_to_go: Option<u32>,
-    depth: Option<u32>,
+    depth: Option<u8>,
     nodes: Option<u64>,
     time_parameters: Option<TimeParameters>,
     stop_flag: Option<Arc<AtomicBool>>,
@@ -123,7 +119,7 @@ impl SearchLimitsBuilder {
     ///
     /// This sets a maximum depth for the search. Can be combined with time controls.
     /// When both depth and time limits are set, the search stops at whichever is reached first.
-    pub fn depth(mut self, depth: u32) -> Self {
+    pub fn depth(mut self, depth: u8) -> Self {
         self.depth = Some(depth);
         self
     }
@@ -283,7 +279,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
         SearchLimits {
             time_control: tm.time_control,
             moves_to_go: tm.moves_to_go,
-            depth: tm.depth,
+            depth: tm.depth.map(|d| d as u8),
             nodes: tm.nodes,
             time_parameters: tm.time_parameters,
             stop_flag: None,
@@ -299,7 +295,7 @@ impl From<SearchLimits> for crate::time_management::TimeLimits {
         crate::time_management::TimeLimits {
             time_control: unified.time_control,
             moves_to_go: unified.moves_to_go,
-            depth: unified.depth,
+            depth: unified.depth.map(|d| d as u32),
             nodes: unified.nodes,
             time_parameters: unified.time_parameters,
         }

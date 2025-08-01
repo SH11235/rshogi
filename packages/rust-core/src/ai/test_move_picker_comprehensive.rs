@@ -7,7 +7,7 @@ mod tests {
     use crate::ai::move_picker::MovePicker;
     use crate::ai::movegen::MoveGen;
     use crate::ai::moves::{Move, MoveList};
-    use crate::ai::search_enhanced::SearchStack;
+    use engine_core::search::SearchStack;
     use std::collections::HashSet;
     use std::sync::Arc;
 

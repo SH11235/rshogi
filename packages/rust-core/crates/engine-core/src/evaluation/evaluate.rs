@@ -10,6 +10,13 @@ pub trait Evaluator {
     fn evaluate(&self, pos: &Position) -> i32;
 }
 
+/// Implement Evaluator for Arc<T> where T: Evaluator
+impl<T: Evaluator + ?Sized> Evaluator for std::sync::Arc<T> {
+    fn evaluate(&self, pos: &Position) -> i32 {
+        (**self).evaluate(pos)
+    }
+}
+
 /// Piece values in centipawns
 const PIECE_VALUES: [i32; 8] = [
     0,    // King (infinite value, but we use 0 here)
@@ -346,6 +353,7 @@ fn evaluate_castle_formation(pos: &Position, color: Color) -> i32 {
 }
 
 /// Simple material evaluator implementing Evaluator trait
+#[derive(Clone, Copy, Debug)]
 pub struct MaterialEvaluator;
 
 impl Evaluator for MaterialEvaluator {
