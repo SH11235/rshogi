@@ -17,7 +17,10 @@ use crate::{
     },
     shogi::{Move, Position},
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 /// Unified searcher with compile-time feature configuration
 ///
@@ -53,8 +56,8 @@ pub struct UnifiedSearcher<
     /// Transposition table (conditionally compiled)
     tt: Option<TranspositionTable>,
 
-    /// Move ordering history
-    history: History,
+    /// Move ordering history (shared with move ordering)
+    history: Arc<Mutex<History>>,
 
     /// Move ordering module
     ordering: ordering::MoveOrdering,
@@ -79,8 +82,7 @@ where
 {
     /// Create a new unified searcher
     pub fn new(evaluator: E) -> Self {
-        let mut history = History::new();
-        let history_ptr = &mut history as *mut History;
+        let history = Arc::new(Mutex::new(History::new()));
 
         Self {
             evaluator: Arc::new(evaluator),
@@ -89,8 +91,8 @@ where
             } else {
                 None
             },
-            history,
-            ordering: ordering::MoveOrdering::new(history_ptr),
+            history: history.clone(),
+            ordering: ordering::MoveOrdering::new(history),
             pv_table: core::PVTable::new(),
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
@@ -100,8 +102,7 @@ where
 
     /// Create a new unified searcher with an already Arc-wrapped evaluator
     pub fn with_arc(evaluator: Arc<E>) -> Self {
-        let mut history = History::new();
-        let history_ptr = &mut history as *mut History;
+        let history = Arc::new(Mutex::new(History::new()));
 
         Self {
             evaluator,
@@ -110,8 +111,8 @@ where
             } else {
                 None
             },
-            history,
-            ordering: ordering::MoveOrdering::new(history_ptr),
+            history: history.clone(),
+            ordering: ordering::MoveOrdering::new(history),
             pv_table: core::PVTable::new(),
             stats: SearchStats::default(),
             context: context::SearchContext::new(),
