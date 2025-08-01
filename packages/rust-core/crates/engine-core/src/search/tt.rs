@@ -232,8 +232,9 @@ impl TranspositionTable {
             return None;
         }
 
-        // Read data (Relaxed is sufficient after key match with Acquire)
-        let data = self.table[base_idx + 1].load(Ordering::Relaxed);
+        // Read data with Acquire ordering to ensure we see the latest write
+        // This is crucial for consistency in release builds
+        let data = self.table[base_idx + 1].load(Ordering::Acquire);
 
         let entry = TTEntry { key, data };
 
@@ -334,9 +335,9 @@ impl TranspositionTable {
             aspiration_fail,
         );
 
-        // Read existing entry
-        let old_key = self.table[base_idx].load(Ordering::Relaxed);
-        let old_data = self.table[base_idx + 1].load(Ordering::Relaxed);
+        // Read existing entry with Acquire ordering to ensure consistency
+        let old_key = self.table[base_idx].load(Ordering::Acquire);
+        let old_data = self.table[base_idx + 1].load(Ordering::Acquire);
         let old_entry = TTEntry {
             key: old_key,
             data: old_data,
