@@ -16,14 +16,21 @@ use std::sync::Arc;
 /// - Advanced pruning: disabled
 /// - Basic move ordering only
 pub struct Searcher<E: Evaluator + Send + Sync + 'static> {
-    inner: UnifiedSearcher<Arc<E>, true, false, 8>,
+    inner: UnifiedSearcher<E, true, false, 8>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> Searcher<E> {
     /// Create a new basic searcher
-    pub fn new(evaluator: Arc<E>) -> Self {
+    pub fn new(evaluator: E) -> Self {
         Self {
             inner: UnifiedSearcher::new(evaluator),
+        }
+    }
+
+    /// Create a new basic searcher with Arc-wrapped evaluator
+    pub fn with_arc(evaluator: Arc<E>) -> Self {
+        Self {
+            inner: UnifiedSearcher::with_arc(evaluator),
         }
     }
 
@@ -45,7 +52,7 @@ mod tests {
     #[test]
     fn test_search_startpos() {
         let mut pos = Position::startpos();
-        let evaluator = Arc::new(MaterialEvaluator);
+        let evaluator = MaterialEvaluator;
         let limits = SearchLimitsBuilder::default().depth(3).build();
         let mut searcher = Searcher::new(evaluator);
 
@@ -59,7 +66,7 @@ mod tests {
     #[test]
     fn test_search_with_stop_flag() {
         let pos = Position::startpos();
-        let evaluator = Arc::new(MaterialEvaluator);
+        let evaluator = MaterialEvaluator;
         let stop_flag = Arc::new(AtomicBool::new(false));
 
         // Start search in a thread

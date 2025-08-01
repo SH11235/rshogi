@@ -353,6 +353,7 @@ fn evaluate_castle_formation(pos: &Position, color: Color) -> i32 {
 }
 
 /// Simple material evaluator implementing Evaluator trait
+#[derive(Clone, Copy, Debug)]
 pub struct MaterialEvaluator;
 
 impl Evaluator for MaterialEvaluator {
