@@ -365,6 +365,10 @@ where
         pos.side_to_move = pos.side_to_move.opposite();
         pos.ply += 1;
 
+        // Update zobrist hash for side to move change
+        pos.hash ^= pos.side_to_move_zobrist();
+        pos.zobrist_hash = pos.hash;
+
         // Search with reduced depth
         let reduction = 2 + depth / 4;
         let score = -alpha_beta(
@@ -379,6 +383,10 @@ where
         // Undo null move
         pos.side_to_move = pos.side_to_move.opposite();
         pos.ply -= 1;
+
+        // Restore zobrist hash
+        pos.hash ^= pos.side_to_move_zobrist();
+        pos.zobrist_hash = pos.hash;
 
         if score >= beta {
             return Some(beta);
