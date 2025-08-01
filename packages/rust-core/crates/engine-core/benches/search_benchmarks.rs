@@ -57,9 +57,8 @@ fn bench_basic_searcher(c: &mut Criterion) {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
                     let limits =
                         SearchLimitsBuilder::default().depth(pos_info.expected_depth).build();
-                    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(
-                        evaluator.clone(),
-                    );
+                    let mut searcher =
+                        UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(evaluator);
                     let result = searcher.search(&mut pos, limits);
                     black_box(result)
                 });
@@ -73,9 +72,8 @@ fn bench_basic_searcher(c: &mut Criterion) {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
                     let limits = SearchLimitsBuilder::default().fixed_time_ms(10).build();
-                    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(
-                        evaluator.clone(),
-                    );
+                    let mut searcher =
+                        UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(evaluator);
                     let result = searcher.search(&mut pos, limits);
                     black_box(result)
                 });
@@ -101,9 +99,8 @@ fn bench_enhanced_searcher(c: &mut Criterion) {
             |b, pos_info| {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
-                    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(
-                        evaluator.clone(),
-                    );
+                    let mut searcher =
+                        UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator);
                     let result = searcher.search(
                         &mut pos,
                         SearchLimitsBuilder::default().depth(pos_info.expected_depth).build(),
@@ -119,9 +116,8 @@ fn bench_enhanced_searcher(c: &mut Criterion) {
             |b, pos_info| {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
-                    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(
-                        evaluator.clone(),
-                    );
+                    let mut searcher =
+                        UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator);
                     let result = searcher
                         .search(&mut pos, SearchLimitsBuilder::default().fixed_time_ms(10).build());
                     black_box(result)
@@ -144,8 +140,7 @@ fn bench_node_counting(c: &mut Criterion) {
     group.bench_function("basic_nodes_per_second", |b| {
         b.iter(|| {
             let limits = SearchLimitsBuilder::default().fixed_time_ms(50).build();
-            let mut searcher =
-                UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(evaluator.clone());
+            let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(evaluator);
             let result = searcher.search(&mut pos.clone(), limits);
             black_box(result.stats.nodes)
         });
@@ -153,8 +148,7 @@ fn bench_node_counting(c: &mut Criterion) {
 
     group.bench_function("enhanced_nodes_per_second", |b| {
         b.iter(|| {
-            let mut searcher =
-                UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator.clone());
+            let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator);
             let result = searcher
                 .search(&mut pos.clone(), SearchLimitsBuilder::default().fixed_time_ms(50).build());
             black_box(result.stats.nodes)
@@ -210,7 +204,7 @@ fn bench_unified_searcher(c: &mut Criterion) {
             |b, pos_info| {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
-                    let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator.clone());
+                    let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
                     let result = searcher.search(
                         &mut pos,
                         SearchLimitsBuilder::default().depth(pos_info.expected_depth).build(),
@@ -227,7 +221,7 @@ fn bench_unified_searcher(c: &mut Criterion) {
             |b, pos_info| {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
-                    let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator.clone());
+                    let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
                     let result = searcher.search(
                         &mut pos,
                         SearchLimitsBuilder::default().depth(pos_info.expected_depth).build(),
