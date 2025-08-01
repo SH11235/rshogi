@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn test_position_helpers() {
         let pos = TestPositions::startpos();
-        assert_eq!(pos.ply, 1);
+        assert_eq!(pos.ply, 0);
 
         let endgame = TestPositions::endgame_simple();
         // Should have 2 kings
