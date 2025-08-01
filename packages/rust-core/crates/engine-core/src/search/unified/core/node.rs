@@ -107,7 +107,9 @@ where
                     // Beta cutoff - update killers and history
                     if USE_PRUNING {
                         searcher.ordering.update_killers(mv, ply);
-                        searcher.history.update_cutoff(pos.side_to_move, mv, depth as i32, None);
+                        if let Ok(mut history) = searcher.history.lock() {
+                            history.update_cutoff(pos.side_to_move, mv, depth as i32, None);
+                        }
                     }
                     break;
                 }

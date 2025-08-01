@@ -6,6 +6,7 @@ use crate::{
     search::history::History,
     shogi::{Move, MoveList, Position},
 };
+use std::sync::{Arc, Mutex};
 
 const KILLER_SLOTS: usize = 2;
 const MAX_PLY: usize = 127;
@@ -15,13 +16,13 @@ pub struct MoveOrdering {
     /// Killer moves table [ply][slot]
     killers: [[Option<Move>; KILLER_SLOTS]; MAX_PLY],
 
-    /// History heuristic reference
-    history: *mut History,
+    /// History heuristic reference (thread-safe)
+    history: Arc<Mutex<History>>,
 }
 
 impl MoveOrdering {
     /// Create new move ordering
-    pub fn new(history: *mut History) -> Self {
+    pub fn new(history: Arc<Mutex<History>>) -> Self {
         Self {
             killers: [[None; KILLER_SLOTS]; MAX_PLY],
             history,
@@ -76,12 +77,10 @@ impl MoveOrdering {
         }
 
         // History heuristic
-        let history_score = unsafe {
-            if let Some(history) = self.history.as_ref() {
-                history.get_score(pos.side_to_move, mv, None)
-            } else {
-                0
-            }
+        let history_score = if let Ok(history) = self.history.lock() {
+            history.get_score(pos.side_to_move, mv, None)
+        } else {
+            0
         };
 
         // Base score with history
@@ -124,6 +123,4 @@ impl MoveOrdering {
     }
 }
 
-// Safe to send across threads as long as History is thread-safe
-unsafe impl Send for MoveOrdering {}
-unsafe impl Sync for MoveOrdering {}
+// MoveOrdering is now automatically Send+Sync because Arc<Mutex<T>> is Send+Sync
