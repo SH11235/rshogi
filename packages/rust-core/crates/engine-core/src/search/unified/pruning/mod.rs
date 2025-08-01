@@ -90,13 +90,32 @@ pub fn can_do_lmr(
 
 /// Calculate LMR reduction
 pub fn lmr_reduction(depth: u8, moves_searched: u32) -> u8 {
-    if depth >= 6 && moves_searched >= 12 {
-        3
-    } else if depth >= 4 && moves_searched >= 6 {
-        2
-    } else {
-        1
+    // More sophisticated reduction table based on depth and move count
+    match (depth, moves_searched) {
+        (d, m) if d >= 8 && m >= 16 => 4,
+        (d, m) if d >= 6 && m >= 12 => 3,
+        (d, m) if d >= 5 && m >= 8 => 2,
+        (d, m) if d >= 4 && m >= 4 => 2,
+        (d, m) if d >= 3 && m >= 4 => 1,
+        _ => 0,
     }
+}
+
+/// Calculate LMR reduction with logarithmic formula (alternative implementation)
+/// This provides smoother reduction based on depth and move count
+#[allow(dead_code)]
+pub fn lmr_reduction_formula(depth: u8, moves_searched: u32) -> u8 {
+    if depth < 3 || moves_searched < 4 {
+        return 0;
+    }
+
+    // Formula similar to Stockfish: log(depth) * log(moves)
+    let depth_factor = (depth as f32).ln();
+    let moves_factor = (moves_searched as f32).ln();
+    let reduction = (depth_factor * moves_factor / 2.0) as u8;
+
+    // Cap the reduction to avoid over-reducing
+    reduction.min(depth.saturating_sub(2))
 }
 
 /// Check if score is a mate score

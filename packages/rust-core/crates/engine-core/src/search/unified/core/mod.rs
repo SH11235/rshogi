@@ -99,7 +99,8 @@ where
         } else {
             // Late Move Reduction (if enabled)
             let reduction = if USE_PRUNING && depth >= 3 && move_idx >= 4 && !pos.is_in_check() {
-                1
+                // Use more sophisticated reduction based on depth and move count
+                crate::search::unified::pruning::lmr_reduction(depth, move_idx as u32)
             } else {
                 0
             };
