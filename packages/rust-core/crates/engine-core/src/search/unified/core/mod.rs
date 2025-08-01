@@ -52,17 +52,24 @@ where
     }
 }
 
-/// Search from root position with iterative deepening
-pub(super) fn search_root<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
+/// Search from root position with aspiration window
+pub(super) fn search_root_with_window<
+    E,
+    const USE_TT: bool,
+    const USE_PRUNING: bool,
+    const TT_SIZE_MB: usize,
+>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
     pos: &mut Position,
     depth: u8,
+    initial_alpha: i32,
+    initial_beta: i32,
 ) -> (i32, Vec<Move>)
 where
     E: Evaluator + Send + Sync + 'static,
 {
-    let mut alpha = -SEARCH_INF;
-    let beta = SEARCH_INF;
+    let mut alpha = initial_alpha;
+    let beta = initial_beta;
     let mut best_score = -SEARCH_INF;
     let mut pv = Vec::new();
 
