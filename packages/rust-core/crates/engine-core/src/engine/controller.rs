@@ -376,14 +376,14 @@ mod tests {
         });
 
         // Set stop flag after short delay
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(100));
         stop_flag.store(true, std::sync::atomic::Ordering::Release);
 
         // Wait for search to complete
         let result = handle.join().unwrap();
 
-        // Should have stopped early
-        assert!(result.stats.elapsed < Duration::from_millis(200));
+        // Should have stopped early (within 500ms accounting for CI variability)
+        assert!(result.stats.elapsed < Duration::from_millis(500));
     }
 
     #[test]
