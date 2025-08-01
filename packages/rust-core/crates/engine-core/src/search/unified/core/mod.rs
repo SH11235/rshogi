@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Search from root position with iterative deepening
-pub fn search_root<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
+pub(super) fn search_root<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
     pos: &mut Position,
     depth: u8,
@@ -105,7 +105,7 @@ where
 }
 
 /// Alpha-beta search with pruning
-pub fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
+pub(super) fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
     pos: &mut Position,
     depth: u8,

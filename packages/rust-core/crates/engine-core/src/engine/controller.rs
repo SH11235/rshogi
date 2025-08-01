@@ -15,6 +15,9 @@ use crate::{
     Position,
 };
 
+/// Type alias for the enhanced searcher with dynamic evaluator
+type DynEnhancedSearcher = EnhancedSearcher<Arc<dyn Evaluator + Send + Sync>>;
+
 /// Engine type selection
 ///
 /// # Engine Types Overview
@@ -74,7 +77,7 @@ pub struct Engine {
     engine_type: EngineType,
     material_evaluator: Arc<MaterialEvaluator>,
     nnue_evaluator: Arc<Mutex<Option<NNUEEvaluatorWrapper>>>,
-    enhanced_searcher: Arc<Mutex<Option<EnhancedSearcher>>>,
+    enhanced_searcher: Arc<Mutex<Option<DynEnhancedSearcher>>>,
     active_time_manager: Arc<Mutex<Option<Arc<TimeManager>>>>,
 }
 
@@ -93,14 +96,17 @@ impl Engine {
         let enhanced_searcher = match engine_type {
             EngineType::Enhanced => {
                 // Initialize enhanced searcher with 16MB TT and material evaluator
-                Arc::new(Mutex::new(Some(EnhancedSearcher::new(16, material_evaluator.clone()))))
+                Arc::new(Mutex::new(Some(DynEnhancedSearcher::new_with_tt_size(
+                    16,
+                    material_evaluator.clone(),
+                ))))
             }
             EngineType::EnhancedNnue => {
                 // Initialize enhanced searcher with NNUE evaluator proxy
                 let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
                     evaluator: nnue_evaluator.clone(),
                 });
-                Arc::new(Mutex::new(Some(EnhancedSearcher::new(16, nnue_proxy))))
+                Arc::new(Mutex::new(Some(DynEnhancedSearcher::new_with_tt_size(16, nnue_proxy))))
             }
             _ => Arc::new(Mutex::new(None)),
         };
@@ -119,17 +125,17 @@ impl Engine {
         log::info!("Engine::search called with engine_type: {:?}", self.engine_type);
         match self.engine_type {
             EngineType::Material => {
-                let mut searcher = Searcher::new(limits, self.material_evaluator.clone());
-                searcher.search(pos)
+                let mut searcher = Searcher::new(self.material_evaluator.clone());
+                searcher.search(pos, limits)
             }
             EngineType::Nnue => {
                 log::info!("Creating NNUE searcher");
                 let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
                     evaluator: self.nnue_evaluator.clone(),
                 });
-                let mut searcher = Searcher::new(limits, nnue_proxy);
+                let mut searcher = Searcher::new(nnue_proxy);
                 log::info!("Starting NNUE search");
-                let result = searcher.search(pos);
+                let result = searcher.search(pos, limits);
                 log::info!("NNUE search completed");
                 result
             }
@@ -266,7 +272,8 @@ impl Engine {
                         let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
                             evaluator: self.nnue_evaluator.clone(),
                         });
-                        *enhanced_guard = Some(EnhancedSearcher::new(16, nnue_proxy));
+                        *enhanced_guard =
+                            Some(DynEnhancedSearcher::new_with_tt_size(16, nnue_proxy));
                     }
                 }
             }
@@ -274,8 +281,10 @@ impl Engine {
                 // If switching to Enhanced and it's not initialized, initialize it
                 let mut enhanced_guard = self.enhanced_searcher.lock().unwrap();
                 if enhanced_guard.is_none() {
-                    *enhanced_guard =
-                        Some(EnhancedSearcher::new(16, self.material_evaluator.clone()));
+                    *enhanced_guard = Some(DynEnhancedSearcher::new_with_tt_size(
+                        16,
+                        self.material_evaluator.clone(),
+                    ));
                 }
             }
             EngineType::Material => {

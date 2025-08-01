@@ -108,8 +108,8 @@ mod search_integration_tests {
         let evaluator = Arc::new(MaterialEvaluator);
 
         // Create two searchers - one with SEE, one without (simulated)
-        let mut searcher_with_see = EnhancedSearcher::new(16, evaluator.clone());
-        let _searcher_baseline = EnhancedSearcher::new(16, evaluator.clone());
+        let mut searcher_with_see = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
+        let _searcher_baseline = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
 
         // Test position with many captures available
         let test_positions = vec![
@@ -156,7 +156,7 @@ mod search_integration_tests {
 
         for _ in 0..3 {
             // Create a fresh searcher for each iteration to ensure no TT pollution
-            let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
+            let mut searcher = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
             let (_best_move, score) = searcher.search(&mut pos.clone(), 6, None, Some(50_000));
 
             scores.push(score);
@@ -187,7 +187,7 @@ mod search_integration_tests {
     fn test_complex_tactical_positions_benchmark() {
         let database = load_tactical_positions();
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = EnhancedSearcher::new(64, evaluator);
+        let mut searcher = EnhancedSearcher::new_with_tt_size(64, evaluator);
 
         println!("\nTactical Position Analysis:");
         println!("{:-<80}", "");
@@ -246,7 +246,7 @@ mod search_integration_tests {
     #[ignore = "Requires proper Position::from_sfen implementation"]
     fn test_see_pruning_in_main_search() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = EnhancedSearcher::new(16, evaluator);
+        let mut searcher = EnhancedSearcher::new_with_tt_size(16, evaluator);
 
         // Position with many bad captures that should be pruned
         let mut pos = Position::from_sfen(

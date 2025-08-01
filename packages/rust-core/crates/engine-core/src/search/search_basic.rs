@@ -17,21 +17,19 @@ use std::sync::Arc;
 /// - Basic move ordering only
 pub struct Searcher<E: Evaluator + Send + Sync + 'static> {
     inner: UnifiedSearcher<Arc<E>, true, false, 8>,
-    limits: SearchLimits,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> Searcher<E> {
     /// Create a new basic searcher
-    pub fn new(limits: SearchLimits, evaluator: Arc<E>) -> Self {
+    pub fn new(evaluator: Arc<E>) -> Self {
         Self {
             inner: UnifiedSearcher::new(evaluator),
-            limits,
         }
     }
 
     /// Search for the best move
-    pub fn search(&mut self, pos: &mut Position) -> SearchResult {
-        self.inner.search(pos, self.limits.clone())
+    pub fn search(&mut self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
+        self.inner.search(pos, limits)
     }
 }
 
@@ -49,9 +47,9 @@ mod tests {
         let mut pos = Position::startpos();
         let evaluator = Arc::new(MaterialEvaluator);
         let limits = SearchLimitsBuilder::default().depth(3).build();
-        let mut searcher = Searcher::new(limits, evaluator);
+        let mut searcher = Searcher::new(evaluator);
 
-        let result = searcher.search(&mut pos);
+        let result = searcher.search(&mut pos, limits);
 
         assert!(result.best_move.is_some());
         assert!(result.stats.nodes > 0);
@@ -74,8 +72,8 @@ mod tests {
                 .depth(100) // Very deep search
                 .stop_flag(stop_flag_clone)
                 .build();
-            let mut searcher = Searcher::new(limits, evaluator_clone);
-            searcher.search(&mut pos_clone)
+            let mut searcher = Searcher::new(evaluator_clone);
+            searcher.search(&mut pos_clone, limits)
         });
 
         // Let it run for a bit longer to ensure search starts
@@ -111,9 +109,9 @@ mod tests {
 
         let evaluator = Arc::new(MaterialEvaluator);
         let limits = SearchLimitsBuilder::default().depth(3).build();
-        let mut searcher = Searcher::new(limits, evaluator);
+        let mut searcher = Searcher::new(evaluator);
 
-        let result = searcher.search(&mut pos);
+        let result = searcher.search(&mut pos, limits);
 
         // Should find a rook move
         assert!(result.best_move.is_some());

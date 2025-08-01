@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Search a single node in the tree
-pub fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
+pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
     pos: &mut Position,
     depth: u8,

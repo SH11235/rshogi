@@ -11,7 +11,7 @@ pub trait Evaluator {
 }
 
 /// Implement Evaluator for Arc<T> where T: Evaluator
-impl<T: Evaluator> Evaluator for std::sync::Arc<T> {
+impl<T: Evaluator + ?Sized> Evaluator for std::sync::Arc<T> {
     fn evaluate(&self, pos: &Position) -> i32 {
         (**self).evaluate(pos)
     }
