@@ -101,14 +101,11 @@ fn test_depth_search_terminates() {
     let tester = SearchTester::new(EngineType::Material);
     let mut pos = Position::startpos();
 
-    // TODO: Performance issue - depth 5 search takes ~25s after Search Engine Unification
-    // This is likely due to TimeControl::Infinite handling changes where TimeManager
-    // is no longer created, affecting search optimizations.
-    // Temporarily reduced depth from 5 to 4 to make test pass.
-    let elapsed = tester.search_with_depth(&mut pos, 4);
+    // Test depth 5 search (performance issue should be fixed)
+    let elapsed = tester.search_with_depth(&mut pos, 5);
 
-    assert!(elapsed < Duration::from_secs(5), "Depth 4 search took too long: {elapsed:?}");
-    println!("Depth 4 search completed in {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "Depth 5 search took too long: {elapsed:?}");
+    println!("Depth 5 search completed in {elapsed:?}");
 }
 
 #[test]
