@@ -160,10 +160,8 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
     let stderr_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         let mut error_output = Vec::new();
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                error_output.push(line);
-            }
+        for line in reader.lines().map_while(Result::ok) {
+            error_output.push(line);
         }
         error_output
     });
@@ -195,7 +193,7 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
     if let Err(e) = writeln!(stdin, "usi") {
         eprintln!("Failed to send usi command: {e}");
         if let Ok(stderr_output) = stderr_handle.join() {
-            eprintln!("Engine stderr: {:?}", stderr_output);
+            eprintln!("Engine stderr: {stderr_output:?}");
         }
         panic!("Engine communication failed: {e}");
     }
@@ -205,7 +203,7 @@ fn run_search_test(flush_delay: &str, depth: u32) -> (Duration, usize, usize) {
     if let Err(e) = writeln!(stdin, "isready") {
         eprintln!("Failed to send isready command: {e}");
         if let Ok(stderr_output) = stderr_handle.join() {
-            eprintln!("Engine stderr: {:?}", stderr_output);
+            eprintln!("Engine stderr: {stderr_output:?}");
         }
         panic!("Engine communication failed: {e}");
     }
