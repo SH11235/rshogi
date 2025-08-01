@@ -43,8 +43,9 @@ impl MoveOrdering {
             scored_moves.push((mv, score));
         }
 
-        // Sort by score (descending)
-        scored_moves.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        // Sort by score (descending) - use stable sort to ensure deterministic ordering
+        // when moves have the same score
+        scored_moves.sort_by(|a, b| b.1.cmp(&a.1));
 
         // Extract moves
         scored_moves.into_iter().map(|(mv, _)| mv).collect()
