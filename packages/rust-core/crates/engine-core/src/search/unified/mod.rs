@@ -327,8 +327,9 @@ where
             return ASPIRATION_WINDOW_INITIAL;
         }
 
-        // Calculate score volatility from recent history
-        let volatility = self.calculate_score_volatility();
+        // Use cached volatility value (already calculated when score history was updated)
+        // This avoids redundant calculation
+        let volatility = self.score_volatility;
 
         // Adjust window based on volatility
         // High volatility = wider window to reduce re-searches
