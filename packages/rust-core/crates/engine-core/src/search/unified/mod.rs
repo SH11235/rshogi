@@ -255,21 +255,26 @@ where
                     break;
                 }
 
-                // Expand window gradually (1.5x expansion)
+                // Expand window based on how far we failed outside the bounds
+                // This adaptive approach expands more for large failures
                 use crate::search::constants::{
                     ASPIRATION_WINDOW_DELTA, ASPIRATION_WINDOW_EXPANSION,
                 };
                 if score <= alpha {
-                    // Fail low - expand alpha
+                    // Fail low - score is worse than expected, expand alpha downward
+                    // Calculate expansion based on distance from previous best score
                     let expansion =
                         ((alpha - best_score).abs() as f32 * ASPIRATION_WINDOW_EXPANSION) as i32;
+                    // Ensure minimum expansion of DELTA to guarantee progress
                     alpha = (alpha - expansion.max(ASPIRATION_WINDOW_DELTA))
                         .max(-crate::search::constants::SEARCH_INF);
                 }
                 if score >= beta {
-                    // Fail high - expand beta
+                    // Fail high - score is better than expected, expand beta upward
+                    // Calculate expansion based on distance from previous best score
                     let expansion =
                         ((beta - best_score).abs() as f32 * ASPIRATION_WINDOW_EXPANSION) as i32;
+                    // Ensure minimum expansion of DELTA to guarantee progress
                     beta = (beta + expansion.max(ASPIRATION_WINDOW_DELTA))
                         .min(crate::search::constants::SEARCH_INF);
                 }
@@ -319,10 +324,17 @@ where
     }
 
     /// Calculate dynamic aspiration window based on score history
+    ///
+    /// The window size adapts to position characteristics:
+    /// - Stable positions: Use narrow windows for more cutoffs
+    /// - Volatile positions: Use wider windows to avoid re-searches
+    ///
+    /// The formula scales the base window by a fraction of score volatility,
+    /// capped at 4x the initial window to maintain search efficiency.
     fn calculate_aspiration_window(&self, depth: u8) -> i32 {
         use crate::search::constants::ASPIRATION_WINDOW_INITIAL;
 
-        // Use base window for early depths
+        // Use base window for early depths where we lack history
         if depth <= 2 || self.score_history.len() < 2 {
             return ASPIRATION_WINDOW_INITIAL;
         }
@@ -332,30 +344,47 @@ where
         let volatility = self.score_volatility;
 
         // Adjust window based on volatility
-        // High volatility = wider window to reduce re-searches
-        ASPIRATION_WINDOW_INITIAL + (volatility / 4).min(100)
+        // - Divide by 4 to scale volatility to window size (empirically determined)
+        // - Cap at max adjustment to prevent excessively wide windows
+        // - This ensures window stays in reasonable range: [INITIAL, INITIAL + MAX_ADJUSTMENT]
+        use crate::search::constants::ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT;
+        ASPIRATION_WINDOW_INITIAL
+            + (volatility / 4).min(ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT)
     }
 
     /// Calculate score volatility from evaluation history
+    ///
+    /// Volatility measures how much the score changes between iterations.
+    /// High volatility indicates a tactical/complex position that may need
+    /// wider aspiration windows to avoid repeated re-searches.
+    ///
+    /// Returns: Average absolute score difference over recent iterations
     fn calculate_score_volatility(&self) -> i32 {
         if self.score_history.len() < 2 {
             return 0;
         }
 
         // Calculate average deviation over recent depths
-        let mut total_deviation = 0;
+        let mut total_deviation = 0i64; // Use i64 to prevent overflow
         let history_len = self.score_history.len();
         let start = history_len.saturating_sub(5); // Look at last 5 depths
 
         for i in (start + 1)..history_len {
-            let diff = (self.score_history[i] - self.score_history[i - 1]).abs();
-            total_deviation += diff;
+            // Calculate absolute difference between consecutive scores
+            let diff = (self.score_history[i] as i64 - self.score_history[i - 1] as i64).abs();
+
+            // Cap individual differences at 1000 centipawns to handle mate scores
+            // and prevent extreme volatility from skewing the average
+            let capped_diff = diff.min(1000);
+            total_deviation += capped_diff;
         }
 
         // Average deviation
         let count = history_len - start - 1;
         if count > 0 {
-            total_deviation / count as i32
+            // Ensure result fits in i32 and is non-negative
+            let avg = total_deviation / count as i64;
+            avg.min(i32::MAX as i64).max(0) as i32
         } else {
             0
         }
@@ -608,6 +637,63 @@ mod tests {
     }
 
     #[test]
+    fn test_volatility_edge_cases() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+
+        // Test with extreme score differences (near mate scores)
+        searcher.score_history.clear();
+        searcher.score_history.push(100);
+        searcher.score_history.push(30000); // Near mate score
+        searcher.score_history.push(-30000); // Opponent mate
+
+        // Should handle extreme values without overflow
+        let volatility = searcher.calculate_score_volatility();
+        assert!(volatility >= 0);
+        assert!(volatility <= 1000); // Should be capped
+
+        // Test with single score
+        searcher.score_history.clear();
+        searcher.score_history.push(100);
+        assert_eq!(searcher.calculate_score_volatility(), 0);
+
+        // Test with identical scores (no volatility)
+        searcher.score_history.clear();
+        for _ in 0..5 {
+            searcher.score_history.push(100);
+        }
+        assert_eq!(searcher.calculate_score_volatility(), 0);
+    }
+
+    #[test]
+    fn test_aspiration_window_dynamic_adjustment() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+
+        // Test with stable position (low volatility)
+        searcher.score_history.clear();
+        searcher.score_history.push(100);
+        searcher.score_history.push(105);
+        searcher.score_history.push(102);
+        searcher.score_volatility = searcher.calculate_score_volatility();
+
+        let window = searcher.calculate_aspiration_window(3);
+        assert!(window <= 50); // Should be relatively narrow
+
+        // Test with volatile position
+        searcher.score_history.clear();
+        searcher.score_history.push(100);
+        searcher.score_history.push(300);
+        searcher.score_history.push(-100);
+        searcher.score_history.push(400);
+        searcher.score_volatility = searcher.calculate_score_volatility();
+
+        let window = searcher.calculate_aspiration_window(4);
+        assert!(window > 50); // Should be wider due to volatility
+        assert!(window <= 125); // But still capped
+    }
+
+    #[test]
     fn test_aspiration_window_search() {
         let evaluator = MaterialEvaluator;
         let mut searcher = UnifiedSearcher::<_, true, true, 8>::new(evaluator);
@@ -646,5 +732,50 @@ mod tests {
         // Check score history was populated
         assert!(!searcher.score_history.is_empty());
         assert_eq!(searcher.score_history.len(), result.stats.depth as usize);
+    }
+
+    #[test]
+    fn test_volatility_with_extreme_values() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+
+        // Test empty history
+        assert_eq!(searcher.calculate_score_volatility(), 0);
+
+        // Test with mate scores
+        searcher.score_history.push(100);
+        searcher.score_history.push(30000); // Near mate
+        searcher.score_history.push(-30000); // Opponent mate
+        searcher.score_history.push(200);
+
+        let volatility = searcher.calculate_score_volatility();
+        // Should be capped and reasonable
+        assert!(volatility > 0);
+        assert!(volatility <= 1000); // Capped at 1000
+
+        // Test window calculation with high volatility
+        searcher.score_volatility = 400; // High volatility
+        let window = searcher.calculate_aspiration_window(5);
+        assert_eq!(window, 25 + 100); // Initial + max adjustment
+    }
+
+    #[test]
+    fn test_aspiration_window_bounds() {
+        let evaluator = MaterialEvaluator;
+        let searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+
+        // Test minimum window
+        let window = searcher.calculate_aspiration_window(1);
+        assert_eq!(window, crate::search::constants::ASPIRATION_WINDOW_INITIAL);
+
+        // Test that window is always positive
+        assert!(window > 0);
+
+        // Test that window has reasonable upper bound
+        assert!(
+            window
+                <= crate::search::constants::ASPIRATION_WINDOW_INITIAL
+                    + crate::search::constants::ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT
+        );
     }
 }
