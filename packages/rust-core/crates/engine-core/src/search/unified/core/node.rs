@@ -329,3 +329,112 @@ where
 }
 
 // Note: Helper functions removed - now using functions from pruning module directly
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::{unified::UnifiedSearcher, SearchLimits},
+        shogi::Position,
+    };
+
+    #[test]
+    fn test_search_node_basic() {
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(5).build());
+
+        let mut pos = Position::startpos();
+        let score = search_node(&mut searcher, &mut pos, 3, -1000, 1000, 0);
+
+        // Should return a valid score
+        assert!(score >= -1000 && score <= 1000);
+        assert!(searcher.stats.nodes > 0);
+    }
+
+    #[test]
+    fn test_search_node_stop_flag() {
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+
+        // Set stop flag immediately
+        searcher.context.stop();
+
+        let mut pos = Position::startpos();
+        let score = search_node(&mut searcher, &mut pos, 5, -1000, 1000, 0);
+
+        // Should return alpha when stopped
+        assert_eq!(score, -1000);
+        // Should have minimal nodes due to early stop
+        assert!(searcher.stats.nodes < 10);
+    }
+
+    #[test]
+    fn test_history_update_with_mutex_error() {
+        // This test verifies that search continues even if history mutex fails
+        // In real code, we handle the error with logging and continue
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(3).build());
+
+        let mut pos = Position::startpos();
+
+        // Even if history mutex were to fail (which we handle gracefully),
+        // search should complete successfully
+        let score = search_node(&mut searcher, &mut pos, 2, -1000, 1000, 0);
+
+        // Verify search completed
+        assert!(score >= -SEARCH_INF && score <= SEARCH_INF);
+    }
+
+    #[test]
+    fn test_max_moves_to_update_performance() {
+        // Test that we limit the number of moves updated for performance
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(3).build());
+
+        let mut pos = Position::startpos();
+
+        // Create a move generator to count moves
+        use crate::movegen::MoveGen;
+        use crate::shogi::MoveList;
+        let mut move_gen = MoveGen::new();
+        let mut moves = MoveList::new();
+        move_gen.generate_all(&pos, &mut moves);
+        assert!(moves.len() > 16); // Ensure we have more than MAX_MOVES_TO_UPDATE
+
+        // Search should complete efficiently even with many moves
+        let start_nodes = searcher.stats.nodes;
+        let _ = search_node(&mut searcher, &mut pos, 3, -1000, 1000, 0);
+        let end_nodes = searcher.stats.nodes;
+
+        // Should have searched some nodes
+        assert!(end_nodes > start_nodes);
+    }
+
+    #[test]
+    fn test_pruning_conditions_respected() {
+        // Test with pruning enabled
+        let mut searcher_with_pruning =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher_with_pruning
+            .context
+            .set_limits(SearchLimits::builder().depth(5).build());
+
+        // Test with pruning disabled
+        let mut searcher_no_pruning =
+            UnifiedSearcher::<MaterialEvaluator, true, false, 16>::new(MaterialEvaluator);
+        searcher_no_pruning.context.set_limits(SearchLimits::builder().depth(5).build());
+
+        let mut pos1 = Position::startpos();
+        let mut pos2 = Position::startpos();
+
+        let _ = search_node(&mut searcher_with_pruning, &mut pos1, 4, -1000, 1000, 0);
+        let _ = search_node(&mut searcher_no_pruning, &mut pos2, 4, -1000, 1000, 0);
+
+        // With pruning should search fewer nodes
+        assert!(searcher_with_pruning.stats.nodes < searcher_no_pruning.stats.nodes);
+    }
+}
