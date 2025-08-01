@@ -77,6 +77,12 @@ pub struct UnifiedSearcher<
 
     /// Search stack for tracking state at each ply
     search_stack: Vec<SearchStack>,
+
+    /// Evaluation history for each depth (for dynamic aspiration window)
+    score_history: Vec<i32>,
+
+    /// Score volatility measurement for window adjustment
+    score_volatility: i32,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -108,6 +114,8 @@ where
             context: context::SearchContext::new(),
             time_manager: None,
             search_stack,
+            score_history: Vec::with_capacity(crate::search::constants::MAX_PLY),
+            score_volatility: 0,
         }
     }
 
@@ -134,6 +142,8 @@ where
             context: context::SearchContext::new(),
             time_manager: None,
             search_stack,
+            score_history: Vec::with_capacity(crate::search::constants::MAX_PLY),
+            score_volatility: 0,
         }
     }
 
@@ -143,6 +153,8 @@ where
         self.stats = SearchStats::default();
         self.context.reset();
         self.pv_table.clear();
+        self.score_history.clear();
+        self.score_volatility = 0;
 
         let start_time = Instant::now();
 
@@ -182,7 +194,7 @@ where
 
         // Iterative deepening
         let mut best_move = None;
-        let mut best_score = 0;
+        let mut best_score: i32 = 0;
         let mut depth = 1;
 
         while depth <= max_depth && !self.context.should_stop() {
@@ -200,8 +212,75 @@ where
                 }
             }
 
-            // Search at current depth
-            let (score, pv) = self.search_root(pos, depth);
+            // Set up aspiration window for depth > 1
+            let (mut alpha, mut beta) =
+                if depth > 1 && best_score.abs() < crate::search::constants::MATE_SCORE {
+                    // Calculate dynamic window based on score history
+                    let window = self.calculate_aspiration_window(depth);
+                    (best_score - window, best_score + window)
+                } else {
+                    // First depth or mate score - use full window
+                    (-crate::search::constants::SEARCH_INF, crate::search::constants::SEARCH_INF)
+                };
+
+            // Search with aspiration window
+            let mut score;
+            let mut pv;
+            let mut aspiration_retries = 0;
+
+            loop {
+                // Search at current depth with window
+                let result = self.search_root_with_window(pos, depth, alpha, beta);
+                score = result.0;
+                pv = result.1;
+
+                // Check if score is within window
+                if score > alpha && score < beta {
+                    // Success - update statistics
+                    if aspiration_retries == 0 {
+                        self.stats.aspiration_hits =
+                            Some(self.stats.aspiration_hits.unwrap_or(0) + 1);
+                    }
+                    break;
+                }
+
+                // Aspiration window fail - need to re-search
+                self.stats.aspiration_failures =
+                    Some(self.stats.aspiration_failures.unwrap_or(0) + 1);
+                self.stats.re_searches = Some(self.stats.re_searches.unwrap_or(0) + 1);
+
+                // Check retry limit
+                if aspiration_retries >= crate::search::constants::ASPIRATION_RETRY_LIMIT {
+                    log::debug!("Aspiration window retry limit reached at depth {depth}");
+                    break;
+                }
+
+                // Expand window gradually (1.5x expansion)
+                use crate::search::constants::{
+                    ASPIRATION_WINDOW_DELTA, ASPIRATION_WINDOW_EXPANSION,
+                };
+                if score <= alpha {
+                    // Fail low - expand alpha
+                    let expansion =
+                        ((alpha - best_score).abs() as f32 * ASPIRATION_WINDOW_EXPANSION) as i32;
+                    alpha = (alpha - expansion.max(ASPIRATION_WINDOW_DELTA))
+                        .max(-crate::search::constants::SEARCH_INF);
+                }
+                if score >= beta {
+                    // Fail high - expand beta
+                    let expansion =
+                        ((beta - best_score).abs() as f32 * ASPIRATION_WINDOW_EXPANSION) as i32;
+                    beta = (beta + expansion.max(ASPIRATION_WINDOW_DELTA))
+                        .min(crate::search::constants::SEARCH_INF);
+                }
+
+                aspiration_retries += 1;
+
+                // Check for timeout during re-search
+                if self.context.should_stop() {
+                    break;
+                }
+            }
 
             // Always update results if we have a valid pv, even if stopping
             if !pv.is_empty() {
@@ -212,6 +291,12 @@ where
                 // Update statistics
                 self.stats.depth = depth;
                 self.stats.pv = pv.clone();
+
+                // Update score history for volatility calculation
+                self.score_history.push(score);
+                if self.score_history.len() > 1 {
+                    self.score_volatility = self.calculate_score_volatility();
+                }
             }
 
             // Call info callback if not stopped
@@ -233,10 +318,58 @@ where
         }
     }
 
-    /// Search from the root position
-    fn search_root(&mut self, pos: &mut Position, depth: u8) -> (i32, Vec<Move>) {
+    /// Calculate dynamic aspiration window based on score history
+    fn calculate_aspiration_window(&self, depth: u8) -> i32 {
+        use crate::search::constants::ASPIRATION_WINDOW_INITIAL;
+
+        // Use base window for early depths
+        if depth <= 2 || self.score_history.len() < 2 {
+            return ASPIRATION_WINDOW_INITIAL;
+        }
+
+        // Calculate score volatility from recent history
+        let volatility = self.calculate_score_volatility();
+
+        // Adjust window based on volatility
+        // High volatility = wider window to reduce re-searches
+        ASPIRATION_WINDOW_INITIAL + (volatility / 4).min(100)
+    }
+
+    /// Calculate score volatility from evaluation history
+    fn calculate_score_volatility(&self) -> i32 {
+        if self.score_history.len() < 2 {
+            return 0;
+        }
+
+        // Calculate average deviation over recent depths
+        let mut total_deviation = 0;
+        let history_len = self.score_history.len();
+        let start = history_len.saturating_sub(5); // Look at last 5 depths
+
+        for i in (start + 1)..history_len {
+            let diff = (self.score_history[i] - self.score_history[i - 1]).abs();
+            total_deviation += diff;
+        }
+
+        // Average deviation
+        let count = history_len - start - 1;
+        if count > 0 {
+            total_deviation / count as i32
+        } else {
+            0
+        }
+    }
+
+    /// Search from the root position with aspiration window
+    fn search_root_with_window(
+        &mut self,
+        pos: &mut Position,
+        depth: u8,
+        alpha: i32,
+        beta: i32,
+    ) -> (i32, Vec<Move>) {
         // Implementation will be added in core module
-        core::search_root(self, pos, depth)
+        core::search_root_with_window(self, pos, depth, alpha, beta)
     }
 
     /// Get current node count
@@ -438,5 +571,79 @@ mod tests {
             "Should stop quickly with 50ms limit, but took {}ms",
             elapsed.as_millis()
         );
+    }
+
+    #[test]
+    fn test_aspiration_window_calculation() {
+        let evaluator = MaterialEvaluator;
+        let searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+
+        // Test base window for early depths
+        let window = searcher.calculate_aspiration_window(1);
+        assert_eq!(window, crate::search::constants::ASPIRATION_WINDOW_INITIAL);
+
+        let window = searcher.calculate_aspiration_window(2);
+        assert_eq!(window, crate::search::constants::ASPIRATION_WINDOW_INITIAL);
+    }
+
+    #[test]
+    fn test_score_volatility_calculation() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+
+        // Empty history should return 0
+        assert_eq!(searcher.calculate_score_volatility(), 0);
+
+        // Add some scores
+        searcher.score_history.push(100);
+        searcher.score_history.push(110);
+        searcher.score_history.push(95);
+        searcher.score_history.push(120);
+
+        // Should calculate average deviation
+        let volatility = searcher.calculate_score_volatility();
+        assert!(volatility > 0);
+        assert!(volatility < 50); // Reasonable range
+    }
+
+    #[test]
+    fn test_aspiration_window_search() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, true, 8>::new(evaluator);
+        let mut pos = Position::startpos();
+
+        // Search with depth limit to test aspiration windows
+        let limits = SearchLimitsBuilder::default().depth(4).build();
+        let result = searcher.search(&mut pos, limits);
+
+        assert!(result.best_move.is_some());
+
+        // Check that aspiration window statistics were tracked
+        // At depth 2 and beyond, aspiration windows should be used
+        if result.stats.depth >= 2 {
+            // Either hits or failures should be recorded
+            let hits = result.stats.aspiration_hits.unwrap_or(0);
+            let failures = result.stats.aspiration_failures.unwrap_or(0);
+            assert!(hits > 0 || failures > 0, "Aspiration window should be used at depth >= 2");
+        }
+    }
+
+    #[test]
+    fn test_aspiration_window_with_volatile_position() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, true, 8>::new(evaluator);
+
+        // Use a tactical position that might have score fluctuations
+        let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let mut pos = Position::from_sfen(sfen).expect("Valid SFEN");
+
+        let limits = SearchLimitsBuilder::default().depth(5).build();
+        let result = searcher.search(&mut pos, limits);
+
+        assert!(result.best_move.is_some());
+
+        // Check score history was populated
+        assert!(!searcher.score_history.is_empty());
+        assert_eq!(searcher.score_history.len(), result.stats.depth as usize);
     }
 }

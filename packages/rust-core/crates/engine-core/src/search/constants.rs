@@ -30,10 +30,11 @@ pub const QUIESCE_MAX_PLY: u8 = 4;
 /// Safety limit to prevent stack overflow in extreme cases
 pub const MAX_QUIESCE_DEPTH: u16 = 32;
 
-/// Aspiration window constants
-pub const ASPIRATION_WINDOW_INITIAL: i32 = 50;
-pub const ASPIRATION_WINDOW_DELTA: i32 = 50;
-pub const ASPIRATION_RETRY_LIMIT: u32 = 4;
+/// Aspiration window constants (optimized for reduced re-searches)
+pub const ASPIRATION_WINDOW_INITIAL: i32 = 25; // Reduced from 50 for tighter initial window
+pub const ASPIRATION_WINDOW_DELTA: i32 = 25; // Reduced from 50 for more gradual expansion
+pub const ASPIRATION_WINDOW_EXPANSION: f32 = 1.5; // Expansion factor (was implicitly 2.0)
+pub const ASPIRATION_RETRY_LIMIT: u32 = 3; // Reduced from 4 to limit re-searches
 
 /// Time pressure threshold for search decisions
 /// When remaining time < elapsed time * threshold, enter time pressure mode
