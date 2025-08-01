@@ -97,4 +97,9 @@ impl SearchContext {
     pub fn elapsed(&self) -> std::time::Duration {
         self.start_time.elapsed()
     }
+
+    /// Get reference to info callback if available
+    pub fn info_callback(&self) -> Option<&crate::search::types::InfoCallback> {
+        self.limits.info_callback.as_ref()
+    }
 }

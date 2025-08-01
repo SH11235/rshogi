@@ -21,8 +21,18 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use crate::search::GamePhase;
 use crate::Color;
+
+/// Game phase enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GamePhase {
+    /// Opening phase (0-20 moves)
+    Opening,
+    /// Middle game (21-60 moves)
+    MiddleGame,
+    /// End game (61+ moves or few pieces)
+    EndGame,
+}
 
 mod allocation;
 mod parameters;

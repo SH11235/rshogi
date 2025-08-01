@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use engine_core::evaluate::Evaluator;
 use engine_core::evaluate::MaterialEvaluator;
 use engine_core::search::search_enhanced::EnhancedSearcher;
 use engine_core::shogi::Move;
@@ -10,7 +11,7 @@ use engine_core::Position;
 
 /// Run search with panic recovery
 fn run_search_safe(
-    searcher: &mut EnhancedSearcher,
+    searcher: &mut EnhancedSearcher<Arc<dyn Evaluator + Send + Sync>>,
     pos: &mut Position,
     depth: u8,
 ) -> Result<(Option<Move>, i32, u64), String> {
@@ -44,7 +45,7 @@ fn main() {
         println!("Testing: {name}");
 
         // PVテーブルありの探索
-        let mut searcher_with_pv = EnhancedSearcher::new(16, evaluator.clone());
+        let mut searcher_with_pv = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
 
         // 深さ6まで探索を5回実行して平均を取る
         let mut total_nodes = 0u64;
@@ -100,7 +101,7 @@ fn main() {
     println!("==================================");
 
     let pos = Position::startpos();
-    let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
+    let mut searcher = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
 
     for depth in 1..=8 {
         let mut pos_copy = pos.clone();

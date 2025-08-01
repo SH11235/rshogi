@@ -120,7 +120,12 @@ where
 
                 // Update statistics
                 self.stats.depth = depth;
-                self.stats.pv = pv;
+                self.stats.pv = pv.clone();
+
+                // Call info callback if available
+                if let Some(callback) = self.context.info_callback() {
+                    callback(depth, score, self.stats.nodes, self.context.elapsed(), &pv);
+                }
             }
 
             depth += 1;

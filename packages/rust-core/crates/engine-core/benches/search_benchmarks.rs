@@ -59,8 +59,8 @@ fn bench_basic_searcher(c: &mut Criterion) {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
                     let limits =
                         SearchLimitsBuilder::default().depth(pos_info.expected_depth).build();
-                    let mut searcher = BasicSearcher::new(limits, evaluator.clone());
-                    let result = searcher.search(&mut pos);
+                    let mut searcher = BasicSearcher::new(evaluator.clone());
+                    let result = searcher.search(&mut pos, limits);
                     black_box(result)
                 });
             },
@@ -73,8 +73,8 @@ fn bench_basic_searcher(c: &mut Criterion) {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
                     let limits = SearchLimitsBuilder::default().fixed_time_ms(10).build();
-                    let mut searcher = BasicSearcher::new(limits, evaluator.clone());
-                    let result = searcher.search(&mut pos);
+                    let mut searcher = BasicSearcher::new(evaluator.clone());
+                    let result = searcher.search(&mut pos, limits);
                     black_box(result)
                 });
             },
@@ -99,7 +99,7 @@ fn bench_enhanced_searcher(c: &mut Criterion) {
             |b, pos_info| {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
-                    let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
+                    let mut searcher = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
                     let result = searcher.search_with_limits(
                         &mut pos,
                         SearchLimitsBuilder::default().depth(pos_info.expected_depth).build(),
@@ -115,7 +115,7 @@ fn bench_enhanced_searcher(c: &mut Criterion) {
             |b, pos_info| {
                 b.iter(|| {
                     let mut pos = Position::from_sfen(pos_info.sfen).unwrap();
-                    let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
+                    let mut searcher = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
                     let result = searcher.search_with_limits(
                         &mut pos,
                         SearchLimitsBuilder::default().fixed_time_ms(10).build(),
@@ -140,15 +140,15 @@ fn bench_node_counting(c: &mut Criterion) {
     group.bench_function("basic_nodes_per_second", |b| {
         b.iter(|| {
             let limits = SearchLimitsBuilder::default().fixed_time_ms(50).build();
-            let mut searcher = BasicSearcher::new(limits, evaluator.clone());
-            let result = searcher.search(&mut pos.clone());
+            let mut searcher = BasicSearcher::new(evaluator.clone());
+            let result = searcher.search(&mut pos.clone(), limits);
             black_box(result.stats.nodes)
         });
     });
 
     group.bench_function("enhanced_nodes_per_second", |b| {
         b.iter(|| {
-            let mut searcher = EnhancedSearcher::new(16, evaluator.clone());
+            let mut searcher = EnhancedSearcher::new_with_tt_size(16, evaluator.clone());
             let _result = searcher.search_with_limits(
                 &mut pos.clone(),
                 SearchLimitsBuilder::default().fixed_time_ms(50).build(),
