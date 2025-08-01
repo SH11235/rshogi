@@ -9,7 +9,11 @@ pub use pv::PVTable;
 
 use crate::{
     evaluation::evaluate::Evaluator,
-    search::{common::mate_score, constants::SEARCH_INF, unified::UnifiedSearcher},
+    search::{
+        common::mate_score,
+        constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
+        unified::UnifiedSearcher,
+    },
     shogi::{Move, Position},
 };
 
@@ -186,6 +190,13 @@ where
         return 0;
     }
 
+    // Absolute depth limit to prevent stack overflow
+    if ply >= MAX_PLY as u16 {
+        log::warn!("Hit absolute ply limit {ply} in alpha-beta search");
+        let eval = searcher.evaluator.evaluate(pos);
+        return eval;
+    }
+
     // Mate distance pruning
     if USE_PRUNING {
         alpha = alpha.max(mate_score(ply as u8, false)); // Getting mated
@@ -251,8 +262,6 @@ fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SI
 where
     E: Evaluator + Send + Sync + 'static,
 {
-    use crate::search::constants::QUIESCE_MAX_PLY;
-
     searcher.stats.nodes += 1;
 
     // Check time limits in quiescence search (especially important for FixedNodes)
@@ -275,8 +284,14 @@ where
         alpha = stand_pat;
     }
 
-    // Depth limit check to prevent infinite recursion
-    if ply >= searcher.context.max_depth() as u16 + QUIESCE_MAX_PLY as u16 {
+    // Depth limit check to prevent infinite recursion and stack overflow
+    // More conservative limit: either absolute ply limit or quiescence depth limit
+    let quiesce_ply = ply.saturating_sub(searcher.context.max_depth() as u16);
+    if ply >= MAX_PLY as u16 || quiesce_ply >= MAX_QUIESCE_DEPTH {
+        // Log if we hit the absolute limit (potential issue)
+        if ply >= MAX_PLY as u16 {
+            log::warn!("Hit absolute ply limit {ply} in quiescence search");
+        }
         return alpha;
     }
 
