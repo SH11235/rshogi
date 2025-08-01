@@ -13,6 +13,40 @@ use crate::{
     shogi::{Move, Position},
 };
 
+/// Get event polling interval based on time limit
+fn get_event_poll_interval<
+    E,
+    const USE_TT: bool,
+    const USE_PRUNING: bool,
+    const TT_SIZE_MB: usize,
+>(
+    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+) -> u64
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    use crate::time_management::TimeControl;
+
+    // Check if we have FixedNodes in either limits or time manager
+    if let TimeControl::FixedNodes { .. } = &searcher.context.limits().time_control {
+        return 0x3F; // Check every 64 nodes
+    }
+
+    // For time-based controls, use adaptive intervals based on soft limit
+    if let Some(tm) = &searcher.time_manager {
+        match tm.soft_limit_ms() {
+            0..=50 => 0x3F,    // ≤50ms → 64 nodes
+            51..=500 => 0x1FF, // ≤0.5s → 512 nodes
+            _ => 0x3FF,        // default 1024 nodes
+        }
+    } else {
+        // TODO: Performance concern - no TimeManager means 1024 node intervals
+        // This can make depth-only searches (e.g., depth 5) very slow as
+        // stop conditions are checked infrequently.
+        0x3FF // default for no time manager
+    }
+}
+
 /// Search from root position with iterative deepening
 pub(super) fn search_root<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
@@ -83,6 +117,16 @@ where
         // Process events (including ponder hit) every move at root
         searcher.context.process_events(&searcher.time_manager);
 
+        // Also check time manager at root (but ensure at least one move is fully searched)
+        if move_idx > 0 {
+            if let Some(ref tm) = searcher.time_manager {
+                if tm.should_stop(searcher.stats.nodes) {
+                    searcher.context.stop();
+                    break;
+                }
+            }
+        }
+
         // Check for timeout
         if searcher.context.should_stop() {
             break;
@@ -122,9 +166,20 @@ where
     // Check limits
     searcher.stats.nodes += 1;
 
-    // Process events every 1024 nodes to keep overhead low
-    if (searcher.stats.nodes & 0x3FF) == 0 {
+    // Get adaptive polling interval based on time control
+    let event_interval = get_event_poll_interval(searcher);
+
+    // Process events based on adaptive interval
+    if (searcher.stats.nodes & event_interval) == 0 {
         searcher.context.process_events(&searcher.time_manager);
+
+        // For FixedNodes, also check time manager
+        if let Some(ref tm) = searcher.time_manager {
+            if tm.should_stop(searcher.stats.nodes) {
+                searcher.context.stop();
+                return 0;
+            }
+        }
     }
 
     if searcher.context.should_stop() {
@@ -199,6 +254,17 @@ where
     use crate::search::constants::QUIESCE_MAX_PLY;
 
     searcher.stats.nodes += 1;
+
+    // Check time limits in quiescence search (especially important for FixedNodes)
+    let event_interval = get_event_poll_interval(searcher);
+    if (searcher.stats.nodes & event_interval) == 0 {
+        if let Some(ref tm) = searcher.time_manager {
+            if tm.should_stop(searcher.stats.nodes) {
+                searcher.context.stop();
+                return alpha; // Return current best value
+            }
+        }
+    }
 
     // Stand pat
     let stand_pat = searcher.evaluator.evaluate(pos);
