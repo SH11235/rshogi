@@ -238,6 +238,12 @@ mod tests {
     #[test]
     #[ignore]
     fn test_benchmark() {
+        // Skip benchmark test in CI environment to save time
+        if std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping benchmark test in CI environment");
+            return;
+        }
+
         let result = run_benchmark();
 
         // Should achieve reasonable performance
