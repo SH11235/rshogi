@@ -238,6 +238,12 @@ mod tests {
     #[test]
     #[ignore]
     fn test_benchmark() {
+        // Skip benchmark test in CI environment to save time
+        if crate::util::is_ci_environment() {
+            println!("Skipping benchmark test in CI environment");
+            return;
+        }
+
         let result = run_benchmark();
 
         // Should achieve reasonable performance
