@@ -88,6 +88,20 @@ pub fn can_do_lmr(
         && !mv.is_promote()
 }
 
+/// Check if we can do razoring (extreme futility pruning at low depths)
+pub fn can_do_razoring(depth: u8, in_check: bool, alpha: i32, static_eval: i32) -> bool {
+    !in_check && depth <= 2 && !is_mate_score(alpha) && static_eval + 400 < alpha
+}
+
+/// Get razoring margin
+pub fn razoring_margin(depth: u8) -> i32 {
+    match depth {
+        1 => 200,
+        2 => 400,
+        _ => 0,
+    }
+}
+
 /// Calculate LMR reduction
 pub fn lmr_reduction(depth: u8, moves_searched: u32) -> u8 {
     // More sophisticated reduction table based on depth and move count
@@ -119,6 +133,16 @@ pub fn lmr_reduction_formula(depth: u8, moves_searched: u32) -> u8 {
 }
 
 /// Check if score is a mate score
-fn is_mate_score(score: i32) -> bool {
+pub fn is_mate_score(score: i32) -> bool {
     score.abs() > 30000
+}
+
+/// Get delta pruning margin for quiescence search
+pub fn delta_pruning_margin() -> i32 {
+    200 // Conservative margin to avoid missing tactics
+}
+
+/// Check if static null move (reverse futility) pruning is applicable
+pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval: i32) -> bool {
+    !in_check && depth <= 6 && !is_mate_score(beta) && static_eval - 120 * depth as i32 >= beta
 }
