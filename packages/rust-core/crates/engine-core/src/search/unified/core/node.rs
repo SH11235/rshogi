@@ -38,6 +38,49 @@ where
         searcher.search_stack[ply as usize].clear_for_new_node();
     }
 
+    // Static evaluation for pruning decisions
+    let static_eval = if USE_PRUNING && !in_check {
+        if crate::search::types::SearchStack::is_valid_ply(ply) {
+            let stack_entry = &mut searcher.search_stack[ply as usize];
+            if let Some(cached_eval) = stack_entry.static_eval {
+                cached_eval
+            } else {
+                let eval = searcher.evaluator.evaluate(pos);
+                stack_entry.static_eval = Some(eval);
+                eval
+            }
+        } else {
+            searcher.evaluator.evaluate(pos)
+        }
+    } else {
+        0 // Not used when in check
+    };
+
+    // Reverse futility pruning (static null move)
+    if USE_PRUNING
+        && crate::search::unified::pruning::can_do_static_null_move(
+            depth,
+            in_check,
+            beta,
+            static_eval,
+        )
+    {
+        return beta;
+    }
+
+    // Razoring - extreme futility pruning at low depths
+    if USE_PRUNING
+        && crate::search::unified::pruning::can_do_razoring(depth, in_check, alpha, static_eval)
+    {
+        // Go directly to quiescence search if position is really bad
+        let razoring_alpha = alpha - crate::search::unified::pruning::razoring_margin(depth);
+        let score =
+            super::quiescence_search(searcher, pos, razoring_alpha, razoring_alpha + 1, ply);
+        if score <= razoring_alpha {
+            return score;
+        }
+    }
+
     // Generate moves
     let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
     let moves = move_gen.generate_all();
@@ -65,8 +108,34 @@ where
         moves.as_slice().to_vec()
     };
 
+    // Early futility pruning check
+    let can_do_futility = USE_PRUNING
+        && crate::search::unified::pruning::can_do_futility_pruning(
+            depth,
+            in_check,
+            alpha,
+            beta,
+            static_eval,
+        );
+    let futility_margin = if can_do_futility {
+        crate::search::unified::pruning::futility_margin(depth)
+    } else {
+        0
+    };
+
     // Search moves
     for &mv in ordered_moves.iter() {
+        // Futility pruning for quiet moves
+        if USE_PRUNING
+            && can_do_futility
+            && moves_searched > 0
+            && !mv.is_capture_hint()
+            && !mv.is_promote()
+            && static_eval + futility_margin <= alpha
+        {
+            continue;
+        }
+
         // Track moves for history updates
         if mv.is_capture_hint() {
             captures_tried.push(mv);
@@ -91,9 +160,17 @@ where
             // Full window search for first move
             score = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, ply + 1);
         } else {
-            // Late move reduction
-            let reduction = if USE_PRUNING && should_reduce(depth, moves_searched, in_check, mv) {
-                calculate_reduction(depth, moves_searched)
+            // Late move reduction using advanced pruning module
+            let gives_check = false; // TODO: implement gives_check detection
+            let reduction = if USE_PRUNING
+                && crate::search::unified::pruning::can_do_lmr(
+                    depth,
+                    moves_searched,
+                    in_check,
+                    gives_check,
+                    mv,
+                ) {
+                crate::search::unified::pruning::lmr_reduction(depth, moves_searched)
             } else {
                 0
             };
@@ -208,9 +285,11 @@ where
             }
         }
 
-        // Futility pruning
+        // Late move pruning - prune remaining moves if we've searched enough
         if USE_PRUNING
-            && can_prune(searcher, pos, depth, alpha, beta, moves_searched, in_check, ply)
+            && depth <= 3
+            && moves_searched >= 8 + depth as u32 * 3
+            && !crate::search::common::is_mate_score(best_score)
         {
             break;
         }
@@ -232,64 +311,4 @@ where
     best_score
 }
 
-/// Check if we should apply late move reduction
-fn should_reduce(depth: u8, moves_searched: u32, in_check: bool, mv: Move) -> bool {
-    depth >= 3 && moves_searched >= 4 && !in_check && !mv.is_capture_hint() && !mv.is_promote()
-}
-
-/// Calculate reduction amount
-fn calculate_reduction(depth: u8, moves_searched: u32) -> u8 {
-    if moves_searched >= 6 && depth >= 4 {
-        2
-    } else {
-        1
-    }
-}
-
-/// Check if we can prune remaining moves
-#[allow(clippy::too_many_arguments)]
-fn can_prune<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
-    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
-    pos: &Position,
-    depth: u8,
-    alpha: i32,
-    beta: i32,
-    moves_searched: u32,
-    in_check: bool,
-    ply: u16,
-) -> bool
-where
-    E: Evaluator + Send + Sync + 'static,
-{
-    // Don't prune if:
-    // - In check
-    // - Too few moves searched
-    // - At low depth
-    // - Near mate scores
-    if in_check || moves_searched < 8 || depth < 2 {
-        return false;
-    }
-
-    if crate::search::common::is_mate_score(alpha) || crate::search::common::is_mate_score(beta) {
-        return false;
-    }
-
-    // Futility margin
-    let margin = 200 * depth as i32;
-
-    // Get static eval - use cached value if available
-    let eval = if crate::search::types::SearchStack::is_valid_ply(ply) {
-        let stack_entry = &mut searcher.search_stack[ply as usize];
-        if let Some(cached_eval) = stack_entry.static_eval {
-            cached_eval
-        } else {
-            let eval = searcher.evaluator.evaluate(pos);
-            stack_entry.static_eval = Some(eval);
-            eval
-        }
-    } else {
-        searcher.evaluator.evaluate(pos)
-    };
-
-    eval + margin < alpha
-}
+// Note: Helper functions removed - now using functions from pruning module directly
