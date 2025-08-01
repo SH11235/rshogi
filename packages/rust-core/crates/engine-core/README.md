@@ -39,6 +39,19 @@ type BasicConfig = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
 type EnhancedConfig = UnifiedSearcher<NnueEvaluator, true, true, 16>;
 ```
 
+## エンジンタイプ
+
+4つの異なるエンジンタイプを提供しています：
+
+| タイプ | 評価関数 | 探索 | 用途 |
+|-------|---------|------|------|
+| Material | 駒価値 | 基本 | デバッグ・学習 |
+| Nnue | NNUE | 基本 | 高速解析 |
+| Enhanced | 駒価値 | 高度 | 省メモリ環境 |
+| EnhancedNnue | NNUE | 高度 | 最強設定 |
+
+詳細は[エンジンタイプ選択ガイド](docs/engine-type-selection.md)を参照してください。
+
 ## 使用方法
 
 ### 基本的な使用例
