@@ -79,10 +79,15 @@ impl MoveOrdering {
         }
 
         // History heuristic
-        let history_score = if let Ok(history) = self.history.lock() {
-            history.get_score(pos.side_to_move, mv, None)
-        } else {
-            0
+        let history_score = match self.history.lock() {
+            Ok(history) => history.get_score(pos.side_to_move, mv, None),
+            Err(e) => {
+                // Mutex poisoning indicates a panic in another thread holding the lock.
+                // This should be extremely rare in production, but log it for debugging.
+                // Impact: Move ordering quality may degrade slightly, but search remains correct.
+                log::error!("Failed to acquire history lock in move ordering: {e}");
+                0 // Fallback to neutral score (won't affect correctness, only efficiency)
+            }
         };
 
         // Base score with history
