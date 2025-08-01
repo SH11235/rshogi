@@ -6,6 +6,10 @@ pub mod search_basic;
 pub mod search_enhanced;
 pub mod tt;
 pub mod types;
+pub mod unified;
+
+#[cfg(test)]
+pub mod test_helpers;
 
 // Re-export commonly used items
 pub use common::{is_mate_score, mate_distance_pruning, mate_score, LimitChecker, SearchContext};

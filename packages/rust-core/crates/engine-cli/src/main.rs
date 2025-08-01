@@ -1513,8 +1513,8 @@ mod tests {
         assert!(total_bestmoves > 0, "Should have received BestMove messages");
 
         // Each search should have received messages
-        for i in 0..3 {
-            assert!(finished_per_search[i] > 0, "Search {i} should have Finished messages");
+        for (i, &count) in finished_per_search.iter().enumerate() {
+            assert!(count > 0, "Search {i} should have Finished messages");
         }
     }
 }
