@@ -131,11 +131,9 @@ where
 
         // Create TimeManager if needed
         use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
-        // TODO: Performance concern - TimeControl::Infinite with depth limit
-        // Currently TimeManager is not created for Infinite time control, which may
-        // cause performance issues for depth-limited searches (e.g., depth 5 taking 25s).
-        // Consider creating TimeManager even for Infinite to enable search optimizations.
-        if !matches!(limits.time_control, TimeControl::Infinite) {
+        // Create TimeManager for non-infinite time controls OR when depth limit is specified
+        // This enables proper search optimizations for depth-limited searches
+        if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
             // Convert SearchLimits to TimeLimits
             let time_limits: TimeLimits = limits.clone().into();
 

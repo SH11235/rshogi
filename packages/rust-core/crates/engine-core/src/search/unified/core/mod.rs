@@ -44,10 +44,13 @@ where
             _ => 0x3FF,        // default 1024 nodes
         }
     } else {
-        // TODO: Performance concern - no TimeManager means 1024 node intervals
-        // This can make depth-only searches (e.g., depth 5) very slow as
-        // stop conditions are checked infrequently.
-        0x3FF // default for no time manager
+        // For depth-only searches without TimeManager, use frequent polling
+        // to ensure responsive termination
+        if searcher.context.limits().depth.is_some() {
+            0x3F // Check every 64 nodes for depth-limited searches
+        } else {
+            0x3FF // default 1024 nodes for truly infinite searches
+        }
     }
 }
 
