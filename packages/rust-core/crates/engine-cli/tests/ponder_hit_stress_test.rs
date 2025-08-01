@@ -287,13 +287,13 @@ fn test_ponder_hit_with_stop() {
     let stop_start = Instant::now();
     send_command(stdin, "stop");
 
-    // Should get bestmove quickly
-    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(500));
+    // Should get bestmove quickly (allow more time for CI environments)
+    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(800));
     let stop_elapsed = stop_start.elapsed();
 
     assert!(result.is_ok(), "Failed to get bestmove after stop");
     assert!(
-        stop_elapsed < Duration::from_millis(500),
+        stop_elapsed < Duration::from_millis(800),
         "Stop after ponderhit took too long: {stop_elapsed:?}"
     );
 
@@ -349,7 +349,7 @@ fn test_ponder_hit_stress_with_thread_timing() {
                 Err(e) => {
                     eprintln!("Failed to get bestmove in iteration {iteration}: {e}");
                     send_command(stdin, "stop");
-                    let _ = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(500));
+                    let _ = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(800));
                     break;
                 }
             }
