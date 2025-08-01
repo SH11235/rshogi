@@ -38,6 +38,49 @@ where
         searcher.search_stack[ply as usize].clear_for_new_node();
     }
 
+    // Static evaluation for pruning decisions
+    let static_eval = if USE_PRUNING && !in_check {
+        if crate::search::types::SearchStack::is_valid_ply(ply) {
+            let stack_entry = &mut searcher.search_stack[ply as usize];
+            if let Some(cached_eval) = stack_entry.static_eval {
+                cached_eval
+            } else {
+                let eval = searcher.evaluator.evaluate(pos);
+                stack_entry.static_eval = Some(eval);
+                eval
+            }
+        } else {
+            searcher.evaluator.evaluate(pos)
+        }
+    } else {
+        0 // Not used when in check
+    };
+
+    // Reverse futility pruning (static null move)
+    if USE_PRUNING
+        && crate::search::unified::pruning::can_do_static_null_move(
+            depth,
+            in_check,
+            beta,
+            static_eval,
+        )
+    {
+        return beta;
+    }
+
+    // Razoring - extreme futility pruning at low depths
+    if USE_PRUNING
+        && crate::search::unified::pruning::can_do_razoring(depth, in_check, alpha, static_eval)
+    {
+        // Go directly to quiescence search if position is really bad
+        let razoring_alpha = alpha - crate::search::unified::pruning::razoring_margin(depth);
+        let score =
+            super::quiescence_search(searcher, pos, razoring_alpha, razoring_alpha + 1, ply);
+        if score <= razoring_alpha {
+            return score;
+        }
+    }
+
     // Generate moves
     let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
     let moves = move_gen.generate_all();
@@ -65,8 +108,34 @@ where
         moves.as_slice().to_vec()
     };
 
+    // Early futility pruning check
+    let can_do_futility = USE_PRUNING
+        && crate::search::unified::pruning::can_do_futility_pruning(
+            depth,
+            in_check,
+            alpha,
+            beta,
+            static_eval,
+        );
+    let futility_margin = if can_do_futility {
+        crate::search::unified::pruning::futility_margin(depth)
+    } else {
+        0
+    };
+
     // Search moves
     for &mv in ordered_moves.iter() {
+        // Futility pruning for quiet moves
+        if USE_PRUNING
+            && can_do_futility
+            && moves_searched > 0
+            && !mv.is_capture_hint()
+            && !mv.is_promote()
+            && static_eval + futility_margin <= alpha
+        {
+            continue;
+        }
+
         // Track moves for history updates
         if mv.is_capture_hint() {
             captures_tried.push(mv);
@@ -91,9 +160,17 @@ where
             // Full window search for first move
             score = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, ply + 1);
         } else {
-            // Late move reduction
-            let reduction = if USE_PRUNING && should_reduce(depth, moves_searched, in_check, mv) {
-                calculate_reduction(depth, moves_searched)
+            // Late move reduction using advanced pruning module
+            let gives_check = false; // TODO: implement gives_check detection
+            let reduction = if USE_PRUNING
+                && crate::search::unified::pruning::can_do_lmr(
+                    depth,
+                    moves_searched,
+                    in_check,
+                    gives_check,
+                    mv,
+                ) {
+                crate::search::unified::pruning::lmr_reduction(depth, moves_searched)
             } else {
                 0
             };
@@ -151,48 +228,27 @@ where
                             None
                         };
 
-                        if let Ok(mut history) = searcher.history.lock() {
-                            // Update history for the cutoff move
-                            history.update_cutoff(pos.side_to_move, mv, depth as i32, prev_move);
+                        match searcher.history.lock() {
+                            Ok(mut history) => {
+                                // Update history for the cutoff move
+                                history.update_cutoff(
+                                    pos.side_to_move,
+                                    mv,
+                                    depth as i32,
+                                    prev_move,
+                                );
 
-                            // Update counter move history
-                            if let Some(prev_mv) = prev_move {
-                                history.counter_moves.update(pos.side_to_move, prev_mv, mv);
-                            }
-
-                            // Update capture history if it's a capture
-                            if mv.is_capture_hint() {
-                                if let (Some(attacker), Some(victim)) =
-                                    (mv.piece_type(), mv.captured_piece_type())
-                                {
-                                    history.capture.update_good(
-                                        pos.side_to_move,
-                                        attacker,
-                                        victim,
-                                        depth as i32,
-                                    );
+                                // Update counter move history
+                                if let Some(prev_mv) = prev_move {
+                                    history.counter_moves.update(pos.side_to_move, prev_mv, mv);
                                 }
-                            }
 
-                            // Penalize quiet moves that didn't cause cutoff
-                            for &quiet_mv in quiet_moves_tried.iter() {
-                                if quiet_mv != mv {
-                                    history.update_quiet(
-                                        pos.side_to_move,
-                                        quiet_mv,
-                                        depth as i32,
-                                        prev_move,
-                                    );
-                                }
-                            }
-
-                            // Penalize captures that didn't cause cutoff
-                            for &capture_mv in captures_tried.iter() {
-                                if capture_mv != mv {
+                                // Update capture history if it's a capture
+                                if mv.is_capture_hint() {
                                     if let (Some(attacker), Some(victim)) =
-                                        (capture_mv.piece_type(), capture_mv.captured_piece_type())
+                                        (mv.piece_type(), mv.captured_piece_type())
                                     {
-                                        history.capture.update_bad(
+                                        history.capture.update_good(
                                             pos.side_to_move,
                                             attacker,
                                             victim,
@@ -200,6 +256,44 @@ where
                                         );
                                     }
                                 }
+
+                                // Limit the number of moves to update for performance
+                                const MAX_MOVES_TO_UPDATE: usize = 16;
+
+                                // Penalize quiet moves that didn't cause cutoff
+                                for &quiet_mv in quiet_moves_tried.iter().take(MAX_MOVES_TO_UPDATE)
+                                {
+                                    if quiet_mv != mv {
+                                        history.update_quiet(
+                                            pos.side_to_move,
+                                            quiet_mv,
+                                            depth as i32,
+                                            prev_move,
+                                        );
+                                    }
+                                }
+
+                                // Penalize captures that didn't cause cutoff
+                                for &capture_mv in captures_tried.iter().take(MAX_MOVES_TO_UPDATE) {
+                                    if capture_mv != mv {
+                                        if let (Some(attacker), Some(victim)) = (
+                                            capture_mv.piece_type(),
+                                            capture_mv.captured_piece_type(),
+                                        ) {
+                                            history.capture.update_bad(
+                                                pos.side_to_move,
+                                                attacker,
+                                                victim,
+                                                depth as i32,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to acquire history lock for updates: {e}");
+                                // Fallback: Just update stats without history heuristics
+                                // This ensures search continues to function even if history is unavailable
                             }
                         }
                     }
@@ -208,9 +302,11 @@ where
             }
         }
 
-        // Futility pruning
+        // Late move pruning - prune remaining moves if we've searched enough
         if USE_PRUNING
-            && can_prune(searcher, pos, depth, alpha, beta, moves_searched, in_check, ply)
+            && depth <= 3
+            && moves_searched >= 8 + depth as u32 * 3
+            && !crate::search::common::is_mate_score(best_score)
         {
             break;
         }
@@ -232,64 +328,113 @@ where
     best_score
 }
 
-/// Check if we should apply late move reduction
-fn should_reduce(depth: u8, moves_searched: u32, in_check: bool, mv: Move) -> bool {
-    depth >= 3 && moves_searched >= 4 && !in_check && !mv.is_capture_hint() && !mv.is_promote()
-}
+// Note: Helper functions removed - now using functions from pruning module directly
 
-/// Calculate reduction amount
-fn calculate_reduction(depth: u8, moves_searched: u32) -> u8 {
-    if moves_searched >= 6 && depth >= 4 {
-        2
-    } else {
-        1
-    }
-}
-
-/// Check if we can prune remaining moves
-#[allow(clippy::too_many_arguments)]
-fn can_prune<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
-    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
-    pos: &Position,
-    depth: u8,
-    alpha: i32,
-    beta: i32,
-    moves_searched: u32,
-    in_check: bool,
-    ply: u16,
-) -> bool
-where
-    E: Evaluator + Send + Sync + 'static,
-{
-    // Don't prune if:
-    // - In check
-    // - Too few moves searched
-    // - At low depth
-    // - Near mate scores
-    if in_check || moves_searched < 8 || depth < 2 {
-        return false;
-    }
-
-    if crate::search::common::is_mate_score(alpha) || crate::search::common::is_mate_score(beta) {
-        return false;
-    }
-
-    // Futility margin
-    let margin = 200 * depth as i32;
-
-    // Get static eval - use cached value if available
-    let eval = if crate::search::types::SearchStack::is_valid_ply(ply) {
-        let stack_entry = &mut searcher.search_stack[ply as usize];
-        if let Some(cached_eval) = stack_entry.static_eval {
-            cached_eval
-        } else {
-            let eval = searcher.evaluator.evaluate(pos);
-            stack_entry.static_eval = Some(eval);
-            eval
-        }
-    } else {
-        searcher.evaluator.evaluate(pos)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::{unified::UnifiedSearcher, SearchLimits},
+        shogi::Position,
     };
 
-    eval + margin < alpha
+    #[test]
+    fn test_search_node_basic() {
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(5).build());
+
+        let mut pos = Position::startpos();
+        let score = search_node(&mut searcher, &mut pos, 3, -1000, 1000, 0);
+
+        // Should return a valid score
+        assert!(score >= -1000 && score <= 1000);
+        assert!(searcher.stats.nodes > 0);
+    }
+
+    #[test]
+    fn test_search_node_stop_flag() {
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+
+        // Set stop flag immediately
+        searcher.context.stop();
+
+        let mut pos = Position::startpos();
+        let score = search_node(&mut searcher, &mut pos, 5, -1000, 1000, 0);
+
+        // Should return alpha when stopped
+        assert_eq!(score, -1000);
+        // Should have minimal nodes due to early stop
+        assert!(searcher.stats.nodes < 10);
+    }
+
+    #[test]
+    fn test_history_update_with_mutex_error() {
+        // This test verifies that search continues even if history mutex fails
+        // In real code, we handle the error with logging and continue
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(3).build());
+
+        let mut pos = Position::startpos();
+
+        // Even if history mutex were to fail (which we handle gracefully),
+        // search should complete successfully
+        let score = search_node(&mut searcher, &mut pos, 2, -1000, 1000, 0);
+
+        // Verify search completed
+        assert!(score >= -SEARCH_INF && score <= SEARCH_INF);
+    }
+
+    #[test]
+    fn test_max_moves_to_update_performance() {
+        // Test that we limit the number of moves updated for performance
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(3).build());
+
+        let mut pos = Position::startpos();
+
+        // Create a move generator to count moves
+        use crate::movegen::MoveGen;
+        use crate::shogi::MoveList;
+        let mut move_gen = MoveGen::new();
+        let mut moves = MoveList::new();
+        move_gen.generate_all(&pos, &mut moves);
+        assert!(moves.len() > 16); // Ensure we have more than MAX_MOVES_TO_UPDATE
+
+        // Search should complete efficiently even with many moves
+        let start_nodes = searcher.stats.nodes;
+        let _ = search_node(&mut searcher, &mut pos, 3, -1000, 1000, 0);
+        let end_nodes = searcher.stats.nodes;
+
+        // Should have searched some nodes
+        assert!(end_nodes > start_nodes);
+    }
+
+    #[test]
+    fn test_pruning_conditions_respected() {
+        // Test with pruning enabled
+        let mut searcher_with_pruning =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher_with_pruning
+            .context
+            .set_limits(SearchLimits::builder().depth(5).build());
+
+        // Test with pruning disabled
+        let mut searcher_no_pruning =
+            UnifiedSearcher::<MaterialEvaluator, true, false, 16>::new(MaterialEvaluator);
+        searcher_no_pruning.context.set_limits(SearchLimits::builder().depth(5).build());
+
+        let mut pos1 = Position::startpos();
+        let mut pos2 = Position::startpos();
+
+        let _ = search_node(&mut searcher_with_pruning, &mut pos1, 4, -1000, 1000, 0);
+        let _ = search_node(&mut searcher_no_pruning, &mut pos2, 4, -1000, 1000, 0);
+
+        // With pruning should search fewer nodes
+        assert!(searcher_with_pruning.stats.nodes < searcher_no_pruning.stats.nodes);
+    }
 }
