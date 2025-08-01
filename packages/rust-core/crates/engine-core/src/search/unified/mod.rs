@@ -395,7 +395,7 @@ mod tests {
         let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
         let mut pos = Position::startpos();
 
-        // 100msの時間制限で、深さ3（より浅い深さで確実に停止）
+        // 100msの時間制限で、深さ3に制限
         let limits = SearchLimitsBuilder::default().fixed_time_ms(100).depth(3).build();
 
         let start = Instant::now();
@@ -403,12 +403,15 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.best_move.is_some());
+
+        // 時間制限が効いていることを確認（マージンを持たせる）
         assert!(
             elapsed.as_millis() < 200,
-            "Should stop around 100ms, but took {}ms",
-            elapsed.as_millis()
+            "Should stop around 100ms, but took {}ms (depth reached: {}, nodes: {})",
+            elapsed.as_millis(),
+            result.stats.depth,
+            result.stats.nodes
         );
-        // 時間制限に少し余裕を持たせる（100ms→200ms）
     }
 
     #[test]
