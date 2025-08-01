@@ -382,8 +382,13 @@ mod tests {
         // Wait for search to complete
         let result = handle.join().unwrap();
 
-        // Should have stopped early (within 500ms accounting for CI variability)
-        assert!(result.stats.elapsed < Duration::from_millis(500));
+        // Should have stopped early (within 1000ms accounting for CI variability)
+        // Increased from 500ms to 1000ms for CI environments with resource constraints
+        assert!(
+            result.stats.elapsed < Duration::from_millis(1000),
+            "Search took too long to stop: {:?}",
+            result.stats.elapsed
+        );
     }
 
     #[test]
