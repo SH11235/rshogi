@@ -4,6 +4,26 @@
 
 use crate::shogi::{Move, Position};
 
+// Pruning constants based on empirical testing
+
+/// Razoring margin - aggressive pruning at very low depths
+/// This value prevents missing shallow tactics while allowing meaningful reductions
+const RAZORING_BASE_MARGIN: i32 = 400;
+
+/// Static null move pruning depth factor
+/// Controls how aggressively we prune based on static evaluation
+/// Higher values = more conservative pruning
+const STATIC_NULL_MOVE_DEPTH_FACTOR: i32 = 120;
+
+/// Delta pruning margin for quiescence search
+/// Conservative to avoid missing captures that change evaluation significantly
+const DELTA_PRUNING_MARGIN: i32 = 200;
+
+/// Razoring margins by depth
+/// Lower depths get smaller margins for more aggressive pruning
+const RAZORING_MARGIN_DEPTH_1: i32 = 200;
+const RAZORING_MARGIN_DEPTH_2: i32 = 400;
+
 /// Pruning parameters
 pub struct PruningParams {
     /// Enable null move pruning
@@ -55,7 +75,7 @@ pub fn can_do_futility_pruning(
     beta: i32,
     _static_eval: i32,
 ) -> bool {
-    !in_check && depth <= 7 && !is_mate_score(alpha) && !is_mate_score(beta)
+    depth <= 7 && can_prune(in_check, alpha, beta)
 }
 
 /// Get futility margin for given depth
@@ -90,14 +110,14 @@ pub fn can_do_lmr(
 
 /// Check if we can do razoring (extreme futility pruning at low depths)
 pub fn can_do_razoring(depth: u8, in_check: bool, alpha: i32, static_eval: i32) -> bool {
-    !in_check && depth <= 2 && !is_mate_score(alpha) && static_eval + 400 < alpha
+    depth <= 2 && can_prune_alpha(in_check, alpha) && static_eval + RAZORING_BASE_MARGIN < alpha
 }
 
 /// Get razoring margin
 pub fn razoring_margin(depth: u8) -> i32 {
     match depth {
-        1 => 200,
-        2 => 400,
+        1 => RAZORING_MARGIN_DEPTH_1,
+        2 => RAZORING_MARGIN_DEPTH_2,
         _ => 0,
     }
 }
@@ -137,12 +157,30 @@ pub fn is_mate_score(score: i32) -> bool {
     score.abs() > 30000
 }
 
+/// Common helper to check if pruning techniques can be applied
+/// Returns true if pruning is allowed based on common preconditions
+pub fn can_prune(in_check: bool, alpha: i32, beta: i32) -> bool {
+    !in_check && !is_mate_score(alpha) && !is_mate_score(beta)
+}
+
+/// Check if pruning is allowed for techniques that only check one bound
+pub fn can_prune_alpha(in_check: bool, alpha: i32) -> bool {
+    !in_check && !is_mate_score(alpha)
+}
+
+/// Check if pruning is allowed for techniques that only check beta
+pub fn can_prune_beta(in_check: bool, beta: i32) -> bool {
+    !in_check && !is_mate_score(beta)
+}
+
 /// Get delta pruning margin for quiescence search
 pub fn delta_pruning_margin() -> i32 {
-    200 // Conservative margin to avoid missing tactics
+    DELTA_PRUNING_MARGIN
 }
 
 /// Check if static null move (reverse futility) pruning is applicable
 pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval: i32) -> bool {
-    !in_check && depth <= 6 && !is_mate_score(beta) && static_eval - 120 * depth as i32 >= beta
+    depth <= 6
+        && can_prune_beta(in_check, beta)
+        && static_eval - STATIC_NULL_MOVE_DEPTH_FACTOR * depth as i32 >= beta
 }
