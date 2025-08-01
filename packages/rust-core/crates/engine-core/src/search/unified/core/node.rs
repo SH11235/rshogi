@@ -26,7 +26,7 @@ where
 
     // Check if in check and update search stack
     let in_check = pos.is_in_check();
-    if ply < searcher.search_stack.len() as u16 {
+    if crate::search::types::SearchStack::is_valid_ply(ply) {
         searcher.search_stack[ply as usize].in_check = in_check;
         searcher.search_stack[ply as usize].clear_for_new_node();
     }
@@ -61,7 +61,7 @@ where
     // Search moves
     for &mv in ordered_moves.iter() {
         // Update current move in search stack
-        if ply < searcher.search_stack.len() as u16 {
+        if crate::search::types::SearchStack::is_valid_ply(ply) {
             searcher.search_stack[ply as usize].current_move = Some(mv);
             searcher.search_stack[ply as usize].move_count = moves_searched + 1;
         }
@@ -118,7 +118,7 @@ where
                     // Beta cutoff - update killers and history
                     if USE_PRUNING {
                         // Update killers in SearchStack
-                        if ply < searcher.search_stack.len() as u16 {
+                        if crate::search::types::SearchStack::is_valid_ply(ply) {
                             searcher.search_stack[ply as usize].update_killers(mv);
                         }
                         if let Ok(mut history) = searcher.history.lock() {
@@ -200,7 +200,7 @@ where
     let margin = 200 * depth as i32;
 
     // Get static eval - use cached value if available
-    let eval = if ply < searcher.search_stack.len() as u16 {
+    let eval = if crate::search::types::SearchStack::is_valid_ply(ply) {
         let stack_entry = &mut searcher.search_stack[ply as usize];
         if let Some(cached_eval) = stack_entry.static_eval {
             cached_eval

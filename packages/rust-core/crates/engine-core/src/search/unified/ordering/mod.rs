@@ -8,8 +8,6 @@ use crate::{
 };
 use std::sync::{Arc, Mutex};
 
-const MAX_PLY: usize = 127;
-
 /// Move ordering state
 pub struct MoveOrdering {
     /// History heuristic reference (thread-safe)
@@ -69,7 +67,7 @@ impl MoveOrdering {
         }
 
         // Killer moves from SearchStack
-        if ply < MAX_PLY as u16 && ply < search_stack.len() as u16 {
+        if crate::search::types::SearchStack::is_valid_ply(ply) {
             let stack_entry = &search_stack[ply as usize];
             for (slot, &killer) in stack_entry.killers.iter().enumerate() {
                 if Some(mv) == killer {
