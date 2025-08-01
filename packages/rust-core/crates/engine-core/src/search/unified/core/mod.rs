@@ -83,7 +83,7 @@ where
 
     // Order moves
     let ordered_moves = if USE_TT || USE_PRUNING {
-        searcher.ordering.order_moves(pos, &moves, None, 0)
+        searcher.ordering.order_moves(pos, &moves, None, &searcher.search_stack, 0)
     } else {
         moves.as_slice().to_vec()
     };
