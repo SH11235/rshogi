@@ -136,7 +136,9 @@ impl SearchStack {
 
     /// Update killers (convenience method)
     pub fn update_killers(&mut self, mv: Move) {
-        if mv.is_capture_hint() {
+        // Killer moves should be quiet moves (non-captures)
+        // Promotions are tactical moves and shouldn't be stored as killers
+        if mv.is_capture_hint() || mv.is_promote() {
             return;
         }
 
