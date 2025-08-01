@@ -121,7 +121,7 @@ fn bench_search_with_see(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: Create new searcher and clone position
-                    let searcher = EnhancedSearcher::new(2, evaluator.clone());
+                    let searcher = EnhancedSearcher::new_with_tt_size(2, evaluator.clone());
                     let pos_clone = pos.clone();
                     (searcher, pos_clone)
                 },
@@ -163,7 +163,7 @@ fn bench_move_ordering(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: Create new searcher and clone position
-                    let searcher = EnhancedSearcher::new(1, evaluator.clone());
+                    let searcher = EnhancedSearcher::new_with_tt_size(1, evaluator.clone());
                     let pos_clone = pos.clone();
                     (searcher, pos_clone)
                 },
