@@ -93,6 +93,11 @@ where
         moves.as_slice().to_vec()
     };
 
+    // Prefetch TT entries for top moves
+    if USE_TT {
+        searcher.prefetch_next_moves(pos, &ordered_moves, 4);
+    }
+
     // Search each move
     for (move_idx, &mv) in ordered_moves.iter().enumerate() {
         // Make move
@@ -100,6 +105,11 @@ where
 
         // Increment node counter
         searcher.stats.nodes += 1;
+
+        // Prefetch TT entry for the new position
+        if USE_TT {
+            searcher.prefetch_tt(pos.zobrist_hash);
+        }
 
         // Search with null window for moves after the first
         let score = if move_idx == 0 {
@@ -427,6 +437,11 @@ where
 
         // Make move
         let undo_info = pos.do_move(mv);
+
+        // Prefetch TT entry for the new position (even in quiescence)
+        if USE_TT {
+            searcher.prefetch_tt(pos.zobrist_hash);
+        }
 
         // Recursive search
         let score = -quiescence_search(searcher, pos, -beta, -alpha, ply + 1);
