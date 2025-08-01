@@ -7,7 +7,7 @@
 //! 4. Bad captures
 //! 5. Quiet moves (history ordered)
 
-use crate::search::search_enhanced::SearchStack;
+use crate::search::SearchStack;
 use crate::shogi::{Move, MoveList, ATTACK_TABLES};
 use crate::{Bitboard, Color, History, MoveGen, PieceType, Position, Square};
 

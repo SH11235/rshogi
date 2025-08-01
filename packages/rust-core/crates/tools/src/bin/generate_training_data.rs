@@ -132,7 +132,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let timeout_occurred = Arc::new(AtomicBool::new(false));
                         let timeout_occurred_clone = timeout_occurred.clone();
                         let timeout_handle = std::thread::spawn(move || {
-                            let timeout_start = std::time::Instant::now();
                             std::thread::sleep(std::time::Duration::from_millis(250)); // Earlier than time limit
                             stop_flag_clone.store(true, Ordering::Release);
                             timeout_occurred_clone.store(true, Ordering::Release);
@@ -157,6 +156,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         timeout_handle.join().ok();
 
                         let total_time = total_start.elapsed();
+
+                        // Log processing time for timeout positions
+                        if was_stopped || search_time.as_millis() >= 240 {
+                            eprintln!(
+                                "Position {} took {:.2}s (search: {:.2}s)",
+                                idx,
+                                total_time.as_secs_f32(),
+                                search_time.as_secs_f32()
+                            );
+                        }
 
                         // Check if we hit timeout
                         if was_stopped || search_time.as_millis() >= 240 {
