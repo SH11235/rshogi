@@ -5,6 +5,8 @@ pub mod limits;
 pub mod search_basic;
 pub mod search_enhanced;
 pub mod tt;
+pub mod tt_stats;
+pub mod tt_v2;
 pub mod types;
 pub mod unified;
 

@@ -153,6 +153,11 @@ where
         let undo_info = pos.do_move(mv);
         searcher.stats.nodes += 1;
 
+        // Prefetch TT entry for the new position
+        if USE_TT {
+            searcher.prefetch_tt(pos.zobrist_hash);
+        }
+
         let mut score;
 
         // Principal variation search

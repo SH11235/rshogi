@@ -6,6 +6,7 @@
 pub mod context;
 pub mod core;
 pub mod ordering;
+pub mod prefetch;
 pub mod pruning;
 
 use crate::{
@@ -447,6 +448,16 @@ where
         if USE_TT {
             if let Some(ref tt) = self.tt {
                 tt.store(hash, best_move, score as i16, 0, depth, node_type);
+            }
+        }
+    }
+
+    /// Prefetch transposition table entry (compile-time optimized)
+    #[inline(always)]
+    pub(crate) fn prefetch_tt(&self, hash: u64) {
+        if USE_TT {
+            if let Some(ref tt) = self.tt {
+                tt.prefetch(hash);
             }
         }
     }

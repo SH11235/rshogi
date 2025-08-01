@@ -32,3 +32,7 @@ serde_yaml = "0.9"
 [[bench]]
 name = "search_benchmarks"
 harness = false
+
+[[bench]]
+name = "tt_prefetch_bench"
+harness = false
