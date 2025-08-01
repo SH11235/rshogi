@@ -49,12 +49,11 @@ use engine_core::{
     search::{unified::UnifiedSearcher, SearchLimitsBuilder},
     evaluation::evaluate::MaterialEvaluator,
 };
-use std::sync::Arc;
 
 // 評価関数の作成
-let evaluator = Arc::new(MaterialEvaluator);
+let evaluator = MaterialEvaluator;
 
-// 探索エンジンの作成
+// 探索エンジンの作成（内部で自動的にArc化）
 let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
 
 // 局面の作成
@@ -115,6 +114,45 @@ Phase 4のベンチマーク結果（開始局面、深さ4）：
 | 拡張設定（枝刈りあり） | 7.3ms | 19.0x |
 
 const genericsによりゼロコスト抽象化を実現し、実行時オーバーヘッドはありません。
+
+## API互換性
+
+### 後方互換性のためのラッパー
+
+既存のコードとの互換性を保つため、以下のラッパークラスを提供しています：
+
+- `search_basic::Searcher`: 基本的な探索エンジンのラッパー
+- `search_enhanced::EnhancedSearcher`: 高度な探索エンジンのラッパー
+
+これらのラッパーは内部的にUnifiedSearcherを使用しており、以下のメソッドを提供します：
+
+```rust
+// 現在の探索深さを取得
+pub fn current_depth(&self) -> u8
+
+// 探索中のノード数を取得  
+pub fn nodes(&self) -> u64
+
+// 主要変化手順を取得
+pub fn principal_variation(&self) -> &[Move]
+```
+
+### 型パラメータについて
+
+評価関数の型パラメータは統一されています：
+
+- すべてのSearcherは生の型`E`を受け取ります
+- UnifiedSearcher内部で自動的に`Arc<E>`に変換されます
+- これにより、大きな評価関数（NNUE）も効率的に共有されます
+- 既存のArc化されたコードとの互換性のため、`with_arc()`メソッドも提供されています
+
+```rust
+// 新しい推奨API（生の型を渡す）
+let searcher = Searcher::new(MaterialEvaluator);
+
+// 既存コードとの互換性（Arc化済みを渡す）
+let searcher = Searcher::with_arc(Arc::new(MaterialEvaluator));
+```
 
 ## ビルドとテスト
 
