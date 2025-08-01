@@ -126,6 +126,16 @@ where
             if let Some(ref tm) = searcher.time_manager {
                 if tm.should_stop(searcher.stats.nodes) {
                     searcher.context.stop();
+                    // Store partial results in TT before stopping
+                    if USE_TT && score > best_score {
+                        searcher.store_tt(
+                            pos.zobrist_hash,
+                            depth,
+                            score,
+                            crate::search::tt::NodeType::LowerBound,
+                            Some(mv),
+                        );
+                    }
                     break;
                 }
             }
@@ -133,6 +143,17 @@ where
 
         // Check for timeout
         if searcher.context.should_stop() {
+            // Store partial results in TT before stopping
+            if USE_TT && best_score > -SEARCH_INF {
+                let best_mv = if pv.is_empty() { None } else { Some(pv[0]) };
+                searcher.store_tt(
+                    pos.zobrist_hash,
+                    depth,
+                    best_score,
+                    crate::search::tt::NodeType::LowerBound,
+                    best_mv,
+                );
+            }
             break;
         }
 
@@ -187,6 +208,17 @@ where
     }
 
     if searcher.context.should_stop() {
+        // Store partial evaluation in TT before returning
+        if USE_TT && depth > 0 {
+            let eval = searcher.evaluator.evaluate(pos);
+            searcher.store_tt(
+                pos.zobrist_hash,
+                0, // Minimal depth since we're aborting
+                eval,
+                crate::search::tt::NodeType::UpperBound,
+                None,
+            );
+        }
         return 0;
     }
 
