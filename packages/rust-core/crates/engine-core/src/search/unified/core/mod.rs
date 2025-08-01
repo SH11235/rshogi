@@ -276,9 +276,31 @@ where
     }
 
     // Null move pruning
-    if USE_PRUNING && depth >= 3 && !pos.is_in_check() {
-        if let Some(score) = try_null_move(searcher, pos, depth, beta, ply) {
-            return score;
+    if USE_PRUNING {
+        // Get static eval for null move decision
+        let static_eval = if crate::search::types::SearchStack::is_valid_ply(ply) {
+            let stack_entry = &mut searcher.search_stack[ply as usize];
+            if let Some(cached_eval) = stack_entry.static_eval {
+                cached_eval
+            } else {
+                let eval = searcher.evaluator.evaluate(pos);
+                stack_entry.static_eval = Some(eval);
+                eval
+            }
+        } else {
+            searcher.evaluator.evaluate(pos)
+        };
+
+        if crate::search::unified::pruning::can_do_null_move(
+            pos,
+            depth,
+            pos.is_in_check(),
+            beta,
+            static_eval,
+        ) {
+            if let Some(score) = try_null_move(searcher, pos, depth, beta, ply) {
+                return score;
+            }
         }
     }
 
@@ -323,6 +345,13 @@ where
         alpha = stand_pat;
     }
 
+    // Delta pruning margin
+    let delta_margin = if USE_PRUNING {
+        crate::search::unified::pruning::delta_pruning_margin()
+    } else {
+        0
+    };
+
     // Depth limit check to prevent infinite recursion and stack overflow
     // More conservative limit: either absolute ply limit or quiescence depth limit
     let quiesce_ply = ply.saturating_sub(searcher.context.max_depth() as u16);
@@ -346,8 +375,49 @@ where
         }
     }
 
+    // Order captures by MVV-LVA if pruning is enabled
+    let ordered_captures = if USE_PRUNING {
+        let mut captures_vec: Vec<Move> = moves.as_slice().to_vec();
+        captures_vec.sort_by_cached_key(|&mv| {
+            // Simple MVV-LVA: prioritize capturing more valuable pieces
+            if let Some(victim) = mv.captured_piece_type() {
+                -(victim as i32)
+            } else {
+                0
+            }
+        });
+        captures_vec
+    } else {
+        moves.as_slice().to_vec()
+    };
+
     // Search captures
-    for &mv in moves.as_slice().iter() {
+    for &mv in ordered_captures.iter() {
+        // Delta pruning - skip captures that can't improve position enough
+        if USE_PRUNING && delta_margin > 0 {
+            // Estimate material gain from capture
+            let material_gain = if let Some(victim) = mv.captured_piece_type() {
+                // Simple piece values for delta pruning
+                match victim {
+                    crate::PieceType::Pawn => 100,
+                    crate::PieceType::Lance => 300,
+                    crate::PieceType::Knight => 400,
+                    crate::PieceType::Silver => 500,
+                    crate::PieceType::Gold => 600,
+                    crate::PieceType::Bishop => 800,
+                    crate::PieceType::Rook => 1000,
+                    crate::PieceType::King => 10000, // Should never happen
+                }
+            } else {
+                0
+            };
+
+            // Skip if capture can't improve alpha
+            if stand_pat + material_gain + delta_margin < alpha {
+                continue;
+            }
+        }
+
         // Make move
         let undo_info = pos.do_move(mv);
 
@@ -423,8 +493,8 @@ where
         pos.hash ^= pos.side_to_move_zobrist();
         pos.zobrist_hash = pos.hash;
 
-        // Search with reduced depth
-        let reduction = 2 + depth / 4;
+        // Search with reduced depth using pruning module
+        let reduction = crate::search::unified::pruning::null_move_reduction(depth);
         let score = -alpha_beta(
             searcher,
             pos,
