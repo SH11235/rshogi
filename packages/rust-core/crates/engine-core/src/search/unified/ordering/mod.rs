@@ -63,7 +63,35 @@ impl MoveOrdering {
             // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
             let victim_value = Self::piece_value(mv.captured_piece_type());
             let attacker_value = Self::piece_value(mv.piece_type());
-            return 100_000 + victim_value * 10 - attacker_value;
+            let mvv_lva = victim_value * 10 - attacker_value;
+
+            // Add capture history score
+            let capture_history_score = match self.history.lock() {
+                Ok(history) => {
+                    if let (Some(attacker_type), Some(victim_type)) =
+                        (mv.piece_type(), mv.captured_piece_type())
+                    {
+                        history.capture.get(pos.side_to_move, attacker_type, victim_type)
+                    } else {
+                        0
+                    }
+                }
+                Err(_) => 0,
+            };
+
+            return 100_000 + mvv_lva + capture_history_score / 10;
+        }
+
+        // Counter move - check if this move is a known good response to the previous move
+        if crate::search::types::SearchStack::is_valid_ply(ply) && ply > 0 {
+            let prev_ply = ply - 1;
+            if let Some(prev_move) = search_stack[prev_ply as usize].current_move {
+                if let Ok(history) = self.history.lock() {
+                    if history.counter_moves.get(pos.side_to_move, prev_move) == Some(mv) {
+                        return 95_000;
+                    }
+                }
+            }
         }
 
         // Killer moves from SearchStack
@@ -76,15 +104,24 @@ impl MoveOrdering {
             }
         }
 
-        // History heuristic
+        // History heuristic with continuation history
         let history_score = match self.history.lock() {
-            Ok(history) => history.get_score(pos.side_to_move, mv, None),
+            Ok(history) => {
+                let prev_move =
+                    if ply > 0 && crate::search::types::SearchStack::is_valid_ply(ply - 1) {
+                        search_stack[(ply - 1) as usize].current_move
+                    } else {
+                        None
+                    };
+                history.get_score(pos.side_to_move, mv, prev_move)
+            }
             Err(e) => {
                 // Mutex poisoning indicates a panic in another thread holding the lock.
                 // This should be extremely rare in production, but log it for debugging.
                 // Impact: Move ordering quality may degrade slightly, but search remains correct.
                 log::error!("Failed to acquire history lock in move ordering: {e}");
-                0 // Fallback to neutral score (won't affect correctness, only efficiency)
+                // Use static evaluation as fallback
+                self.get_static_move_score(pos, mv)
             }
         };
 
@@ -107,6 +144,68 @@ impl MoveOrdering {
             Some(PieceType::King) => 10000,
             None => 0,
         }
+    }
+
+    /// Get static move score when history is unavailable
+    /// This provides a reasonable move ordering based on basic heuristics
+    fn get_static_move_score(&self, pos: &Position, mv: Move) -> i32 {
+        use crate::{Color, PieceType};
+
+        let mut score = 0;
+
+        // Promotions get significant bonus
+        if mv.is_promote() {
+            score += 2000;
+        }
+
+        // Center control bonus
+        let to_sq = mv.to();
+        // 5th rank (middle of the board) is important
+        if to_sq.rank() == 5 {
+            score += 200;
+        }
+        // Center files (3-7) are important
+        if to_sq.file() >= 3 && to_sq.file() <= 7 {
+            score += 100;
+        }
+
+        // Piece advancement bonus (moving pieces forward is generally good)
+        let advancement_bonus = match pos.side_to_move {
+            Color::Black => (9 - to_sq.rank()) * 10,
+            Color::White => to_sq.rank() * 10,
+        };
+        score += advancement_bonus as i32;
+
+        // Piece-specific movement bonuses
+        match mv.piece_type() {
+            Some(PieceType::Rook) | Some(PieceType::Bishop) => {
+                // Major pieces moving to active squares
+                score += 300;
+            }
+            Some(PieceType::Gold) | Some(PieceType::Silver) => {
+                // Minor pieces developing
+                score += 200;
+            }
+            Some(PieceType::Knight) | Some(PieceType::Lance) => {
+                // Supporting pieces
+                score += 100;
+            }
+            Some(PieceType::Pawn) => {
+                // Pawns advancing in the center
+                if to_sq.file() >= 4 && to_sq.file() <= 6 {
+                    score += 50;
+                }
+            }
+            _ => {}
+        }
+
+        // Drops to key squares
+        if mv.is_drop() {
+            // Drops near the enemy king are often good
+            score += 150;
+        }
+
+        score
     }
 }
 
