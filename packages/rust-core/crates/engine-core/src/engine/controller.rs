@@ -8,12 +8,16 @@ use std::sync::{Arc, Mutex};
 use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
-    search::search_basic::Searcher,
-    search::search_enhanced::EnhancedSearcher,
-    search::{SearchLimits, SearchResult, SearchStats},
-    time_management::TimeManager,
+    search::unified::UnifiedSearcher,
+    search::{SearchLimits, SearchResult},
     Position,
 };
+
+/// Type alias for unified searchers
+type MaterialSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
+type NnueBasicSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, false, 8>;
+type MaterialEnhancedSearcher = UnifiedSearcher<MaterialEvaluator, true, true, 16>;
+type NnueEnhancedSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, true, 16>;
 
 /// Engine type selection
 ///
@@ -74,8 +78,11 @@ pub struct Engine {
     engine_type: EngineType,
     material_evaluator: Arc<MaterialEvaluator>,
     nnue_evaluator: Arc<Mutex<Option<NNUEEvaluatorWrapper>>>,
-    enhanced_searcher: Arc<Mutex<Option<EnhancedSearcher>>>,
-    active_time_manager: Arc<Mutex<Option<Arc<TimeManager>>>>,
+    // Unified searchers for each engine type
+    material_searcher: Arc<Mutex<Option<MaterialSearcher>>>,
+    nnue_basic_searcher: Arc<Mutex<Option<NnueBasicSearcher>>>,
+    material_enhanced_searcher: Arc<Mutex<Option<MaterialEnhancedSearcher>>>,
+    nnue_enhanced_searcher: Arc<Mutex<Option<NnueEnhancedSearcher>>>,
 }
 
 impl Engine {
@@ -90,27 +97,45 @@ impl Engine {
             Arc::new(Mutex::new(None))
         };
 
-        let enhanced_searcher = match engine_type {
-            EngineType::Enhanced => {
-                // Initialize enhanced searcher with 16MB TT and material evaluator
-                Arc::new(Mutex::new(Some(EnhancedSearcher::new(16, material_evaluator.clone()))))
-            }
-            EngineType::EnhancedNnue => {
-                // Initialize enhanced searcher with NNUE evaluator proxy
-                let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
-                    evaluator: nnue_evaluator.clone(),
-                });
-                Arc::new(Mutex::new(Some(EnhancedSearcher::new(16, nnue_proxy))))
-            }
-            _ => Arc::new(Mutex::new(None)),
+        // Initialize searchers based on engine type
+        let material_searcher = if engine_type == EngineType::Material {
+            Arc::new(Mutex::new(Some(MaterialSearcher::new(*material_evaluator))))
+        } else {
+            Arc::new(Mutex::new(None))
+        };
+
+        let nnue_basic_searcher = if engine_type == EngineType::Nnue {
+            let nnue_proxy = NNUEEvaluatorProxy {
+                evaluator: nnue_evaluator.clone(),
+            };
+            Arc::new(Mutex::new(Some(NnueBasicSearcher::new(nnue_proxy))))
+        } else {
+            Arc::new(Mutex::new(None))
+        };
+
+        let material_enhanced_searcher = if engine_type == EngineType::Enhanced {
+            Arc::new(Mutex::new(Some(MaterialEnhancedSearcher::new(*material_evaluator))))
+        } else {
+            Arc::new(Mutex::new(None))
+        };
+
+        let nnue_enhanced_searcher = if engine_type == EngineType::EnhancedNnue {
+            let nnue_proxy = NNUEEvaluatorProxy {
+                evaluator: nnue_evaluator.clone(),
+            };
+            Arc::new(Mutex::new(Some(NnueEnhancedSearcher::new(nnue_proxy))))
+        } else {
+            Arc::new(Mutex::new(None))
         };
 
         Engine {
             engine_type,
             material_evaluator,
             nnue_evaluator,
-            enhanced_searcher,
-            active_time_manager: Arc::new(Mutex::new(None)),
+            material_searcher,
+            nnue_basic_searcher,
+            material_enhanced_searcher,
+            nnue_enhanced_searcher,
         }
     }
 
@@ -119,104 +144,40 @@ impl Engine {
         log::info!("Engine::search called with engine_type: {:?}", self.engine_type);
         match self.engine_type {
             EngineType::Material => {
-                let mut searcher = Searcher::new(limits, self.material_evaluator.clone());
-                searcher.search(pos)
+                let mut searcher_guard = self.material_searcher.lock().unwrap();
+                if let Some(searcher) = searcher_guard.as_mut() {
+                    searcher.search(pos, limits)
+                } else {
+                    panic!("Material searcher not initialized");
+                }
             }
             EngineType::Nnue => {
-                log::info!("Creating NNUE searcher");
-                let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
-                    evaluator: self.nnue_evaluator.clone(),
-                });
-                let mut searcher = Searcher::new(limits, nnue_proxy);
                 log::info!("Starting NNUE search");
-                let result = searcher.search(pos);
-                log::info!("NNUE search completed");
-                result
-            }
-            EngineType::Enhanced | EngineType::EnhancedNnue => {
-                log::info!("Starting Enhanced search (type: {:?})", self.engine_type);
-                // Record start time
-                let start_time = std::time::Instant::now();
-
-                // Set up callback to capture TimeManager when created
-                {
-                    let time_slot = self.active_time_manager.clone();
-                    let mut enhanced_guard = self
-                        .enhanced_searcher
-                        .lock()
-                        .expect("Failed to acquire enhanced searcher lock");
-
-                    if let Some(enhanced_searcher) = enhanced_guard.as_mut() {
-                        // Set callback to capture TimeManager
-                        enhanced_searcher.set_time_manager_callback(move |tm: Arc<TimeManager>| {
-                            *time_slot.lock().unwrap() = Some(tm);
-                        });
-                    }
-                } // Guard is dropped here
-
-                // Run search (re-lock for search execution)
-                let (best_move, score, nodes, pv, actual_depth) = {
-                    let mut enhanced_guard = self
-                        .enhanced_searcher
-                        .lock()
-                        .expect("Failed to acquire enhanced searcher lock");
-
-                    if let Some(enhanced_searcher) = enhanced_guard.as_mut() {
-                        // Run enhanced search with limits (this creates TimeManager internally)
-                        log::info!("Running enhanced_searcher.search_with_limits");
-                        let (best_move, score) =
-                            enhanced_searcher.search_with_limits(pos, limits.clone());
-                        log::info!(
-                            "Enhanced search returned: move={:?}, score={}",
-                            best_move.is_some(),
-                            score
-                        );
-
-                        // Get nodes count
-                        let nodes = enhanced_searcher.nodes();
-
-                        // Get principal variation - avoid if search was interrupted
-                        let pv = if let Some(ref stop_flag) = limits.stop_flag {
-                            if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                                // Search was interrupted, PV may be corrupted
-                                Vec::new()
-                            } else {
-                                enhanced_searcher.principal_variation().to_vec()
-                            }
-                        } else {
-                            enhanced_searcher.principal_variation().to_vec()
-                        };
-
-                        // Get actual search depth
-                        let actual_depth = enhanced_searcher.current_depth();
-
-                        (best_move, score, nodes, pv, actual_depth)
-                    } else {
-                        // Should not happen if engine type is Enhanced
-                        panic!("Enhanced searcher not initialized for Enhanced engine type");
-                    }
-                }; // Guard is dropped here
-
-                // Clear TimeManager reference after search completes (only for non-ponder searches)
-                // Keep the reference during ponder mode for potential ponder_hit
-                if !matches!(limits.time_control, crate::time_management::TimeControl::Ponder(_)) {
-                    self.active_time_manager.lock().unwrap().take();
+                let mut searcher_guard = self.nnue_basic_searcher.lock().unwrap();
+                if let Some(searcher) = searcher_guard.as_mut() {
+                    let result = searcher.search(pos, limits);
+                    log::info!("NNUE search completed");
+                    result
+                } else {
+                    panic!("NNUE searcher not initialized");
                 }
-
-                // Calculate elapsed time
-                let elapsed = start_time.elapsed();
-
-                // Convert to SearchResult
-                SearchResult {
-                    best_move,
-                    score,
-                    stats: SearchStats {
-                        nodes,
-                        elapsed,
-                        pv,
-                        depth: actual_depth,
-                        ..Default::default()
-                    },
+            }
+            EngineType::Enhanced => {
+                log::info!("Starting Enhanced search");
+                let mut searcher_guard = self.material_enhanced_searcher.lock().unwrap();
+                if let Some(searcher) = searcher_guard.as_mut() {
+                    searcher.search(pos, limits)
+                } else {
+                    panic!("Enhanced searcher not initialized");
+                }
+            }
+            EngineType::EnhancedNnue => {
+                log::info!("Starting Enhanced NNUE search");
+                let mut searcher_guard = self.nnue_enhanced_searcher.lock().unwrap();
+                if let Some(searcher) = searcher_guard.as_mut() {
+                    searcher.search(pos, limits)
+                } else {
+                    panic!("Enhanced NNUE searcher not initialized");
                 }
             }
         }
@@ -252,34 +213,51 @@ impl Engine {
         self.engine_type = engine_type;
 
         match engine_type {
-            EngineType::Nnue | EngineType::EnhancedNnue => {
-                // If switching to NNUE and it's not initialized, initialize with zero weights
+            EngineType::Material => {
+                // Initialize material searcher if not already
+                let mut searcher_guard = self.material_searcher.lock().unwrap();
+                if searcher_guard.is_none() {
+                    *searcher_guard = Some(MaterialSearcher::new(*self.material_evaluator));
+                }
+            }
+            EngineType::Nnue => {
+                // Initialize NNUE evaluator if needed
                 let mut nnue_guard = self.nnue_evaluator.lock().unwrap();
                 if nnue_guard.is_none() {
                     *nnue_guard = Some(NNUEEvaluatorWrapper::zero());
                 }
 
-                // For EnhancedNnue, also initialize enhanced searcher
-                if engine_type == EngineType::EnhancedNnue {
-                    let mut enhanced_guard = self.enhanced_searcher.lock().unwrap();
-                    if enhanced_guard.is_none() {
-                        let nnue_proxy = Arc::new(NNUEEvaluatorProxy {
-                            evaluator: self.nnue_evaluator.clone(),
-                        });
-                        *enhanced_guard = Some(EnhancedSearcher::new(16, nnue_proxy));
-                    }
+                // Initialize NNUE basic searcher
+                let mut searcher_guard = self.nnue_basic_searcher.lock().unwrap();
+                if searcher_guard.is_none() {
+                    let nnue_proxy = NNUEEvaluatorProxy {
+                        evaluator: self.nnue_evaluator.clone(),
+                    };
+                    *searcher_guard = Some(NnueBasicSearcher::new(nnue_proxy));
                 }
             }
             EngineType::Enhanced => {
-                // If switching to Enhanced and it's not initialized, initialize it
-                let mut enhanced_guard = self.enhanced_searcher.lock().unwrap();
-                if enhanced_guard.is_none() {
-                    *enhanced_guard =
-                        Some(EnhancedSearcher::new(16, self.material_evaluator.clone()));
+                // Initialize enhanced material searcher
+                let mut searcher_guard = self.material_enhanced_searcher.lock().unwrap();
+                if searcher_guard.is_none() {
+                    *searcher_guard = Some(MaterialEnhancedSearcher::new(*self.material_evaluator));
                 }
             }
-            EngineType::Material => {
-                // Material evaluator is always available
+            EngineType::EnhancedNnue => {
+                // Initialize NNUE evaluator if needed
+                let mut nnue_guard = self.nnue_evaluator.lock().unwrap();
+                if nnue_guard.is_none() {
+                    *nnue_guard = Some(NNUEEvaluatorWrapper::zero());
+                }
+
+                // Initialize enhanced NNUE searcher
+                let mut searcher_guard = self.nnue_enhanced_searcher.lock().unwrap();
+                if searcher_guard.is_none() {
+                    let nnue_proxy = NNUEEvaluatorProxy {
+                        evaluator: self.nnue_evaluator.clone(),
+                    };
+                    *searcher_guard = Some(NnueEnhancedSearcher::new(nnue_proxy));
+                }
             }
         }
     }
@@ -388,15 +366,13 @@ mod tests {
         let stop_flag_clone = stop_flag.clone();
 
         let handle = thread::spawn(move || {
-            std::panic::catch_unwind(|| {
-                let mut pos_mut = pos_clone;
-                let limits = SearchLimits::builder()
-                    .depth(10)
-                    .fixed_time_ms(10000)
-                    .stop_flag(stop_flag_clone)
-                    .build();
-                engine_clone.search(&mut pos_mut, limits)
-            })
+            let mut pos_mut = pos_clone;
+            let limits = SearchLimits::builder()
+                .depth(10)
+                .fixed_time_ms(10000)
+                .stop_flag(stop_flag_clone)
+                .build();
+            engine_clone.search(&mut pos_mut, limits)
         });
 
         // Set stop flag after short delay
@@ -404,21 +380,9 @@ mod tests {
         stop_flag.store(true, std::sync::atomic::Ordering::Release);
 
         // Wait for search to complete
-        let result = handle.join().unwrap().unwrap_or_else(|_| {
-            // If search panicked due to PV corruption, return a default result
-            // This indicates the stop flag successfully interrupted the search
-            SearchResult {
-                best_move: None,
-                score: 0,
-                stats: SearchStats {
-                    nodes: 1,
-                    elapsed: Duration::from_millis(50),
-                    ..Default::default()
-                },
-            }
-        });
+        let result = handle.join().unwrap();
 
-        // Should have stopped early (either with a move or due to interruption)
+        // Should have stopped early
         assert!(result.stats.elapsed < Duration::from_millis(200));
     }
 

@@ -21,8 +21,18 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use crate::search::GamePhase;
 use crate::Color;
+
+/// Game phase enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GamePhase {
+    /// Opening phase (0-20 moves)
+    Opening,
+    /// Middle game (21-60 moves)
+    MiddleGame,
+    /// End game (61+ moves or few pieces)
+    EndGame,
+}
 
 mod allocation;
 mod parameters;
@@ -299,6 +309,16 @@ impl TimeManager {
         {
             start.elapsed().as_millis() as u64
         }
+    }
+
+    /// Get soft time limit in milliseconds
+    pub fn soft_limit_ms(&self) -> u64 {
+        self.inner.soft_limit_ms.load(Ordering::Acquire)
+    }
+
+    /// Get current time control
+    pub fn time_control(&self) -> TimeControl {
+        self.inner.active_time_control.read().clone()
     }
 
     /// Update time after move completion (recommended API)

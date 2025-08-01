@@ -223,7 +223,6 @@ fn test_worker_no_bestmove() {
 fn test_stop_timeout_fallback() {
     let (tx, rx) = unbounded::<MockWorkerMessage>();
     let bestmove_count = Arc::new(AtomicU32::new(0));
-    let mut search_state = SearchState::Searching;
     let bestmove_sent = Arc::new(AtomicBool::new(false));
 
     // Simulate partial result before timeout
@@ -249,7 +248,7 @@ fn test_stop_timeout_fallback() {
     }
 
     // Simulate timeout - stop requested and send fallback bestmove
-    search_state = SearchState::StopRequested;
+    let mut search_state = SearchState::StopRequested;
     if !bestmove_sent.load(Ordering::Acquire) && partial_result.is_some() {
         bestmove_count.fetch_add(1, Ordering::Release);
         bestmove_sent.store(true, Ordering::Release);

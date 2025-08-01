@@ -26,6 +26,10 @@ pub const DEFAULT_SEARCH_DEPTH: u8 = 6;
 /// Limits the depth of capture-only search to avoid explosion
 pub const QUIESCE_MAX_PLY: u8 = 4;
 
+/// Absolute maximum depth for quiescence search
+/// Safety limit to prevent stack overflow in extreme cases
+pub const MAX_QUIESCE_DEPTH: u16 = 32;
+
 /// Aspiration window constants
 pub const ASPIRATION_WINDOW_INITIAL: i32 = 50;
 pub const ASPIRATION_WINDOW_DELTA: i32 = 50;

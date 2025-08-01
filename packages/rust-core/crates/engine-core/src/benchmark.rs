@@ -3,11 +3,10 @@
 use crate::evaluate::{Evaluator, MaterialEvaluator};
 use crate::movegen::MoveGen;
 use crate::nnue::NNUEEvaluatorWrapper;
-use crate::search::search_basic::Searcher;
+use crate::search::unified::UnifiedSearcher;
 use crate::search::SearchLimits;
 use crate::shogi::MoveList;
 use crate::shogi::{Color, Piece, PieceType, Position, Square};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Performance test results
@@ -101,10 +100,10 @@ fn benchmark_search() -> (u64, u64, Duration) {
 
         let limits = SearchLimits::builder().depth(8).fixed_time_ms(5000).build();
 
-        let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = Searcher::new(limits, evaluator);
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(evaluator);
         let mut pos_clone = pos.clone();
-        let result = searcher.search(&mut pos_clone);
+        let result = searcher.search(&mut pos_clone, limits);
 
         total_nodes += result.stats.nodes;
         total_time += result.stats.elapsed;

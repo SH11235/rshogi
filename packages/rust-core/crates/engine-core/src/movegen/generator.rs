@@ -1306,17 +1306,18 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
-        // Starting position should have exactly 28 legal moves with new convention
-        // Looking at the actual moves:
-        // - 9 pawn moves (9g9f through 1g1f)
-        // - 19 piece moves from the back rank
-        // Total = 28
+        // Starting position should have exactly 30 legal moves
+        // - 9 pawn moves (each pawn can move one square forward)
+        // - 2 rook moves (左右の飛車が1マス前進)
+        // - 2 bishop moves (左右の角が1マス前進)
+        // - 2 gold moves (金が前進)
+        // - 2 silver moves (銀が前進)
+        // - 4 knight moves (桂馬が跳ねる)
+        // - 2 lance moves (香車が前進)
+        // - 2 king moves (玉が前進)
+        // Total = 30
 
-        // Note: The difference from the traditional 30 moves is due to
-        // the new board orientation where some moves are no longer available
-        // in the starting position.
-
-        assert_eq!(moves.len(), 28);
+        assert_eq!(moves.len(), 30);
     }
 
     #[test]
@@ -1388,13 +1389,13 @@ mod tests {
     #[test]
     fn test_movegen_in_check() {
         let mut pos = Position::empty();
-        // Black king in check from white lance
+        // Black king in check from white rook
         pos.board
             .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
         pos.board
             .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Lance, Color::White));
+            .put_piece(Square::new(4, 3), Piece::new(PieceType::Rook, Color::White));
         pos.board
             .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::Black));
 
