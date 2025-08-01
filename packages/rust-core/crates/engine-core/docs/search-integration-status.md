@@ -27,45 +27,44 @@
 
 ### ❌ 未実装・要修正箇所
 
-#### 1. **エンジンコントローラー（最優先）**
+#### 1. ~~**エンジンコントローラー（最優先）**~~ ✅ 完了
 **ファイル**: `crates/engine-core/src/engine/controller.rs`
 
-**問題点**:
-- 依然として旧モジュールを使用：
+**実施内容**:
+- 旧モジュールの使用を削除し、統合searcherを使用：
   ```rust
-  use crate::search::search_basic::Searcher;
-  use crate::search::search_enhanced::EnhancedSearcher;
+  use crate::search::unified::{UnifiedSearcher};
   ```
-- `Engine::search()`メソッドが旧searcherを使用して探索を実行
+- 各エンジンタイプに対応する統合searcherの型エイリアスを定義
+- `Engine::search()`メソッドを統合searcherで実装
 
-**必要な対応**:
-- `UnifiedSearcher`を使用するように修正
-- エンジンタイプに応じた適切な型パラメータの設定
-
-#### 2. **SearchStackの依存関係問題**
+#### 2. ~~**SearchStackの依存関係問題**~~ ✅ 完了
 **影響ファイル**: 
 - `crates/engine-core/src/movegen/move_picker.rs`
 - `src/ai/test_move_picker_integration.rs`
 - `src/ai/test_move_picker_comprehensive.rs`
 
-**問題点**:
-- `MovePicker`が`search_enhanced::SearchStack`に依存
-- 統合エンジンは`SearchStack`を使用せず、独自の`MoveOrdering`でキラームーブを管理
+**実施内容**:
+- `SearchStack`を`search/types.rs`に移動し、共通型として定義
+- `search_enhanced`からは後方互換性のために再エクスポート
+- `MovePicker`と関連テストファイルのimportを更新
+- これにより、統合searcherと`MovePicker`の両方から`SearchStack`を使用可能に
 
-**必要な対応**:
-- オプション1: `SearchStack`を共通モジュールに移動
-- オプション2: `MovePicker`を統合エンジンの`MoveOrdering`に合わせて修正
-- オプション3: `SearchStack`のインターフェースを簡素化
+#### 3. ~~**ベンチマーク・テストの更新**~~ ✅ 完了
+以下のファイルを統合searcherに更新完了：
 
-#### 3. **ベンチマーク・テストの更新**
-以下のファイルが旧searcherを使用：
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/benchmark.rs` | `UnifiedSearcher<MaterialEvaluator, true, false, 8>`に更新 |
+| `tests/test_search_integration.rs` | `UnifiedSearcher<MaterialEvaluator, true, true, 16>`に更新 |
+| `benches/search_benchmarks.rs` | 基本・拡張両方の設定で統合searcherを使用 |
+| `benches/see_integration_bench.rs` | `UnifiedSearcher<MaterialEvaluator, true, true, TT_SIZE>`に更新 |
 
-| ファイル | 使用している旧モジュール |
-|---------|---------------------|
-| `benches/search_benchmarks.rs` | `search_basic::Searcher`, `search_enhanced::EnhancedSearcher` |
-| `tests/test_search_integration.rs` | `search_enhanced::EnhancedSearcher` |
-| `src/benchmark.rs` | `search_basic::Searcher` |
-| `benches/see_integration_bench.rs` | `search_enhanced::EnhancedSearcher` |
+**実施内容**:
+- 旧searcherのimportを削除
+- 統合searcherの適切な型パラメータで設定
+- `SearchLimitsBuilder`を使用したAPI更新
+- 不要な`Arc`ラッパーを削除
 
 #### 4. **性能関連のTODO**
 1. **TimeControl::Infiniteでの性能問題**
@@ -122,6 +121,28 @@
 3. **メモリ使用量**
    - BasicSearcher: ~20MB（TT 8MB）
    - EnhancedSearcher: ~36MB（TT 16MB）
+
+## 追加の技術的考察
+
+### キラームーブ管理の二重実装
+現在、キラームーブ管理が2箇所で実装されています：
+
+1. **SearchStack（MovePicker用）**
+   - `search/types.rs`で定義
+   - `MovePicker`で使用
+   - 追加の探索情報も保持（static_eval、current_move等）
+
+2. **MoveOrdering（統合searcher用）**
+   - `search/unified/ordering/mod.rs`で実装
+   - 統合searcherで独立して使用
+   - キラームーブのみに特化
+
+この二重実装は機能的には問題ありませんが、以下の点で改善の余地があります：
+- コードの重複
+- SearchStackの追加情報（static_eval等）が統合searcherで未活用
+- 将来的なメンテナンスの複雑化
+
+ただし、現状では両実装とも正しく動作しており、統合は優先度低と判断します。
 
 ## まとめ
 統合エンジンの基本実装は完了していますが、実際の使用箇所の移行が未完了です。特に`controller.rs`の更新が最優先事項であり、これにより統合エンジンが実際に使用されるようになります。
