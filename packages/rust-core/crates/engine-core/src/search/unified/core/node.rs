@@ -95,6 +95,8 @@ where
             // NOTE: We intentionally allow reduced_depth to become 0, which triggers
             // quiescence search. Using .max(1) would prevent proper quiescence search
             // and can lead to illegal move generation (e.g., king captures).
+            // Calculate reduced depth for Late Move Reduction (LMR)
+            // saturating_sub ensures depth doesn't go negative, transitioning to quiescence search when depth=0
             let reduced_depth = depth.saturating_sub(1 + reduction);
             score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, ply + 1);
 
