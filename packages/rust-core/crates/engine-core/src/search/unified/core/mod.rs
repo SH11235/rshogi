@@ -39,8 +39,10 @@ where
     // For time-based controls, use adaptive intervals based on soft limit
     if let Some(tm) = &searcher.time_manager {
         match tm.soft_limit_ms() {
-            0..=50 => 0x3F,    // ≤50ms → 64 nodes
-            51..=500 => 0x1FF, // ≤0.5s → 512 nodes
+            0..=50 => 0x1F,    // ≤50ms → 32 nodes
+            51..=100 => 0x3F,  // ≤100ms → 64 nodes
+            101..=200 => 0x7F, // ≤200ms → 128 nodes
+            201..=500 => 0xFF, // ≤0.5s → 256 nodes
             _ => 0x3FF,        // default 1024 nodes
         }
     } else {
