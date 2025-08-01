@@ -202,6 +202,25 @@ When working with rust-core:
 - Document public APIs with doc comments
 - Keep WASM module size small by avoiding unnecessary dependencies
 
+### Debug Tools
+
+**Position Analysis Tool**: Use `debug_position` for investigating search performance issues
+
+```bash
+# Analyze specific position with SFEN
+cargo run --release --bin debug_position -- --sfen "SFEN" --depth 5 --time 1000
+
+# Compare engine types
+cargo run --release --bin debug_position -- -s "SFEN" -e material
+cargo run --release --bin debug_position -- -s "SFEN" -e enhanced_nnue
+
+# Check move generation
+cargo run --release --bin debug_position -- -s "SFEN" --moves
+cargo run --release --bin debug_position -- -s "SFEN" --perft 5
+```
+
+See `/packages/rust-core/docs/debug-position-tool.md` for detailed usage.
+
 ### Build Configuration
 
 - Target: wasm32-unknown-unknown

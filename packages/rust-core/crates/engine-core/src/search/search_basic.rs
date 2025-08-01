@@ -71,7 +71,7 @@ mod tests {
 
         // Start search in a thread
         let mut pos_clone = pos.clone();
-        let evaluator_clone = evaluator.clone();
+        let evaluator_clone = evaluator;
         let stop_flag_clone = stop_flag.clone();
 
         let handle = thread::spawn(move || {

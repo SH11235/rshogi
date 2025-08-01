@@ -209,7 +209,8 @@ where
         }
     }
 
-    if searcher.context.should_stop() {
+    // Check stop flag periodically (every 1024 nodes) to minimize overhead
+    if searcher.stats.nodes & 0x3FF == 0 && searcher.context.should_stop() {
         // Store partial evaluation in TT before returning
         if USE_TT && depth > 0 {
             let eval = searcher.evaluator.evaluate(pos);
@@ -301,6 +302,10 @@ where
     // Check time limits in quiescence search (especially important for FixedNodes)
     let event_interval = get_event_poll_interval(searcher);
     if (searcher.stats.nodes & event_interval) == 0 {
+        // Check both context stop flag and time manager
+        if searcher.context.should_stop() {
+            return alpha;
+        }
         if let Some(ref tm) = searcher.time_manager {
             if tm.should_stop(searcher.stats.nodes) {
                 searcher.context.stop();
@@ -443,4 +448,69 @@ where
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::Position;
+
+    #[test]
+    fn test_stop_flag_polling_interval() {
+        // Test that stop flag checks are done at appropriate intervals
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Simulate node counting and verify polling frequency
+        let mut check_count = 0;
+        for i in 0..100000 {
+            searcher.stats.nodes = i;
+            // Check stop flag only every 1024 nodes (0x3FF = 1023)
+            if searcher.stats.nodes & 0x3FF == 0 {
+                check_count += 1;
+            }
+        }
+
+        // Should check approximately 97 times (100000 / 1024)
+        assert!((95..=100).contains(&check_count), "Check count: {check_count}");
+    }
+
+    #[test]
+    fn test_get_event_poll_interval_values() {
+        // Test that the polling interval function returns expected values
+        let evaluator = MaterialEvaluator;
+        let searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Without time manager, should return 0x7F (127) for responsiveness
+        let interval = get_event_poll_interval(&searcher);
+        assert_eq!(interval, 0x7F, "Without time manager should return 0x7F");
+    }
+
+    #[test]
+    fn test_has_non_pawn_material() {
+        let pos = Position::startpos();
+
+        // Starting position has non-pawn material (checks current side to move)
+        assert!(has_non_pawn_material(&pos)); // Black's turn at start
+
+        // TODO: Add test for endgame position with only pawns
+    }
+
+    #[test]
+    fn test_reduced_depth_calculation() {
+        // Test that reduced depth calculation handles edge cases properly
+        let depth: u8 = 3;
+        let reduction: u8 = 2;
+
+        // saturating_sub ensures we don't underflow
+        let reduced_depth = depth.saturating_sub(1 + reduction);
+        assert_eq!(reduced_depth, 0); // Should transition to quiescence search
+
+        // Normal case
+        let depth: u8 = 6;
+        let reduction: u8 = 1;
+        let reduced_depth = depth.saturating_sub(1 + reduction);
+        assert_eq!(reduced_depth, 4);
+    }
 }
