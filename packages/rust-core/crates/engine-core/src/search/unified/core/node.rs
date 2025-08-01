@@ -85,8 +85,12 @@ where
             };
 
             // Null window search with safe depth calculation
-            // Calculate reduced depth, ensuring it doesn't go below 0
-            let reduced_depth = depth.saturating_sub(1).saturating_sub(reduction);
+            // Calculate reduced depth safely to avoid underflow
+            // Using saturating_sub(1 + reduction) is more robust than chained saturating_sub
+            // NOTE: We intentionally allow reduced_depth to become 0, which triggers
+            // quiescence search. Using .max(1) would prevent proper quiescence search
+            // and can lead to illegal move generation (e.g., king captures).
+            let reduced_depth = depth.saturating_sub(1 + reduction);
             score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, ply + 1);
 
             // Re-search if needed
