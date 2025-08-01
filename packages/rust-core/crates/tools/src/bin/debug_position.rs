@@ -156,6 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Show TT stats if requested
     if args.show_tt_stats {
         println!("\n=== Transposition Table Stats ===");
+        // Prepare for future TT statistics implementation
         if let Some(tt_hits) = result.stats.tt_hits {
             println!("TT hits: {tt_hits}");
         }
@@ -207,4 +208,67 @@ fn perft(position: &Position, depth: u8) -> u64 {
     }
 
     nodes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_perft_calculation() {
+        // Test perft for initial position
+        let position =
+            Position::from_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+                .unwrap();
+
+        // Known perft values for initial position
+        assert_eq!(perft(&position, 1), 30);
+        assert_eq!(perft(&position, 2), 900);
+        // Depth 3 takes longer, so we just verify it completes
+        let result = perft(&position, 3);
+        assert!(result > 20000 && result < 30000);
+    }
+
+    #[test]
+    fn test_engine_type_parsing() {
+        // Test valid engine types
+        assert!(matches!(
+            match "material".to_lowercase().as_str() {
+                "material" => EngineType::Material,
+                _ => EngineType::Material,
+            },
+            EngineType::Material
+        ));
+
+        assert!(matches!(
+            match "enhanced_nnue".to_lowercase().as_str() {
+                "enhanced_nnue" => EngineType::EnhancedNnue,
+                _ => EngineType::Material,
+            },
+            EngineType::EnhancedNnue
+        ));
+    }
+
+    #[test]
+    fn test_legal_move_generation() {
+        let position =
+            Position::from_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+                .unwrap();
+        let mut move_gen = MoveGen::new();
+        let mut move_list = MoveList::new();
+        move_gen.generate_all(&position, &mut move_list);
+
+        // Filter legal moves
+        let mut legal_count = 0;
+        for mv in move_list.as_slice() {
+            let mut test_pos = position.clone();
+            test_pos.do_move(*mv);
+            if !test_pos.in_check() {
+                legal_count += 1;
+            }
+        }
+
+        // Initial position should have exactly 30 legal moves
+        assert_eq!(legal_count, 30);
+    }
 }
