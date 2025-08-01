@@ -108,7 +108,7 @@ mod search_integration_tests {
 
         // Create unified searcher with enhanced features
         let mut searcher_with_see =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new((*evaluator).clone());
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
 
         // Test position with many captures available
         let test_positions = vec![
@@ -154,7 +154,7 @@ mod search_integration_tests {
         for _ in 0..3 {
             // Create a fresh searcher for each iteration to ensure no TT pollution
             let mut searcher =
-                UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new((*evaluator).clone());
+                UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
             use engine_core::search::SearchLimitsBuilder;
             let limits = SearchLimitsBuilder::default().depth(6).nodes(50_000).build();
             let result = searcher.search(&mut pos.clone(), limits);
@@ -195,8 +195,7 @@ mod search_integration_tests {
     fn test_complex_tactical_positions_benchmark() {
         let database = load_tactical_positions();
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 64>::new((*evaluator).clone());
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 64>::new(*evaluator);
 
         println!("\nTactical Position Analysis:");
         println!("{:-<80}", "");
@@ -258,8 +257,7 @@ mod search_integration_tests {
     #[ignore = "Requires proper Position::from_sfen implementation"]
     fn test_see_pruning_in_main_search() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new((*evaluator).clone());
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
 
         // Position with many bad captures that should be pruned
         let mut pos = Position::from_sfen(
