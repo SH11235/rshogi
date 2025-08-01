@@ -123,6 +123,10 @@ pub struct SearchStack {
     pub history_score: i32,
     /// Excluded move (for singular extension)
     pub excluded_move: Option<Move>,
+    /// Counter move (best response to this move)
+    pub counter_move: Option<Move>,
+    /// Quiet moves tried at this node (for history updates)
+    pub quiet_moves: Vec<Move>,
 }
 
 impl SearchStack {
@@ -162,7 +166,8 @@ impl SearchStack {
         self.current_move = None;
         self.move_count = 0;
         self.excluded_move = None;
-        // Note: We keep killers, static_eval, threat_move as they may be useful
+        self.quiet_moves.clear();
+        // Note: We keep killers, static_eval, threat_move, counter_move as they may be useful
     }
 
     /// Check if ply is within valid range for SearchStack access
