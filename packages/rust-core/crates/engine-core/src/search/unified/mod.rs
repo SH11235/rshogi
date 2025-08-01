@@ -369,8 +369,14 @@ where
         let history_len = self.score_history.len();
         let start = history_len.saturating_sub(5); // Look at last 5 depths
 
+        // Safety check: ensure we have at least 2 elements to compare
+        if start + 1 >= history_len {
+            return 0;
+        }
+
         for i in (start + 1)..history_len {
             // Calculate absolute difference between consecutive scores
+            // Safety: bounds are guaranteed by the check above
             let diff = (self.score_history[i] as i64 - self.score_history[i - 1] as i64).abs();
 
             // Cap individual differences at 1000 centipawns to handle mate scores
@@ -379,11 +385,12 @@ where
             total_deviation += capped_diff;
         }
 
-        // Average deviation
-        let count = history_len - start - 1;
+        // Average deviation with proper rounding
+        let count = (history_len - start - 1) as i64;
         if count > 0 {
+            // Add count/2 for proper rounding before integer division
+            let avg = (total_deviation + count / 2) / count;
             // Ensure result fits in i32 and is non-negative
-            let avg = total_deviation / count as i64;
             avg.min(i32::MAX as i64).max(0) as i32
         } else {
             0
@@ -777,5 +784,37 @@ mod tests {
                 <= crate::search::constants::ASPIRATION_WINDOW_INITIAL
                     + crate::search::constants::ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT
         );
+    }
+
+    #[test]
+    fn test_volatility_calculation_edge_cases() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+
+        // Test with single score - should return 0
+        searcher.score_history.push(100);
+        assert_eq!(searcher.calculate_score_volatility(), 0);
+
+        // Test with exactly 2 scores
+        searcher.score_history.push(150);
+        let volatility = searcher.calculate_score_volatility();
+        assert_eq!(volatility, 50); // |150 - 100| = 50
+
+        // Test rounding in average calculation
+        searcher.score_history.clear();
+        searcher.score_history.push(0);
+        searcher.score_history.push(5);
+        searcher.score_history.push(10);
+        let volatility = searcher.calculate_score_volatility();
+        assert_eq!(volatility, 5); // (5 + 5) / 2 = 5
+
+        // Test with 3 values where average needs rounding
+        searcher.score_history.clear();
+        searcher.score_history.push(0);
+        searcher.score_history.push(10);
+        searcher.score_history.push(13);
+        let volatility = searcher.calculate_score_volatility();
+        // (10 + 3) / 2 = 6.5, rounded to 7
+        assert_eq!(volatility, 7);
     }
 }
