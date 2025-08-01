@@ -311,6 +311,16 @@ impl TimeManager {
         }
     }
 
+    /// Get soft time limit in milliseconds
+    pub fn soft_limit_ms(&self) -> u64 {
+        self.inner.soft_limit_ms.load(Ordering::Acquire)
+    }
+
+    /// Get current time control
+    pub fn time_control(&self) -> TimeControl {
+        self.inner.active_time_control.read().clone()
+    }
+
     /// Update time after move completion (recommended API)
     ///
     /// # Arguments
