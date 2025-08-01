@@ -132,4 +132,9 @@ impl SearchContext {
     pub fn ponder_hit_flag(&self) -> Option<&Arc<AtomicBool>> {
         self.ponder_hit_flag.as_ref()
     }
+
+    /// Get reference to search limits
+    pub fn limits(&self) -> &SearchLimits {
+        &self.limits
+    }
 }

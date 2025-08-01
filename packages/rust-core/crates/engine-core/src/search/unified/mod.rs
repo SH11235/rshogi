@@ -126,7 +126,11 @@ where
 
         // Create TimeManager if needed
         use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
-        if !matches!(limits.time_control, TimeControl::Infinite | TimeControl::FixedNodes { .. }) {
+        // TODO: Performance concern - TimeControl::Infinite with depth limit
+        // Currently TimeManager is not created for Infinite time control, which may
+        // cause performance issues for depth-limited searches (e.g., depth 5 taking 25s).
+        // Consider creating TimeManager even for Infinite to enable search optimizations.
+        if !matches!(limits.time_control, TimeControl::Infinite) {
             // Convert SearchLimits to TimeLimits
             let time_limits: TimeLimits = limits.clone().into();
 
@@ -150,6 +154,9 @@ where
             self.time_manager = None;
         }
 
+        // Get actual depth limit from limits (not from context which defaults to 127)
+        let max_depth = limits.depth.unwrap_or(127);
+
         // Initialize search context with limits
         self.context.set_limits(limits);
 
@@ -158,34 +165,37 @@ where
         let mut best_score = 0;
         let mut depth = 1;
 
-        while depth <= self.context.max_depth() && !self.context.should_stop() {
+        while depth <= max_depth && !self.context.should_stop() {
             // Process events including ponder hit
             self.context.process_events(&self.time_manager);
 
-            // Check time limits via TimeManager
-            if let Some(ref tm) = self.time_manager {
-                if tm.should_stop(self.stats.nodes) {
-                    log::info!("TimeManager signaled stop after {} nodes", self.stats.nodes);
-                    self.context.stop();
-                    break;
+            // Check time limits via TimeManager (skip for depth 1 to ensure at least 1 ply)
+            if depth > 1 {
+                if let Some(ref tm) = self.time_manager {
+                    if tm.should_stop(self.stats.nodes) {
+                        log::info!("TimeManager signaled stop after {} nodes", self.stats.nodes);
+                        self.context.stop();
+                        break;
+                    }
                 }
             }
 
             // Search at current depth
             let (score, pv) = self.search_root(pos, depth);
 
-            if !self.context.should_stop() {
+            // Always update results if we have a valid pv, even if stopping
+            if !pv.is_empty() {
                 best_score = score;
-                if !pv.is_empty() {
-                    best_move = Some(pv[0]);
-                    self.pv_table.update_from_line(&pv);
-                }
+                best_move = Some(pv[0]);
+                self.pv_table.update_from_line(&pv);
 
                 // Update statistics
                 self.stats.depth = depth;
                 self.stats.pv = pv.clone();
+            }
 
-                // Call info callback if available
+            // Call info callback if not stopped
+            if !self.context.should_stop() {
                 if let Some(callback) = self.context.info_callback() {
                     callback(depth, score, self.stats.nodes, self.context.elapsed(), &pv);
                 }
@@ -261,6 +271,12 @@ pub type EnhancedSearcher<E> = UnifiedSearcher<E, true, true, 16>;
 mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::SearchLimitsBuilder;
+    use crate::Position;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_unified_searcher_creation() {
@@ -283,5 +299,121 @@ mod tests {
 
         let enhanced_eval = MaterialEvaluator;
         let _enhanced = EnhancedConfig::new(enhanced_eval);
+    }
+
+    #[test]
+    fn test_fixed_nodes() {
+        // Test FixedNodes - 時間に依存しない
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut pos = Position::startpos();
+
+        let limits = SearchLimitsBuilder::default().fixed_nodes(5000).build();
+        let start = Instant::now();
+        let result = searcher.search(&mut pos, limits);
+        let elapsed = start.elapsed();
+
+        assert!(result.best_move.is_some());
+        assert!(
+            result.stats.nodes <= 10000,
+            "Node count {} should be reasonable (quiescence search may exceed limit)",
+            result.stats.nodes
+        );
+        assert!(elapsed.as_secs() < 1, "Should complete within 1 second");
+    }
+
+    #[test]
+    fn test_depth_limit() {
+        // Test depth limit - 浅い深さで確実に終了
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut pos = Position::startpos();
+
+        let limits = SearchLimitsBuilder::default().depth(1).build();
+
+        let start = Instant::now();
+        let result = searcher.search(&mut pos, limits);
+        let elapsed = start.elapsed();
+
+        assert!(result.best_move.is_some());
+        assert_eq!(result.stats.depth, 1);
+        assert!(elapsed.as_secs() < 1, "Should complete within 1 second");
+    }
+
+    #[test]
+    fn test_stop_flag_responsiveness() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut pos = Position::startpos();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // 十分なノード数を設定して、停止フラグなしでは時間がかかるようにする
+        let limits = SearchLimitsBuilder::default()
+            .fixed_nodes(1_000_000)
+            .stop_flag(stop_flag.clone())
+            .build();
+
+        // 1ms後に停止フラグを立てる
+        let stop_flag_clone = stop_flag.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1));
+            stop_flag_clone.store(true, Ordering::Relaxed);
+        });
+
+        let start = Instant::now();
+        let result = searcher.search(&mut pos, limits);
+        let elapsed = start.elapsed();
+
+        assert!(result.best_move.is_some());
+        assert!(
+            elapsed.as_millis() < 50,
+            "Search should stop within 50ms after stop flag is set, but took {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_time_manager_integration() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut pos = Position::startpos();
+
+        // 100msの時間制限で、深さ3（より浅い深さで確実に停止）
+        let limits = SearchLimitsBuilder::default().fixed_time_ms(100).depth(3).build();
+
+        let start = Instant::now();
+        let result = searcher.search(&mut pos, limits);
+        let elapsed = start.elapsed();
+
+        assert!(result.best_move.is_some());
+        assert!(
+            elapsed.as_millis() < 200,
+            "Should stop around 100ms, but took {}ms",
+            elapsed.as_millis()
+        );
+        // 時間制限に少し余裕を持たせる（100ms→200ms）
+    }
+
+    #[test]
+    fn test_short_time_control() {
+        // Test very short time controls with adaptive polling
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut pos = Position::startpos();
+
+        // 50msの時間制限（depth 1が完走できる程度）
+        let limits = SearchLimitsBuilder::default().fixed_time_ms(50).depth(2).build();
+
+        let start = Instant::now();
+        let result = searcher.search(&mut pos, limits);
+        let elapsed = start.elapsed();
+
+        assert!(result.best_move.is_some(), "Must have best move even with short time");
+        assert!(result.stats.depth >= 1, "Should complete at least depth 1");
+        assert!(
+            elapsed.as_millis() < 100,
+            "Should stop quickly with 50ms limit, but took {}ms",
+            elapsed.as_millis()
+        );
     }
 }
