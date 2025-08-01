@@ -167,11 +167,11 @@ impl SearchStack {
 
     /// Check if ply is within valid range for SearchStack access
     ///
-    /// Since SearchStack is pre-allocated with 128 elements and MAX_PLY is 127,
-    /// this is essentially a compile-time constant check.
+    /// Since SearchStack is pre-allocated with MAX_PLY+1 elements,
+    /// this ensures we don't access out of bounds.
     #[inline(always)]
     pub fn is_valid_ply(ply: u16) -> bool {
-        ply < 128 // SearchStack size is hardcoded to 128 in UnifiedSearcher::new()
+        ply <= crate::search::constants::MAX_PLY as u16
     }
 }
 

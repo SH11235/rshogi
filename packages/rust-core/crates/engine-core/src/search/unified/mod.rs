@@ -87,8 +87,10 @@ where
     /// Create a new unified searcher
     pub fn new(evaluator: E) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
-        let mut search_stack = Vec::with_capacity(128);
-        for ply in 0..128 {
+        // Pre-allocate search stack for maximum search depth
+        // This is a small amount of memory (8KB) and avoids dynamic allocation during search
+        let mut search_stack = Vec::with_capacity(crate::search::constants::MAX_PLY + 1);
+        for ply in 0..=crate::search::constants::MAX_PLY {
             search_stack.push(SearchStack::new(ply as u16));
         }
 
@@ -112,8 +114,9 @@ where
     /// Create a new unified searcher with an already Arc-wrapped evaluator
     pub fn with_arc(evaluator: Arc<E>) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
-        let mut search_stack = Vec::with_capacity(128);
-        for ply in 0..128 {
+        // Pre-allocate search stack for maximum search depth
+        let mut search_stack = Vec::with_capacity(crate::search::constants::MAX_PLY + 1);
+        for ply in 0..=crate::search::constants::MAX_PLY {
             search_stack.push(SearchStack::new(ply as u16));
         }
 
