@@ -104,7 +104,13 @@ fn test_depth_search_terminates() {
     // Test depth 5 search (performance issue should be fixed)
     let elapsed = tester.search_with_depth(&mut pos, 5);
 
-    assert!(elapsed < Duration::from_secs(5), "Depth 5 search took too long: {elapsed:?}");
+    // Debug builds are significantly slower
+    let time_limit = if cfg!(debug_assertions) {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(5)
+    };
+    assert!(elapsed < time_limit, "Depth 5 search took too long: {elapsed:?}");
     println!("Depth 5 search completed in {elapsed:?}");
 }
 
@@ -161,7 +167,13 @@ fn test_various_positions() {
 
     for mut pos in positions {
         let elapsed = tester.search_with_depth(&mut pos, 3);
-        assert!(elapsed < Duration::from_secs(2), "Search took too long for position");
+        // Debug builds are significantly slower
+        let time_limit = if cfg!(debug_assertions) {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(2)
+        };
+        assert!(elapsed < time_limit, "Search took too long for position");
     }
 }
 

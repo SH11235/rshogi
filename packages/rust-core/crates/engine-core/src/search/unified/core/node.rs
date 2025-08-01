@@ -18,6 +18,11 @@ pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const 
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // Check stop flag periodically (every 1024 nodes) to minimize overhead
+    if searcher.stats.nodes & 0x3FF == 0 && searcher.context.should_stop() {
+        return alpha;
+    }
+
     let original_alpha = alpha;
     let hash = pos.zobrist_hash;
     let mut best_move = None;
@@ -90,6 +95,8 @@ where
             // NOTE: We intentionally allow reduced_depth to become 0, which triggers
             // quiescence search. Using .max(1) would prevent proper quiescence search
             // and can lead to illegal move generation (e.g., king captures).
+            // Calculate reduced depth for Late Move Reduction (LMR)
+            // saturating_sub ensures depth doesn't go negative, transitioning to quiescence search when depth=0
             let reduced_depth = depth.saturating_sub(1 + reduction);
             score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, ply + 1);
 
