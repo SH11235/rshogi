@@ -28,6 +28,8 @@ where
     let mut best_move = None;
     let mut best_score = -SEARCH_INF;
     let mut moves_searched = 0;
+    let mut quiet_moves_tried: Vec<Move> = Vec::new();
+    let mut captures_tried: Vec<Move> = Vec::new();
 
     // Check if in check and update search stack
     let in_check = pos.is_in_check();
@@ -65,6 +67,13 @@ where
 
     // Search moves
     for &mv in ordered_moves.iter() {
+        // Track moves for history updates
+        if mv.is_capture_hint() {
+            captures_tried.push(mv);
+        } else if !mv.is_promote() {
+            quiet_moves_tried.push(mv);
+        }
+
         // Update current move in search stack
         if crate::search::types::SearchStack::is_valid_ply(ply) {
             searcher.search_stack[ply as usize].current_move = Some(mv);
@@ -132,8 +141,66 @@ where
                         if crate::search::types::SearchStack::is_valid_ply(ply) {
                             searcher.search_stack[ply as usize].update_killers(mv);
                         }
+
+                        // Get previous move for history updates
+                        let prev_move = if ply > 0
+                            && crate::search::types::SearchStack::is_valid_ply(ply - 1)
+                        {
+                            searcher.search_stack[(ply - 1) as usize].current_move
+                        } else {
+                            None
+                        };
+
                         if let Ok(mut history) = searcher.history.lock() {
-                            history.update_cutoff(pos.side_to_move, mv, depth as i32, None);
+                            // Update history for the cutoff move
+                            history.update_cutoff(pos.side_to_move, mv, depth as i32, prev_move);
+
+                            // Update counter move history
+                            if let Some(prev_mv) = prev_move {
+                                history.counter_moves.update(pos.side_to_move, prev_mv, mv);
+                            }
+
+                            // Update capture history if it's a capture
+                            if mv.is_capture_hint() {
+                                if let (Some(attacker), Some(victim)) =
+                                    (mv.piece_type(), mv.captured_piece_type())
+                                {
+                                    history.capture.update_good(
+                                        pos.side_to_move,
+                                        attacker,
+                                        victim,
+                                        depth as i32,
+                                    );
+                                }
+                            }
+
+                            // Penalize quiet moves that didn't cause cutoff
+                            for &quiet_mv in quiet_moves_tried.iter() {
+                                if quiet_mv != mv {
+                                    history.update_quiet(
+                                        pos.side_to_move,
+                                        quiet_mv,
+                                        depth as i32,
+                                        prev_move,
+                                    );
+                                }
+                            }
+
+                            // Penalize captures that didn't cause cutoff
+                            for &capture_mv in captures_tried.iter() {
+                                if capture_mv != mv {
+                                    if let (Some(attacker), Some(victim)) =
+                                        (capture_mv.piece_type(), capture_mv.captured_piece_type())
+                                    {
+                                        history.capture.update_bad(
+                                            pos.side_to_move,
+                                            attacker,
+                                            victim,
+                                            depth as i32,
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     break;
