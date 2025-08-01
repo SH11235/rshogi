@@ -80,6 +80,9 @@ where
         // Undo move
         pos.undo_move(mv, undo_info);
 
+        // Process events (including ponder hit) every move at root
+        searcher.context.process_events(&searcher.time_manager);
+
         // Check for timeout
         if searcher.context.should_stop() {
             break;
@@ -118,6 +121,12 @@ where
 {
     // Check limits
     searcher.stats.nodes += 1;
+
+    // Process events every 1024 nodes to keep overhead low
+    if (searcher.stats.nodes & 0x3FF) == 0 {
+        searcher.context.process_events(&searcher.time_manager);
+    }
+
     if searcher.context.should_stop() {
         return 0;
     }
