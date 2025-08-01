@@ -209,7 +209,8 @@ where
         }
     }
 
-    if searcher.context.should_stop() {
+    // Check stop flag periodically (every 1024 nodes) to minimize overhead
+    if searcher.stats.nodes & 0x3FF == 0 && searcher.context.should_stop() {
         // Store partial evaluation in TT before returning
         if USE_TT && depth > 0 {
             let eval = searcher.evaluator.evaluate(pos);
