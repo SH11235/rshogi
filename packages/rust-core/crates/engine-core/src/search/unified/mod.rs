@@ -13,7 +13,8 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         history::History,
-        tt::{NodeType, TranspositionTable},
+        tt::NodeType,
+        tt_config::{TTVersion, TranspositionTableUnified},
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
     },
@@ -56,7 +57,7 @@ pub struct UnifiedSearcher<
     evaluator: Arc<E>,
 
     /// Transposition table (conditionally compiled)
-    tt: Option<TranspositionTable>,
+    tt: Option<TranspositionTableUnified>,
 
     /// Move ordering history (shared with move ordering)
     history: Arc<Mutex<History>>,
@@ -104,7 +105,8 @@ where
         Self {
             evaluator: Arc::new(evaluator),
             tt: if USE_TT {
-                Some(TranspositionTable::new(TT_SIZE_MB))
+                // Use V2 by default for better performance
+                Some(TranspositionTableUnified::new_default(TT_SIZE_MB))
             } else {
                 None
             },
@@ -132,7 +134,8 @@ where
         Self {
             evaluator,
             tt: if USE_TT {
-                Some(TranspositionTable::new(TT_SIZE_MB))
+                // Use V2 by default for better performance
+                Some(TranspositionTableUnified::new_default(TT_SIZE_MB))
             } else {
                 None
             },
@@ -146,6 +149,21 @@ where
             score_history: Vec::with_capacity(crate::search::constants::MAX_PLY),
             score_volatility: 0,
         }
+    }
+
+    /// Set the transposition table version
+    ///
+    /// This allows runtime switching between TT implementations.
+    /// Note: This will clear the current TT contents.
+    pub fn set_tt_version(&mut self, version: TTVersion) {
+        if USE_TT {
+            self.tt = Some(TranspositionTableUnified::new(version, TT_SIZE_MB));
+        }
+    }
+
+    /// Get the current TT version
+    pub fn get_tt_version(&self) -> Option<TTVersion> {
+        self.tt.as_ref().map(|tt| tt.version())
     }
 
     /// Main search entry point

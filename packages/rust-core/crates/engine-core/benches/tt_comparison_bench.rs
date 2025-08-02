@@ -3,21 +3,17 @@
 //! Measures cache efficiency, replacement strategy effectiveness, and overall performance
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use engine_core::{
-    search::{tt::TranspositionTable, tt_v2::TranspositionTableV2},
-    Position,
-};
-use rand::{Rng, SeedableRng};
-use rand_xorshift::XorShiftRng;
+use engine_core::search::{tt::TranspositionTable, tt_v2::TranspositionTableV2};
+use rand::Rng;
 use std::hint::black_box;
 use std::time::Duration;
 
 /// Generate test hashes with different access patterns
 fn generate_test_hashes(pattern: &str, count: usize) -> Vec<u64> {
-    let mut rng = XorShiftRng::seed_from_u64(42);
+    let mut rng = rand::rng();
 
     match pattern {
-        "random" => (0..count).map(|_| rng.gen()).collect(),
+        "random" => (0..count).map(|_| rng.random()).collect(),
         "sequential" => (0..count as u64).map(|i| i * 0x1000).collect(),
         "clustered" => {
             // Simulate positions that are close in the search tree
@@ -25,8 +21,8 @@ fn generate_test_hashes(pattern: &str, count: usize) -> Vec<u64> {
             let per_cluster = count / clusters;
             let mut hashes = Vec::with_capacity(count);
 
-            for c in 0..clusters {
-                let base = rng.gen::<u64>();
+            for _c in 0..clusters {
+                let base = rng.random::<u64>();
                 for i in 0..per_cluster {
                     hashes.push(base.wrapping_add(i as u64));
                 }
@@ -51,7 +47,7 @@ fn generate_test_hashes(pattern: &str, count: usize) -> Vec<u64> {
             }
             hashes
         }
-        _ => panic!("Unknown pattern: {}", pattern),
+        _ => panic!("Unknown pattern: {pattern}"),
     }
 }
 
@@ -121,17 +117,17 @@ fn bench_replacement_strategy(c: &mut Criterion) {
     group.bench_function("v1_replacement", |b| {
         b.iter(|| {
             let mut tt = TranspositionTable::new(table_size_mb);
-            let mut rng = XorShiftRng::seed_from_u64(123);
+            let mut rng = rand::rng();
 
             // Simulate search with different depths
-            for iteration in 0..5 {
+            for _iteration in 0..5 {
                 tt.new_search();
 
                 for _ in 0..unique_positions {
-                    let hash = rng.gen();
-                    let depth = rng.gen_range(1..20);
-                    let score = rng.gen_range(-1000..1000);
-                    let node_type = match rng.gen_range(0..3) {
+                    let hash = rng.random();
+                    let depth = rng.random_range(1..20);
+                    let score = rng.random_range(-1000..1000);
+                    let node_type = match rng.random_range(0..3) {
                         0 => engine_core::search::tt::NodeType::Exact,
                         1 => engine_core::search::tt::NodeType::LowerBound,
                         _ => engine_core::search::tt::NodeType::UpperBound,
@@ -148,17 +144,17 @@ fn bench_replacement_strategy(c: &mut Criterion) {
     group.bench_function("v2_replacement", |b| {
         b.iter(|| {
             let mut tt = TranspositionTableV2::new(table_size_mb);
-            let mut rng = XorShiftRng::seed_from_u64(123);
+            let mut rng = rand::rng();
 
             // Simulate search with different depths
-            for iteration in 0..5 {
+            for _iteration in 0..5 {
                 tt.new_search();
 
                 for _ in 0..unique_positions {
-                    let hash = rng.gen();
-                    let depth = rng.gen_range(1..20);
-                    let score = rng.gen_range(-1000..1000);
-                    let node_type = match rng.gen_range(0..3) {
+                    let hash = rng.random();
+                    let depth = rng.random_range(1..20);
+                    let score = rng.random_range(-1000..1000);
+                    let node_type = match rng.random_range(0..3) {
                         0 => engine_core::search::tt_v2::NodeType::Exact,
                         1 => engine_core::search::tt_v2::NodeType::LowerBound,
                         _ => engine_core::search::tt_v2::NodeType::UpperBound,
@@ -182,13 +178,13 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
     group.bench_function("v1_mixed_70_30", |b| {
         let tt = TranspositionTable::new(16);
-        let mut rng = XorShiftRng::seed_from_u64(456);
+        let mut rng = rand::rng();
 
         b.iter(|| {
             for _ in 0..10_000 {
-                let hash = rng.gen();
+                let hash = rng.random();
 
-                if rng.gen_range(0..100) < 70 {
+                if rng.random_range(0..100) < 70 {
                     // 70% reads
                     black_box(tt.probe(hash));
                 } else {
@@ -201,13 +197,13 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
     group.bench_function("v2_mixed_70_30", |b| {
         let tt = TranspositionTableV2::new(16);
-        let mut rng = XorShiftRng::seed_from_u64(456);
+        let mut rng = rand::rng();
 
         b.iter(|| {
             for _ in 0..10_000 {
-                let hash = rng.gen();
+                let hash = rng.random();
 
-                if rng.gen_range(0..100) < 70 {
+                if rng.random_range(0..100) < 70 {
                     // 70% reads
                     black_box(tt.probe(hash));
                 } else {
