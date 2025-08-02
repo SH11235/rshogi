@@ -109,6 +109,8 @@ impl TTEntry {
         if move_data == 0 {
             return None;
         }
+        // Debug assertion to validate move data
+        debug_assert!(move_data <= 0x7FFF, "Suspicious move data in TT entry: {move_data:#x}");
         Some(Move::from_u16(move_data))
     }
 
@@ -138,14 +140,21 @@ impl TTEntry {
             0 => NodeType::Exact,
             1 => NodeType::LowerBound,
             2 => NodeType::UpperBound,
-            _ => NodeType::Exact, // Default to Exact for corrupted data
+            _ => {
+                // Debug assertion to catch corrupted data in development
+                debug_assert!(false, "Corrupted node type in TT entry: raw value = {raw}");
+                NodeType::Exact // Default to Exact for corrupted data
+            }
         }
     }
 
     /// Get age
     #[inline]
     pub fn age(&self) -> u8 {
-        ((self.data >> AGE_SHIFT) & AGE_MASK as u64) as u8
+        let age = ((self.data >> AGE_SHIFT) & AGE_MASK as u64) as u8;
+        // Debug assertion to validate age is within expected range
+        debug_assert!(age <= AGE_MASK, "Age value out of range: {age} (max: {AGE_MASK})");
+        age
     }
 
     /// Calculate replacement priority score (higher = more valuable to keep)
@@ -329,6 +338,11 @@ impl TranspositionTableV2 {
         depth: u8,
         node_type: NodeType,
     ) {
+        // Debug assertions to validate input values
+        debug_assert!(hash != 0, "Attempting to store entry with zero hash");
+        debug_assert!(depth <= 127, "Depth value out of reasonable range: {depth}");
+        debug_assert!(score.abs() <= 30000, "Score value out of reasonable range: {score}");
+
         let entry = TTEntry::new(hash, mv, score, eval, depth, node_type, self.age);
         let idx = self.bucket_index(hash);
         self.buckets[idx].store(entry, self.age);
