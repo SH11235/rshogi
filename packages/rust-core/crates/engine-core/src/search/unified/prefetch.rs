@@ -1,6 +1,7 @@
 //! TT prefetching strategies for improved cache performance
 
 use crate::{
+    engine::zobrist::ZOBRIST,
     evaluation::evaluate::Evaluator,
     search::unified::UnifiedSearcher,
     shogi::{Move, Position},
@@ -25,21 +26,53 @@ where
         // For efficient prefetching, we use the incremental zobrist hash update
         // This avoids the cost of actually making moves
         for &mv in moves.iter().take(prefetch_count) {
-            // Calculate approximate hash after move
-            // Note: This is simplified and doesn't account for all zobrist components
-            // but is good enough for prefetching purposes
+            // Calculate more accurate hash after move using actual Zobrist tables
             let approx_hash = if mv.is_drop() {
                 // For drops, XOR in the piece at the destination
                 let piece_type = mv.drop_piece_type();
                 let to = mv.to();
-                // Simplified hash update (actual implementation would use zobrist tables)
-                pos.zobrist_hash ^ ((piece_type as u64) << 16) ^ (to.index() as u64)
+                let color = pos.side_to_move;
+
+                // Use actual Zobrist table for accurate hash
+                let piece = crate::shogi::Piece::new(piece_type, color);
+                let piece_hash = ZOBRIST.piece_square_hash(piece, to);
+
+                // Also account for hand piece removal (approximate)
+                let hand_hash = ZOBRIST.hand_hash(color, piece_type, 1);
+
+                // Update hash with side to move change
+                pos.zobrist_hash ^ piece_hash ^ hand_hash ^ ZOBRIST.side_to_move
             } else {
-                // For normal moves, XOR out from source and XOR in at destination
+                // For normal moves, use more accurate hash calculation
                 let from = mv.from().unwrap();
                 let to = mv.to();
-                // Simplified hash update
-                pos.zobrist_hash ^ (from.index() as u64) ^ (to.index() as u64)
+
+                // Get the moving piece
+                if let Some(piece) = pos.board.piece_on(from) {
+                    let from_hash = ZOBRIST.piece_square_hash(piece, from);
+                    let to_hash = ZOBRIST.piece_square_hash(piece, to);
+
+                    // Handle promotion if applicable
+                    let to_hash = if mv.is_promote() && piece.piece_type.can_promote() {
+                        let promoted = piece.promote();
+                        ZOBRIST.piece_square_hash(promoted, to)
+                    } else {
+                        to_hash
+                    };
+
+                    // Check for capture
+                    let capture_hash = if let Some(captured) = pos.board.piece_on(to) {
+                        ZOBRIST.piece_square_hash(captured, to)
+                    } else {
+                        0
+                    };
+
+                    // Update hash with side to move change
+                    pos.zobrist_hash ^ from_hash ^ to_hash ^ capture_hash ^ ZOBRIST.side_to_move
+                } else {
+                    // Fallback to simple hash if piece not found
+                    pos.zobrist_hash ^ (from.index() as u64) ^ (to.index() as u64)
+                }
             };
 
             // Prefetch the TT entry for this approximate hash
