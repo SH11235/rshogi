@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "tt_prefetch_bench"
 harness = false
+
+[[bench]]
+name = "tt_comparison_bench"
+harness = false
