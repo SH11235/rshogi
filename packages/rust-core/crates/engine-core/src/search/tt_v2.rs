@@ -237,13 +237,38 @@ impl TTBucket {
         // First pass: look for exact match or empty slot
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Acquire);
 
-            if old_key == 0 || old_key == target_key {
-                // Empty slot or same position - store here
-                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-                self.entries[idx].store(new_entry.key, Ordering::Release);
-                return;
+            // Use CAS for atomic update to avoid race conditions
+            loop {
+                let old_key = self.entries[idx].load(Ordering::Acquire);
+
+                if old_key == 0 || old_key == target_key {
+                    // Try to atomically update the key
+                    match self.entries[idx].compare_exchange_weak(
+                        old_key,
+                        new_entry.key,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            // Key successfully updated, now store the data
+                            self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                            return;
+                        }
+                        Err(_) => {
+                            // Another thread modified the entry, retry if still applicable
+                            let current_key = self.entries[idx].load(Ordering::Acquire);
+                            if current_key != 0 && current_key != target_key {
+                                // This slot is now occupied by a different position, try next slot
+                                break;
+                            }
+                            // Otherwise, retry the CAS operation
+                        }
+                    }
+                } else {
+                    // Slot is occupied by different position, try next
+                    break;
+                }
             }
         }
 
@@ -270,8 +295,21 @@ impl TTBucket {
         // Check if new entry is more valuable than the worst existing entry
         if new_entry.priority_score(current_age) > worst_score {
             let idx = worst_idx * 2;
-            self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-            self.entries[idx].store(new_entry.key, Ordering::Release);
+
+            // Use CAS to ensure atomic replacement
+            // Note: We don't retry here as we've already determined this is the best slot to replace
+            let old_key = self.entries[idx].load(Ordering::Acquire);
+
+            // Attempt atomic update of the key
+            if self.entries[idx]
+                .compare_exchange(old_key, new_entry.key, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                // Key successfully updated, now store the data
+                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+            }
+            // If CAS failed, another thread updated this entry - we accept this race
+            // as it's not critical (both threads are storing valid entries)
         }
     }
 }
