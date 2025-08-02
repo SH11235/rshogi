@@ -31,7 +31,7 @@ mod tests {
         } else {
             0.0
         };
-        println!("NPS: {:.0}", nps);
+        println!("NPS: {nps:.0}");
     }
 
     #[test]
