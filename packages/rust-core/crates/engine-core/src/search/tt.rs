@@ -53,7 +53,7 @@ const NODE_TYPE_BITS: u8 = 2;
 const NODE_TYPE_MASK: u8 = (1 << NODE_TYPE_BITS) - 1;
 const AGE_SHIFT: u8 = 20;
 const AGE_BITS: u8 = 3;
-const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
+pub(crate) const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
 const PV_FLAG_SHIFT: u8 = 19;
 const PV_FLAG_MASK: u64 = 1;
 
@@ -83,7 +83,7 @@ const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
 // The cycle is designed to be larger than the maximum possible age value (2^AGE_BITS)
 // to prevent ambiguity in age distance calculations
 const MAX_GENERATION_VALUE: u16 = (1 << 8) - 1; // Maximum value before adding AGE_BITS range
-const GENERATION_CYCLE: u16 = MAX_GENERATION_VALUE + (1 << AGE_BITS); // 255 + 8 = 263
+pub(crate) const GENERATION_CYCLE: u16 = MAX_GENERATION_VALUE + (1 << AGE_BITS); // 255 + 8 = 263
 #[allow(dead_code)]
 const GENERATION_CYCLE_MASK: u16 = (1 << (8 + AGE_BITS)) - 1; // For efficient modulo operation
 
@@ -935,6 +935,55 @@ mod tests {
         let entry2 = tt.probe(hash2).expect("Entry should exist");
         // After 8 generations, age wraps around (0-7), so we're back at 0
         assert_eq!(entry2.age(), initial_age, "Age should wrap around after 8 generations");
+    }
+
+    #[test]
+    fn test_high_contention_cas_handling() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Test CAS retry mechanism under high contention
+        let tt = Arc::new(TranspositionTable::new(1)); // Small table to force collisions
+        let num_threads = 16;
+        let iterations_per_thread = 1000;
+        let target_hash = 0x123456789ABCDEF0; // Same hash for all threads
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let tt = Arc::clone(&tt);
+                thread::spawn(move || {
+                    for i in 0..iterations_per_thread {
+                        // All threads try to write to the same hash location
+                        tt.store(
+                            target_hash,
+                            Some(Move::normal(
+                                Square::new((thread_id % 9) as u8, 7),
+                                Square::new((thread_id % 9) as u8, 6),
+                                false,
+                            )),
+                            thread_id as i16 * 10 + i as i16,
+                            thread_id as i16 * 5,
+                            (thread_id % 20) as u8,
+                            NodeType::Exact,
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify that the table still works correctly after high contention
+        let entry = tt.probe(target_hash);
+        assert!(entry.is_some(), "Entry should exist after high contention");
+
+        // The entry should have valid data (from one of the threads)
+        let entry = entry.unwrap();
+        assert!(entry.depth() <= 20, "Depth should be reasonable");
+        assert!(entry.score().abs() < 10000, "Score should be reasonable");
     }
 
     #[test]
