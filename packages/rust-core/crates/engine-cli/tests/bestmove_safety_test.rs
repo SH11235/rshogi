@@ -36,12 +36,11 @@ impl SearchState {
 
 /// Mock worker message types for unit testing
 #[derive(Debug)]
-#[allow(dead_code)]
 enum MockWorkerMessage {
     Info(String),
     BestMove {
-        best_move: String,
-        ponder: Option<String>,
+        _best_move: String,
+        _ponder: Option<String>,
     },
     PartialResult {
         current_best: String,
@@ -49,7 +48,7 @@ enum MockWorkerMessage {
         score: i32,
     },
     Finished {
-        from_guard: bool,
+        _from_guard: bool,
     },
     Error(String),
 }
@@ -66,11 +65,11 @@ fn test_message_ordering_unit() {
 
         // Simulate normal completion
         tx.send(MockWorkerMessage::BestMove {
-            best_move: "7g7f".to_string(),
-            ponder: None,
+            _best_move: "7g7f".to_string(),
+            _ponder: None,
         })
         .unwrap();
-        tx.send(MockWorkerMessage::Finished { from_guard: false }).unwrap();
+        tx.send(MockWorkerMessage::Finished { _from_guard: false }).unwrap();
 
         // Process messages
         while let Ok(msg) = rx.try_recv() {
@@ -101,10 +100,10 @@ fn test_message_ordering_unit() {
         let bestmove_sent = Arc::new(AtomicBool::new(false));
 
         // Simulate reversed order
-        tx.send(MockWorkerMessage::Finished { from_guard: false }).unwrap();
+        tx.send(MockWorkerMessage::Finished { _from_guard: false }).unwrap();
         tx.send(MockWorkerMessage::BestMove {
-            best_move: "7g7f".to_string(),
-            ponder: None,
+            _best_move: "7g7f".to_string(),
+            _ponder: None,
         })
         .unwrap();
 
@@ -139,13 +138,13 @@ fn test_message_ordering_unit() {
 
         // Simulate double bestmove
         tx.send(MockWorkerMessage::BestMove {
-            best_move: "7g7f".to_string(),
-            ponder: None,
+            _best_move: "7g7f".to_string(),
+            _ponder: None,
         })
         .unwrap();
         tx.send(MockWorkerMessage::BestMove {
-            best_move: "8h2b+".to_string(),
-            ponder: None,
+            _best_move: "8h2b+".to_string(),
+            _ponder: None,
         })
         .unwrap();
 
@@ -180,7 +179,7 @@ fn test_worker_no_bestmove() {
         score: 100,
     })
     .unwrap();
-    tx.send(MockWorkerMessage::Finished { from_guard: false }).unwrap();
+    tx.send(MockWorkerMessage::Finished { _from_guard: false }).unwrap();
 
     let mut partial_result = None;
     let mut should_send_fallback = false;
@@ -257,8 +256,8 @@ fn test_stop_timeout_fallback() {
 
     // Now simulate delayed worker bestmove arriving
     tx.send(MockWorkerMessage::BestMove {
-        best_move: "7g7f".to_string(),
-        ponder: Some("8c8d".to_string()),
+        _best_move: "7g7f".to_string(),
+        _ponder: Some("8c8d".to_string()),
     })
     .unwrap();
 
@@ -289,11 +288,11 @@ fn test_sequential_searches() {
 
         // Simulate search
         tx.send(MockWorkerMessage::BestMove {
-            best_move: format!("move{i}"),
-            ponder: None,
+            _best_move: format!("move{i}"),
+            _ponder: None,
         })
         .unwrap();
-        tx.send(MockWorkerMessage::Finished { from_guard: false }).unwrap();
+        tx.send(MockWorkerMessage::Finished { _from_guard: false }).unwrap();
 
         // Process messages
         while let Ok(msg) = rx.try_recv() {
