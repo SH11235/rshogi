@@ -1136,10 +1136,7 @@ mod parallel_tests {
                     let entry = tt_clone.probe(hash);
                     assert!(
                         entry.is_some(),
-                        "Entry not found for hash {:#x} (thread {}, iteration {})",
-                        hash,
-                        thread_id,
-                        i
+                        "Entry not found for hash {hash:#x} (thread {thread_id}, iteration {i})"
                     );
                 }
             });

@@ -77,18 +77,23 @@ impl SearchContext {
     ) {
         // Check for ponder hit (only once)
         if let Some(flag) = &self.ponder_hit_flag {
-            if flag.swap(false, Ordering::Acquire) {
-                log::info!("Ponder hit detected in process_events");
+            // Use load first to check without modifying
+            if flag.load(Ordering::Acquire) {
+                log::info!("Ponder hit flag is true, attempting to process");
+                // Now do the swap to ensure we only process once
+                if flag.swap(false, Ordering::Acquire) {
+                    log::info!("Ponder hit detected in process_events");
 
-                // Notify TimeManager about ponder hit
-                if let Some(tm) = time_manager {
-                    let elapsed_ms = self.elapsed().as_millis() as u64;
-                    tm.ponder_hit(None, elapsed_ms);
-                    log::info!("TimeManager notified of ponder hit after {elapsed_ms}ms");
+                    // Notify TimeManager about ponder hit
+                    if let Some(tm) = time_manager {
+                        let elapsed_ms = self.elapsed().as_millis() as u64;
+                        tm.ponder_hit(None, elapsed_ms);
+                        log::info!("TimeManager notified of ponder hit after {elapsed_ms}ms");
+                    }
+
+                    // Convert search context from ponder to normal
+                    self.convert_from_ponder();
                 }
-
-                // Convert search context from ponder to normal
-                self.convert_from_ponder();
             }
         }
     }
