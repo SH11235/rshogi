@@ -1,52 +1,52 @@
-# Transposition Table Performance Summary
+# 置換表（Transposition Table）パフォーマンスサマリー
 
-## Current Implementation Status
+## 現在の実装状況
 
-### Architecture
-- **Dynamic Bucket Sizing**: Implemented with Small(4), Medium(8), Large(16) entry configurations
-- **SIMD Optimizations**: AVX2 and SSE2 implementations for parallel key search
-- **Automatic Size Selection**: Based on table size (≤8MB: Small, 9-32MB: Medium, >32MB: Large)
+### アーキテクチャ
+- **動的バケットサイジング**: Small(4)、Medium(8)、Large(16)エントリ構成を実装
+- **SIMD最適化**: 並列キー検索のためのAVX2およびSSE2実装
+- **自動サイズ選択**: テーブルサイズに基づく選択（≤8MB: Small、9-32MB: Medium、>32MB: Large）
 
-## Performance Benchmarks
+## パフォーマンスベンチマーク
 
-### Bucket Size Comparison
-| Bucket Size | Entries | Memory | Probe Time | Use Case |
+### バケットサイズ比較
+| バケットサイズ | エントリ数 | メモリ | プローブ時間 | 用途 |
 |------------|---------|--------|------------|----------|
-| Small | 4 | 64B (1 cache line) | 9.91 ns | Cache efficiency (≤8MB tables) |
-| Medium | 8 | 128B (2 cache lines) | 11.42 ns | Balanced (9-32MB tables) |
-| Large | 16 | 256B (4 cache lines) | ~12-13 ns | Capacity (>32MB tables) |
+| Small | 4 | 64B (1キャッシュライン) | 9.91 ns | キャッシュ効率重視（≤8MBテーブル） |
+| Medium | 8 | 128B (2キャッシュライン) | 11.42 ns | バランス型（9-32MBテーブル） |
+| Large | 16 | 256B (4キャッシュライン) | ~12-13 ns | 容量重視（>32MBテーブル） |
 
-### SIMD vs Scalar Performance (8-entry buckets)
-| Operation | Scalar | SIMD | Winner |
+### SIMD vs スカラー性能（8エントリバケット）
+| 操作 | スカラー | SIMD | 優位 |
 |-----------|--------|------|--------|
-| Hit (early) | 4.71 ns | 6.23 ns | Scalar |
-| Hit (middle) | ~5.2 ns | ~6.2 ns | Scalar |
-| Hit (last) | ~5.7 ns | ~6.2 ns | Scalar |
-| Miss | 5.71 ns | 6.20 ns | Scalar (marginal) |
+| ヒット（早期） | 4.71 ns | 6.23 ns | スカラー |
+| ヒット（中間） | ~5.2 ns | ~6.2 ns | スカラー |
+| ヒット（最後） | ~5.7 ns | ~6.2 ns | スカラー |
+| ミス | 5.71 ns | 6.20 ns | スカラー（僅差） |
 
-### Key Findings
-1. **SIMD overhead**: Atomic memory operations dominate performance, limiting SIMD benefits
-2. **Early termination advantage**: Scalar can exit early on match, SIMD must process all entries
-3. **Cache efficiency**: 4-entry buckets fit in single cache line, providing best latency
+### 主要な発見
+1. **SIMDオーバーヘッド**: アトミックメモリ操作が性能を支配し、SIMDの利点を制限
+2. **早期終了の優位性**: スカラーはマッチ時に早期終了可能、SIMDは全エントリを処理する必要がある
+3. **キャッシュ効率**: 4エントリバケットは単一キャッシュラインに収まり、最良のレイテンシを提供
 
-## Technical Details
+## 技術詳細
 
-### Memory Layout
-- Each entry: 16 bytes (8-byte key + 8-byte data)
-- Atomic operations: Using `Ordering::Acquire` for reads, `Ordering::Release` for writes
-- Alignment: Buckets aligned to their size boundaries
+### メモリレイアウト
+- 各エントリ: 16バイト（8バイトキー + 8バイトデータ）
+- アトミック操作: 読み込みに`Ordering::Acquire`、書き込みに`Ordering::Release`を使用
+- アライメント: バケットはサイズ境界にアライン
 
-### SIMD Implementation
-- **4 entries**: Single AVX2 256-bit register or 2x SSE2 128-bit registers
-- **8 entries**: 2x AVX2 256-bit registers with early exit on first half match
-- **16 entries**: Future AVX-512 support prepared
+### SIMD実装
+- **4エントリ**: 単一AVX2 256ビットレジスタまたは2x SSE2 128ビットレジスタ
+- **8エントリ**: 2x AVX2 256ビットレジスタ、前半マッチ時の早期終了付き
+- **16エントリ**: 将来のAVX-512サポート準備済み
 
-## Future Optimization Opportunities
+## 将来の最適化機会
 
-1. **Memory barrier optimization**: Reduce atomic operation overhead with relaxed ordering + fences
-2. **Prefetch strategies**: Improve cache hit rates for sequential access patterns
-3. **Hybrid approach**: Use scalar for first few entries, SIMD for remainder
+1. **メモリバリア最適化**: relaxedオーダリング + フェンスでアトミック操作のオーバーヘッドを削減
+2. **プリフェッチ戦略**: シーケンシャルアクセスパターンのキャッシュヒット率向上
+3. **ハイブリッドアプローチ**: 最初の数エントリはスカラー、残りはSIMDで処理
 
-## Conclusion
+## 結論
 
-Current implementation provides a flexible, extensible architecture for transposition table management. While SIMD optimizations show limited benefit in current benchmarks due to memory-bound operations, the infrastructure supports future optimizations and larger bucket sizes where SIMD may prove more effective.
+現在の実装は、置換表管理のための柔軟で拡張可能なアーキテクチャを提供している。メモリバウンドな操作のため、現在のベンチマークではSIMD最適化の利点は限定的だが、このインフラストラクチャは将来の最適化と、SIMDがより効果的になる可能性のある大規模バケットサイズをサポートしている。
