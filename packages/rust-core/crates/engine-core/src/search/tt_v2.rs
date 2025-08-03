@@ -38,7 +38,9 @@ const SCORE_MAX: i16 = (1 << (SCORE_BITS - 1)) - 1; // 8191
 const SCORE_MIN: i16 = -(1 << (SCORE_BITS - 1)); // -8192
 
 // Extended flags (new)
+#[allow(dead_code)]
 const EXTENDED_FLAGS_SHIFT: u8 = 32;
+#[allow(dead_code)]
 const EXTENDED_FLAGS_BITS: u8 = 2;
 const SINGULAR_EXTENSION_FLAG: u64 = 1 << 33;
 const NULL_MOVE_FLAG: u64 = 1 << 32;
@@ -56,7 +58,9 @@ const PV_FLAG_SHIFT: u8 = 19;
 const PV_FLAG_MASK: u64 = 1;
 
 // Search flags (expanded)
+#[allow(dead_code)]
 const SEARCH_FLAGS_SHIFT: u8 = 16;
+#[allow(dead_code)]
 const SEARCH_FLAGS_BITS: u8 = 3;
 const TT_MOVE_TRIED_FLAG: u64 = 1 << 18;
 const MATE_THREAT_FLAG: u64 = 1 << 17;
@@ -69,11 +73,19 @@ const EVAL_MAX: i16 = (1 << (EVAL_BITS - 1)) - 1; // 8191
 const EVAL_MIN: i16 = -(1 << (EVAL_BITS - 1)); // -8192
 
 // Reserved for future
+#[allow(dead_code)]
 const RESERVED_BITS: u8 = 2;
+#[allow(dead_code)]
 const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
 
 // Apery-style generation cycle constants
-const GENERATION_CYCLE: u16 = 255 + (1 << AGE_BITS); // 263
+// This ensures proper wraparound behavior for age distance calculations
+// The cycle is designed to be larger than the maximum possible age value (2^AGE_BITS)
+// to prevent ambiguity in age distance calculations
+const MAX_GENERATION_VALUE: u16 = (1 << 8) - 1; // Maximum value before adding AGE_BITS range
+const GENERATION_CYCLE: u16 = MAX_GENERATION_VALUE + (1 << AGE_BITS); // 255 + 8 = 263
+#[allow(dead_code)]
+const GENERATION_CYCLE_MASK: u16 = (1 << (8 + AGE_BITS)) - 1; // For efficient modulo operation
 
 // Key uses upper 32 bits of hash (lower 32 bits used for indexing)
 const KEY_SHIFT: u8 = 32;
@@ -235,26 +247,18 @@ impl TTEntry {
     #[inline]
     pub fn score(&self) -> i16 {
         let raw = ((self.data >> SCORE_SHIFT) & SCORE_MASK) as u16;
-        // Sign-extend from 14-bit to 16-bit
-        if raw & (1 << (SCORE_BITS - 1)) != 0 {
-            // Negative value - set upper bits to 1
-            (raw | (0xFFFF << SCORE_BITS)) as i16
-        } else {
-            raw as i16
-        }
+        // Efficient sign-extension from 14-bit to 16-bit
+        // Left shift to align sign bit, then arithmetic right shift to extend
+        ((raw as i16) << (16 - SCORE_BITS)) >> (16 - SCORE_BITS)
     }
 
     /// Get static evaluation from entry (14-bit signed value)
     #[inline]
     pub fn eval(&self) -> i16 {
         let raw = ((self.data >> EVAL_SHIFT) & EVAL_MASK) as u16;
-        // Sign-extend from 14-bit to 16-bit
-        if raw & (1 << (EVAL_BITS - 1)) != 0 {
-            // Negative value - set upper bits to 1
-            (raw | (0xFFFF << EVAL_BITS)) as i16
-        } else {
-            raw as i16
-        }
+        // Efficient sign-extension from 14-bit to 16-bit
+        // Left shift to align sign bit, then arithmetic right shift to extend
+        ((raw as i16) << (16 - EVAL_BITS)) >> (16 - EVAL_BITS)
     }
 
     /// Get search depth
@@ -403,6 +407,10 @@ impl TTBucket {
             let idx = i * 2;
 
             // Use CAS for atomic update to avoid race conditions
+            // Limit retries to prevent potential infinite loops under extreme contention
+            const MAX_CAS_RETRIES: u32 = 8;
+            let mut retry_count = 0;
+
             loop {
                 let old_key = self.entries[idx].load(Ordering::Acquire);
 
@@ -420,6 +428,12 @@ impl TTBucket {
                             return;
                         }
                         Err(_) => {
+                            retry_count += 1;
+                            if retry_count >= MAX_CAS_RETRIES {
+                                // Too many retries, give up on this slot
+                                break;
+                            }
+
                             // Another thread modified the entry, retry if still applicable
                             let current_key = self.entries[idx].load(Ordering::Acquire);
                             if current_key != 0 && current_key != target_key {
@@ -427,6 +441,8 @@ impl TTBucket {
                                 break;
                             }
                             // Otherwise, retry the CAS operation
+                            // Add small backoff to reduce contention
+                            std::hint::spin_loop();
                         }
                     }
                 } else {
@@ -905,6 +921,79 @@ mod tests {
         let entry2 = tt.probe(hash2).expect("Entry should exist");
         // After 8 generations, age wraps around (0-7), so we're back at 0
         assert_eq!(entry2.age(), initial_age, "Age should wrap around after 8 generations");
+    }
+
+    #[test]
+    fn test_sign_extension_correctness() {
+        // Test that our optimized sign extension works correctly
+        // for 14-bit signed values
+
+        // Test cases: [14-bit value, expected 16-bit result]
+        let test_cases = vec![
+            // Zero and edge cases
+            (0x0000_u16, 0_i16),  // Zero
+            (0x0001_u16, 1_i16),  // Smallest positive
+            (0x3FFF_u16, -1_i16), // -1 in 14-bit
+            // Positive boundary values
+            (0x1FFE_u16, 8190_i16), // Max positive - 1
+            (0x1FFF_u16, 8191_i16), // Max positive (2^13 - 1)
+            // Negative boundary values (critical for sign extension)
+            (0x2000_u16, -8192_i16), // Min negative (-2^13) - most critical
+            (0x2001_u16, -8191_i16), // Min negative + 1
+            (0x2002_u16, -8190_i16), // Min negative + 2
+            // Mid-range values
+            (0x1000_u16, 4096_i16),  // Mid positive
+            (0x3000_u16, -4096_i16), // Mid negative
+            (0x0FFF_u16, 4095_i16),  // Just below mid positive
+            (0x2FFF_u16, -4097_i16), // Just above mid negative
+            // Additional edge cases near sign bit
+            (0x1FFD_u16, 8189_i16),  // Close to max positive
+            (0x2003_u16, -8189_i16), // Close to min negative
+        ];
+
+        for (raw_14bit, expected) in test_cases {
+            // Test score sign extension
+            let entry = TTEntry {
+                key: 0,
+                data: (raw_14bit as u64) << SCORE_SHIFT,
+            };
+            let actual_score = entry.score();
+            assert_eq!(
+                actual_score, expected,
+                "Score sign extension failed for {raw_14bit:#06x}: got {actual_score}, expected {expected}"
+            );
+
+            // Test eval sign extension
+            let entry = TTEntry {
+                key: 0,
+                data: (raw_14bit as u64) << EVAL_SHIFT,
+            };
+            let actual_eval = entry.eval();
+            assert_eq!(
+                actual_eval,
+                expected,
+                "Eval sign extension failed for {raw_14bit:#06x}: got {actual_eval}, expected {expected}"
+            );
+        }
+
+        // Additional test: Verify round-trip conversion
+        // Store values and retrieve them to ensure consistency
+        for value in [-8192, -8191, -1, 0, 1, 8190, 8191] {
+            let params = TTEntryParams {
+                key: 0x123456789ABCDEF,
+                mv: None,
+                score: value,
+                eval: value,
+                depth: 10,
+                node_type: NodeType::Exact,
+                age: 0,
+                is_pv: false,
+                ..Default::default()
+            };
+            let entry = TTEntry::from_params(params);
+            assert_eq!(entry.score(), value, "Round-trip failed for score {value}");
+            assert_eq!(entry.eval(), value, "Round-trip failed for eval {value}");
+        }
     }
 
     #[test]
