@@ -645,10 +645,14 @@ impl TranspositionTable {
             _mm_prefetch(bucket_ptr as *const i8, 3); // _MM_HINT_T0
         }
 
+        // ARM64 prefetch is currently unstable in stable Rust
+        // Skip prefetch on ARM64 until it becomes stable
+        // Note: _prefetch intrinsic requires nightly Rust (feature stdarch_aarch64_prefetch)
         #[cfg(target_arch = "aarch64")]
-        unsafe {
-            use std::arch::aarch64::_prefetch;
-            _prefetch(bucket_ptr as *const i8, 0, 3); // Read, L1 cache
+        {
+            // Prefetch is not available on stable Rust for ARM64
+            // This is a no-op to avoid compilation errors
+            let _ = bucket_ptr; // Use the pointer to avoid unused variable warning
         }
     }
 }
