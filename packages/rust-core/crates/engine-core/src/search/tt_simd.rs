@@ -295,14 +295,17 @@ pub mod x86_64 {
             let offset = chunk_idx * 2;
             let keys_vec = _mm_loadu_si128(keys[offset..].as_ptr() as *const __m128i);
             let target_vec = _mm_set1_epi64x(target as i64);
+            // Note: SSE2 doesn't have _mm_cmpeq_epi64, so we use epi32 and check the pattern
             let cmp_result = _mm_cmpeq_epi32(keys_vec, target_vec);
             let mask = _mm_movemask_epi8(cmp_result) as u16;
 
-            if mask == 0xFFFF {
-                // First 64-bit match
+            // For 64-bit comparisons with epi32:
+            // First 64-bit match: lower 8 bytes all 0xFF
+            if mask & 0x00FF == 0x00FF {
                 return Some(offset);
-            } else if mask == 0xFF00 {
-                // Second 64-bit match
+            }
+            // Second 64-bit match: upper 8 bytes all 0xFF
+            if mask & 0xFF00 == 0xFF00 {
                 return Some(offset + 1);
             }
         }
