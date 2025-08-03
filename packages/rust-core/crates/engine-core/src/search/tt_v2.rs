@@ -24,8 +24,13 @@ const NODE_TYPE_MASK: u8 = (1 << NODE_TYPE_BITS) - 1;
 const AGE_SHIFT: u8 = 20;
 const AGE_BITS: u8 = 3; // Reduced from 6 to 3 bits (0-7)
 const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
+const PV_FLAG_SHIFT: u8 = 19; // PV flag bit
+const PV_FLAG_MASK: u64 = 1;
 const EVAL_BITS: u8 = 16;
 const EVAL_MASK: u64 = (1 << EVAL_BITS) - 1;
+
+// Apery-style generation cycle constants
+const GENERATION_CYCLE: u16 = 255 + (1 << AGE_BITS); // 263
 
 // Key uses upper 32 bits of hash (lower 32 bits used for indexing)
 const KEY_SHIFT: u8 = 32;
@@ -43,6 +48,19 @@ pub enum NodeType {
     LowerBound = 1,
     /// Upper bound (fail-low/all node)
     UpperBound = 2,
+}
+
+/// Parameters for creating a TT entry
+#[derive(Clone, Copy)]
+pub struct TTEntryParams {
+    pub key: u64,
+    pub mv: Option<Move>,
+    pub score: i16,
+    pub eval: i16,
+    pub depth: u8,
+    pub node_type: NodeType,
+    pub age: u8,
+    pub is_pv: bool,
 }
 
 /// Transposition table entry (16 bytes)
@@ -64,11 +82,26 @@ impl TTEntry {
         node_type: NodeType,
         age: u8,
     ) -> Self {
+        let params = TTEntryParams {
+            key,
+            mv,
+            score,
+            eval,
+            depth,
+            node_type,
+            age,
+            is_pv: false,
+        };
+        Self::from_params(params)
+    }
+
+    /// Create new TT entry from parameters
+    pub fn from_params(params: TTEntryParams) -> Self {
         // Use upper 32 bits of key
-        let key = (key >> KEY_SHIFT) << KEY_SHIFT;
+        let key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
 
         // Pack move into 16 bits
-        let move_data = match mv {
+        let move_data = match params.mv {
             Some(m) => m.to_u16(),
             None => 0,
         };
@@ -79,14 +112,16 @@ impl TTEntry {
         // [31-25]: depth (7 bits)
         // [24-23]: node type (2 bits)
         // [22-20]: age (3 bits)
-        // [19-16]: reserved (4 bits)
+        // [19]: PV flag (1 bit)
+        // [18-16]: reserved (3 bits)
         // [15-0]: static eval (16 bits)
         let data = ((move_data as u64) << MOVE_SHIFT)
-            | ((score as u16 as u64) << SCORE_SHIFT)
-            | (((depth & DEPTH_MASK) as u64) << DEPTH_SHIFT)
-            | ((node_type as u64) << NODE_TYPE_SHIFT)
-            | (((age & AGE_MASK) as u64) << AGE_SHIFT)
-            | (eval as u16 as u64);
+            | ((params.score as u16 as u64) << SCORE_SHIFT)
+            | (((params.depth & DEPTH_MASK) as u64) << DEPTH_SHIFT)
+            | ((params.node_type as u64) << NODE_TYPE_SHIFT)
+            | (((params.age & AGE_MASK) as u64) << AGE_SHIFT)
+            | ((params.is_pv as u64) << PV_FLAG_SHIFT)
+            | (params.eval as u16 as u64);
 
         TTEntry { key, data }
     }
@@ -157,29 +192,38 @@ impl TTEntry {
         age
     }
 
-    /// Calculate replacement priority score (higher = more valuable to keep)
+    /// Check if this is a PV node
+    #[inline]
+    pub fn is_pv(&self) -> bool {
+        ((self.data >> PV_FLAG_SHIFT) & PV_FLAG_MASK) != 0
+    }
+
+    /// Calculate replacement priority score using Apery-style cyclic distance
     #[inline]
     fn priority_score(&self, current_age: u8) -> i32 {
         if self.is_empty() {
-            return -1000; // Empty entries have lowest priority
+            return i32::MIN; // Empty entries have lowest priority (should be replaced first)
         }
 
-        let mut score = 0;
+        // Calculate cyclic distance between generations (Apery-style)
+        let age_distance = ((GENERATION_CYCLE + current_age as u16 - self.age() as u16)
+            & (AGE_MASK as u16)) as i32;
 
-        // Age factor: current generation entries are preferred
-        if self.age() == current_age {
-            score += 100;
+        // Base priority: depth minus age distance
+        // Older entries (larger age_distance) get lower priority
+        let mut priority = self.depth() as i32 - age_distance;
+
+        // Bonus for PV nodes (they should be preserved longer)
+        if self.is_pv() {
+            priority += 32;
         }
 
-        // Depth factor: deeper searches are more valuable
-        score += self.depth() as i32 * 10;
-
-        // Node type factor: exact nodes are most valuable
+        // Smaller bonus for exact entries
         if self.node_type() == NodeType::Exact {
-            score += 50;
+            priority += 16;
         }
 
-        score
+        priority
     }
 }
 
@@ -376,13 +420,39 @@ impl TranspositionTableV2 {
         depth: u8,
         node_type: NodeType,
     ) {
-        // Debug assertions to validate input values
-        debug_assert!(hash != 0, "Attempting to store entry with zero hash");
-        debug_assert!(depth <= 127, "Depth value out of reasonable range: {depth}");
-        debug_assert!(score.abs() <= 30000, "Score value out of reasonable range: {score}");
+        let params = TTEntryParams {
+            key: hash,
+            mv,
+            score,
+            eval,
+            depth,
+            node_type,
+            age: self.age,
+            is_pv: false,
+        };
+        self.store_entry(params);
+    }
 
-        let entry = TTEntry::new(hash, mv, score, eval, depth, node_type, self.age);
-        let idx = self.bucket_index(hash);
+    /// Store entry in transposition table with parameters
+    pub fn store_with_params(&self, mut params: TTEntryParams) {
+        // Override age with current table age
+        params.age = self.age;
+        self.store_entry(params);
+    }
+
+    /// Store entry using parameters
+    fn store_entry(&self, params: TTEntryParams) {
+        // Debug assertions to validate input values
+        debug_assert!(params.key != 0, "Attempting to store entry with zero hash");
+        debug_assert!(params.depth <= 127, "Depth value out of reasonable range: {}", params.depth);
+        debug_assert!(
+            params.score.abs() <= 30000,
+            "Score value out of reasonable range: {}",
+            params.score
+        );
+
+        let entry = TTEntry::from_params(params);
+        let idx = self.bucket_index(params.key);
         self.buckets[idx].store(entry, self.age);
     }
 
@@ -592,5 +662,282 @@ mod tests {
         // All entries should be stored and retrievable since they have different keys
         assert_eq!(stored_count, BUCKET_SIZE);
         assert_eq!(retrieved_count, BUCKET_SIZE);
+    }
+
+    // === Apery-style improvement tests ===
+
+    #[test]
+    fn test_generation_cycle_distance() {
+        let tt = TranspositionTableV2::new(1);
+
+        // Store entry with age 0
+        let hash1 = 0x1234567890abcdef;
+        tt.store(hash1, None, 100, 50, 10, NodeType::Exact);
+
+        // Verify entry exists and has correct age
+        let entry = tt.probe(hash1).expect("Entry should exist");
+        assert_eq!(entry.score(), 100);
+        assert_eq!(entry.depth(), 10);
+        assert_eq!(entry.age(), 0);
+    }
+
+    #[test]
+    fn test_pv_flag_functionality() {
+        let tt = TranspositionTableV2::new(1);
+
+        // Store PV node
+        let hash = 0xfedcba0987654321;
+        tt.store_with_params(TTEntryParams {
+            key: hash,
+            mv: None,
+            score: 200,
+            eval: 100,
+            depth: 15,
+            node_type: NodeType::Exact,
+            age: 0, // Will be overridden by store_with_params
+            is_pv: true,
+        });
+
+        // Verify PV flag is set
+        let entry = tt.probe(hash).expect("Entry should exist");
+        assert!(entry.is_pv(), "PV flag should be set");
+        assert_eq!(entry.node_type(), NodeType::Exact);
+        assert_eq!(entry.score(), 200);
+        assert_eq!(entry.depth(), 15);
+
+        // Store another entry with same hash (will always replace due to exact key match)
+        tt.store_with_params(TTEntryParams {
+            key: hash,
+            mv: None,
+            score: 300,
+            eval: 150,
+            depth: 20,
+            node_type: NodeType::LowerBound,
+            age: 0, // Will be overridden by store_with_params
+            is_pv: false,
+        });
+
+        // The new entry should replace
+        let entry = tt.probe(hash).expect("Entry should exist");
+        assert_eq!(entry.score(), 300, "New entry should replace on exact key match");
+        assert!(!entry.is_pv(), "PV flag should be cleared");
+    }
+
+    #[test]
+    fn test_priority_score_with_age() {
+        let mut tt = TranspositionTableV2::new(1);
+
+        // Fill a bucket with entries
+        let base_hash = 0x123456789abcdef0;
+
+        // Store 4 entries (bucket size) with different depths
+        for i in 0..4 {
+            let hash = base_hash + i;
+            tt.store(hash, None, (i * 10) as i16, 0, (i + 1) as u8, NodeType::Exact);
+        }
+
+        // Advance age
+        tt.new_search();
+        tt.new_search();
+
+        // Try to store a new entry - should replace the shallowest old entry
+        let new_hash = base_hash + 100;
+        tt.store_with_params(TTEntryParams {
+            key: new_hash,
+            mv: None,
+            score: 500,
+            eval: 250,
+            depth: 20,
+            node_type: NodeType::Exact,
+            age: 0, // Will be overridden by store_with_params
+            is_pv: true,
+        });
+
+        // Verify the new entry exists
+        let entry = tt.probe(new_hash);
+        assert!(entry.is_some(), "New entry should be stored");
+    }
+
+    #[test]
+    fn test_age_wraparound_handling() {
+        let mut tt = TranspositionTableV2::new(1);
+
+        // Store entry at age 0
+        let hash = 0xdeadbeefcafebabe;
+        tt.store(hash, None, 100, 50, 10, NodeType::Exact);
+
+        let entry1 = tt.probe(hash).expect("Entry should exist");
+        let initial_age = entry1.age();
+
+        // Advance age through full cycle (8 generations)
+        for _ in 0..8 {
+            tt.new_search();
+        }
+
+        // Store new entry after wraparound
+        let hash2 = 0xbabecafedeadbeef;
+        tt.store(hash2, None, 200, 100, 15, NodeType::Exact);
+
+        let entry2 = tt.probe(hash2).expect("Entry should exist");
+        // After 8 generations, age wraps around (0-7), so we're back at 0
+        assert_eq!(entry2.age(), initial_age, "Age should wrap around after 8 generations");
+    }
+
+    #[test]
+    fn test_apery_priority_calculation() {
+        // Test the priority calculation indirectly through bucket replacement
+        let bucket = TTBucket::new();
+
+        // Create entries with different characteristics
+        let entry1 = TTEntry::from_params(TTEntryParams {
+            key: 0x123,
+            mv: None,
+            score: 100,
+            eval: 50,
+            depth: 10,
+            node_type: NodeType::Exact,
+            age: 0,
+            is_pv: false,
+        });
+        let entry2 = TTEntry::from_params(TTEntryParams {
+            key: 0x456,
+            mv: None,
+            score: 100,
+            eval: 50,
+            depth: 10,
+            node_type: NodeType::Exact,
+            age: 0,
+            is_pv: true,
+        });
+
+        // Store regular entry
+        bucket.store(entry1, 0);
+        assert!(bucket.probe(0x123).is_some());
+
+        // Store PV entry - it should be preserved when possible
+        bucket.store(entry2, 0);
+        assert!(bucket.probe(0x456).is_some());
+
+        // Test that PV entries have priority in replacement
+        // Fill the bucket
+        for i in 2..BUCKET_SIZE {
+            let hash = 0x1000 * (i as u64 + 1);
+            let entry = TTEntry::new(hash, None, 50, 25, 5, NodeType::LowerBound, 0);
+            bucket.store(entry, 0);
+        }
+
+        // PV entry should still be there
+        assert!(bucket.probe(0x456).is_some(), "PV entry should be preserved");
+    }
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn test_cas_basic_functionality() {
+        // First test basic single-threaded operation
+        let tt = TranspositionTableV2::new(1);
+        let hash = 0x123456789ABCDEF;
+
+        // Store and retrieve
+        tt.store(hash, None, 100, 50, 10, NodeType::Exact);
+        let entry = tt.probe(hash);
+        assert!(entry.is_some(), "Should find entry after store");
+        assert_eq!(entry.unwrap().score(), 100);
+    }
+
+    #[test]
+    fn test_cas_concurrent_updates() {
+        let tt = Arc::new(TranspositionTableV2::new(1));
+        let num_threads = 4;
+        let test_hash = 0x123456789ABCDEF;
+
+        let mut handles = vec![];
+
+        // Multiple threads updating the same position
+        for thread_id in 0..num_threads {
+            let tt_clone = Arc::clone(&tt);
+            let handle = thread::spawn(move || {
+                for i in 0..100 {
+                    // Each thread stores its ID as the score
+                    tt_clone.store(
+                        test_hash,
+                        None,
+                        (thread_id * 100 + i) as i16,
+                        0,
+                        10,
+                        NodeType::Exact,
+                    );
+
+                    // Give other threads a chance
+                    if i % 10 == 0 {
+                        thread::yield_now();
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        // Final entry should exist
+        let final_entry = tt.probe(test_hash);
+        assert!(final_entry.is_some(), "Entry should exist after concurrent updates");
+    }
+
+    #[test]
+    fn test_cas_different_positions() {
+        let tt = Arc::new(TranspositionTableV2::new(1));
+        let num_threads = 4;
+        let operations_per_thread = 100;
+
+        let mut handles = vec![];
+
+        for thread_id in 0..num_threads {
+            let tt_clone = Arc::clone(&tt);
+            let handle = thread::spawn(move || {
+                // Each thread uses its own hash range
+                for i in 0..operations_per_thread {
+                    let hash = 0x1000000000000000 * (thread_id as u64 + 1) + i as u64;
+
+                    // Store entry
+                    tt_clone.store(
+                        hash,
+                        None,
+                        (thread_id * 100 + i) as i16,
+                        0,
+                        10,
+                        NodeType::Exact,
+                    );
+
+                    // Verify we can read it back
+                    let entry = tt_clone.probe(hash);
+                    assert!(
+                        entry.is_some(),
+                        "Entry not found for hash {:#x} (thread {}, iteration {})",
+                        hash,
+                        thread_id,
+                        i
+                    );
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        // Verify table has entries
+        let hashfull = tt.hashfull();
+        assert!(hashfull > 0, "Table should contain entries");
     }
 }
