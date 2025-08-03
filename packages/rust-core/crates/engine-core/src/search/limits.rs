@@ -292,8 +292,20 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
 /// Convert to time_management TimeLimits
 impl From<SearchLimits> for crate::time_management::TimeLimits {
     fn from(unified: SearchLimits) -> Self {
+        // Unwrap Ponder to get the inner time control
+        let time_control = match unified.time_control {
+            crate::time_management::TimeControl::Ponder(inner) => {
+                log::info!("Converting Ponder({inner:?}) to inner time control for TimeManager");
+                *inner
+            }
+            other => {
+                log::info!("Using time control as-is: {other:?}");
+                other
+            }
+        };
+
         crate::time_management::TimeLimits {
-            time_control: unified.time_control,
+            time_control,
             moves_to_go: unified.moves_to_go,
             depth: unified.depth.map(|d| d as u32),
             nodes: unified.nodes,

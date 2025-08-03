@@ -36,9 +36,21 @@ where
         return 0x3F; // Check every 64 nodes
     }
 
+    // Check if we're in ponder mode - need frequent polling for ponderhit
+    if matches!(&searcher.context.limits().time_control, TimeControl::Ponder(_)) {
+        return 0x3F; // Check every 64 nodes for responsive ponderhit detection
+    }
+
     // For time-based controls, use adaptive intervals based on soft limit
     if let Some(tm) = &searcher.time_manager {
-        match tm.soft_limit_ms() {
+        // Check if TimeManager is in ponder mode (soft_limit would be u64::MAX)
+        let soft_limit = tm.soft_limit_ms();
+        if soft_limit == u64::MAX {
+            // Ponder mode or infinite search - need frequent polling
+            return 0x3F; // Check every 64 nodes
+        }
+
+        match soft_limit {
             0..=50 => 0x1F,    // ≤50ms → 32 nodes
             51..=100 => 0x3F,  // ≤100ms → 64 nodes
             101..=200 => 0x7F, // ≤200ms → 128 nodes
@@ -215,6 +227,19 @@ where
 
     // Process events based on adaptive interval
     if (searcher.stats.nodes & event_interval) == 0 {
+        // Add debug logging for ponder mode
+        if matches!(
+            &searcher.context.limits().time_control,
+            crate::time_management::TimeControl::Ponder(_)
+        ) && searcher.stats.nodes % 10000 == 0
+        {
+            log::debug!(
+                "Ponder search: checking events at {} nodes (interval: {:#x})",
+                searcher.stats.nodes,
+                event_interval
+            );
+        }
+
         searcher.context.process_events(&searcher.time_manager);
 
         // For FixedNodes, also check time manager

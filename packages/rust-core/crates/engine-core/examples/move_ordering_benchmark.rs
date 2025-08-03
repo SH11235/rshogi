@@ -59,7 +59,7 @@ fn main() {
             if result.stats.nodes > 0 {
                 // Calculate branching factor (lower is better)
                 let branching_factor = (result.stats.nodes as f64).powf(1.0 / depth as f64);
-                println!("    Branching factor: {:.2}", branching_factor);
+                println!("    Branching factor: {branching_factor:.2}");
             }
         }
 
