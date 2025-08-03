@@ -9,6 +9,19 @@ use crate::{shogi::Move, util};
 use util::sync_compat::{AtomicU64, Ordering};
 
 // Bit layout constants for TTEntry data field
+// Current layout (64 bits total):
+// [63-48]: move (16 bits) - Could be optimized to 14-15 bits based on actual usage
+// [47-32]: score (16 bits) - Could be optimized to 14 bits if values stay within ±8191
+// [31-25]: depth (7 bits) - Supports depth up to 127
+// [24-23]: node type (2 bits) - Exact/LowerBound/UpperBound
+// [22-20]: age (3 bits) - Generation counter (0-7)
+// [19]: PV flag (1 bit) - Principal Variation node marker
+// [18-16]: RESERVED (3 bits) - Available for future features:
+//          - Bit 18: Could be used for Singular Extension flag
+//          - Bit 17: Could be used for Null Move Pruning flag
+//          - Bit 16: Could be used for additional search info
+// [15-0]: static eval (16 bits) - Could be optimized to 14 bits if values stay within ±8191
+
 const MOVE_SHIFT: u8 = 48;
 const MOVE_BITS: u8 = 16;
 const MOVE_MASK: u64 = (1 << MOVE_BITS) - 1;
@@ -26,6 +39,13 @@ const AGE_BITS: u8 = 3; // Reduced from 6 to 3 bits (0-7)
 const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
 const PV_FLAG_SHIFT: u8 = 19; // PV flag bit
 const PV_FLAG_MASK: u64 = 1;
+// Reserved bits for future use
+#[allow(dead_code)]
+const RESERVED_SHIFT: u8 = 16;
+#[allow(dead_code)]
+const RESERVED_BITS: u8 = 3;
+#[allow(dead_code)]
+const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
 const EVAL_BITS: u8 = 16;
 const EVAL_MASK: u64 = (1 << EVAL_BITS) - 1;
 
@@ -113,7 +133,7 @@ impl TTEntry {
         // [24-23]: node type (2 bits)
         // [22-20]: age (3 bits)
         // [19]: PV flag (1 bit)
-        // [18-16]: reserved (3 bits)
+        // [18-16]: reserved (3 bits) - Available for future optimization
         // [15-0]: static eval (16 bits)
         let data = ((move_data as u64) << MOVE_SHIFT)
             | ((params.score as u16 as u64) << SCORE_SHIFT)
