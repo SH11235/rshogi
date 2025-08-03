@@ -224,6 +224,9 @@ where
                             searcher.search_stack[ply as usize].update_killers(mv);
                         }
 
+                        // Also update global killer table
+                        searcher.ordering.update_killer(ply, mv);
+
                         // Get previous move for history updates
                         let prev_move = if ply > 0
                             && crate::search::types::SearchStack::is_valid_ply(ply - 1)

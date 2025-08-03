@@ -541,6 +541,12 @@ impl EngineAdapter {
             EngineError::SearchSetupFailed(format!("Failed to apply go parameters: {e}"))
         })?;
         log::debug!("SearchLimits created successfully");
+        log::debug!(
+            "Final SearchLimits - time_control: {:?}, depth: {:?}, nodes: {:?}",
+            limits.time_control,
+            limits.depth,
+            limits.nodes
+        );
 
         Ok((position, limits, ponder_hit_flag))
     }

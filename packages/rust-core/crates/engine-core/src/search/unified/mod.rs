@@ -13,8 +13,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         history::History,
-        tt::NodeType,
-        tt_config::{TTVersion, TranspositionTableUnified},
+        tt::{NodeType, TranspositionTable},
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
     },
@@ -57,7 +56,7 @@ pub struct UnifiedSearcher<
     evaluator: Arc<E>,
 
     /// Transposition table (conditionally compiled)
-    tt: Option<TranspositionTableUnified>,
+    tt: Option<TranspositionTable>,
 
     /// Move ordering history (shared with move ordering)
     history: Arc<Mutex<History>>,
@@ -105,8 +104,7 @@ where
         Self {
             evaluator: Arc::new(evaluator),
             tt: if USE_TT {
-                // Use V2 by default for better performance
-                Some(TranspositionTableUnified::new_default(TT_SIZE_MB))
+                Some(TranspositionTable::new(TT_SIZE_MB))
             } else {
                 None
             },
@@ -134,8 +132,7 @@ where
         Self {
             evaluator,
             tt: if USE_TT {
-                // Use V2 by default for better performance
-                Some(TranspositionTableUnified::new_default(TT_SIZE_MB))
+                Some(TranspositionTable::new(TT_SIZE_MB))
             } else {
                 None
             },
@@ -151,21 +148,6 @@ where
         }
     }
 
-    /// Set the transposition table version
-    ///
-    /// This allows runtime switching between TT implementations.
-    /// Note: This will clear the current TT contents.
-    pub fn set_tt_version(&mut self, version: TTVersion) {
-        if USE_TT {
-            self.tt = Some(TranspositionTableUnified::new(version, TT_SIZE_MB));
-        }
-    }
-
-    /// Get the current TT version
-    pub fn get_tt_version(&self) -> Option<TTVersion> {
-        self.tt.as_ref().map(|tt| tt.version())
-    }
-
     /// Main search entry point
     pub fn search(&mut self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
         // Reset search state
@@ -179,20 +161,46 @@ where
 
         // Create TimeManager if needed
         use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
-        // Create TimeManager for non-infinite time controls OR when depth limit is specified
-        // This enables proper search optimizations for depth-limited searches
-        if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
+
+        // Estimate game phase from position (共通で使用)
+        let game_phase = if pos.ply <= 40 {
+            GamePhase::Opening
+        } else if pos.ply <= 120 {
+            GamePhase::MiddleGame
+        } else {
+            GamePhase::EndGame
+        };
+
+        // --- 新しい分岐: Ponder用の特別処理 ---
+        if matches!(limits.time_control, TimeControl::Ponder(_)) {
+            log::info!("Creating TimeManager for PONDER mode");
+
+            // ① SearchLimits -> TimeLimits へ（ここで inner に unwrap される）
+            let pending_limits: TimeLimits = limits.clone().into();
+            log::info!(
+                "After conversion for ponder, time_limits.time_control: {:?}",
+                pending_limits.time_control
+            );
+
+            // ② Ponder 用の TimeManager を作成
+            let time_manager = Arc::new(TimeManager::new_ponder(
+                &pending_limits,
+                pos.side_to_move,
+                pos.ply.into(),
+                game_phase,
+            ));
+            self.time_manager = Some(time_manager);
+        } else if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
+            // 通常の時間制御またはdepth制限がある場合
+            log::info!("Creating TimeManager with time_control: {:?}", limits.time_control);
+
             // Convert SearchLimits to TimeLimits
             let time_limits: TimeLimits = limits.clone().into();
 
-            // Estimate game phase from position
-            let game_phase = if pos.ply <= 40 {
-                GamePhase::Opening
-            } else if pos.ply <= 120 {
-                GamePhase::MiddleGame
-            } else {
-                GamePhase::EndGame
-            };
+            log::info!(
+                "After conversion, time_limits.time_control: {:?}",
+                time_limits.time_control
+            );
 
             let time_manager = Arc::new(TimeManager::new(
                 &time_limits,
@@ -202,6 +210,7 @@ where
             ));
             self.time_manager = Some(time_manager);
         } else {
+            // Infinite時間制御でdepth制限もない場合
             self.time_manager = None;
         }
 
