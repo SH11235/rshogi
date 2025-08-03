@@ -223,6 +223,10 @@ fn test_multiple_stop_commands() {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Skipped in debug builds due to performance"
+)]
 fn test_ponder_sequence() {
     let mut engine = spawn_engine();
 
