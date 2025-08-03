@@ -400,6 +400,34 @@ impl TranspositionTable {
             _mm_prefetch(ptr, 3); // _MM_HINT_T0
         }
     }
+
+    /// Prefetch multiple entries that might be accessed soon
+    /// This is useful when we know multiple positions will be searched
+    #[inline]
+    pub fn prefetch_multiple(&self, hashes: &[u64]) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            for &hash in hashes.iter().take(4) {
+                // Limit to 4 to avoid cache pollution
+                self.prefetch(hash);
+            }
+        }
+    }
+
+    /// Prefetch with non-temporal hint (won't pollute cache as much)
+    #[inline]
+    pub fn prefetch_nta(&self, hash: u64) {
+        let idx = self.index(hash);
+        let base_idx = idx * 2;
+
+        // Prefetch with non-temporal hint
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::arch::x86_64::_mm_prefetch;
+            let ptr = &self.table[base_idx] as *const AtomicU64 as *const i8;
+            _mm_prefetch(ptr, 0); // _MM_HINT_NTA (non-temporal)
+        }
+    }
 }
 
 #[cfg(test)]

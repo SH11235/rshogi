@@ -4,8 +4,8 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::{
-    evaluation::evaluate::MaterialEvaluator, search::unified::UnifiedSearcher,
-    search::SearchLimitsBuilder, Position, TranspositionTable,
+    evaluation::evaluate::MaterialEvaluator, search::tt_v2::TranspositionTableV2,
+    search::unified::UnifiedSearcher, search::SearchLimitsBuilder, Position, TranspositionTable,
 };
 use std::hint::black_box;
 use std::time::Duration;
@@ -165,24 +165,60 @@ fn bench_tt_performance(c: &mut Criterion) {
     let sizes = vec![8, 16, 32, 64];
 
     for size in sizes {
-        group.bench_with_input(BenchmarkId::new("probe_hit_rate", size), &size, |b, &size_mb| {
-            let tt = TranspositionTable::new(size_mb);
-            let pos = Position::startpos();
-            let hash = pos.zobrist_hash;
+        // Benchmark original TT
+        group.bench_with_input(
+            BenchmarkId::new("v1_probe_hit_rate", size),
+            &size,
+            |b, &size_mb| {
+                let tt = TranspositionTable::new(size_mb);
+                let pos = Position::startpos();
+                let hash = pos.zobrist_hash;
 
-            // Pre-fill TT
-            for i in 0..1000 {
-                let test_hash = hash.wrapping_add(i);
-                tt.store(test_hash, None, 100, 0, 5, engine_core::search::tt::NodeType::Exact);
-            }
-
-            b.iter(|| {
-                for i in 0..100 {
-                    let test_hash = hash.wrapping_add(i * 10);
-                    black_box(tt.probe(test_hash));
+                // Pre-fill TT
+                for i in 0..1000 {
+                    let test_hash = hash.wrapping_add(i);
+                    tt.store(test_hash, None, 100, 0, 5, engine_core::search::tt::NodeType::Exact);
                 }
-            });
-        });
+
+                b.iter(|| {
+                    for i in 0..100 {
+                        let test_hash = hash.wrapping_add(i * 10);
+                        black_box(tt.probe(test_hash));
+                    }
+                });
+            },
+        );
+
+        // Benchmark new bucket-based TT
+        group.bench_with_input(
+            BenchmarkId::new("v2_probe_hit_rate", size),
+            &size,
+            |b, &size_mb| {
+                let tt = TranspositionTableV2::new(size_mb);
+                let pos = Position::startpos();
+                let hash = pos.zobrist_hash;
+
+                // Pre-fill TT
+                for i in 0..1000 {
+                    let test_hash = hash.wrapping_add(i);
+                    tt.store(
+                        test_hash,
+                        None,
+                        100,
+                        0,
+                        5,
+                        engine_core::search::tt_v2::NodeType::Exact,
+                    );
+                }
+
+                b.iter(|| {
+                    for i in 0..100 {
+                        let test_hash = hash.wrapping_add(i * 10);
+                        black_box(tt.probe(test_hash));
+                    }
+                });
+            },
+        );
     }
 
     group.finish();
