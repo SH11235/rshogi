@@ -54,3 +54,7 @@ harness = false
 [[bench]]
 name = "tt_8entry_comparison"
 harness = false
+
+[[bench]]
+name = "tt_memory_barrier_bench"
+harness = false
