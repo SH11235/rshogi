@@ -53,7 +53,7 @@ const NODE_TYPE_BITS: u8 = 2;
 const NODE_TYPE_MASK: u8 = (1 << NODE_TYPE_BITS) - 1;
 const AGE_SHIFT: u8 = 20;
 const AGE_BITS: u8 = 3;
-const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
+pub(crate) const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
 const PV_FLAG_SHIFT: u8 = 19;
 const PV_FLAG_MASK: u64 = 1;
 
@@ -83,15 +83,47 @@ const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
 // The cycle is designed to be larger than the maximum possible age value (2^AGE_BITS)
 // to prevent ambiguity in age distance calculations
 const MAX_GENERATION_VALUE: u16 = (1 << 8) - 1; // Maximum value before adding AGE_BITS range
-const GENERATION_CYCLE: u16 = MAX_GENERATION_VALUE + (1 << AGE_BITS); // 255 + 8 = 263
+pub(crate) const GENERATION_CYCLE: u16 = MAX_GENERATION_VALUE + (1 << AGE_BITS); // 255 + 8 = 263
 #[allow(dead_code)]
 const GENERATION_CYCLE_MASK: u16 = (1 << (8 + AGE_BITS)) - 1; // For efficient modulo operation
 
 // Key uses upper 32 bits of hash (lower 32 bits used for indexing)
 const KEY_SHIFT: u8 = 32;
 
-/// Number of entries per bucket
+/// Number of entries per bucket (default for backward compatibility)
 const BUCKET_SIZE: usize = 4;
+
+/// Dynamic bucket size configuration
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BucketSize {
+    /// 4 entries (64 bytes) - 1 cache line, optimal for small tables (≤8MB)
+    Small = 4,
+    /// 8 entries (128 bytes) - 2 cache lines, optimal for medium tables (9-32MB)
+    Medium = 8,
+    /// 16 entries (256 bytes) - 4 cache lines, optimal for large tables (>32MB)
+    Large = 16,
+}
+
+impl BucketSize {
+    /// Determine optimal bucket size based on table size
+    pub fn optimal_for_size(table_size_mb: usize) -> Self {
+        match table_size_mb {
+            0..=8 => BucketSize::Small,
+            9..=32 => BucketSize::Medium,
+            _ => BucketSize::Large,
+        }
+    }
+
+    /// Get number of entries in this bucket size
+    pub fn entries(&self) -> usize {
+        *self as usize
+    }
+
+    /// Get size in bytes for this bucket size
+    pub fn bytes(&self) -> usize {
+        self.entries() * 16 // Each entry is 16 bytes (key + data)
+    }
+}
 
 /// Type of node in the search tree
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,10 +406,61 @@ impl TTBucket {
         }
     }
 
-    /// Probe bucket for matching entry
+    /// Probe bucket for matching entry using SIMD when available
     fn probe(&self, key: u64) -> Option<TTEntry> {
         let target_key = (key >> KEY_SHIFT) << KEY_SHIFT;
 
+        // Try SIMD-optimized path first
+        if self.probe_simd_available() {
+            return self.probe_simd_impl(target_key);
+        }
+
+        // Fallback to scalar implementation
+        self.probe_scalar(target_key)
+    }
+
+    /// Check if SIMD probe is available
+    /// This is inlined and the feature detection is cached by the CPU
+    #[inline(always)]
+    fn probe_simd_available(&self) -> bool {
+        // The is_x86_feature_detected! macro is already optimized:
+        // It caches the result in a static variable after first call
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// SIMD-optimized probe implementation
+    fn probe_simd_impl(&self, target_key: u64) -> Option<TTEntry> {
+        // Load all 4 keys at once for SIMD comparison
+        let mut keys = [0u64; BUCKET_SIZE];
+        for (i, key) in keys.iter_mut().enumerate() {
+            *key = self.entries[i * 2].load(Ordering::Acquire);
+        }
+
+        // Use SIMD to find matching key
+        if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            let entry = TTEntry {
+                key: keys[idx],
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
+            }
+        }
+
+        None
+    }
+
+    /// Scalar fallback probe implementation
+    fn probe_scalar(&self, target_key: u64) -> Option<TTEntry> {
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
             let entry_key = self.entries[idx].load(Ordering::Acquire);
@@ -398,7 +481,7 @@ impl TTBucket {
         None
     }
 
-    /// Store entry in bucket using improved replacement strategy
+    /// Store entry in bucket using improved replacement strategy with SIMD
     fn store(&self, new_entry: TTEntry, current_age: u8) {
         let target_key = new_entry.key;
 
@@ -407,8 +490,8 @@ impl TTBucket {
             let idx = i * 2;
 
             // Use CAS for atomic update to avoid race conditions
-            // Limit retries to prevent potential infinite loops under extreme contention
-            const MAX_CAS_RETRIES: u32 = 8;
+            // Reduced retries and exponential backoff for better performance under contention
+            const MAX_CAS_RETRIES: u32 = 4; // Reduced from 8 - fail fast is better
             let mut retry_count = 0;
 
             loop {
@@ -441,8 +524,10 @@ impl TTBucket {
                                 break;
                             }
                             // Otherwise, retry the CAS operation
-                            // Add small backoff to reduce contention
-                            std::hint::spin_loop();
+                            // Exponential backoff to reduce contention
+                            for _ in 0..(1 << retry_count.min(3)) {
+                                std::hint::spin_loop();
+                            }
                         }
                     }
                 } else {
@@ -452,25 +537,12 @@ impl TTBucket {
             }
         }
 
-        // Second pass: find least valuable entry to replace
-        let mut worst_idx = 0;
-        let mut worst_score = i32::MAX;
-
-        for i in 0..BUCKET_SIZE {
-            let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Acquire);
-            let old_data = self.entries[idx + 1].load(Ordering::Acquire);
-            let old_entry = TTEntry {
-                key: old_key,
-                data: old_data,
-            };
-
-            let score = old_entry.priority_score(current_age);
-            if score < worst_score {
-                worst_score = score;
-                worst_idx = i;
-            }
-        }
+        // Second pass: find least valuable entry to replace using SIMD if available
+        let (worst_idx, worst_score) = if self.store_simd_available() {
+            self.find_worst_entry_simd(current_age)
+        } else {
+            self.find_worst_entry_scalar(current_age)
+        };
 
         // Check if new entry is more valuable than the worst existing entry
         if new_entry.priority_score(current_age) > worst_score {
@@ -492,21 +564,524 @@ impl TTBucket {
             // as it's not critical (both threads are storing valid entries)
         }
     }
+
+    /// Check if SIMD store optimization is available
+    #[inline]
+    fn store_simd_available(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// Find worst entry using SIMD priority calculation
+    fn find_worst_entry_simd(&self, current_age: u8) -> (usize, i32) {
+        // Prepare data for SIMD priority calculation
+        let mut depths = [0u8; BUCKET_SIZE];
+        let mut ages = [0u8; BUCKET_SIZE];
+        let mut is_pv = [false; BUCKET_SIZE];
+        let mut is_exact = [false; BUCKET_SIZE];
+        let mut is_empty = [false; BUCKET_SIZE];
+
+        // Load all entries at once
+        for i in 0..BUCKET_SIZE {
+            let idx = i * 2;
+            let key = self.entries[idx].load(Ordering::Acquire);
+            if key == 0 {
+                // Mark empty slots
+                is_empty[i] = true;
+                depths[i] = 0;
+                ages[i] = 0;
+                is_pv[i] = false;
+                is_exact[i] = false;
+            } else {
+                let data = self.entries[idx + 1].load(Ordering::Acquire);
+                let entry = TTEntry { key, data };
+                depths[i] = entry.depth();
+                ages[i] = entry.age();
+                is_pv[i] = entry.is_pv();
+                is_exact[i] = entry.node_type() == NodeType::Exact;
+            }
+        }
+
+        // Calculate all priority scores using SIMD
+        let mut scores = crate::search::tt_simd::simd::calculate_priority_scores(
+            &depths,
+            &ages,
+            &is_pv,
+            &is_exact,
+            current_age,
+        );
+
+        // Set empty entries to minimum priority (they should be replaced first)
+        for (i, empty) in is_empty.iter().enumerate() {
+            if *empty {
+                scores[i] = i32::MIN;
+            }
+        }
+
+        // Find minimum score and its index
+        let mut worst_idx = 0;
+        let mut worst_score = scores[0];
+        for (i, &score) in scores.iter().enumerate().skip(1) {
+            if score < worst_score {
+                worst_score = score;
+                worst_idx = i;
+            }
+        }
+
+        (worst_idx, worst_score)
+    }
+
+    /// Find worst entry using scalar priority calculation
+    fn find_worst_entry_scalar(&self, current_age: u8) -> (usize, i32) {
+        let mut worst_idx = 0;
+        let mut worst_score = i32::MAX;
+
+        for i in 0..BUCKET_SIZE {
+            let idx = i * 2;
+            let old_key = self.entries[idx].load(Ordering::Acquire);
+            let old_data = self.entries[idx + 1].load(Ordering::Acquire);
+            let old_entry = TTEntry {
+                key: old_key,
+                data: old_data,
+            };
+
+            let score = old_entry.priority_score(current_age);
+            if score < worst_score {
+                worst_score = score;
+                worst_idx = i;
+            }
+        }
+
+        (worst_idx, worst_score)
+    }
+}
+
+/// Flexible bucket that can hold variable number of entries
+struct FlexibleTTBucket {
+    /// Atomic entries (keys and data interleaved)
+    entries: Box<[AtomicU64]>,
+    /// Size configuration for this bucket
+    size: BucketSize,
+}
+
+impl FlexibleTTBucket {
+    /// Create new flexible bucket with specified size
+    fn new(size: BucketSize) -> Self {
+        let entry_count = size.entries() * 2; // key + data for each entry
+        let mut entries = Vec::with_capacity(entry_count);
+        for _ in 0..entry_count {
+            entries.push(AtomicU64::new(0));
+        }
+
+        FlexibleTTBucket {
+            entries: entries.into_boxed_slice(),
+            size,
+        }
+    }
+
+    /// Probe bucket for matching entry
+    fn probe(&self, key: u64) -> Option<TTEntry> {
+        let target_key = (key >> KEY_SHIFT) << KEY_SHIFT;
+
+        match self.size {
+            BucketSize::Small => self.probe_4(target_key),
+            BucketSize::Medium => self.probe_8(target_key),
+            BucketSize::Large => self.probe_16(target_key),
+        }
+    }
+
+    /// Probe 4-entry bucket (current implementation)
+    fn probe_4(&self, target_key: u64) -> Option<TTEntry> {
+        // Try SIMD-optimized path first
+        if self.probe_simd_available() {
+            return self.probe_simd_4(target_key);
+        }
+        // Fallback to scalar
+        self.probe_scalar_4(target_key)
+    }
+
+    /// Probe 8-entry bucket
+    fn probe_8(&self, target_key: u64) -> Option<TTEntry> {
+        // Try SIMD-optimized path first
+        if self.probe_simd_available() {
+            return self.probe_simd_8(target_key);
+        }
+        // Fallback to scalar
+        self.probe_scalar_8(target_key)
+    }
+
+    /// Probe 16-entry bucket
+    fn probe_16(&self, target_key: u64) -> Option<TTEntry> {
+        // Currently only scalar implementation
+        self.probe_scalar_16(target_key)
+    }
+
+    /// Check if SIMD probe is available
+    #[inline]
+    fn probe_simd_available(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// SIMD probe for 4 entries
+    fn probe_simd_4(&self, target_key: u64) -> Option<TTEntry> {
+        let mut keys = [0u64; 4];
+        for (i, key) in keys.iter_mut().enumerate() {
+            *key = self.entries[i * 2].load(Ordering::Acquire);
+        }
+
+        if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            let entry = TTEntry {
+                key: keys[idx],
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
+    /// SIMD probe for 8 entries
+    fn probe_simd_8(&self, target_key: u64) -> Option<TTEntry> {
+        let mut keys = [0u64; 8];
+        for (i, key) in keys.iter_mut().enumerate() {
+            *key = self.entries[i * 2].load(Ordering::Acquire);
+        }
+
+        if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_8(&keys, target_key) {
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            let entry = TTEntry {
+                key: keys[idx],
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
+            }
+        }
+        None
+    }
+
+    /// Scalar probe for 4 entries
+    fn probe_scalar_4(&self, target_key: u64) -> Option<TTEntry> {
+        for i in 0..4 {
+            let idx = i * 2;
+            let stored_key = self.entries[idx].load(Ordering::Acquire);
+
+            if (stored_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                let data = self.entries[idx + 1].load(Ordering::Acquire);
+                let entry = TTEntry {
+                    key: stored_key,
+                    data,
+                };
+
+                if entry.depth() > 0 {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    /// Scalar probe for 8 entries
+    fn probe_scalar_8(&self, target_key: u64) -> Option<TTEntry> {
+        for i in 0..8 {
+            let idx = i * 2;
+            let stored_key = self.entries[idx].load(Ordering::Acquire);
+
+            if (stored_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                let data = self.entries[idx + 1].load(Ordering::Acquire);
+                let entry = TTEntry {
+                    key: stored_key,
+                    data,
+                };
+
+                if entry.depth() > 0 {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    /// Scalar probe for 16 entries
+    fn probe_scalar_16(&self, target_key: u64) -> Option<TTEntry> {
+        for i in 0..16 {
+            let idx = i * 2;
+            let stored_key = self.entries[idx].load(Ordering::Acquire);
+
+            if (stored_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                let data = self.entries[idx + 1].load(Ordering::Acquire);
+                let entry = TTEntry {
+                    key: stored_key,
+                    data,
+                };
+
+                if entry.depth() > 0 {
+                    return Some(entry);
+                }
+            }
+        }
+        None
+    }
+
+    /// Store entry in bucket
+    fn store(&self, params: TTEntryParams, current_age: u8) {
+        match self.size {
+            BucketSize::Small => self.store_4(params, current_age),
+            BucketSize::Medium => self.store_8(params, current_age),
+            BucketSize::Large => self.store_16(params, current_age),
+        }
+    }
+
+    /// Store in 4-entry bucket
+    fn store_4(&self, params: TTEntryParams, current_age: u8) {
+        let new_entry = TTEntry::from_params(params);
+        let target_key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
+
+        // Check for existing entry
+        for i in 0..4 {
+            let idx = i * 2;
+            let old_key = self.entries[idx].load(Ordering::Acquire);
+
+            if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                // Update existing entry
+                self.entries[idx].store(new_entry.key, Ordering::Release);
+                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                return;
+            }
+        }
+
+        // Find worst entry to replace
+        let (worst_idx, _) = self.find_worst_entry_4(current_age);
+        let idx = worst_idx * 2;
+
+        // Store new entry
+        self.entries[idx].store(new_entry.key, Ordering::Release);
+        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+    }
+
+    /// Store in 8-entry bucket
+    fn store_8(&self, params: TTEntryParams, current_age: u8) {
+        let new_entry = TTEntry::from_params(params);
+        let target_key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
+
+        // Check for existing entry
+        for i in 0..8 {
+            let idx = i * 2;
+            let old_key = self.entries[idx].load(Ordering::Acquire);
+
+            if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                // Update existing entry
+                self.entries[idx].store(new_entry.key, Ordering::Release);
+                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                return;
+            }
+        }
+
+        // Find worst entry to replace
+        let (worst_idx, _) = self.find_worst_entry_8(current_age);
+        let idx = worst_idx * 2;
+
+        // Store new entry
+        self.entries[idx].store(new_entry.key, Ordering::Release);
+        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+    }
+
+    /// Store in 16-entry bucket
+    fn store_16(&self, params: TTEntryParams, current_age: u8) {
+        let new_entry = TTEntry::from_params(params);
+        let target_key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
+
+        // Check for existing entry
+        for i in 0..16 {
+            let idx = i * 2;
+            let old_key = self.entries[idx].load(Ordering::Acquire);
+
+            if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                // Update existing entry
+                self.entries[idx].store(new_entry.key, Ordering::Release);
+                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                return;
+            }
+        }
+
+        // Find worst entry to replace (scalar for now)
+        let (worst_idx, _) = self.find_worst_entry_16(current_age);
+        let idx = worst_idx * 2;
+
+        // Store new entry
+        self.entries[idx].store(new_entry.key, Ordering::Release);
+        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+    }
+
+    /// Find worst entry in 4-entry bucket using SIMD
+    fn find_worst_entry_4(&self, current_age: u8) -> (usize, i32) {
+        // Prepare data for SIMD processing
+        let mut depths = [0u8; 4];
+        let mut ages = [0u8; 4];
+        let mut is_pv = [false; 4];
+        let mut is_exact = [false; 4];
+        let mut is_empty = [false; 4];
+
+        for i in 0..4 {
+            let idx = i * 2;
+            let key = self.entries[idx].load(Ordering::Acquire);
+            let data = self.entries[idx + 1].load(Ordering::Acquire);
+            let entry = TTEntry { key, data };
+
+            if entry.is_empty() {
+                is_empty[i] = true;
+            } else {
+                depths[i] = entry.depth();
+                ages[i] = entry.age();
+                is_pv[i] = entry.is_pv();
+                is_exact[i] = entry.node_type() == NodeType::Exact;
+            }
+        }
+
+        // Calculate priorities using SIMD
+        let mut scores = crate::search::tt_simd::simd::calculate_priority_scores(
+            &depths,
+            &ages,
+            &is_pv,
+            &is_exact,
+            current_age,
+        );
+
+        // Set empty entries to minimum priority
+        for (i, empty) in is_empty.iter().enumerate() {
+            if *empty {
+                scores[i] = i32::MIN;
+            }
+        }
+
+        // Find minimum score
+        let mut worst_idx = 0;
+        let mut worst_score = scores[0];
+        for (i, &score) in scores.iter().enumerate().skip(1) {
+            if score < worst_score {
+                worst_score = score;
+                worst_idx = i;
+            }
+        }
+
+        (worst_idx, worst_score)
+    }
+
+    /// Find worst entry in 8-entry bucket using SIMD
+    fn find_worst_entry_8(&self, current_age: u8) -> (usize, i32) {
+        // Prepare data for SIMD processing
+        let mut depths = [0u8; 8];
+        let mut ages = [0u8; 8];
+        let mut is_pv = [false; 8];
+        let mut is_exact = [false; 8];
+        let mut is_empty = [false; 8];
+
+        for i in 0..8 {
+            let idx = i * 2;
+            let key = self.entries[idx].load(Ordering::Acquire);
+            let data = self.entries[idx + 1].load(Ordering::Acquire);
+            let entry = TTEntry { key, data };
+
+            if entry.is_empty() {
+                is_empty[i] = true;
+            } else {
+                depths[i] = entry.depth();
+                ages[i] = entry.age();
+                is_pv[i] = entry.is_pv();
+                is_exact[i] = entry.node_type() == NodeType::Exact;
+            }
+        }
+
+        // Calculate priorities using SIMD
+        let mut scores = crate::search::tt_simd::simd::calculate_priority_scores_8(
+            &depths,
+            &ages,
+            &is_pv,
+            &is_exact,
+            current_age,
+        );
+
+        // Set empty entries to minimum priority
+        for (i, empty) in is_empty.iter().enumerate() {
+            if *empty {
+                scores[i] = i32::MIN;
+            }
+        }
+
+        // Find minimum score
+        let mut worst_idx = 0;
+        let mut worst_score = scores[0];
+        for (i, &score) in scores.iter().enumerate().skip(1) {
+            if score < worst_score {
+                worst_score = score;
+                worst_idx = i;
+            }
+        }
+
+        (worst_idx, worst_score)
+    }
+
+    /// Find worst entry in 16-entry bucket (scalar for now)
+    fn find_worst_entry_16(&self, current_age: u8) -> (usize, i32) {
+        let mut worst_idx = 0;
+        let mut worst_score = i32::MAX;
+
+        for i in 0..16 {
+            let idx = i * 2;
+            let key = self.entries[idx].load(Ordering::Acquire);
+            let data = self.entries[idx + 1].load(Ordering::Acquire);
+            let entry = TTEntry { key, data };
+
+            let score = entry.priority_score(current_age);
+            if score < worst_score {
+                worst_score = score;
+                worst_idx = i;
+            }
+        }
+
+        (worst_idx, worst_score)
+    }
 }
 
 /// Optimized transposition table with bucket structure
 pub struct TranspositionTable {
-    /// Table buckets
+    /// Table buckets (legacy fixed-size)
     buckets: Vec<TTBucket>,
+    /// Flexible buckets (for dynamic sizing)
+    flexible_buckets: Option<Vec<FlexibleTTBucket>>,
     /// Number of buckets
     num_buckets: usize,
     /// Current age/generation (3 bits: 0-7)
     age: u8,
+    /// Bucket size configuration
+    #[allow(dead_code)]
+    bucket_size: Option<BucketSize>,
+    /// SIMD availability (cached at initialization)
+    #[allow(dead_code)]
+    simd_available: bool,
 }
 
 impl TranspositionTable {
-    /// Create new transposition table with given size in MB
+    /// Create new transposition table with given size in MB (backward compatible)
     pub fn new(size_mb: usize) -> Self {
+        // Use legacy implementation for backward compatibility
         // Each bucket is 64 bytes
         let bucket_size = std::mem::size_of::<TTBucket>();
         debug_assert_eq!(bucket_size, 64);
@@ -527,10 +1102,72 @@ impl TranspositionTable {
             buckets.push(TTBucket::new());
         }
 
+        // Check SIMD availability once at initialization
+        let simd_available = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                false
+            }
+        };
+
         TranspositionTable {
             buckets,
+            flexible_buckets: None,
             num_buckets,
             age: 0,
+            bucket_size: None,
+            simd_available,
+        }
+    }
+
+    /// Create new transposition table with dynamic bucket sizing
+    pub fn new_with_config(size_mb: usize, bucket_size: Option<BucketSize>) -> Self {
+        let bucket_size = bucket_size.unwrap_or_else(|| BucketSize::optimal_for_size(size_mb));
+        let bytes_per_bucket = bucket_size.bytes();
+
+        let num_buckets = if size_mb == 0 {
+            // Minimum size depends on bucket size
+            match bucket_size {
+                BucketSize::Small => 1024, // 64KB minimum
+                BucketSize::Medium => 512, // 64KB minimum
+                BucketSize::Large => 256,  // 64KB minimum
+            }
+        } else {
+            (size_mb * 1024 * 1024) / bytes_per_bucket
+        };
+
+        // Round to power of 2 for fast indexing
+        let num_buckets = num_buckets.next_power_of_two();
+
+        // Allocate flexible buckets
+        let mut flexible_buckets = Vec::with_capacity(num_buckets);
+        for _ in 0..num_buckets {
+            flexible_buckets.push(FlexibleTTBucket::new(bucket_size));
+        }
+
+        // Check SIMD availability once at initialization
+        let simd_available = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                false
+            }
+        };
+
+        TranspositionTable {
+            buckets: Vec::new(), // Empty for flexible mode
+            flexible_buckets: Some(flexible_buckets),
+            num_buckets,
+            age: 0,
+            bucket_size: Some(bucket_size),
+            simd_available,
         }
     }
 
@@ -543,7 +1180,12 @@ impl TranspositionTable {
     /// Probe the transposition table
     pub fn probe(&self, hash: u64) -> Option<TTEntry> {
         let idx = self.bucket_index(hash);
-        self.buckets[idx].probe(hash)
+
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            flexible_buckets[idx].probe(hash)
+        } else {
+            self.buckets[idx].probe(hash)
+        }
     }
 
     /// Store entry in transposition table
@@ -588,16 +1230,29 @@ impl TranspositionTable {
             params.score
         );
 
-        let entry = TTEntry::from_params(params);
         let idx = self.bucket_index(params.key);
-        self.buckets[idx].store(entry, self.age);
+
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            flexible_buckets[idx].store(params, self.age);
+        } else {
+            let entry = TTEntry::from_params(params);
+            self.buckets[idx].store(entry, self.age);
+        }
     }
 
     /// Clear the transposition table
     pub fn clear(&mut self) {
-        for bucket in &mut self.buckets {
-            for atomic in &bucket.entries {
-                atomic.store(0, Ordering::Relaxed);
+        if let Some(ref mut flexible_buckets) = self.flexible_buckets {
+            for bucket in flexible_buckets {
+                for atomic in bucket.entries.iter() {
+                    atomic.store(0, Ordering::Relaxed);
+                }
+            }
+        } else {
+            for bucket in &mut self.buckets {
+                for atomic in &bucket.entries {
+                    atomic.store(0, Ordering::Relaxed);
+                }
             }
         }
         self.age = 0;
@@ -688,7 +1343,98 @@ mod alignment_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Square;
+    use crate::shogi::{Move, Square};
+
+    // Test SIMD probe produces same results as scalar
+    #[test]
+    fn test_tt_probe_simd_vs_scalar() {
+        let bucket = TTBucket::new();
+        let test_entry = TTEntry::new(0x1234567890ABCDEF, None, 100, -50, 10, NodeType::Exact, 0);
+
+        // Store an entry
+        bucket.store(test_entry, 0);
+
+        // Test both SIMD and scalar paths produce same result
+        let simd_result = if bucket.probe_simd_available() {
+            bucket.probe_simd_impl(test_entry.key)
+        } else {
+            bucket.probe_scalar(test_entry.key)
+        };
+
+        let scalar_result = bucket.probe_scalar(test_entry.key);
+
+        assert_eq!(simd_result.is_some(), scalar_result.is_some());
+        if let (Some(simd_entry), Some(scalar_entry)) = (simd_result, scalar_result) {
+            assert_eq!(simd_entry.key, scalar_entry.key);
+            assert_eq!(simd_entry.data, scalar_entry.data);
+        }
+    }
+
+    // Test SIMD store priority calculation
+    #[test]
+    fn test_tt_store_simd_priority() {
+        let bucket = TTBucket::new();
+
+        // Fill bucket with test entries with unique keys
+        for i in 0..BUCKET_SIZE {
+            // Use high bits to ensure unique keys after shift
+            let key = (0x1000000000000000_u64 * (i as u64 + 1)) | 0xFFFF;
+            let entry = TTEntry::new(
+                key,
+                None,
+                50 + i as i16 * 10,
+                -20 + i as i16 * 5,
+                5 + i as u8,
+                if i % 2 == 0 {
+                    NodeType::Exact
+                } else {
+                    NodeType::LowerBound
+                },
+                i as u8,
+            );
+            bucket.store(entry, 0);
+        }
+
+        // Test both SIMD and scalar find worst entry
+        let current_age = 4;
+        let (simd_idx, simd_score) = if bucket.store_simd_available() {
+            bucket.find_worst_entry_simd(current_age)
+        } else {
+            bucket.find_worst_entry_scalar(current_age)
+        };
+
+        let (scalar_idx, scalar_score) = bucket.find_worst_entry_scalar(current_age);
+
+        // Debug output to understand the difference
+        if simd_idx != scalar_idx {
+            println!("SIMD idx: {}, score: {}", simd_idx, simd_score);
+            println!("Scalar idx: {}, score: {}", scalar_idx, scalar_score);
+
+            // Check all scores to understand what's happening
+            for i in 0..BUCKET_SIZE {
+                let idx = i * 2;
+                let key = bucket.entries[idx].load(Ordering::Acquire);
+                if key != 0 {
+                    let data = bucket.entries[idx + 1].load(Ordering::Acquire);
+                    let entry = TTEntry { key, data };
+                    let score = entry.priority_score(current_age);
+                    println!(
+                        "Entry {}: depth={}, age={}, score={}",
+                        i,
+                        entry.depth(),
+                        entry.age(),
+                        score
+                    );
+                } else {
+                    println!("Entry {}: empty", i);
+                }
+            }
+        }
+
+        // They should identify the same worst entry
+        assert_eq!(simd_idx, scalar_idx, "SIMD and scalar should find same worst entry");
+        assert_eq!(simd_score, scalar_score, "SIMD and scalar should calculate same score");
+    }
 
     #[test]
     fn test_bucket_operations() {
@@ -938,6 +1684,55 @@ mod tests {
     }
 
     #[test]
+    fn test_high_contention_cas_handling() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Test CAS retry mechanism under high contention
+        let tt = Arc::new(TranspositionTable::new(1)); // Small table to force collisions
+        let num_threads = 16;
+        let iterations_per_thread = 1000;
+        let target_hash = 0x123456789ABCDEF0; // Same hash for all threads
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let tt = Arc::clone(&tt);
+                thread::spawn(move || {
+                    for i in 0..iterations_per_thread {
+                        // All threads try to write to the same hash location
+                        tt.store(
+                            target_hash,
+                            Some(Move::normal(
+                                Square::new((thread_id % 9) as u8, 7),
+                                Square::new((thread_id % 9) as u8, 6),
+                                false,
+                            )),
+                            thread_id as i16 * 10 + i as i16,
+                            thread_id as i16 * 5,
+                            (thread_id % 20) as u8,
+                            NodeType::Exact,
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify that the table still works correctly after high contention
+        let entry = tt.probe(target_hash);
+        assert!(entry.is_some(), "Entry should exist after high contention");
+
+        // The entry should have valid data (from one of the threads)
+        let entry = entry.unwrap();
+        assert!(entry.depth() <= 20, "Depth should be reasonable");
+        assert!(entry.score().abs() < 10000, "Score should be reasonable");
+    }
+
+    #[test]
     fn test_sign_extension_correctness() {
         // Test that our optimized sign extension works correctly
         // for 14-bit signed values
@@ -1057,6 +1852,197 @@ mod tests {
 
         // PV entry should still be there
         assert!(bucket.probe(0x456).is_some(), "PV entry should be preserved");
+    }
+
+    // Tests for dynamic bucket sizing
+    #[test]
+    fn test_bucket_size_selection() {
+        assert_eq!(BucketSize::optimal_for_size(4), BucketSize::Small);
+        assert_eq!(BucketSize::optimal_for_size(8), BucketSize::Small);
+        assert_eq!(BucketSize::optimal_for_size(16), BucketSize::Medium);
+        assert_eq!(BucketSize::optimal_for_size(32), BucketSize::Medium);
+        assert_eq!(BucketSize::optimal_for_size(64), BucketSize::Large);
+        assert_eq!(BucketSize::optimal_for_size(128), BucketSize::Large);
+    }
+
+    #[test]
+    fn test_bucket_size_properties() {
+        assert_eq!(BucketSize::Small.entries(), 4);
+        assert_eq!(BucketSize::Small.bytes(), 64);
+
+        assert_eq!(BucketSize::Medium.entries(), 8);
+        assert_eq!(BucketSize::Medium.bytes(), 128);
+
+        assert_eq!(BucketSize::Large.entries(), 16);
+        assert_eq!(BucketSize::Large.bytes(), 256);
+    }
+
+    #[test]
+    fn test_flexible_bucket_operations() {
+        for size in [BucketSize::Small, BucketSize::Medium, BucketSize::Large] {
+            let bucket = FlexibleTTBucket::new(size);
+            let hash = 0x1234567890ABCDEF;
+
+            // Test probe on empty bucket
+            assert!(bucket.probe(hash).is_none());
+
+            // Store entry
+            let params = TTEntryParams {
+                key: hash,
+                mv: None,
+                score: 100,
+                eval: 50,
+                depth: 10,
+                node_type: NodeType::Exact,
+                age: 0,
+                is_pv: false,
+                ..Default::default()
+            };
+            bucket.store(params, 0);
+
+            // Retrieve entry
+            let found = bucket.probe(hash);
+            assert!(found.is_some());
+            let entry = found.unwrap();
+            assert_eq!(entry.score(), 100);
+            assert_eq!(entry.eval(), 50);
+            assert_eq!(entry.depth(), 10);
+        }
+    }
+
+    #[test]
+    fn test_dynamic_tt_creation() {
+        // Test with different sizes and configurations
+        let configs = [
+            (4, Some(BucketSize::Small)),
+            (16, Some(BucketSize::Medium)),
+            (64, Some(BucketSize::Large)),
+            (16, None), // Auto-select
+        ];
+
+        for (size_mb, bucket_size) in configs {
+            let tt = TranspositionTable::new_with_config(size_mb, bucket_size);
+
+            // Verify it was created with flexible buckets
+            assert!(tt.flexible_buckets.is_some());
+            assert!(tt.bucket_size.is_some());
+
+            // Test basic operations
+            let hash = 0xABCDEF1234567890;
+            tt.store(hash, None, 100, 50, 10, NodeType::Exact);
+
+            let entry = tt.probe(hash);
+            assert!(entry.is_some());
+            assert_eq!(entry.unwrap().score(), 100);
+        }
+    }
+
+    #[test]
+    fn test_flexible_bucket_replacement() {
+        let bucket = FlexibleTTBucket::new(BucketSize::Medium); // 8 entries
+
+        // Test replacement within a single bucket
+        // First, verify empty bucket
+        for i in 0..8 {
+            let hash = ((i + 1) as u64) << 32 | i;
+            assert!(bucket.probe(hash).is_none(), "Bucket should start empty");
+        }
+
+        // Fill bucket with entries - all different upper bits but same bucket
+        // Note: In a real TT, these would map to the same bucket based on lower bits
+        for i in 0..8 {
+            let hash = ((i + 1) as u64) << 32 | 0x1234; // Different upper bits, same lower
+            let params = TTEntryParams {
+                key: hash,
+                mv: None,
+                score: (i * 10) as i16,
+                eval: 0,
+                depth: (i + 1) as u8, // Increasing depth
+                node_type: NodeType::Exact,
+                age: 0,
+                is_pv: false,
+                ..Default::default()
+            };
+            bucket.store(params, 0);
+        }
+
+        // After storing 8 unique entries in an 8-entry bucket, all should be retrievable
+        let mut found_count = 0;
+        for i in 0..8 {
+            let hash = ((i + 1) as u64) << 32 | 0x1234;
+            if bucket.probe(hash).is_some() {
+                found_count += 1;
+            }
+        }
+        assert_eq!(found_count, 8, "All 8 entries should be stored");
+
+        // Add a new entry with much higher depth (should replace lowest priority)
+        let new_hash = (9_u64 << 32) | 0x1234;
+        let new_params = TTEntryParams {
+            key: new_hash,
+            mv: None,
+            score: 200,
+            eval: 100,
+            depth: 20,
+            node_type: NodeType::Exact,
+            age: 0,
+            is_pv: true,
+            ..Default::default()
+        };
+        bucket.store(new_params, 0);
+
+        // New entry should be stored
+        assert!(bucket.probe(new_hash).is_some());
+    }
+
+    #[test]
+    fn test_simd_8_entry_correctness() {
+        let bucket = FlexibleTTBucket::new(BucketSize::Medium);
+
+        // Store entries at different positions
+        let test_hashes = [
+            0x1111111111111111,
+            0x2222222222222222,
+            0x3333333333333333,
+            0x4444444444444444,
+            0x5555555555555555,
+            0x6666666666666666,
+            0x7777777777777777,
+            0x8888888888888888,
+        ];
+
+        for (i, &hash) in test_hashes.iter().enumerate() {
+            let params = TTEntryParams {
+                key: hash,
+                mv: None,
+                score: (i * 10) as i16,
+                eval: 0,
+                depth: (i + 1) as u8,
+                node_type: NodeType::Exact,
+                age: 0,
+                is_pv: false,
+                ..Default::default()
+            };
+            bucket.store(params, 0);
+        }
+
+        // Test both SIMD and scalar probe paths
+        for (i, &hash) in test_hashes.iter().enumerate() {
+            // SIMD path
+            if bucket.probe_simd_available() {
+                let simd_result = bucket.probe_simd_8(hash >> KEY_SHIFT << KEY_SHIFT);
+                assert!(simd_result.is_some(), "SIMD probe failed for entry {i}");
+            }
+
+            // Scalar path
+            let scalar_result = bucket.probe_scalar_8(hash >> KEY_SHIFT << KEY_SHIFT);
+            assert!(scalar_result.is_some(), "Scalar probe failed for entry {i}");
+
+            // Full probe (uses dispatch)
+            let result = bucket.probe(hash);
+            assert!(result.is_some(), "Full probe failed for entry {i}");
+            assert_eq!(result.unwrap().score(), (i * 10) as i16);
+        }
     }
 }
 
