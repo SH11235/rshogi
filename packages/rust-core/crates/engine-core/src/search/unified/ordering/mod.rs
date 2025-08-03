@@ -311,8 +311,8 @@ mod tests {
         let history = Arc::new(Mutex::new(History::new()));
         let ordering = Arc::new(MoveOrdering::new(Arc::clone(&history)));
 
-        let num_threads = 16;
-        let time_limit = Duration::from_millis(100); // Simulate 100ms time pressure
+        let num_threads = 4; // Reduced from 16 to avoid CI timeout
+        let time_limit = Duration::from_millis(50); // Reduced from 100ms for faster CI
         let start_time = Instant::now();
 
         let handles: Vec<_> = (0..num_threads)

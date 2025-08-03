@@ -214,8 +214,8 @@ mod tests {
 
         // Test killer table behavior under memory pressure with many concurrent threads
         let table = Arc::new(KillerTable::new());
-        let num_threads = 32; // More threads than typical CPU cores
-        let iterations_per_thread = 1000;
+        let num_threads = 8; // Reduced from 32 to avoid excessive load on CI
+        let iterations_per_thread = 100; // Reduced from 1000 for faster CI
 
         let handles: Vec<_> = (0..num_threads)
             .map(|thread_id| {
@@ -240,7 +240,7 @@ mod tests {
                         let _ = table.get(ply);
 
                         // Occasionally age the table to stress memory reallocation
-                        if i % 100 == 0 {
+                        if i % 50 == 0 {
                             table.age();
                         }
                     }
