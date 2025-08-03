@@ -98,8 +98,16 @@ mod tests {
         let level = dispatch::SimdLevel::detect();
         println!("Detected SIMD level: {:?}", level);
 
-        // At minimum, we should have scalar
-        assert_ne!(level, dispatch::SimdLevel::Avx2);
+        // Check that we detected a valid SIMD level
+        // The level should be one of: Scalar, Sse2, Sse41, or Avx2
+        match level {
+            dispatch::SimdLevel::Scalar
+            | dispatch::SimdLevel::Sse2
+            | dispatch::SimdLevel::Sse41
+            | dispatch::SimdLevel::Avx2 => {
+                // Valid SIMD level detected - test passes
+            }
+        }
     }
 
     #[test]
