@@ -42,3 +42,7 @@ harness = false
 [[bench]]
 name = "tt_simd_bench"
 harness = false
+
+[[bench]]
+name = "tt_bucket_bench"
+harness = false
