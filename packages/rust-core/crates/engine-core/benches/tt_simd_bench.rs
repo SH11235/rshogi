@@ -1,7 +1,8 @@
 //! Benchmark for SIMD-optimized TT operations
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::search::tt_simd::{scalar, simd};
+use std::hint::black_box;
 
 fn bench_key_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("tt_key_search");
@@ -15,20 +16,18 @@ fn bench_key_search(c: &mut Criterion) {
     ];
 
     let targets = vec![
-        keys[0],            // Hit at position 0
-        keys[2],            // Hit at position 2
-        keys[3],            // Hit at position 3
-        0x3333333333333333, // Miss
+        (keys[0], "hit_pos0"),        // Hit at position 0
+        (keys[2], "hit_pos2"),        // Hit at position 2
+        (keys[3], "hit_pos3"),        // Hit at position 3
+        (0x3333333333333333, "miss"), // Miss
     ];
 
-    for target in &targets {
-        let hit_or_miss = if keys.contains(target) { "hit" } else { "miss" };
-
-        group.bench_with_input(BenchmarkId::new("scalar", hit_or_miss), target, |b, &target| {
+    for (target, name) in &targets {
+        group.bench_with_input(BenchmarkId::new("scalar", name), target, |b, &target| {
             b.iter(|| scalar::find_matching_key(black_box(&keys), black_box(target)));
         });
 
-        group.bench_with_input(BenchmarkId::new("simd", hit_or_miss), target, |b, &target| {
+        group.bench_with_input(BenchmarkId::new("simd", name), target, |b, &target| {
             b.iter(|| simd::find_matching_key(black_box(&keys), black_box(target)));
         });
     }

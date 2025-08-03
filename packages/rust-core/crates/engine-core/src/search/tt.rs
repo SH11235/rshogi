@@ -374,10 +374,59 @@ impl TTBucket {
         }
     }
 
-    /// Probe bucket for matching entry
+    /// Probe bucket for matching entry using SIMD when available
     fn probe(&self, key: u64) -> Option<TTEntry> {
         let target_key = (key >> KEY_SHIFT) << KEY_SHIFT;
 
+        // Try SIMD-optimized path first
+        if self.probe_simd_available() {
+            return self.probe_simd_impl(target_key);
+        }
+
+        // Fallback to scalar implementation
+        self.probe_scalar(target_key)
+    }
+
+    /// Check if SIMD probe is available
+    #[inline]
+    fn probe_simd_available(&self) -> bool {
+        // Check if we have SIMD support
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// SIMD-optimized probe implementation
+    fn probe_simd_impl(&self, target_key: u64) -> Option<TTEntry> {
+        // Load all 4 keys at once for SIMD comparison
+        let mut keys = [0u64; BUCKET_SIZE];
+        for (i, key) in keys.iter_mut().enumerate() {
+            *key = self.entries[i * 2].load(Ordering::Acquire);
+        }
+
+        // Use SIMD to find matching key
+        if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            let entry = TTEntry {
+                key: keys[idx],
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
+            }
+        }
+
+        None
+    }
+
+    /// Scalar fallback probe implementation
+    fn probe_scalar(&self, target_key: u64) -> Option<TTEntry> {
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
             let entry_key = self.entries[idx].load(Ordering::Acquire);
@@ -398,7 +447,7 @@ impl TTBucket {
         None
     }
 
-    /// Store entry in bucket using improved replacement strategy
+    /// Store entry in bucket using improved replacement strategy with SIMD
     fn store(&self, new_entry: TTEntry, current_age: u8) {
         let target_key = new_entry.key;
 
@@ -452,25 +501,12 @@ impl TTBucket {
             }
         }
 
-        // Second pass: find least valuable entry to replace
-        let mut worst_idx = 0;
-        let mut worst_score = i32::MAX;
-
-        for i in 0..BUCKET_SIZE {
-            let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Acquire);
-            let old_data = self.entries[idx + 1].load(Ordering::Acquire);
-            let old_entry = TTEntry {
-                key: old_key,
-                data: old_data,
-            };
-
-            let score = old_entry.priority_score(current_age);
-            if score < worst_score {
-                worst_score = score;
-                worst_idx = i;
-            }
-        }
+        // Second pass: find least valuable entry to replace using SIMD if available
+        let (worst_idx, worst_score) = if self.store_simd_available() {
+            self.find_worst_entry_simd(current_age)
+        } else {
+            self.find_worst_entry_scalar(current_age)
+        };
 
         // Check if new entry is more valuable than the worst existing entry
         if new_entry.priority_score(current_age) > worst_score {
@@ -491,6 +527,102 @@ impl TTBucket {
             // If CAS failed, another thread updated this entry - we accept this race
             // as it's not critical (both threads are storing valid entries)
         }
+    }
+
+    /// Check if SIMD store optimization is available
+    #[inline]
+    fn store_simd_available(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    }
+
+    /// Find worst entry using SIMD priority calculation
+    fn find_worst_entry_simd(&self, current_age: u8) -> (usize, i32) {
+        // Prepare data for SIMD priority calculation
+        let mut depths = [0u8; BUCKET_SIZE];
+        let mut ages = [0u8; BUCKET_SIZE];
+        let mut is_pv = [false; BUCKET_SIZE];
+        let mut is_exact = [false; BUCKET_SIZE];
+        let mut is_empty = [false; BUCKET_SIZE];
+
+        // Load all entries at once
+        for i in 0..BUCKET_SIZE {
+            let idx = i * 2;
+            let key = self.entries[idx].load(Ordering::Acquire);
+            if key == 0 {
+                // Mark empty slots
+                is_empty[i] = true;
+                depths[i] = 0;
+                ages[i] = 0;
+                is_pv[i] = false;
+                is_exact[i] = false;
+            } else {
+                let data = self.entries[idx + 1].load(Ordering::Acquire);
+                let entry = TTEntry { key, data };
+                depths[i] = entry.depth();
+                ages[i] = entry.age();
+                is_pv[i] = entry.is_pv();
+                is_exact[i] = entry.node_type() == NodeType::Exact;
+            }
+        }
+
+        // Calculate all priority scores using SIMD
+        let mut scores = crate::search::tt_simd::simd::calculate_priority_scores(
+            &depths,
+            &ages,
+            &is_pv,
+            &is_exact,
+            current_age,
+        );
+
+        // Set empty entries to minimum priority (they should be replaced first)
+        for (i, empty) in is_empty.iter().enumerate() {
+            if *empty {
+                scores[i] = i32::MIN;
+            }
+        }
+
+        // Find minimum score and its index
+        let mut worst_idx = 0;
+        let mut worst_score = scores[0];
+        for (i, &score) in scores.iter().enumerate().skip(1) {
+            if score < worst_score {
+                worst_score = score;
+                worst_idx = i;
+            }
+        }
+
+        (worst_idx, worst_score)
+    }
+
+    /// Find worst entry using scalar priority calculation
+    fn find_worst_entry_scalar(&self, current_age: u8) -> (usize, i32) {
+        let mut worst_idx = 0;
+        let mut worst_score = i32::MAX;
+
+        for i in 0..BUCKET_SIZE {
+            let idx = i * 2;
+            let old_key = self.entries[idx].load(Ordering::Acquire);
+            let old_data = self.entries[idx + 1].load(Ordering::Acquire);
+            let old_entry = TTEntry {
+                key: old_key,
+                data: old_data,
+            };
+
+            let score = old_entry.priority_score(current_age);
+            if score < worst_score {
+                worst_score = score;
+                worst_idx = i;
+            }
+        }
+
+        (worst_idx, worst_score)
     }
 }
 
@@ -688,7 +820,98 @@ mod alignment_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Square;
+    use crate::shogi::{Move, Square};
+
+    // Test SIMD probe produces same results as scalar
+    #[test]
+    fn test_tt_probe_simd_vs_scalar() {
+        let bucket = TTBucket::new();
+        let test_entry = TTEntry::new(0x1234567890ABCDEF, None, 100, -50, 10, NodeType::Exact, 0);
+
+        // Store an entry
+        bucket.store(test_entry, 0);
+
+        // Test both SIMD and scalar paths produce same result
+        let simd_result = if bucket.probe_simd_available() {
+            bucket.probe_simd_impl(test_entry.key)
+        } else {
+            bucket.probe_scalar(test_entry.key)
+        };
+
+        let scalar_result = bucket.probe_scalar(test_entry.key);
+
+        assert_eq!(simd_result.is_some(), scalar_result.is_some());
+        if let (Some(simd_entry), Some(scalar_entry)) = (simd_result, scalar_result) {
+            assert_eq!(simd_entry.key, scalar_entry.key);
+            assert_eq!(simd_entry.data, scalar_entry.data);
+        }
+    }
+
+    // Test SIMD store priority calculation
+    #[test]
+    fn test_tt_store_simd_priority() {
+        let bucket = TTBucket::new();
+
+        // Fill bucket with test entries with unique keys
+        for i in 0..BUCKET_SIZE {
+            // Use high bits to ensure unique keys after shift
+            let key = (0x1000000000000000_u64 * (i as u64 + 1)) | 0xFFFF;
+            let entry = TTEntry::new(
+                key,
+                None,
+                50 + i as i16 * 10,
+                -20 + i as i16 * 5,
+                5 + i as u8,
+                if i % 2 == 0 {
+                    NodeType::Exact
+                } else {
+                    NodeType::LowerBound
+                },
+                i as u8,
+            );
+            bucket.store(entry, 0);
+        }
+
+        // Test both SIMD and scalar find worst entry
+        let current_age = 4;
+        let (simd_idx, simd_score) = if bucket.store_simd_available() {
+            bucket.find_worst_entry_simd(current_age)
+        } else {
+            bucket.find_worst_entry_scalar(current_age)
+        };
+
+        let (scalar_idx, scalar_score) = bucket.find_worst_entry_scalar(current_age);
+
+        // Debug output to understand the difference
+        if simd_idx != scalar_idx {
+            println!("SIMD idx: {}, score: {}", simd_idx, simd_score);
+            println!("Scalar idx: {}, score: {}", scalar_idx, scalar_score);
+
+            // Check all scores to understand what's happening
+            for i in 0..BUCKET_SIZE {
+                let idx = i * 2;
+                let key = bucket.entries[idx].load(Ordering::Acquire);
+                if key != 0 {
+                    let data = bucket.entries[idx + 1].load(Ordering::Acquire);
+                    let entry = TTEntry { key, data };
+                    let score = entry.priority_score(current_age);
+                    println!(
+                        "Entry {}: depth={}, age={}, score={}",
+                        i,
+                        entry.depth(),
+                        entry.age(),
+                        score
+                    );
+                } else {
+                    println!("Entry {}: empty", i);
+                }
+            }
+        }
+
+        // They should identify the same worst entry
+        assert_eq!(simd_idx, scalar_idx, "SIMD and scalar should find same worst entry");
+        assert_eq!(simd_score, scalar_score, "SIMD and scalar should calculate same score");
+    }
 
     #[test]
     fn test_bucket_operations() {
