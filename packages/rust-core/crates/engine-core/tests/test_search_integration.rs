@@ -40,33 +40,29 @@ mod search_integration_tests {
     }
 
     #[derive(Debug, Deserialize)]
-    #[allow(dead_code)]
     struct Benchmarks {
         see_basic: PerformanceMetric,
-        see_with_pins: PerformanceMetric,
-        quiescence_cutoff_rate: RateMetric,
-        move_ordering_efficiency: OrderingMetric,
+        _see_with_pins: PerformanceMetric,
+        _quiescence_cutoff_rate: RateMetric,
+        _move_ordering_efficiency: OrderingMetric,
     }
 
     #[derive(Debug, Deserialize)]
-    #[allow(dead_code)]
     struct PerformanceMetric {
         max_time_ns: u64,
-        description: String,
+        _description: String,
     }
 
     #[derive(Debug, Deserialize)]
-    #[allow(dead_code)]
     struct RateMetric {
-        min_rate: f64,
-        description: String,
+        _min_rate: f64,
+        _description: String,
     }
 
     #[derive(Debug, Deserialize)]
-    #[allow(dead_code)]
     struct OrderingMetric {
-        first_move_cutoff_rate: f64,
-        description: String,
+        _first_move_cutoff_rate: f64,
+        _description: String,
     }
 
     /// Load tactical positions from YAML
@@ -78,19 +74,19 @@ mod search_integration_tests {
                 benchmarks: Benchmarks {
                     see_basic: PerformanceMetric {
                         max_time_ns: 10000,
-                        description: "Basic SEE".to_string(),
+                        _description: "Basic SEE".to_string(),
                     },
-                    see_with_pins: PerformanceMetric {
+                    _see_with_pins: PerformanceMetric {
                         max_time_ns: 20000,
-                        description: "SEE with pins".to_string(),
+                        _description: "SEE with pins".to_string(),
                     },
-                    quiescence_cutoff_rate: RateMetric {
-                        min_rate: 0.5,
-                        description: "Quiescence cutoff".to_string(),
+                    _quiescence_cutoff_rate: RateMetric {
+                        _min_rate: 0.5,
+                        _description: "Quiescence cutoff".to_string(),
                     },
-                    move_ordering_efficiency: OrderingMetric {
-                        first_move_cutoff_rate: 0.3,
-                        description: "Move ordering".to_string(),
+                    _move_ordering_efficiency: OrderingMetric {
+                        _first_move_cutoff_rate: 0.3,
+                        _description: "Move ordering".to_string(),
                     },
                 },
             };
@@ -358,12 +354,11 @@ mod search_integration_tests {
 
 /// Search statistics for testing
 #[derive(Default)]
-#[allow(dead_code)]
 struct SearchStats {
     nodes: u64,
-    quiescence_nodes: u64,
-    beta_cutoffs: u64,
-    first_move_cutoffs: u64,
+    _quiescence_nodes: u64,
+    _beta_cutoffs: u64,
+    _first_move_cutoffs: u64,
     see_pruned_moves: u64,
     total_moves: u64,
 }
@@ -372,10 +367,10 @@ struct SearchStats {
 fn create_mock_stats(nodes: u64) -> SearchStats {
     SearchStats {
         nodes,
-        quiescence_nodes: nodes / 3,    // Estimate
-        beta_cutoffs: nodes / 10,       // Estimate
-        first_move_cutoffs: nodes / 30, // Estimate
-        see_pruned_moves: 400,          // Increased sample size for more stable results
-        total_moves: 4000,              // Increased sample size to reduce environment variance
+        _quiescence_nodes: nodes / 3,    // Estimate
+        _beta_cutoffs: nodes / 10,       // Estimate
+        _first_move_cutoffs: nodes / 30, // Estimate
+        see_pruned_moves: 400,           // Increased sample size for more stable results
+        total_moves: 4000,               // Increased sample size to reduce environment variance
     }
 }
