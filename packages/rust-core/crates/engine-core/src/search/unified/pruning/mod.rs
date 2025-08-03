@@ -4,25 +4,25 @@
 
 use crate::shogi::{Move, Position};
 
-// Pruning constants based on empirical testing
+// Pruning constants based on empirical testing and modern engine practices
 
 /// Razoring margin - aggressive pruning at very low depths
-/// This value prevents missing shallow tactics while allowing meaningful reductions
-const RAZORING_BASE_MARGIN: i32 = 400;
+/// Adjusted for more aggressive pruning in tactical positions
+const RAZORING_BASE_MARGIN: i32 = 350; // Reduced from 400 for more aggressive razoring
 
 /// Static null move pruning depth factor
 /// Controls how aggressively we prune based on static evaluation
-/// Higher values = more conservative pruning
-const STATIC_NULL_MOVE_DEPTH_FACTOR: i32 = 120;
+/// Lower values = more aggressive pruning
+const STATIC_NULL_MOVE_DEPTH_FACTOR: i32 = 100; // Reduced from 120 for more aggressive pruning
 
 /// Delta pruning margin for quiescence search
-/// Conservative to avoid missing captures that change evaluation significantly
-const DELTA_PRUNING_MARGIN: i32 = 200;
+/// Conservative to avoid missing important captures
+const DELTA_PRUNING_MARGIN: i32 = 150; // Reduced from 200 for slightly more aggressive delta pruning
 
-/// Razoring margins by depth
-/// Lower depths get smaller margins for more aggressive pruning
-const RAZORING_MARGIN_DEPTH_1: i32 = 200;
-const RAZORING_MARGIN_DEPTH_2: i32 = 400;
+/// Razoring margins by depth - optimized for shogi
+/// More aggressive at shallow depths where tactical threats are common
+const RAZORING_MARGIN_DEPTH_1: i32 = 150; // Reduced from 200
+const RAZORING_MARGIN_DEPTH_2: i32 = 300; // Reduced from 400
 
 /// Pruning parameters
 pub struct PruningParams {
@@ -45,7 +45,9 @@ impl Default for PruningParams {
             null_move: true,
             futility: true,
             lmr: true,
-            futility_margins: [0, 100, 200, 300, 400, 500, 600, 700],
+            // Optimized futility margins for shogi
+            // More aggressive at shallow depths, gradual increase for deeper searches
+            futility_margins: [0, 80, 160, 250, 350, 450, 550, 650],
         }
     }
 }
@@ -78,17 +80,17 @@ pub fn can_do_futility_pruning(
     depth <= 7 && can_prune(in_check, alpha, beta)
 }
 
-/// Get futility margin for given depth
+/// Get futility margin for given depth - optimized values
 pub fn futility_margin(depth: u8) -> i32 {
     match depth {
         0 => 0,
-        1 => 100,
-        2 => 200,
-        3 => 300,
-        4 => 400,
-        5 => 500,
-        6 => 600,
-        _ => 700,
+        1 => 80,  // Reduced from 100
+        2 => 160, // Reduced from 200
+        3 => 250, // Reduced from 300
+        4 => 350, // Reduced from 400
+        5 => 450, // Reduced from 500
+        6 => 550, // Reduced from 600
+        _ => 650, // Reduced from 700
     }
 }
 
@@ -122,34 +124,36 @@ pub fn razoring_margin(depth: u8) -> i32 {
     }
 }
 
-/// Calculate LMR reduction
-/// More aggressive reduction table based on modern engine practices
+/// Calculate LMR reduction - optimized for shogi's tactical nature
+/// More aggressive reduction table tuned for shogi games
 pub fn lmr_reduction(depth: u8, moves_searched: u32) -> u8 {
     // No reduction for first few moves or shallow depths
     if depth < 3 || moves_searched < 4 {
         return 0;
     }
 
-    // More aggressive reduction table
+    // Optimized reduction table for shogi
+    // Slightly more conservative than chess due to drops and sudden tactics
     match (depth, moves_searched) {
         // Very deep searches with many moves - maximum reduction
-        (d, m) if d >= 10 && m >= 20 => 6,
-        (d, m) if d >= 9 && m >= 18 => 5,
-        (d, m) if d >= 8 && m >= 16 => 5,
+        (d, m) if d >= 12 && m >= 24 => 6, // Cap at 6 for very deep searches
+        (d, m) if d >= 10 && m >= 20 => 5,
+        (d, m) if d >= 9 && m >= 16 => 5,
+        (d, m) if d >= 8 && m >= 14 => 4,
 
         // Deep searches - significant reduction
-        (d, m) if d >= 7 && m >= 14 => 4,
-        (d, m) if d >= 6 && m >= 12 => 4,
-        (d, m) if d >= 6 && m >= 8 => 3,
+        (d, m) if d >= 7 && m >= 12 => 4,
+        (d, m) if d >= 6 && m >= 10 => 3,
+        (d, m) if d >= 6 && m >= 7 => 3,
 
         // Medium depth - moderate reduction
-        (d, m) if d >= 5 && m >= 10 => 3,
-        (d, m) if d >= 5 && m >= 6 => 3,
-        (d, m) if d >= 4 && m >= 8 => 3,
+        (d, m) if d >= 5 && m >= 8 => 3,
+        (d, m) if d >= 5 && m >= 5 => 2,
+        (d, m) if d >= 4 && m >= 6 => 2,
         (d, m) if d >= 4 && m >= 4 => 2,
 
-        // Shallow depth - light reduction
-        (d, m) if d >= 3 && m >= 6 => 2,
+        // Shallow depth - conservative reduction
+        (d, m) if d >= 3 && m >= 5 => 1,
         (d, m) if d >= 3 && m >= 4 => 1,
 
         _ => 0,
@@ -157,7 +161,7 @@ pub fn lmr_reduction(depth: u8, moves_searched: u32) -> u8 {
 }
 
 /// Calculate LMR reduction with logarithmic formula (alternative implementation)
-/// This provides smoother reduction based on depth and move count
+/// Optimized formula for shogi with adjusted parameters
 /// Can be enabled by switching the function call in node.rs for A/B testing
 #[allow(dead_code)]
 pub fn lmr_reduction_formula(depth: u8, moves_searched: u32) -> u8 {
@@ -165,15 +169,15 @@ pub fn lmr_reduction_formula(depth: u8, moves_searched: u32) -> u8 {
         return 0;
     }
 
-    // More aggressive formula: log(depth) * log(moves) / 1.5
-    // The divisor is reduced from 2.0 to 1.5 for more aggressive pruning
+    // Optimized formula for shogi: log(depth) * log(moves) / 1.75
+    // The divisor is set to 1.75 (between conservative 2.0 and aggressive 1.5)
     let depth_factor = (depth as f32).ln();
     let moves_factor = (moves_searched as f32).ln();
-    let reduction = (depth_factor * moves_factor / 1.5) as u8;
+    let reduction = (depth_factor * moves_factor / 1.75) as u8;
 
-    // Cap the reduction more aggressively
-    // Allow reduction up to depth-1 for very late moves
-    reduction.min(depth.saturating_sub(1))
+    // Cap the reduction more conservatively for shogi
+    // Allow reduction up to depth-2 to preserve some tactical depth
+    reduction.min(depth.saturating_sub(2).min(6)) // Also cap at 6 maximum
 }
 
 /// Check if score is a mate score
@@ -204,7 +208,7 @@ pub fn delta_pruning_margin() -> i32 {
 
 /// Check if static null move (reverse futility) pruning is applicable
 pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval: i32) -> bool {
-    depth <= 6
+    depth <= 7 // Extended from 6 to 7 for slightly more aggressive static null move
         && can_prune_beta(in_check, beta)
         && static_eval - STATIC_NULL_MOVE_DEPTH_FACTOR * depth as i32 >= beta
 }
@@ -279,22 +283,22 @@ mod tests {
         assert!(!can_do_futility_pruning(3, false, 31000, 200, 150));
         assert!(!can_do_futility_pruning(3, false, 100, -31000, 150));
 
-        // Test margin values
+        // Test optimized margin values
         assert_eq!(futility_margin(0), 0);
-        assert_eq!(futility_margin(1), 100);
-        assert_eq!(futility_margin(2), 200);
-        assert_eq!(futility_margin(7), 700);
-        assert_eq!(futility_margin(10), 700); // capped at 700
+        assert_eq!(futility_margin(1), 80);
+        assert_eq!(futility_margin(2), 160);
+        assert_eq!(futility_margin(7), 650);
+        assert_eq!(futility_margin(10), 650); // capped at 650
     }
 
     #[test]
     fn test_razoring_boundary_conditions() {
         // Valid razoring at depth 1
-        assert!(can_do_razoring(1, false, 0, -500)); // static_eval + 400 < alpha
-        assert!(can_do_razoring(2, false, 100, -350)); // static_eval + 400 < alpha
+        assert!(can_do_razoring(1, false, 0, -400)); // static_eval + 350 < alpha
+        assert!(can_do_razoring(2, false, 100, -300)); // static_eval + 350 < alpha
 
         // Invalid: static eval too high
-        assert!(!can_do_razoring(1, false, 0, -300)); // -300 + 400 = 100 >= 0
+        assert!(!can_do_razoring(1, false, 0, -300)); // -300 + 350 = 50 >= 0
 
         // Invalid: too deep
         assert!(!can_do_razoring(3, false, 0, -500));
@@ -346,64 +350,67 @@ mod tests {
     }
 
     #[test]
-    fn test_lmr_reduction_table() {
-        // Test the new aggressive reduction table
+    fn test_lmr_reduction_table_optimized() {
+        // Test the optimized reduction table for shogi
 
         // No reduction for early moves or shallow depths
         assert_eq!(lmr_reduction(2, 5), 0);
         assert_eq!(lmr_reduction(3, 3), 0);
 
-        // Shallow depth reductions
+        // Shallow depth reductions - more conservative
         assert_eq!(lmr_reduction(3, 4), 1);
-        assert_eq!(lmr_reduction(3, 6), 2);
+        assert_eq!(lmr_reduction(3, 5), 1);
 
         // Medium depth reductions
         assert_eq!(lmr_reduction(4, 4), 2);
-        assert_eq!(lmr_reduction(4, 8), 3);
-        assert_eq!(lmr_reduction(5, 6), 3);
-        assert_eq!(lmr_reduction(5, 10), 3);
+        assert_eq!(lmr_reduction(4, 6), 2);
+        assert_eq!(lmr_reduction(5, 5), 2);
+        assert_eq!(lmr_reduction(5, 8), 3);
 
         // Deep reductions
-        assert_eq!(lmr_reduction(6, 8), 3);
-        assert_eq!(lmr_reduction(6, 12), 4);
-        assert_eq!(lmr_reduction(7, 14), 4);
-        assert_eq!(lmr_reduction(8, 16), 5);
+        assert_eq!(lmr_reduction(6, 7), 3);
+        assert_eq!(lmr_reduction(6, 10), 3);
+        assert_eq!(lmr_reduction(7, 12), 4);
+        assert_eq!(lmr_reduction(8, 14), 4);
 
         // Very deep reductions
-        assert_eq!(lmr_reduction(9, 18), 5);
-        assert_eq!(lmr_reduction(10, 20), 6);
-        assert_eq!(lmr_reduction(12, 25), 6); // max reduction
+        assert_eq!(lmr_reduction(9, 16), 5);
+        assert_eq!(lmr_reduction(10, 20), 5);
+        assert_eq!(lmr_reduction(12, 24), 6); // max reduction
     }
 
     #[test]
-    fn test_lmr_reduction_formula() {
-        // Test logarithmic formula
+    fn test_lmr_reduction_formula_optimized() {
+        // Test optimized logarithmic formula
         assert_eq!(lmr_reduction_formula(2, 5), 0);
         assert_eq!(lmr_reduction_formula(3, 3), 0);
 
         // Should produce reasonable reductions
         let r1 = lmr_reduction_formula(5, 10);
-        assert!(r1 > 0 && r1 <= 4);
+        assert!(r1 > 0 && r1 <= 3);
 
         let r2 = lmr_reduction_formula(8, 20);
         assert!(r2 > r1); // deeper/later moves get more reduction
-        assert!(r2 <= 7); // capped at depth-1
+        assert!(r2 <= 6); // capped at 6
 
         let r3 = lmr_reduction_formula(10, 30);
-        assert!(r3 <= 9); // capped at depth-1
+        assert!(r3 <= 6); // capped at 6 maximum
     }
 
     #[test]
-    fn test_static_null_move_pruning() {
-        // Valid conditions
-        assert!(can_do_static_null_move(3, false, 100, 500)); // 500 - 120*3 = 140 >= 100
-        assert!(can_do_static_null_move(2, false, 0, 250)); // 250 - 120*2 = 10 >= 0
+    fn test_static_null_move_pruning_optimized() {
+        // Valid conditions with optimized parameters
+        assert!(can_do_static_null_move(3, false, 100, 500)); // 500 - 100*3 = 200 >= 100
+        assert!(can_do_static_null_move(2, false, 0, 250)); // 250 - 100*2 = 50 >= 0
 
         // Invalid: static eval too low
-        assert!(!can_do_static_null_move(3, false, 100, 400)); // 400 - 120*3 = 40 < 100
+        assert!(!can_do_static_null_move(3, false, 100, 350)); // 350 - 100*3 = 50 < 100
+
+        // Now valid at depth 7
+        assert!(can_do_static_null_move(7, false, 100, 800)); // 800 - 100*7 = 100 >= 100
 
         // Invalid: too deep
-        assert!(!can_do_static_null_move(7, false, 100, 1000));
+        assert!(!can_do_static_null_move(8, false, 100, 1000));
 
         // Invalid: in check
         assert!(!can_do_static_null_move(3, true, 100, 500));
@@ -412,13 +419,13 @@ mod tests {
         assert!(!can_do_static_null_move(3, false, 31000, 500));
 
         // Boundary test at exact threshold
-        assert!(can_do_static_null_move(1, false, 100, 220)); // 220 - 120*1 = 100 >= 100
-        assert!(!can_do_static_null_move(1, false, 100, 219)); // 219 - 120*1 = 99 < 100
+        assert!(can_do_static_null_move(1, false, 100, 200)); // 200 - 100*1 = 100 >= 100
+        assert!(!can_do_static_null_move(1, false, 100, 199)); // 199 - 100*1 = 99 < 100
     }
 
     #[test]
-    fn test_delta_pruning_margin() {
+    fn test_delta_pruning_margin_optimized() {
         assert_eq!(delta_pruning_margin(), DELTA_PRUNING_MARGIN);
-        assert_eq!(delta_pruning_margin(), 200); // verify constant value
+        assert_eq!(delta_pruning_margin(), 150); // verify optimized value
     }
 }
