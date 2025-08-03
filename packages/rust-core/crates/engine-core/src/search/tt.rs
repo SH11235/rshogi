@@ -462,27 +462,30 @@ impl TTBucket {
         None
     }
 
-    /// Scalar fallback probe implementation (optimized with single memory barrier)
+    /// Scalar fallback probe implementation (hybrid: early termination + single fence)
     fn probe_scalar(&self, target_key: u64) -> Option<TTEntry> {
-        // First pass: load all keys with Relaxed ordering to minimize barriers
-        let mut keys = [0u64; BUCKET_SIZE];
+        // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
+        let mut matched_key = 0u64;
 
-        for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Relaxed);
-            if *key == target_key && matching_idx.is_none() {
+        // Load keys with early termination
+        for i in 0..BUCKET_SIZE {
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if key == target_key {
                 matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
             }
         }
 
-        // If we found a match, apply memory barrier once and load the data
+        // If we found a match, apply single memory fence and load data
         if let Some(idx) = matching_idx {
-            // Single acquire fence for all loads
+            // Single acquire fence for synchronization
             std::sync::atomic::fence(Ordering::Acquire);
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: keys[idx],
+                key: matched_key,
                 data,
             };
 
@@ -652,25 +655,23 @@ impl TTBucket {
         (worst_idx, worst_score)
     }
 
-    /// Find worst entry using scalar priority calculation (optimized with batch loading)
+    /// Find worst entry using scalar priority calculation
     fn find_worst_entry_scalar(&self, current_age: u8) -> (usize, i32) {
-        // First pass: load all entries with Relaxed ordering
-        let mut entries = [TTEntry::default(); BUCKET_SIZE];
-
-        for (i, entry) in entries.iter_mut().enumerate() {
-            let idx = i * 2;
-            *entry = TTEntry {
-                key: self.entries[idx].load(Ordering::Relaxed),
-                data: self.entries[idx + 1].load(Ordering::Relaxed),
-            };
-        }
-
-        // Second pass: calculate priority scores
         let mut worst_idx = 0;
         let mut worst_score = i32::MAX;
 
-        for (i, entry) in entries.iter().enumerate() {
-            let score = entry.priority_score(current_age);
+        for i in 0..BUCKET_SIZE {
+            let idx = i * 2;
+            let key = self.entries[idx].load(Ordering::Acquire);
+
+            let score = if key == 0 {
+                i32::MIN // Empty entries have lowest priority
+            } else {
+                let data = self.entries[idx + 1].load(Ordering::Relaxed);
+                let entry = TTEntry { key, data };
+                entry.priority_score(current_age)
+            };
+
             if score < worst_score {
                 worst_score = score;
                 worst_idx = i;
@@ -800,27 +801,30 @@ impl FlexibleTTBucket {
         None
     }
 
-    /// Scalar probe for 4 entries (optimized with single memory barrier)
+    /// Scalar probe for 4 entries (hybrid: early termination + single fence)
     fn probe_scalar_4(&self, target_key: u64) -> Option<TTEntry> {
-        // First pass: load all keys with Relaxed ordering
-        let mut keys = [0u64; 4];
+        // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
+        let mut matched_key = 0u64;
 
-        for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Relaxed);
-            if (*key >> KEY_SHIFT) << KEY_SHIFT == target_key && matching_idx.is_none() {
+        // Load keys with early termination
+        for i in 0..4 {
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
                 matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
             }
         }
 
-        // If we found a match, apply memory barrier once and load the data
+        // If we found a match, apply single memory fence and load data
         if let Some(idx) = matching_idx {
-            // Single acquire fence for all loads
+            // Single acquire fence for synchronization
             std::sync::atomic::fence(Ordering::Acquire);
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: keys[idx],
+                key: matched_key,
                 data,
             };
 
@@ -831,27 +835,30 @@ impl FlexibleTTBucket {
         None
     }
 
-    /// Scalar probe for 8 entries (optimized with single memory barrier)
+    /// Scalar probe for 8 entries (hybrid: early termination + single fence)
     fn probe_scalar_8(&self, target_key: u64) -> Option<TTEntry> {
-        // First pass: load all keys with Relaxed ordering
-        let mut keys = [0u64; 8];
+        // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
+        let mut matched_key = 0u64;
 
-        for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Relaxed);
-            if (*key >> KEY_SHIFT) << KEY_SHIFT == target_key && matching_idx.is_none() {
+        // Load keys with early termination
+        for i in 0..8 {
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
                 matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
             }
         }
 
-        // If we found a match, apply memory barrier once and load the data
+        // If we found a match, apply single memory fence and load data
         if let Some(idx) = matching_idx {
-            // Single acquire fence for all loads
+            // Single acquire fence for synchronization
             std::sync::atomic::fence(Ordering::Acquire);
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: keys[idx],
+                key: matched_key,
                 data,
             };
 
@@ -862,27 +869,30 @@ impl FlexibleTTBucket {
         None
     }
 
-    /// Scalar probe for 16 entries (optimized with single memory barrier)
+    /// Scalar probe for 16 entries (hybrid: early termination + single fence)
     fn probe_scalar_16(&self, target_key: u64) -> Option<TTEntry> {
-        // First pass: load all keys with Relaxed ordering
-        let mut keys = [0u64; 16];
+        // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
+        let mut matched_key = 0u64;
 
-        for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Relaxed);
-            if (*key >> KEY_SHIFT) << KEY_SHIFT == target_key && matching_idx.is_none() {
+        // Load keys with early termination
+        for i in 0..16 {
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
                 matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
             }
         }
 
-        // If we found a match, apply memory barrier once and load the data
+        // If we found a match, apply single memory fence and load data
         if let Some(idx) = matching_idx {
-            // Single acquire fence for all loads
+            // Single acquire fence for synchronization
             std::sync::atomic::fence(Ordering::Acquire);
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: keys[idx],
+                key: matched_key,
                 data,
             };
 
