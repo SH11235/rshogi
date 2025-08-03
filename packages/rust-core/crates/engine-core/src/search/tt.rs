@@ -420,9 +420,11 @@ impl TTBucket {
     }
 
     /// Check if SIMD probe is available
-    #[inline]
+    /// This is inlined and the feature detection is cached by the CPU
+    #[inline(always)]
     fn probe_simd_available(&self) -> bool {
-        // Check if we have SIMD support
+        // The is_x86_feature_detected! macro is already optimized:
+        // It caches the result in a static variable after first call
         #[cfg(target_arch = "x86_64")]
         {
             std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
@@ -488,8 +490,8 @@ impl TTBucket {
             let idx = i * 2;
 
             // Use CAS for atomic update to avoid race conditions
-            // Limit retries to prevent potential infinite loops under extreme contention
-            const MAX_CAS_RETRIES: u32 = 8;
+            // Reduced retries and exponential backoff for better performance under contention
+            const MAX_CAS_RETRIES: u32 = 4; // Reduced from 8 - fail fast is better
             let mut retry_count = 0;
 
             loop {
@@ -522,8 +524,10 @@ impl TTBucket {
                                 break;
                             }
                             // Otherwise, retry the CAS operation
-                            // Add small backoff to reduce contention
-                            std::hint::spin_loop();
+                            // Exponential backoff to reduce contention
+                            for _ in 0..(1 << retry_count.min(3)) {
+                                std::hint::spin_loop();
+                            }
                         }
                     }
                 } else {
@@ -1069,6 +1073,9 @@ pub struct TranspositionTable {
     /// Bucket size configuration
     #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
+    /// SIMD availability (cached at initialization)
+    #[allow(dead_code)]
+    simd_available: bool,
 }
 
 impl TranspositionTable {
@@ -1095,12 +1102,25 @@ impl TranspositionTable {
             buckets.push(TTBucket::new());
         }
 
+        // Check SIMD availability once at initialization
+        let simd_available = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                false
+            }
+        };
+
         TranspositionTable {
             buckets,
             flexible_buckets: None,
             num_buckets,
             age: 0,
             bucket_size: None,
+            simd_available,
         }
     }
 
@@ -1129,12 +1149,25 @@ impl TranspositionTable {
             flexible_buckets.push(FlexibleTTBucket::new(bucket_size));
         }
 
+        // Check SIMD availability once at initialization
+        let simd_available = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                false
+            }
+        };
+
         TranspositionTable {
             buckets: Vec::new(), // Empty for flexible mode
             flexible_buckets: Some(flexible_buckets),
             num_buckets,
             age: 0,
             bucket_size: Some(bucket_size),
+            simd_available,
         }
     }
 
