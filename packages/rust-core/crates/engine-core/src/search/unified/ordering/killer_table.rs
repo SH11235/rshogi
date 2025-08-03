@@ -39,8 +39,9 @@ impl KillerTable {
             return;
         }
 
-        // Killer moves should be quiet moves (non-captures, non-promotions)
-        if mv.is_capture_hint() || mv.is_promote() {
+        // Killer moves should be quiet moves (non-captures, non-promotions, non-drops)
+        // Drops are tactical moves that create new material on the board
+        if mv.is_capture_hint() || mv.is_promote() || mv.is_drop() {
             return;
         }
 

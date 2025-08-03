@@ -131,6 +131,8 @@ impl MoveOrdering {
         }
 
         // History heuristic with improved fallback
+        // Use try_lock() instead of lock() to avoid blocking on contention
+        // This prioritizes performance over perfect history accuracy in high-contention scenarios
         let history_score = match self.history.try_lock() {
             Ok(history) => {
                 let prev_move =
