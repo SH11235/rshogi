@@ -38,3 +38,7 @@ harness = false
 [[bench]]
 name = "tt_prefetch_bench"
 harness = false
+
+[[bench]]
+name = "tt_simd_bench"
+harness = false
