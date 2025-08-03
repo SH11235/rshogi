@@ -153,6 +153,11 @@ where
         let undo_info = pos.do_move(mv);
         searcher.stats.nodes += 1;
 
+        // Prefetch TT entry for the new position
+        if USE_TT {
+            searcher.prefetch_tt(pos.zobrist_hash);
+        }
+
         let mut score;
 
         // Principal variation search
@@ -349,7 +354,7 @@ mod tests {
         let score = search_node(&mut searcher, &mut pos, 3, -1000, 1000, 0);
 
         // Should return a valid score
-        assert!(score >= -1000 && score <= 1000);
+        assert!((-1000..=1000).contains(&score));
         assert!(searcher.stats.nodes > 0);
     }
 
@@ -385,7 +390,7 @@ mod tests {
         let score = search_node(&mut searcher, &mut pos, 2, -1000, 1000, 0);
 
         // Verify search completed
-        assert!(score >= -SEARCH_INF && score <= SEARCH_INF);
+        assert!((-SEARCH_INF..=SEARCH_INF).contains(&score));
     }
 
     #[test]
