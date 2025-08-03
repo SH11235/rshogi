@@ -8,6 +8,8 @@ edition = "2021"
 loom = ["dep:loom"]
 # Feature for tests that require large stack size
 large-stack-tests = []
+# Feature to enable nightly-only optimizations (e.g., ARM64 prefetch)
+nightly = []
 
 [dependencies]
 serde = { workspace = true }
