@@ -206,4 +206,57 @@ mod tests {
         // Ply 2 should have what was at ply 1
         assert_eq!(table.get(2)[0], Some(mv2));
     }
+
+    #[test]
+    fn test_killer_table_memory_pressure() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Test killer table behavior under memory pressure with many concurrent threads
+        let table = Arc::new(KillerTable::new());
+        let num_threads = 32; // More threads than typical CPU cores
+        let iterations_per_thread = 1000;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let table = Arc::clone(&table);
+                thread::spawn(move || {
+                    for i in 0..iterations_per_thread {
+                        let ply = (thread_id + i) % MAX_KILLER_PLY;
+                        // Create moves using the same pattern as other tests
+                        let from_file = ((thread_id * 7 + i) % 9) as u8;
+                        let from_rank = ((thread_id * 3 + i) % 9) as u8;
+                        let to_file = ((thread_id * 11 + i + 1) % 9) as u8;
+                        let to_rank = ((thread_id * 5 + i + 1) % 9) as u8;
+
+                        let mv = Move::normal(
+                            Square::new(from_file, from_rank),
+                            Square::new(to_file, to_rank),
+                            false,
+                        );
+
+                        // Simulate memory pressure by rapidly adding and retrieving
+                        table.update(ply, mv);
+                        let _ = table.get(ply);
+
+                        // Occasionally age the table to stress memory reallocation
+                        if i % 100 == 0 {
+                            table.age();
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify table is still functional after stress test
+        let test_move = Move::normal(Square::new(6, 6), Square::new(6, 5), false);
+        table.update(0, test_move);
+        let killers = table.get(0);
+        assert!(killers.contains(&Some(test_move)));
+    }
 }
