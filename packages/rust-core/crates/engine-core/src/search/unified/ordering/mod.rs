@@ -2,22 +2,39 @@
 //!
 //! Implements various move ordering heuristics
 
+mod killer_table;
+
 use crate::{
     search::{history::History, types::SearchStack},
     shogi::{Move, MoveList, Position},
 };
 use std::sync::{Arc, Mutex};
 
+pub use killer_table::KillerTable;
+
 /// Move ordering state
 pub struct MoveOrdering {
     /// History heuristic reference (thread-safe)
     history: Arc<Mutex<History>>,
+    /// Global killer moves table
+    killer_table: Arc<KillerTable>,
 }
 
 impl MoveOrdering {
     /// Create new move ordering
     pub fn new(history: Arc<Mutex<History>>) -> Self {
-        Self { history }
+        Self {
+            history,
+            killer_table: Arc::new(KillerTable::new()),
+        }
+    }
+
+    /// Create with existing killer table (for sharing between threads)
+    pub fn with_killer_table(history: Arc<Mutex<History>>, killer_table: Arc<KillerTable>) -> Self {
+        Self {
+            history,
+            killer_table,
+        }
     }
 
     /// Order moves for search using SearchStack
@@ -94,18 +111,27 @@ impl MoveOrdering {
             }
         }
 
-        // Killer moves from SearchStack
+        // Killer moves from both SearchStack and global KillerTable
         if crate::search::types::SearchStack::is_valid_ply(ply) {
+            // First check SearchStack killers
             let stack_entry = &search_stack[ply as usize];
             for (slot, &killer) in stack_entry.killers.iter().enumerate() {
                 if Some(mv) == killer {
                     return 90_000 - slot as i32;
                 }
             }
+
+            // Then check global KillerTable
+            let global_killers = self.killer_table.get(ply as usize);
+            for (slot, &killer) in global_killers.iter().enumerate() {
+                if Some(mv) == killer {
+                    return 89_000 - slot as i32;
+                }
+            }
         }
 
-        // History heuristic with continuation history
-        let history_score = match self.history.lock() {
+        // History heuristic with improved fallback
+        let history_score = match self.history.try_lock() {
             Ok(history) => {
                 let prev_move =
                     if ply > 0 && crate::search::types::SearchStack::is_valid_ply(ply - 1) {
@@ -115,13 +141,25 @@ impl MoveOrdering {
                     };
                 history.get_score(pos.side_to_move, mv, prev_move)
             }
-            Err(e) => {
-                // Mutex poisoning indicates a panic in another thread holding the lock.
-                // This should be extremely rare in production, but log it for debugging.
-                // Impact: Move ordering quality may degrade slightly, but search remains correct.
-                log::error!("Failed to acquire history lock in move ordering: {e}");
-                // Use static evaluation as fallback
-                self.get_static_move_score(pos, mv)
+            Err(_) => {
+                // Mutex is busy (contention) or poisoned
+                // Use enhanced static evaluation as fallback
+                let static_score = self.get_static_move_score(pos, mv);
+
+                // Add bonuses based on move characteristics that don't require history
+                let mut bonus = 0;
+
+                // Bonus for moves that attack opponent pieces
+                if self.is_attacking_move(pos, mv) {
+                    bonus += 500;
+                }
+
+                // Bonus for defensive moves
+                if self.is_defensive_move(pos, mv) {
+                    bonus += 300;
+                }
+
+                static_score + bonus
             }
         };
 
@@ -206,6 +244,54 @@ impl MoveOrdering {
         }
 
         score
+    }
+
+    /// Check if a move attacks opponent pieces
+    fn is_attacking_move(&self, pos: &Position, mv: Move) -> bool {
+        use crate::Color;
+
+        let to_sq = mv.to();
+        let _enemy_color = pos.side_to_move.flip();
+
+        // Check if the destination square is near enemy pieces
+        // This is a simplified heuristic - proper attack detection would require
+        // generating attacks from the destination square
+        match pos.side_to_move {
+            Color::Black => {
+                // For black, attacking moves go towards lower ranks (enemy territory)
+                to_sq.rank() <= 3
+            }
+            Color::White => {
+                // For white, attacking moves go towards higher ranks
+                to_sq.rank() >= 7
+            }
+        }
+    }
+
+    /// Check if a move is defensive
+    fn is_defensive_move(&self, pos: &Position, mv: Move) -> bool {
+        use crate::Color;
+
+        // Drops in own territory are often defensive
+        if mv.is_drop() {
+            let to_sq = mv.to();
+            match pos.side_to_move {
+                Color::Black => to_sq.rank() >= 7,
+                Color::White => to_sq.rank() <= 3,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Update killer moves in global table
+    pub fn update_killer(&self, ply: u16, mv: Move) {
+        self.killer_table.update(ply as usize, mv);
+    }
+
+    /// Clear killer table for new search
+    pub fn clear_killers(&self) {
+        self.killer_table.clear();
     }
 }
 
