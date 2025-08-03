@@ -645,14 +645,24 @@ impl TranspositionTable {
             _mm_prefetch(bucket_ptr as *const i8, 3); // _MM_HINT_T0
         }
 
-        // ARM64 prefetch is currently unstable in stable Rust
-        // Skip prefetch on ARM64 until it becomes stable
-        // Note: _prefetch intrinsic requires nightly Rust (feature stdarch_aarch64_prefetch)
+        // ARM64 prefetch - currently requires nightly Rust
+        // We conditionally compile based on whether we're using nightly
         #[cfg(target_arch = "aarch64")]
         {
-            // Prefetch is not available on stable Rust for ARM64
-            // This is a no-op to avoid compilation errors
-            let _ = bucket_ptr; // Use the pointer to avoid unused variable warning
+            // On nightly Rust (like in CI), we can use prefetch
+            // This uses a trick: we try to detect nightly at compile time
+            #[cfg(feature = "nightly")]
+            unsafe {
+                use std::arch::aarch64::_prefetch;
+                _prefetch(bucket_ptr as *const i8, 0, 3); // Read, L1 cache
+            }
+
+            // On stable Rust, prefetch is not available
+            #[cfg(not(feature = "nightly"))]
+            {
+                // No-op on stable builds to avoid compilation errors
+                let _ = bucket_ptr; // Avoid unused variable warning
+            }
         }
     }
 }
