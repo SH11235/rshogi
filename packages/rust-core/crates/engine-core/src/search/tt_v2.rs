@@ -9,12 +9,40 @@ use crate::{shogi::Move, util};
 use util::sync_compat::{AtomicU64, Ordering};
 
 // Bit layout constants for TTEntry data field
+// Optimized layout (64 bits total) - Version 2.1:
+// [63-48]: move (16 bits)
+// [47-34]: score (14 bits) - Optimized from 16 bits, supports ±8191
+// [33-32]: extended flags (2 bits):
+//          - Bit 33: Singular Extension flag
+//          - Bit 32: Null Move Pruning flag
+// [31-25]: depth (7 bits) - Supports depth up to 127
+// [24-23]: node type (2 bits) - Exact/LowerBound/UpperBound
+// [22-20]: age (3 bits) - Generation counter (0-7)
+// [19]: PV flag (1 bit) - Principal Variation node marker
+// [18-16]: search flags (3 bits):
+//          - Bit 18: TT Move tried flag
+//          - Bit 17: Mate threat flag
+//          - Bit 16: Reserved for future use
+// [15-2]: static eval (14 bits) - Optimized from 16 bits, supports ±8191
+// [1-0]: Reserved (2 bits) - For future extensions
+
 const MOVE_SHIFT: u8 = 48;
 const MOVE_BITS: u8 = 16;
 const MOVE_MASK: u64 = (1 << MOVE_BITS) - 1;
-const SCORE_SHIFT: u8 = 32;
-const SCORE_BITS: u8 = 16;
+
+// Optimized score field: 14 bits (was 16)
+const SCORE_SHIFT: u8 = 34;
+const SCORE_BITS: u8 = 14;
 const SCORE_MASK: u64 = (1 << SCORE_BITS) - 1;
+const SCORE_MAX: i16 = (1 << (SCORE_BITS - 1)) - 1; // 8191
+const SCORE_MIN: i16 = -(1 << (SCORE_BITS - 1)); // -8192
+
+// Extended flags (new)
+const EXTENDED_FLAGS_SHIFT: u8 = 32;
+const EXTENDED_FLAGS_BITS: u8 = 2;
+const SINGULAR_EXTENSION_FLAG: u64 = 1 << 33;
+const NULL_MOVE_FLAG: u64 = 1 << 32;
+
 const DEPTH_SHIFT: u8 = 25;
 const DEPTH_BITS: u8 = 7;
 const DEPTH_MASK: u8 = (1 << DEPTH_BITS) - 1;
@@ -22,12 +50,27 @@ const NODE_TYPE_SHIFT: u8 = 23;
 const NODE_TYPE_BITS: u8 = 2;
 const NODE_TYPE_MASK: u8 = (1 << NODE_TYPE_BITS) - 1;
 const AGE_SHIFT: u8 = 20;
-const AGE_BITS: u8 = 3; // Reduced from 6 to 3 bits (0-7)
+const AGE_BITS: u8 = 3;
 const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
-const PV_FLAG_SHIFT: u8 = 19; // PV flag bit
+const PV_FLAG_SHIFT: u8 = 19;
 const PV_FLAG_MASK: u64 = 1;
-const EVAL_BITS: u8 = 16;
+
+// Search flags (expanded)
+const SEARCH_FLAGS_SHIFT: u8 = 16;
+const SEARCH_FLAGS_BITS: u8 = 3;
+const TT_MOVE_TRIED_FLAG: u64 = 1 << 18;
+const MATE_THREAT_FLAG: u64 = 1 << 17;
+
+// Optimized eval field: 14 bits (was 16)
+const EVAL_SHIFT: u8 = 2;
+const EVAL_BITS: u8 = 14;
 const EVAL_MASK: u64 = (1 << EVAL_BITS) - 1;
+const EVAL_MAX: i16 = (1 << (EVAL_BITS - 1)) - 1; // 8191
+const EVAL_MIN: i16 = -(1 << (EVAL_BITS - 1)); // -8192
+
+// Reserved for future
+const RESERVED_BITS: u8 = 2;
+const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
 
 // Apery-style generation cycle constants
 const GENERATION_CYCLE: u16 = 255 + (1 << AGE_BITS); // 263
@@ -61,6 +104,30 @@ pub struct TTEntryParams {
     pub node_type: NodeType,
     pub age: u8,
     pub is_pv: bool,
+    // Extended flags (optional)
+    pub singular_extension: bool,
+    pub null_move: bool,
+    pub tt_move_tried: bool,
+    pub mate_threat: bool,
+}
+
+impl Default for TTEntryParams {
+    fn default() -> Self {
+        Self {
+            key: 0,
+            mv: None,
+            score: 0,
+            eval: 0,
+            depth: 0,
+            node_type: NodeType::Exact,
+            age: 0,
+            is_pv: false,
+            singular_extension: false,
+            null_move: false,
+            tt_move_tried: false,
+            mate_threat: false,
+        }
+    }
 }
 
 /// Transposition table entry (16 bytes)
@@ -72,7 +139,7 @@ pub struct TTEntry {
 }
 
 impl TTEntry {
-    /// Create new TT entry
+    /// Create new TT entry (backward compatibility)
     pub fn new(
         key: u64,
         mv: Option<Move>,
@@ -91,6 +158,7 @@ impl TTEntry {
             node_type,
             age,
             is_pv: false,
+            ..Default::default()
         };
         Self::from_params(params)
     }
@@ -106,22 +174,36 @@ impl TTEntry {
             None => 0,
         };
 
-        // Pack all data into 64 bits:
-        // [63-48]: move (16 bits)
-        // [47-32]: score (16 bits)
-        // [31-25]: depth (7 bits)
-        // [24-23]: node type (2 bits)
-        // [22-20]: age (3 bits)
-        // [19]: PV flag (1 bit)
-        // [18-16]: reserved (3 bits)
-        // [15-0]: static eval (16 bits)
-        let data = ((move_data as u64) << MOVE_SHIFT)
-            | ((params.score as u16 as u64) << SCORE_SHIFT)
+        // Clamp score and eval to 14-bit range
+        let score = params.score.clamp(SCORE_MIN, SCORE_MAX);
+        let eval = params.eval.clamp(EVAL_MIN, EVAL_MAX);
+
+        // Encode score and eval as 14-bit values (with sign bit)
+        let score_encoded = ((score as u16) & SCORE_MASK as u16) as u64;
+        let eval_encoded = ((eval as u16) & EVAL_MASK as u16) as u64;
+
+        // Pack all data into 64 bits with optimized layout:
+        let mut data = ((move_data as u64) << MOVE_SHIFT)
+            | (score_encoded << SCORE_SHIFT)
             | (((params.depth & DEPTH_MASK) as u64) << DEPTH_SHIFT)
             | ((params.node_type as u64) << NODE_TYPE_SHIFT)
             | (((params.age & AGE_MASK) as u64) << AGE_SHIFT)
             | ((params.is_pv as u64) << PV_FLAG_SHIFT)
-            | (params.eval as u16 as u64);
+            | (eval_encoded << EVAL_SHIFT);
+
+        // Set extended flags
+        if params.singular_extension {
+            data |= SINGULAR_EXTENSION_FLAG;
+        }
+        if params.null_move {
+            data |= NULL_MOVE_FLAG;
+        }
+        if params.tt_move_tried {
+            data |= TT_MOVE_TRIED_FLAG;
+        }
+        if params.mate_threat {
+            data |= MATE_THREAT_FLAG;
+        }
 
         TTEntry { key, data }
     }
@@ -149,16 +231,30 @@ impl TTEntry {
         Some(Move::from_u16(move_data))
     }
 
-    /// Get score from entry
+    /// Get score from entry (14-bit signed value)
     #[inline]
     pub fn score(&self) -> i16 {
-        ((self.data >> SCORE_SHIFT) & SCORE_MASK) as i16
+        let raw = ((self.data >> SCORE_SHIFT) & SCORE_MASK) as u16;
+        // Sign-extend from 14-bit to 16-bit
+        if raw & (1 << (SCORE_BITS - 1)) != 0 {
+            // Negative value - set upper bits to 1
+            (raw | (0xFFFF << SCORE_BITS)) as i16
+        } else {
+            raw as i16
+        }
     }
 
-    /// Get static evaluation from entry
+    /// Get static evaluation from entry (14-bit signed value)
     #[inline]
     pub fn eval(&self) -> i16 {
-        (self.data & EVAL_MASK) as i16
+        let raw = ((self.data >> EVAL_SHIFT) & EVAL_MASK) as u16;
+        // Sign-extend from 14-bit to 16-bit
+        if raw & (1 << (EVAL_BITS - 1)) != 0 {
+            // Negative value - set upper bits to 1
+            (raw | (0xFFFF << EVAL_BITS)) as i16
+        } else {
+            raw as i16
+        }
     }
 
     /// Get search depth
@@ -196,6 +292,30 @@ impl TTEntry {
     #[inline]
     pub fn is_pv(&self) -> bool {
         ((self.data >> PV_FLAG_SHIFT) & PV_FLAG_MASK) != 0
+    }
+
+    /// Check if Singular Extension was applied
+    #[inline]
+    pub fn has_singular_extension(&self) -> bool {
+        (self.data & SINGULAR_EXTENSION_FLAG) != 0
+    }
+
+    /// Check if Null Move Pruning was applied
+    #[inline]
+    pub fn has_null_move(&self) -> bool {
+        (self.data & NULL_MOVE_FLAG) != 0
+    }
+
+    /// Check if TT move was tried
+    #[inline]
+    pub fn tt_move_tried(&self) -> bool {
+        (self.data & TT_MOVE_TRIED_FLAG) != 0
+    }
+
+    /// Check if position has mate threat
+    #[inline]
+    pub fn has_mate_threat(&self) -> bool {
+        (self.data & MATE_THREAT_FLAG) != 0
     }
 
     /// Calculate replacement priority score using Apery-style cyclic distance
@@ -429,6 +549,7 @@ impl TranspositionTableV2 {
             node_type,
             age: self.age,
             is_pv: false,
+            ..Default::default()
         };
         self.store_entry(params);
     }
@@ -696,6 +817,7 @@ mod tests {
             node_type: NodeType::Exact,
             age: 0, // Will be overridden by store_with_params
             is_pv: true,
+            ..Default::default()
         });
 
         // Verify PV flag is set
@@ -715,6 +837,7 @@ mod tests {
             node_type: NodeType::LowerBound,
             age: 0, // Will be overridden by store_with_params
             is_pv: false,
+            ..Default::default()
         });
 
         // The new entry should replace
@@ -751,6 +874,7 @@ mod tests {
             node_type: NodeType::Exact,
             age: 0, // Will be overridden by store_with_params
             is_pv: true,
+            ..Default::default()
         });
 
         // Verify the new entry exists
@@ -798,6 +922,7 @@ mod tests {
             node_type: NodeType::Exact,
             age: 0,
             is_pv: false,
+            ..Default::default()
         });
         let entry2 = TTEntry::from_params(TTEntryParams {
             key: 0x456,
@@ -808,6 +933,7 @@ mod tests {
             node_type: NodeType::Exact,
             age: 0,
             is_pv: true,
+            ..Default::default()
         });
 
         // Store regular entry
