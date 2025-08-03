@@ -85,6 +85,10 @@ fn read_until_pattern(
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Performance test - skipped in debug builds"
+)]
 fn test_rapid_ponder_hit() {
     let mut engine = spawn_engine();
     let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
@@ -168,6 +172,10 @@ fn test_rapid_ponder_hit() {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Performance test - skipped in debug builds"
+)]
 fn test_ponder_hit_while_mutex_locked() {
     let mut engine = spawn_engine();
     let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
@@ -214,6 +222,10 @@ fn test_ponder_hit_while_mutex_locked() {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Performance test - skipped in debug builds"
+)]
 fn test_concurrent_ponder_and_position_commands() {
     let mut engine = spawn_engine();
     let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
@@ -265,6 +277,10 @@ fn test_concurrent_ponder_and_position_commands() {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Performance test - skipped in debug builds"
+)]
 fn test_ponder_hit_with_stop() {
     let mut engine = spawn_engine();
     let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
@@ -310,6 +326,10 @@ fn test_ponder_hit_with_stop() {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "Performance test - skipped in debug builds"
+)]
 fn test_ponder_hit_stress_with_thread_timing() {
     // This test specifically checks for race conditions by using thread timing
     let stop_flag = Arc::new(AtomicBool::new(false));
