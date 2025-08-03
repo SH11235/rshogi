@@ -77,7 +77,13 @@ jobs:
           echo "4. Integration tests"
           echo ""
           # Run ignored tests but exclude benchmark tests which can hang in CI
-          RUST_MIN_STACK=${{ steps.stack.outputs.size }} cargo test -- --ignored --nocapture --skip test_benchmark
+          # Use release build for performance-critical tests
+          # Enable nightly features when using nightly Rust
+          if [ "${{ matrix.rust }}" = "nightly" ]; then
+            RUST_MIN_STACK=${{ steps.stack.outputs.size }} cargo test --release --features nightly -- --ignored --nocapture --skip test_benchmark
+          else
+            RUST_MIN_STACK=${{ steps.stack.outputs.size }} cargo test --release -- --ignored --nocapture --skip test_benchmark
+          fi
       
       - name: Run ignored tests (Windows)
         if: runner.os == 'Windows'
@@ -88,7 +94,13 @@ jobs:
           Write-Host ""
           $env:RUST_MIN_STACK = "${{ steps.stack.outputs.size }}"
           # Run ignored tests but exclude benchmark tests which can hang in CI
-          cargo test -- --ignored --nocapture --skip test_benchmark
+          # Use release build for performance-critical tests
+          # Enable nightly features when using nightly Rust
+          if ("${{ matrix.rust }}" -eq "nightly") {
+            cargo test --release --features nightly -- --ignored --nocapture --skip test_benchmark
+          } else {
+            cargo test --release -- --ignored --nocapture --skip test_benchmark
+          }
       
       - name: Test Summary
         if: always()
