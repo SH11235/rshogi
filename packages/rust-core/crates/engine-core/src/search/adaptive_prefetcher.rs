@@ -70,7 +70,7 @@ impl AdaptivePrefetcher {
         let misses = self.miss_count.load(Ordering::Relaxed);
         let total = hits + misses;
 
-        // Wait until we have enough statistics
+        // Don't adjust until we have enough statistics
         if total < Self::STAT_WINDOW {
             return;
         }
@@ -254,16 +254,23 @@ mod tests {
     fn test_statistics_decay() {
         let prefetcher = AdaptivePrefetcher::new();
 
-        // Add many samples
-        for _ in 0..2048 {
-            prefetcher.record_hit();
-        }
+        // Directly set statistics to test decay behavior
+        // We bypass the automatic decay that happens during recording
+        prefetcher.hit_count.store(2000, Ordering::Relaxed);
+        prefetcher.miss_count.store(48, Ordering::Relaxed);
 
         let stats_before = prefetcher.stats();
+        assert_eq!(stats_before.hits, 2000);
+        assert_eq!(stats_before.misses, 48);
+
+        // Call adjust_distance which should decay the statistics
+        // since total (2048) >= STAT_WINDOW (1024)
         prefetcher.adjust_distance();
+
         let stats_after = prefetcher.stats();
 
-        // Statistics should decay
-        assert!(stats_after.hits < stats_before.hits);
+        // Statistics should decay by right shift (divide by 2)
+        assert_eq!(stats_after.hits, 1000, "Hits should decay from 2000 to 1000");
+        assert_eq!(stats_after.misses, 24, "Misses should decay from 48 to 24");
     }
 }
