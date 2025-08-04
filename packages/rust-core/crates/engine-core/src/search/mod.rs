@@ -1,3 +1,4 @@
+pub mod adaptive_prefetcher;
 pub mod common;
 pub mod constants;
 pub mod history;
@@ -10,6 +11,8 @@ pub mod tt_stats;
 pub mod types;
 pub mod unified;
 
+#[cfg(test)]
+pub mod prefetch_test;
 #[cfg(test)]
 pub mod test_helpers;
 
