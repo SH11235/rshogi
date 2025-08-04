@@ -484,7 +484,7 @@ where
     pub(crate) fn prefetch_tt(&self, hash: u64) {
         if USE_TT {
             if let Some(ref tt) = self.tt {
-                tt.prefetch(hash);
+                tt.prefetch_l1(hash); // Use L1 cache for immediate access
             }
         }
     }
