@@ -138,13 +138,15 @@ impl Default for KillerTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Square;
+    use crate::{usi::parse_usi_square, Square};
 
     #[test]
     fn test_killer_update() {
         let table = KillerTable::new();
-        let mv1 = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
-        let mv2 = Move::normal(Square::new(7, 7), Square::new(7, 6), false);
+        let mv1 =
+            Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
+        let mv2 =
+            Move::normal(parse_usi_square("2h").unwrap(), parse_usi_square("2g").unwrap(), false);
 
         // Update at ply 0
         table.update(0, mv1);
@@ -162,9 +164,12 @@ mod tests {
     #[test]
     fn test_killer_is_killer() {
         let table = KillerTable::new();
-        let mv1 = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
-        let mv2 = Move::normal(Square::new(7, 7), Square::new(7, 6), false);
-        let mv3 = Move::normal(Square::new(3, 7), Square::new(3, 6), false);
+        let mv1 =
+            Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
+        let mv2 =
+            Move::normal(parse_usi_square("2h").unwrap(), parse_usi_square("2g").unwrap(), false);
+        let mv3 =
+            Move::normal(parse_usi_square("6h").unwrap(), parse_usi_square("6g").unwrap(), false);
 
         table.update(0, mv1);
         table.update(0, mv2);
@@ -177,7 +182,8 @@ mod tests {
     #[test]
     fn test_killer_clear() {
         let table = KillerTable::new();
-        let mv1 = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
+        let mv1 =
+            Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
 
         table.update(0, mv1);
         table.update(1, mv1);
@@ -191,8 +197,10 @@ mod tests {
     #[test]
     fn test_killer_age() {
         let table = KillerTable::new();
-        let mv1 = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
-        let mv2 = Move::normal(Square::new(7, 7), Square::new(7, 6), false);
+        let mv1 =
+            Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
+        let mv2 =
+            Move::normal(parse_usi_square("2h").unwrap(), parse_usi_square("2g").unwrap(), false);
 
         table.update(0, mv1);
         table.update(1, mv2);
@@ -254,7 +262,8 @@ mod tests {
         }
 
         // Verify table is still functional after stress test
-        let test_move = Move::normal(Square::new(6, 6), Square::new(6, 5), false);
+        let test_move =
+            Move::normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap(), false);
         table.update(0, test_move);
         let killers = table.get(0);
         assert!(killers.contains(&Some(test_move)));

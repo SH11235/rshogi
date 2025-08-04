@@ -328,6 +328,8 @@ pub fn calculate_update(pos: &Position, mv: Move) -> NNUEResult<AccumulatorUpdat
 
 #[cfg(test)]
 mod tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
 
     #[test]
@@ -360,7 +362,8 @@ mod tests {
     #[test]
     fn test_calculate_update_normal_move() {
         let pos = Position::startpos();
-        let mv = Move::make_normal(Square::new(6, 6), Square::new(6, 5)); // 7g7f
+        let mv =
+            Move::make_normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap()); // 7g7f
 
         let update = calculate_update(&pos, mv).unwrap();
 
@@ -374,7 +377,7 @@ mod tests {
         let mut pos = Position::startpos();
         pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
 
-        let mv = Move::make_drop(PieceType::Pawn, Square::new(4, 4)); // P*5e
+        let mv = Move::make_drop(PieceType::Pawn, parse_usi_square("5e").unwrap()); // P*5e
 
         let update = calculate_update(&pos, mv).unwrap();
 
@@ -388,9 +391,10 @@ mod tests {
         let mut pos = Position::empty();
         // Add some pieces but no kings
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
-        let mv = Move::make_normal(Square::new(4, 4), Square::new(4, 3));
+        let mv =
+            Move::make_normal(parse_usi_square("5e").unwrap(), parse_usi_square("5d").unwrap());
 
         let result = calculate_update(&pos, mv);
         assert!(result.is_err());

@@ -11,7 +11,8 @@ use engine_core::evaluate::MaterialEvaluator;
 use engine_core::search::unified::UnifiedSearcher;
 use engine_core::search::SearchLimitsBuilder;
 use engine_core::shogi::{Move, MoveList};
-use engine_core::{Color, MoveGen, Piece, PieceType, Position, Square};
+use engine_core::usi::parse_usi_square;
+use engine_core::{Color, MoveGen, Piece, PieceType, Position};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -190,15 +191,15 @@ fn create_simple_capture_position() -> Position {
 
     // Kings
     pos.board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // Simple pawn capture
     pos.board
-        .put_piece(Square::new(3, 3), Piece::new(PieceType::Pawn, Color::Black));
+        .put_piece(parse_usi_square("6d").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::White));
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::White));
 
     pos.board.rebuild_occupancy_bitboards();
     pos.side_to_move = Color::Black;
@@ -211,21 +212,21 @@ fn create_complex_exchange_position() -> Position {
 
     // Kings
     pos.board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // Complex center with multiple pieces
     pos.board
-        .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::White));
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::White));
     pos.board
-        .put_piece(Square::new(3, 3), Piece::new(PieceType::Silver, Color::Black));
+        .put_piece(parse_usi_square("6d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
     pos.board
-        .put_piece(Square::new(5, 5), Piece::new(PieceType::Bishop, Color::Black));
+        .put_piece(parse_usi_square("4f").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 6), Piece::new(PieceType::Rook, Color::White));
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Rook, Color::White));
     pos.board
-        .put_piece(Square::new(4, 2), Piece::new(PieceType::Rook, Color::Black));
+        .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Rook, Color::Black));
 
     pos.board.rebuild_occupancy_bitboards();
     pos.side_to_move = Color::Black;
@@ -238,27 +239,27 @@ fn create_pinned_position() -> Position {
 
     // Black King at 5i
     pos.board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
 
     // Black Gold at 5e (pinned)
     pos.board
-        .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::Black));
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
     // White Rook at 5a (pinning)
     pos.board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::Rook, Color::White));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
     // White Pawn at 4e (can't be captured by pinned Gold)
     pos.board
-        .put_piece(Square::new(5, 4), Piece::new(PieceType::Pawn, Color::White));
+        .put_piece(parse_usi_square("4e").unwrap(), Piece::new(PieceType::Pawn, Color::White));
 
     // Black Silver at 6f (can capture)
     pos.board
-        .put_piece(Square::new(3, 3), Piece::new(PieceType::Silver, Color::Black));
+        .put_piece(parse_usi_square("6d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
 
     // White King
     pos.board
-        .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::White));
 
     pos.board.rebuild_occupancy_bitboards();
     pos.side_to_move = Color::Black;
@@ -275,9 +276,9 @@ fn create_multiple_pins_position() -> Position {
 
     // Add diagonal pin
     pos.board
-        .put_piece(Square::new(6, 2), Piece::new(PieceType::Silver, Color::Black));
+        .put_piece(parse_usi_square("3c").unwrap(), Piece::new(PieceType::Silver, Color::Black));
     pos.board
-        .put_piece(Square::new(8, 0), Piece::new(PieceType::Bishop, Color::White));
+        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Bishop, Color::White));
 
     pos.board.rebuild_occupancy_bitboards();
     pos
@@ -288,9 +289,9 @@ fn create_cross_pins_position() -> Position {
 
     // Add horizontal pin
     pos.board
-        .put_piece(Square::new(2, 0), Piece::new(PieceType::Gold, Color::Black));
+        .put_piece(parse_usi_square("7a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
     pos.board
-        .put_piece(Square::new(0, 0), Piece::new(PieceType::Rook, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
     pos.board.rebuild_occupancy_bitboards();
     pos
@@ -302,10 +303,10 @@ fn create_middlegame_position() -> Position {
 
     // Make some standard opening moves
     let moves = vec![
-        Move::normal(Square::new(2, 2), Square::new(2, 3), false),
-        Move::normal(Square::new(3, 6), Square::new(3, 5), false),
-        Move::normal(Square::new(2, 3), Square::new(2, 4), false),
-        Move::normal(Square::new(3, 5), Square::new(3, 4), false),
+        Move::normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap(), false),
+        Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false),
+        Move::normal(parse_usi_square("7d").unwrap(), parse_usi_square("7e").unwrap(), false),
+        Move::normal(parse_usi_square("6f").unwrap(), parse_usi_square("6e").unwrap(), false),
     ];
 
     for mv in moves {
@@ -325,23 +326,23 @@ fn create_many_captures_position() -> Position {
 
     // Set up a position where many pieces can capture on the same square
     pos.board
-        .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // Target square with valuable piece
     pos.board
-        .put_piece(Square::new(5, 5), Piece::new(PieceType::Gold, Color::White));
+        .put_piece(parse_usi_square("4f").unwrap(), Piece::new(PieceType::Gold, Color::White));
 
     // Multiple attackers
     pos.board
-        .put_piece(Square::new(4, 5), Piece::new(PieceType::Pawn, Color::Black));
+        .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
     pos.board
-        .put_piece(Square::new(5, 4), Piece::new(PieceType::Silver, Color::Black));
+        .put_piece(parse_usi_square("4e").unwrap(), Piece::new(PieceType::Silver, Color::Black));
     pos.board
-        .put_piece(Square::new(6, 6), Piece::new(PieceType::Bishop, Color::Black));
+        .put_piece(parse_usi_square("3g").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
     pos.board
-        .put_piece(Square::new(5, 7), Piece::new(PieceType::Rook, Color::Black));
+        .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
 
     pos.board.rebuild_occupancy_bitboards();
     pos.side_to_move = Color::Black;
@@ -358,15 +359,15 @@ fn create_forced_sequence_position() -> Position {
 
     // In check position
     pos.board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
     pos.board
-        .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+        .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
     // Only one way to block
     pos.board
-        .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::Black));
+        .put_piece(parse_usi_square("6a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
     pos.board.rebuild_occupancy_bitboards();
     pos.side_to_move = Color::Black;

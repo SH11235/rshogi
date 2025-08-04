@@ -215,6 +215,8 @@ pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval
 
 #[cfg(test)]
 mod tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
 
     #[test]
@@ -317,18 +319,20 @@ mod tests {
 
     #[test]
     fn test_lmr_conditions_and_reductions() {
-        use crate::shogi::{Move, Square};
+        use crate::shogi::Move;
 
         // Create test moves
-        let normal_move = Move::normal(Square::new(7, 7), Square::new(7, 6), false);
+        let normal_move =
+            Move::normal(parse_usi_square("2h").unwrap(), parse_usi_square("2g").unwrap(), false);
         let capture_move = Move::normal_with_piece(
-            Square::new(7, 7),
-            Square::new(7, 6),
+            parse_usi_square("2h").unwrap(),
+            parse_usi_square("2g").unwrap(),
             false,
             crate::shogi::PieceType::Pawn,
             Some(crate::shogi::PieceType::Pawn),
         );
-        let promote_move = Move::normal(Square::new(7, 7), Square::new(7, 3), true);
+        let promote_move =
+            Move::normal(parse_usi_square("2h").unwrap(), parse_usi_square("2d").unwrap(), true);
 
         // Valid LMR conditions
         assert!(can_do_lmr(3, 4, false, false, normal_move));

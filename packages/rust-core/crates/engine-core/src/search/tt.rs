@@ -1433,7 +1433,10 @@ mod alignment_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shogi::{Move, Square};
+    use crate::{
+        shogi::{Move, Square},
+        usi::parse_usi_square,
+    };
 
     // Test SIMD probe produces same results as scalar
     #[test]
@@ -1530,7 +1533,11 @@ mod tests {
     fn test_bucket_operations() {
         let bucket = TTBucket::new();
         let hash1 = 0x1234567890ABCDEF;
-        let mv = Some(Move::normal(Square::new(2, 7), Square::new(2, 6), false));
+        let mv = Some(Move::normal(
+            parse_usi_square("7h").unwrap(),
+            parse_usi_square("7g").unwrap(),
+            false,
+        ));
 
         // Store entry
         let entry = TTEntry::new(hash1, mv, 100, 50, 10, NodeType::Exact, 0);
@@ -1571,7 +1578,11 @@ mod tests {
     fn test_transposition_table() {
         let tt = TranspositionTable::new(1);
         let hash = 0x1234567890ABCDEF;
-        let mv = Some(Move::normal(Square::new(7, 7), Square::new(7, 6), false));
+        let mv = Some(Move::normal(
+            parse_usi_square("2h").unwrap(),
+            parse_usi_square("2g").unwrap(),
+            false,
+        ));
 
         // Store and retrieve
         tt.store(hash, mv, 1500, 1000, 8, NodeType::LowerBound);
@@ -2138,6 +2149,8 @@ mod tests {
 
 #[cfg(test)]
 mod parallel_tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
     use std::sync::Arc;
     use std::thread;
@@ -2256,8 +2269,8 @@ mod parallel_tests {
 
         // Store an entry
         let mv = crate::shogi::Move::make_normal(
-            crate::shogi::Square::new(7, 7),
-            crate::shogi::Square::new(7, 6),
+            parse_usi_square("2h").unwrap(),
+            parse_usi_square("2g").unwrap(),
         );
 
         tt.store(hash, Some(mv), 100, 50, 10, NodeType::Exact);

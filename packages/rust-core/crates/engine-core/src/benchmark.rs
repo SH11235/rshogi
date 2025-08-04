@@ -6,7 +6,8 @@ use crate::nnue::NNUEEvaluatorWrapper;
 use crate::search::unified::UnifiedSearcher;
 use crate::search::SearchLimits;
 use crate::shogi::MoveList;
-use crate::shogi::{Color, Piece, PieceType, Position, Square};
+use crate::shogi::{Color, Piece, PieceType, Position};
+use crate::usi::parse_usi_square;
 use std::time::{Duration, Instant};
 
 /// Performance test results
@@ -196,30 +197,30 @@ fn create_test_positions() -> Vec<Position> {
     // Add kings
     endgame
         .board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
     endgame
         .board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
     // Add some pieces
     endgame
         .board
-        .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::Black));
+        .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Gold, Color::Black));
     endgame
         .board
-        .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::White));
+        .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Gold, Color::White));
     endgame
         .board
-        .put_piece(Square::new(6, 6), Piece::new(PieceType::Silver, Color::Black));
+        .put_piece(parse_usi_square("3g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
     endgame
         .board
-        .put_piece(Square::new(2, 2), Piece::new(PieceType::Silver, Color::White));
+        .put_piece(parse_usi_square("7c").unwrap(), Piece::new(PieceType::Silver, Color::White));
     // Add some pawns
     endgame
         .board
-        .put_piece(Square::new(7, 5), Piece::new(PieceType::Pawn, Color::Black));
+        .put_piece(parse_usi_square("2f").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
     endgame
         .board
-        .put_piece(Square::new(1, 3), Piece::new(PieceType::Pawn, Color::White));
+        .put_piece(parse_usi_square("8d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
     positions.push(endgame);
 
     // Position with pieces in hand
