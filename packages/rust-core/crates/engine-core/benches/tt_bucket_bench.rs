@@ -1,12 +1,13 @@
 //! Benchmark for TTBucket SIMD optimizations
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::search::tt::NodeType;
 use engine_core::search::TranspositionTable;
 use rand::Rng;
+use std::hint::black_box;
 
 fn setup_filled_tt(size_mb: usize) -> TranspositionTable {
-    let mut tt = TranspositionTable::new(size_mb);
+    let tt = TranspositionTable::new(size_mb);
     let mut rng = rand::rng();
 
     // Fill TT with random entries

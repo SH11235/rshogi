@@ -1,5 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkGroup, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use engine_core::search::tt_simd::{scalar, simd};
+use std::hint::black_box;
 
 fn bench_8_entry_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("8_entry_search");
@@ -26,12 +27,12 @@ fn bench_8_entry_search(c: &mut Criterion) {
 
     for (name, target) in test_positions {
         // Benchmark scalar implementation
-        group.bench_function(format!("scalar/{}", name), |b| {
+        group.bench_function(format!("scalar/{name}"), |b| {
             b.iter(|| black_box(scalar::find_matching_key_8(&keys, black_box(target))));
         });
 
         // Benchmark SIMD implementation
-        group.bench_function(format!("simd/{}", name), |b| {
+        group.bench_function(format!("simd/{name}"), |b| {
             b.iter(|| black_box(simd::find_matching_key_8(&keys, black_box(target))));
         });
     }
