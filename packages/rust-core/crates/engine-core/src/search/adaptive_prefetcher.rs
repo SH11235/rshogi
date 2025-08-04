@@ -273,4 +273,37 @@ mod tests {
         assert_eq!(stats_after.hits, 1000, "Hits should decay from 2000 to 1000");
         assert_eq!(stats_after.misses, 24, "Misses should decay from 48 to 24");
     }
+
+    #[test]
+    fn test_integration_with_transposition_table() {
+        use crate::search::tt::TranspositionTable;
+        use crate::shogi::board::Position;
+
+        let prefetcher = AdaptivePrefetcher::new();
+        let tt = TranspositionTable::new(16);
+
+        // Simulate prefetch with adaptive distance
+        let pos = Position::startpos();
+        let distance = prefetcher.calculate_distance(1000);
+
+        // Prefetch multiple entries based on distance
+        for i in 0..distance {
+            let hash = pos.zobrist_hash() ^ (i as u64);
+            tt.prefetch_l1(hash);
+        }
+
+        // Record hits and misses
+        for i in 0..distance {
+            let hash = pos.zobrist_hash() ^ (i as u64);
+            if tt.probe(hash).is_some() {
+                prefetcher.record_hit();
+            } else {
+                prefetcher.record_miss();
+            }
+        }
+
+        // Check statistics
+        let stats = prefetcher.stats();
+        assert_eq!(stats.total(), distance as u64);
+    }
 }
