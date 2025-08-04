@@ -1442,8 +1442,8 @@ mod tests {
 
         // Debug output to understand the difference
         if simd_idx != scalar_idx {
-            println!("SIMD idx: {}, score: {}", simd_idx, simd_score);
-            println!("Scalar idx: {}, score: {}", scalar_idx, scalar_score);
+            println!("SIMD idx: {simd_idx}, score: {simd_score}");
+            println!("Scalar idx: {scalar_idx}, score: {scalar_score}");
 
             // Check all scores to understand what's happening
             for i in 0..BUCKET_SIZE {
@@ -1461,7 +1461,7 @@ mod tests {
                         score
                     );
                 } else {
-                    println!("Entry {}: empty", i);
+                    println!("Entry {i}: empty");
                 }
             }
         }
@@ -1979,7 +1979,7 @@ mod tests {
         // Test replacement within a single bucket
         // First, verify empty bucket
         for i in 0..8 {
-            let hash = ((i + 1) as u64) << 32 | i;
+            let hash = (i + 1) << 32 | i;
             assert!(bucket.probe(hash).is_none(), "Bucket should start empty");
         }
 

@@ -1,12 +1,13 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::search::tt::{BucketSize, NodeType, TranspositionTable};
+use std::hint::black_box;
 
 fn bench_bucket_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("bucket_sizes");
 
     // Test different bucket sizes
     for size in [BucketSize::Small, BucketSize::Medium, BucketSize::Large] {
-        let size_str = format!("{:?}", size);
+        let size_str = format!("{size:?}");
 
         // Create TT with specific bucket size
         let tt = TranspositionTable::new_with_config(16, Some(size));
@@ -107,7 +108,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
         let tt = TranspositionTable::new_with_config(32, Some(bucket_size));
 
         // Sequential access pattern
-        group.bench_function(format!("{}_sequential", name), |b| {
+        group.bench_function(format!("{name}_sequential"), |b| {
             let mut hash = 0u64;
             b.iter(|| {
                 hash += 1;
@@ -116,7 +117,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
         });
 
         // Random access pattern
-        group.bench_function(format!("{}_random", name), |b| {
+        group.bench_function(format!("{name}_random"), |b| {
             let mut hash = 0x1234567890ABCDEF_u64;
             b.iter(|| {
                 // Simple PRNG for consistent random pattern

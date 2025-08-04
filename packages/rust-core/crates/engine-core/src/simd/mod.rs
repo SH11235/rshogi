@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn test_simd_detection() {
         let level = dispatch::SimdLevel::detect();
-        println!("Detected SIMD level: {:?}", level);
+        println!("Detected SIMD level: {level:?}");
 
         // Check that we detected a valid SIMD level
         // The level should be one of: Scalar, Sse2, Sse41, or Avx2
