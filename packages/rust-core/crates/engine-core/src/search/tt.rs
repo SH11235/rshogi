@@ -1136,9 +1136,6 @@ pub struct TranspositionTable {
     /// Bucket size configuration
     #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
-    /// SIMD availability (cached at initialization)
-    #[allow(dead_code)]
-    simd_available: bool,
 }
 
 impl TranspositionTable {
@@ -1165,25 +1162,12 @@ impl TranspositionTable {
             buckets.push(TTBucket::new());
         }
 
-        // Check SIMD availability once at initialization
-        let simd_available = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                false
-            }
-        };
-
         TranspositionTable {
             buckets,
             flexible_buckets: None,
             num_buckets,
             age: 0,
             bucket_size: None,
-            simd_available,
         }
     }
 
@@ -1212,25 +1196,12 @@ impl TranspositionTable {
             flexible_buckets.push(FlexibleTTBucket::new(bucket_size));
         }
 
-        // Check SIMD availability once at initialization
-        let simd_available = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                false
-            }
-        };
-
         TranspositionTable {
             buckets: Vec::new(), // Empty for flexible mode
             flexible_buckets: Some(flexible_buckets),
             num_buckets,
             age: 0,
             bucket_size: Some(bucket_size),
-            simd_available,
         }
     }
 
