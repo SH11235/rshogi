@@ -1323,37 +1323,92 @@ impl TranspositionTable {
         self.num_buckets * BUCKET_SIZE
     }
 
-    /// Prefetch bucket for the given hash
-    #[inline]
-    pub fn prefetch(&self, hash: u64) {
+    /// Prefetch bucket for the given hash with cache level hint
+    /// hint: 0=L1, 1=L2, 2=L3, 3=NTA (non-temporal)
+    #[inline(always)]
+    pub fn prefetch(&self, hash: u64, hint: i32) {
         let idx = self.bucket_index(hash);
-        let bucket_ptr = &self.buckets[idx] as *const TTBucket;
 
         #[cfg(target_arch = "x86_64")]
         unsafe {
             use std::arch::x86_64::_mm_prefetch;
-            _mm_prefetch(bucket_ptr as *const i8, 3); // _MM_HINT_T0
+            let bucket_ptr = if let Some(ref flexible) = self.flexible_buckets {
+                &flexible[idx] as *const _ as *const i8
+            } else {
+                &self.buckets[idx] as *const _ as *const i8
+            };
+
+            // x86_64 hints: 0=T0(L1), 1=T1(L2), 2=T2(L3), 3=NTA
+            // _mm_prefetch requires compile-time constant, so we match on hint
+            match hint {
+                0 => _mm_prefetch(bucket_ptr, 0), // _MM_HINT_T0
+                1 => _mm_prefetch(bucket_ptr, 1), // _MM_HINT_T1
+                2 => _mm_prefetch(bucket_ptr, 2), // _MM_HINT_T2
+                _ => _mm_prefetch(bucket_ptr, 3), // _MM_HINT_NTA
+            }
         }
 
-        // ARM64 prefetch - currently requires nightly Rust
-        // We conditionally compile based on whether we're using nightly
         #[cfg(target_arch = "aarch64")]
-        {
-            // On nightly Rust (like in CI), we can use prefetch
-            // This uses a trick: we try to detect nightly at compile time
-            #[cfg(feature = "nightly")]
-            unsafe {
-                use std::arch::aarch64::_prefetch;
-                _prefetch(bucket_ptr as *const i8, 0, 3); // Read, L1 cache
-            }
+        unsafe {
+            // Use inline assembly for stable Rust compatibility
+            let bucket_ptr = if let Some(ref flexible) = self.flexible_buckets {
+                &flexible[idx] as *const _ as *const u8
+            } else {
+                &self.buckets[idx] as *const _ as *const u8
+            };
 
-            // On stable Rust, prefetch is not available
-            #[cfg(not(feature = "nightly"))]
-            {
-                // No-op on stable builds to avoid compilation errors
-                let _ = bucket_ptr; // Avoid unused variable warning
+            // ARM PRFM instruction with different cache levels
+            match hint {
+                0 => {
+                    // PLDL1KEEP - Prefetch to L1 cache
+                    core::arch::asm!(
+                        "prfm pldl1keep, [{ptr}]",
+                        ptr = in(reg) bucket_ptr,
+                        options(nostack, preserves_flags)
+                    );
+                }
+                1 => {
+                    // PLDL2KEEP - Prefetch to L2 cache
+                    core::arch::asm!(
+                        "prfm pldl2keep, [{ptr}]",
+                        ptr = in(reg) bucket_ptr,
+                        options(nostack, preserves_flags)
+                    );
+                }
+                _ => {
+                    // PLDL3KEEP - Prefetch to L3 cache
+                    core::arch::asm!(
+                        "prfm pldl3keep, [{ptr}]",
+                        ptr = in(reg) bucket_ptr,
+                        options(nostack, preserves_flags)
+                    );
+                }
             }
         }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            // No-op for unsupported architectures
+            let _ = (hash, hint);
+        }
+    }
+
+    /// Simple prefetch to L1 cache
+    #[inline(always)]
+    pub fn prefetch_l1(&self, hash: u64) {
+        self.prefetch(hash, 0);
+    }
+
+    /// Prefetch to L2 cache for deeper searches
+    #[inline(always)]
+    pub fn prefetch_l2(&self, hash: u64) {
+        self.prefetch(hash, 1);
+    }
+
+    /// Prefetch to L3 cache for very deep searches
+    #[inline(always)]
+    pub fn prefetch_l3(&self, hash: u64) {
+        self.prefetch(hash, 2);
     }
 }
 
@@ -1553,7 +1608,7 @@ mod tests {
         tt.store(hash, None, 100, 50, 10, NodeType::Exact);
 
         // Prefetch should not crash
-        tt.prefetch(hash);
+        tt.prefetch_l1(hash);
 
         // Verify entry is still accessible
         let entry = tt.probe(hash);
