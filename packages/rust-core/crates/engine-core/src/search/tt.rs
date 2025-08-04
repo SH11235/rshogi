@@ -438,14 +438,17 @@ impl TTBucket {
     /// SIMD-optimized probe implementation
     fn probe_simd_impl(&self, target_key: u64) -> Option<TTEntry> {
         // Load all 4 keys at once for SIMD comparison
+        // Use Relaxed ordering for initial loads to avoid unnecessary barriers
         let mut keys = [0u64; BUCKET_SIZE];
         for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Acquire);
+            *key = self.entries[i * 2].load(Ordering::Relaxed);
         }
 
         // Use SIMD to find matching key
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Add acquire fence before reading data to ensure consistency
+            std::sync::atomic::fence(Ordering::Acquire);
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -459,22 +462,35 @@ impl TTBucket {
         None
     }
 
-    /// Scalar fallback probe implementation
+    /// Scalar fallback probe implementation (hybrid: early termination + single fence)
     fn probe_scalar(&self, target_key: u64) -> Option<TTEntry> {
+        // Hybrid approach: early termination to minimize memory access
+        let mut matching_idx = None;
+        let mut matched_key = 0u64;
+
+        // Load keys with early termination
         for i in 0..BUCKET_SIZE {
-            let idx = i * 2;
-            let entry_key = self.entries[idx].load(Ordering::Acquire);
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if key == target_key {
+                matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
+            }
+        }
 
-            if entry_key == target_key {
-                let data = self.entries[idx + 1].load(Ordering::Acquire);
-                let entry = TTEntry {
-                    key: entry_key,
-                    data,
-                };
+        // If we found a match, apply single memory fence and load data
+        if let Some(idx) = matching_idx {
+            // Single acquire fence for synchronization
+            std::sync::atomic::fence(Ordering::Acquire);
 
-                if entry.depth() > 0 {
-                    return Some(entry);
-                }
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            let entry = TTEntry {
+                key: matched_key,
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
             }
         }
 
@@ -495,7 +511,8 @@ impl TTBucket {
             let mut retry_count = 0;
 
             loop {
-                let old_key = self.entries[idx].load(Ordering::Acquire);
+                // Use Relaxed for speculative read in CAS loop
+                let old_key = self.entries[idx].load(Ordering::Relaxed);
 
                 if old_key == 0 || old_key == target_key {
                     // Try to atomically update the key
@@ -518,7 +535,7 @@ impl TTBucket {
                             }
 
                             // Another thread modified the entry, retry if still applicable
-                            let current_key = self.entries[idx].load(Ordering::Acquire);
+                            let current_key = self.entries[idx].load(Ordering::Relaxed);
                             if current_key != 0 && current_key != target_key {
                                 // This slot is now occupied by a different position, try next slot
                                 break;
@@ -550,7 +567,7 @@ impl TTBucket {
 
             // Use CAS to ensure atomic replacement
             // Note: We don't retry here as we've already determined this is the best slot to replace
-            let old_key = self.entries[idx].load(Ordering::Acquire);
+            let old_key = self.entries[idx].load(Ordering::Relaxed);
 
             // Attempt atomic update of the key
             if self.entries[idx]
@@ -588,9 +605,10 @@ impl TTBucket {
         let mut is_empty = [false; BUCKET_SIZE];
 
         // Load all entries at once
+        // Use Relaxed ordering since we're just reading for priority calculation
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
-            let key = self.entries[idx].load(Ordering::Acquire);
+            let key = self.entries[idx].load(Ordering::Relaxed);
             if key == 0 {
                 // Mark empty slots
                 is_empty[i] = true;
@@ -599,7 +617,7 @@ impl TTBucket {
                 is_pv[i] = false;
                 is_exact[i] = false;
             } else {
-                let data = self.entries[idx + 1].load(Ordering::Acquire);
+                let data = self.entries[idx + 1].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
                 depths[i] = entry.depth();
                 ages[i] = entry.age();
@@ -644,14 +662,16 @@ impl TTBucket {
 
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Acquire);
-            let old_data = self.entries[idx + 1].load(Ordering::Acquire);
-            let old_entry = TTEntry {
-                key: old_key,
-                data: old_data,
+            let key = self.entries[idx].load(Ordering::Acquire);
+
+            let score = if key == 0 {
+                i32::MIN // Empty entries have lowest priority
+            } else {
+                let data = self.entries[idx + 1].load(Ordering::Relaxed);
+                let entry = TTEntry { key, data };
+                entry.priority_score(current_age)
             };
 
-            let score = old_entry.priority_score(current_age);
             if score < worst_score {
                 worst_score = score;
                 worst_idx = i;
@@ -739,11 +759,13 @@ impl FlexibleTTBucket {
     fn probe_simd_4(&self, target_key: u64) -> Option<TTEntry> {
         let mut keys = [0u64; 4];
         for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Acquire);
+            *key = self.entries[i * 2].load(Ordering::Relaxed);
         }
 
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Add acquire fence before reading data
+            std::sync::atomic::fence(Ordering::Acquire);
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -760,11 +782,13 @@ impl FlexibleTTBucket {
     fn probe_simd_8(&self, target_key: u64) -> Option<TTEntry> {
         let mut keys = [0u64; 8];
         for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Acquire);
+            *key = self.entries[i * 2].load(Ordering::Relaxed);
         }
 
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_8(&keys, target_key) {
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Add acquire fence before reading data
+            std::sync::atomic::fence(Ordering::Acquire);
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -777,64 +801,103 @@ impl FlexibleTTBucket {
         None
     }
 
-    /// Scalar probe for 4 entries
+    /// Scalar probe for 4 entries (hybrid: early termination + single fence)
     fn probe_scalar_4(&self, target_key: u64) -> Option<TTEntry> {
+        // Hybrid approach: early termination to minimize memory access
+        let mut matching_idx = None;
+        let mut matched_key = 0u64;
+
+        // Load keys with early termination
         for i in 0..4 {
-            let idx = i * 2;
-            let stored_key = self.entries[idx].load(Ordering::Acquire);
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
+            }
+        }
 
-            if (stored_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
-                let data = self.entries[idx + 1].load(Ordering::Acquire);
-                let entry = TTEntry {
-                    key: stored_key,
-                    data,
-                };
+        // If we found a match, apply single memory fence and load data
+        if let Some(idx) = matching_idx {
+            // Single acquire fence for synchronization
+            std::sync::atomic::fence(Ordering::Acquire);
 
-                if entry.depth() > 0 {
-                    return Some(entry);
-                }
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            let entry = TTEntry {
+                key: matched_key,
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
             }
         }
         None
     }
 
-    /// Scalar probe for 8 entries
+    /// Scalar probe for 8 entries (hybrid: early termination + single fence)
     fn probe_scalar_8(&self, target_key: u64) -> Option<TTEntry> {
+        // Hybrid approach: early termination to minimize memory access
+        let mut matching_idx = None;
+        let mut matched_key = 0u64;
+
+        // Load keys with early termination
         for i in 0..8 {
-            let idx = i * 2;
-            let stored_key = self.entries[idx].load(Ordering::Acquire);
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
+            }
+        }
 
-            if (stored_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
-                let data = self.entries[idx + 1].load(Ordering::Acquire);
-                let entry = TTEntry {
-                    key: stored_key,
-                    data,
-                };
+        // If we found a match, apply single memory fence and load data
+        if let Some(idx) = matching_idx {
+            // Single acquire fence for synchronization
+            std::sync::atomic::fence(Ordering::Acquire);
 
-                if entry.depth() > 0 {
-                    return Some(entry);
-                }
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            let entry = TTEntry {
+                key: matched_key,
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
             }
         }
         None
     }
 
-    /// Scalar probe for 16 entries
+    /// Scalar probe for 16 entries (hybrid: early termination + single fence)
     fn probe_scalar_16(&self, target_key: u64) -> Option<TTEntry> {
+        // Hybrid approach: early termination to minimize memory access
+        let mut matching_idx = None;
+        let mut matched_key = 0u64;
+
+        // Load keys with early termination
         for i in 0..16 {
-            let idx = i * 2;
-            let stored_key = self.entries[idx].load(Ordering::Acquire);
+            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+                matching_idx = Some(i);
+                matched_key = key;
+                break; // Early termination - key optimization
+            }
+        }
 
-            if (stored_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
-                let data = self.entries[idx + 1].load(Ordering::Acquire);
-                let entry = TTEntry {
-                    key: stored_key,
-                    data,
-                };
+        // If we found a match, apply single memory fence and load data
+        if let Some(idx) = matching_idx {
+            // Single acquire fence for synchronization
+            std::sync::atomic::fence(Ordering::Acquire);
 
-                if entry.depth() > 0 {
-                    return Some(entry);
-                }
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            let entry = TTEntry {
+                key: matched_key,
+                data,
+            };
+
+            if entry.depth() > 0 {
+                return Some(entry);
             }
         }
         None
@@ -857,7 +920,7 @@ impl FlexibleTTBucket {
         // Check for existing entry
         for i in 0..4 {
             let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Acquire);
+            let old_key = self.entries[idx].load(Ordering::Relaxed);
 
             if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
                 // Update existing entry
@@ -884,7 +947,7 @@ impl FlexibleTTBucket {
         // Check for existing entry
         for i in 0..8 {
             let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Acquire);
+            let old_key = self.entries[idx].load(Ordering::Relaxed);
 
             if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
                 // Update existing entry
@@ -911,7 +974,7 @@ impl FlexibleTTBucket {
         // Check for existing entry
         for i in 0..16 {
             let idx = i * 2;
-            let old_key = self.entries[idx].load(Ordering::Acquire);
+            let old_key = self.entries[idx].load(Ordering::Relaxed);
 
             if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
                 // Update existing entry
@@ -941,8 +1004,8 @@ impl FlexibleTTBucket {
 
         for i in 0..4 {
             let idx = i * 2;
-            let key = self.entries[idx].load(Ordering::Acquire);
-            let data = self.entries[idx + 1].load(Ordering::Acquire);
+            let key = self.entries[idx].load(Ordering::Relaxed);
+            let data = self.entries[idx + 1].load(Ordering::Relaxed);
             let entry = TTEntry { key, data };
 
             if entry.is_empty() {
@@ -995,8 +1058,8 @@ impl FlexibleTTBucket {
 
         for i in 0..8 {
             let idx = i * 2;
-            let key = self.entries[idx].load(Ordering::Acquire);
-            let data = self.entries[idx + 1].load(Ordering::Acquire);
+            let key = self.entries[idx].load(Ordering::Relaxed);
+            let data = self.entries[idx + 1].load(Ordering::Relaxed);
             let entry = TTEntry { key, data };
 
             if entry.is_empty() {
@@ -1045,8 +1108,8 @@ impl FlexibleTTBucket {
 
         for i in 0..16 {
             let idx = i * 2;
-            let key = self.entries[idx].load(Ordering::Acquire);
-            let data = self.entries[idx + 1].load(Ordering::Acquire);
+            let key = self.entries[idx].load(Ordering::Relaxed);
+            let data = self.entries[idx + 1].load(Ordering::Relaxed);
             let entry = TTEntry { key, data };
 
             let score = entry.priority_score(current_age);
@@ -1073,9 +1136,6 @@ pub struct TranspositionTable {
     /// Bucket size configuration
     #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
-    /// SIMD availability (cached at initialization)
-    #[allow(dead_code)]
-    simd_available: bool,
 }
 
 impl TranspositionTable {
@@ -1102,25 +1162,12 @@ impl TranspositionTable {
             buckets.push(TTBucket::new());
         }
 
-        // Check SIMD availability once at initialization
-        let simd_available = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                false
-            }
-        };
-
         TranspositionTable {
             buckets,
             flexible_buckets: None,
             num_buckets,
             age: 0,
             bucket_size: None,
-            simd_available,
         }
     }
 
@@ -1149,25 +1196,12 @@ impl TranspositionTable {
             flexible_buckets.push(FlexibleTTBucket::new(bucket_size));
         }
 
-        // Check SIMD availability once at initialization
-        let simd_available = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                false
-            }
-        };
-
         TranspositionTable {
             buckets: Vec::new(), // Empty for flexible mode
             flexible_buckets: Some(flexible_buckets),
             num_buckets,
             age: 0,
             bucket_size: Some(bucket_size),
-            simd_available,
         }
     }
 
@@ -1274,6 +1308,7 @@ impl TranspositionTable {
             for j in 0..BUCKET_SIZE {
                 let idx = j * 2;
                 total += 1;
+                // Use Relaxed for sampling - no synchronization needed
                 if self.buckets[i].entries[idx].load(Ordering::Relaxed) != 0 {
                     filled += 1;
                 }
@@ -1407,8 +1442,8 @@ mod tests {
 
         // Debug output to understand the difference
         if simd_idx != scalar_idx {
-            println!("SIMD idx: {}, score: {}", simd_idx, simd_score);
-            println!("Scalar idx: {}, score: {}", scalar_idx, scalar_score);
+            println!("SIMD idx: {simd_idx}, score: {simd_score}");
+            println!("Scalar idx: {scalar_idx}, score: {scalar_score}");
 
             // Check all scores to understand what's happening
             for i in 0..BUCKET_SIZE {
@@ -1426,7 +1461,7 @@ mod tests {
                         score
                     );
                 } else {
-                    println!("Entry {}: empty", i);
+                    println!("Entry {i}: empty");
                 }
             }
         }
@@ -1944,7 +1979,7 @@ mod tests {
         // Test replacement within a single bucket
         // First, verify empty bucket
         for i in 0..8 {
-            let hash = ((i + 1) as u64) << 32 | i;
+            let hash = (i + 1) << 32 | i;
             assert!(bucket.probe(hash).is_none(), "Bucket should start empty");
         }
 
