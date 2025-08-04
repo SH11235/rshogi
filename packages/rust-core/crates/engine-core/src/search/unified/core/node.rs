@@ -109,7 +109,8 @@ where
     };
 
     // Phase 2: Selective prefetch for promising moves
-    if USE_TT && depth > 2 {
+    // HOTFIX: Limit prefetch to reasonable depths to avoid exponential growth
+    if USE_TT && depth > 2 && depth <= 6 {
         // Get killer moves from search stack
         let killers = if crate::search::types::SearchStack::is_valid_ply(ply) {
             &searcher.search_stack[ply as usize].killers
@@ -164,7 +165,8 @@ where
 
         // Prefetch next few moves while processing current move (overlap computation)
         // This is more aggressive prefetching for the first few moves
-        if USE_TT && move_idx < 3 && move_idx + 1 < ordered_moves.len() {
+        // HOTFIX: Also limit this to reasonable depths
+        if USE_TT && depth <= 6 && move_idx < 3 && move_idx + 1 < ordered_moves.len() {
             // Prefetch the next 1-2 moves to warm cache
             let prefetch_end = (move_idx + 3).min(ordered_moves.len());
             for &next_mv in &ordered_moves[move_idx + 1..prefetch_end] {
