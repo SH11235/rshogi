@@ -68,15 +68,17 @@ impl PVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shogi::{Move, Square};
+    use crate::{shogi::Move, usi::parse_usi_square};
 
     #[test]
     fn test_pv_table() {
         let mut pv = PVTable::new();
 
         // Create some test moves
-        let move1 = Move::normal(Square::new(7, 6), Square::new(7, 5), false);
-        let move2 = Move::normal(Square::new(3, 2), Square::new(3, 3), false);
+        let move1 =
+            Move::normal(parse_usi_square("2g").unwrap(), parse_usi_square("2f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false);
 
         // Update PV
         pv.update(1, move2, &[]);

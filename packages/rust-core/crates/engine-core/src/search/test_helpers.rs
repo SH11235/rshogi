@@ -5,6 +5,7 @@
 use crate::{
     evaluation::evaluate::MaterialEvaluator,
     search::{SearchLimits, SearchLimitsBuilder, SearchResult},
+    usi::parse_usi_square,
     Color, Piece, PieceType, Position, Square,
 };
 use std::sync::{
@@ -27,9 +28,9 @@ impl TestPositions {
     pub fn endgame_simple() -> Position {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board.rebuild_occupancy_bitboards();
         pos
     }
@@ -45,16 +46,16 @@ impl TestPositions {
         let mut pos = Position::empty();
         // Black king
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         // White king
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         // Black rook that can capture white gold
         pos.board
-            .put_piece(Square::new(7, 7), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("2h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
         // White gold to be captured
         pos.board
-            .put_piece(Square::new(7, 1), Piece::new(PieceType::Gold, Color::White));
+            .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Gold, Color::White));
         pos.board.rebuild_occupancy_bitboards();
         pos
     }
@@ -64,11 +65,11 @@ impl TestPositions {
         let mut pos = Position::empty();
         // Black king in check from white rook
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Rook, Color::White));
         pos.board.rebuild_occupancy_bitboards();
         pos
     }

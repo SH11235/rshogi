@@ -45,6 +45,7 @@ mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
     use crate::search::SearchLimitsBuilder;
+    use crate::usi::parse_usi_square;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -100,17 +101,17 @@ mod tests {
     fn test_fallback_move_quality() {
         // Position where most pieces are blocked
         let mut pos = Position::empty();
-        use crate::{Color, Piece, PieceType, Square};
+        use crate::{Color, Piece, PieceType};
 
         // Kings
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Add a rook that can move
         pos.board
-            .put_piece(Square::new(0, 7), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("9h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
 
         pos.board.rebuild_occupancy_bitboards();
 

@@ -251,12 +251,14 @@ pub fn extract_features(pos: &Position, king_sq: Square, perspective: Color) -> 
 
 #[cfg(test)]
 mod tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
 
     #[test]
     fn test_bona_piece_from_board() {
         let piece = Piece::new(PieceType::Pawn, Color::Black);
-        let sq = Square::new(4, 4); // 5e
+        let sq = parse_usi_square("5e").unwrap(); // 5e
         let bona = BonaPiece::from_board(piece, sq).expect("Valid piece type");
 
         assert_eq!(bona.index(), 40); // Pawn at index 40
@@ -276,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_halfkp_index() {
-        let king_sq = Square::new(4, 8); // 5i
+        let king_sq = parse_usi_square("5i").unwrap(); // 5i
         let piece = BonaPiece(100);
         let index = halfkp_index(king_sq, piece);
 
@@ -286,7 +288,7 @@ mod tests {
     #[test]
     fn test_extract_features() {
         let pos = Position::startpos();
-        let king_sq = Square::new(4, 8); // Black king position
+        let king_sq = parse_usi_square("5i").unwrap(); // Black king position
         let features = extract_features(&pos, king_sq, Color::Black);
 
         // Starting position has 40 pieces (including kings)
