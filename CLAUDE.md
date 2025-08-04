@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - When practicing TDD and Test Driven Development, please follow all the steps recommended by t-wada.
 - Applied for the Kent C. Dodds Testing Trophy for front-end testing
 - For refactoring, follow the steps recommended by Martin Fowler.
+- **"Premature optimization is the root of all evil" - Donald Knuth**: Only implement features that are immediately needed. Avoid speculative "future-proofing".
 
 ## Commands
 
