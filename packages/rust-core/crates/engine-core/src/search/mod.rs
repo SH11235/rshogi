@@ -1,3 +1,4 @@
+pub mod adaptive_prefetcher;
 pub mod common;
 pub mod constants;
 pub mod history;

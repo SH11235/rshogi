@@ -105,9 +105,21 @@ where
         moves.as_slice().to_vec()
     };
 
-    // Prefetch TT entries for top moves
+    // Phase 2: Improved prefetching strategy
     if USE_TT {
-        searcher.prefetch_next_moves(pos, &ordered_moves, 4);
+        // Prefetch PV line from previous iteration if available
+        let prev_pv = searcher.pv_table.get_line(0);
+        if !prev_pv.is_empty() {
+            searcher.prefetch_pv_line(pos, prev_pv, depth);
+        }
+
+        // Selective prefetch for top moves (killer moves + best ordered moves)
+        let killers = if !searcher.search_stack.is_empty() {
+            &searcher.search_stack[0].killers
+        } else {
+            &[None, None]
+        };
+        searcher.selective_prefetch(pos, &ordered_moves, killers, depth);
     }
 
     // Search each move
