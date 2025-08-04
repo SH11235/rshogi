@@ -1,0 +1,269 @@
+//! Adaptive prefetch manager for transposition table
+//!
+//! This module implements an adaptive prefetching strategy that:
+//! - Tracks prefetch hit/miss rates
+//! - Dynamically adjusts prefetch distance based on effectiveness
+//! - Provides statistics for performance tuning
+
+use crate::util::sync_compat::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicUsize;
+
+/// Adaptive prefetcher for the transposition table
+///
+/// Tracks prefetch effectiveness and adjusts strategy dynamically
+pub struct AdaptivePrefetcher {
+    /// Prefetch hit count
+    hit_count: AtomicU64,
+    /// Prefetch miss count
+    miss_count: AtomicU64,
+    /// Current prefetch distance (1-8 moves ahead)
+    current_distance: AtomicUsize,
+    /// Statistics update counter
+    stat_counter: AtomicU64,
+}
+
+impl AdaptivePrefetcher {
+    /// Maximum prefetch distance
+    const MAX_DISTANCE: usize = 8;
+    /// Minimum prefetch distance
+    const MIN_DISTANCE: usize = 1;
+    /// Number of samples before adjusting strategy
+    const STAT_WINDOW: u64 = 1024;
+
+    /// Create a new adaptive prefetcher
+    pub fn new() -> Self {
+        Self {
+            hit_count: AtomicU64::new(0),
+            miss_count: AtomicU64::new(0),
+            current_distance: AtomicUsize::new(2), // Start with moderate distance
+            stat_counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a prefetch hit
+    #[inline]
+    pub fn record_hit(&self) {
+        self.hit_count.fetch_add(1, Ordering::Relaxed);
+        self.update_statistics();
+    }
+
+    /// Record a prefetch miss
+    #[inline]
+    pub fn record_miss(&self) {
+        self.miss_count.fetch_add(1, Ordering::Relaxed);
+        self.update_statistics();
+    }
+
+    /// Update statistics and adjust strategy if needed
+    fn update_statistics(&self) {
+        let count = self.stat_counter.fetch_add(1, Ordering::Relaxed);
+
+        // Check if we should adjust strategy
+        if (count + 1) % Self::STAT_WINDOW == 0 {
+            self.adjust_distance();
+        }
+    }
+
+    /// Adjust prefetch distance based on hit rate
+    fn adjust_distance(&self) {
+        let hits = self.hit_count.load(Ordering::Relaxed);
+        let misses = self.miss_count.load(Ordering::Relaxed);
+        let total = hits + misses;
+
+        // Wait until we have enough statistics
+        if total < Self::STAT_WINDOW {
+            return;
+        }
+
+        let hit_rate = hits as f64 / total as f64;
+        let current = self.current_distance.load(Ordering::Relaxed);
+
+        let new_distance = if hit_rate > 0.7 {
+            // High hit rate: increase distance to prefetch more aggressively
+            (current + 1).min(Self::MAX_DISTANCE)
+        } else if hit_rate < 0.3 {
+            // Low hit rate: reduce distance to avoid wasting bandwidth
+            current.saturating_sub(1).max(Self::MIN_DISTANCE)
+        } else {
+            current
+        };
+
+        if new_distance != current {
+            self.current_distance.store(new_distance, Ordering::Relaxed);
+        }
+
+        // Decay statistics to prevent overflow and adapt to changing patterns
+        // Right shift by 1 = divide by 2
+        self.hit_count.store(hits >> 1, Ordering::Relaxed);
+        self.miss_count.store(misses >> 1, Ordering::Relaxed);
+    }
+
+    /// Calculate dynamic prefetch distance based on remaining nodes
+    pub fn calculate_distance(&self, remaining_nodes: u64) -> usize {
+        let base_distance = self.current_distance.load(Ordering::Relaxed);
+
+        // Dynamic scaling based on remaining nodes
+        // Use log2 to scale distance with search depth
+        let dynamic_factor = if remaining_nodes > 0 {
+            (remaining_nodes as f64).log2().max(1.0)
+        } else {
+            1.0
+        };
+
+        // Adjust base distance by dynamic factor
+        let adjusted = (base_distance as f64 * dynamic_factor / 8.0) as usize;
+
+        adjusted.clamp(Self::MIN_DISTANCE, Self::MAX_DISTANCE)
+    }
+
+    /// Get current prefetch distance
+    pub fn current_distance(&self) -> usize {
+        self.current_distance.load(Ordering::Relaxed)
+    }
+
+    /// Get current hit rate
+    pub fn hit_rate(&self) -> f64 {
+        let hits = self.hit_count.load(Ordering::Relaxed);
+        let misses = self.miss_count.load(Ordering::Relaxed);
+        let total = hits + misses;
+
+        if total == 0 {
+            0.0
+        } else {
+            hits as f64 / total as f64
+        }
+    }
+
+    /// Get statistics
+    pub fn stats(&self) -> PrefetchStats {
+        let hits = self.hit_count.load(Ordering::Relaxed);
+        let misses = self.miss_count.load(Ordering::Relaxed);
+        let distance = self.current_distance.load(Ordering::Relaxed);
+
+        PrefetchStats {
+            hits,
+            misses,
+            distance,
+            hit_rate: if hits + misses > 0 {
+                hits as f64 / (hits + misses) as f64
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// Reset statistics
+    pub fn reset(&self) {
+        self.hit_count.store(0, Ordering::Relaxed);
+        self.miss_count.store(0, Ordering::Relaxed);
+        self.stat_counter.store(0, Ordering::Relaxed);
+        self.current_distance.store(2, Ordering::Relaxed);
+    }
+}
+
+impl Default for AdaptivePrefetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Prefetch statistics
+#[derive(Debug, Clone, Copy)]
+pub struct PrefetchStats {
+    /// Number of prefetch hits
+    pub hits: u64,
+    /// Number of prefetch misses
+    pub misses: u64,
+    /// Current prefetch distance
+    pub distance: usize,
+    /// Hit rate (0.0 to 1.0)
+    pub hit_rate: f64,
+}
+
+impl PrefetchStats {
+    /// Total number of prefetch attempts
+    pub fn total(&self) -> u64 {
+        self.hits + self.misses
+    }
+
+    /// Check if prefetch is effective (hit rate above threshold)
+    pub fn is_effective(&self) -> bool {
+        self.hit_rate > 0.5
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adaptive_distance() {
+        let prefetcher = AdaptivePrefetcher::new();
+
+        // Initial distance should be 2
+        assert_eq!(prefetcher.current_distance(), 2);
+
+        // Simulate high hit rate
+        for _ in 0..800 {
+            prefetcher.record_hit();
+        }
+        for _ in 0..200 {
+            prefetcher.record_miss();
+        }
+
+        // After STAT_WINDOW samples, distance should increase
+        prefetcher.adjust_distance();
+        assert!(prefetcher.current_distance() >= 2);
+
+        // Check hit rate
+        let stats = prefetcher.stats();
+        assert!(stats.hit_rate > 0.7);
+    }
+
+    #[test]
+    fn test_low_hit_rate_adjustment() {
+        let prefetcher = AdaptivePrefetcher::new();
+
+        // Simulate low hit rate
+        for _ in 0..200 {
+            prefetcher.record_hit();
+        }
+        for _ in 0..800 {
+            prefetcher.record_miss();
+        }
+
+        // Distance should decrease
+        prefetcher.adjust_distance();
+        assert!(prefetcher.current_distance() <= 2);
+    }
+
+    #[test]
+    fn test_dynamic_distance_calculation() {
+        let prefetcher = AdaptivePrefetcher::new();
+
+        // Test with different remaining nodes
+        let dist_low = prefetcher.calculate_distance(10);
+        let dist_high = prefetcher.calculate_distance(1000000);
+
+        // Higher remaining nodes should not drastically increase distance
+        assert!(dist_high <= AdaptivePrefetcher::MAX_DISTANCE);
+        assert!(dist_low >= AdaptivePrefetcher::MIN_DISTANCE);
+    }
+
+    #[test]
+    fn test_statistics_decay() {
+        let prefetcher = AdaptivePrefetcher::new();
+
+        // Add many samples
+        for _ in 0..2048 {
+            prefetcher.record_hit();
+        }
+
+        let stats_before = prefetcher.stats();
+        prefetcher.adjust_distance();
+        let stats_after = prefetcher.stats();
+
+        // Statistics should decay
+        assert!(stats_after.hits < stats_before.hits);
+    }
+}
