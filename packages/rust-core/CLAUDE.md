@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code when working with Rust code in this directory.
 
+## Core Development Principles
+
+### Avoid Premature Optimization
+- **"Premature optimization is the root of all evil" - Donald Knuth**
+- Only implement features that are immediately needed
+- Remove speculative code and "future-proofing" that isn't actively used
+- Measure performance before optimizing
+- Keep code simple and maintainable first
+- Don't add fields or methods "for future use" - add them when actually needed
+
 ## Rust Code Quality Standards
 
 ### Format Strings - Use Modern Syntax
