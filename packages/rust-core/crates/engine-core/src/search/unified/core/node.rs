@@ -108,6 +108,19 @@ where
         moves.as_slice().to_vec()
     };
 
+    // Phase 2: Selective prefetch for promising moves
+    if USE_TT && depth > 2 {
+        // Get killer moves from search stack
+        let killers = if crate::search::types::SearchStack::is_valid_ply(ply) {
+            &searcher.search_stack[ply as usize].killers
+        } else {
+            &[None, None]
+        };
+
+        // Use selective prefetch which only prefetches promising moves
+        searcher.selective_prefetch(pos, &ordered_moves, killers, depth);
+    }
+
     // Early futility pruning check
     let can_do_futility = USE_PRUNING
         && crate::search::unified::pruning::can_do_futility_pruning(
@@ -124,7 +137,7 @@ where
     };
 
     // Search moves
-    for &mv in ordered_moves.iter() {
+    for (move_idx, &mv) in ordered_moves.iter().enumerate() {
         // Futility pruning for quiet moves
         if USE_PRUNING
             && can_do_futility
@@ -147,6 +160,20 @@ where
         if crate::search::types::SearchStack::is_valid_ply(ply) {
             searcher.search_stack[ply as usize].current_move = Some(mv);
             searcher.search_stack[ply as usize].move_count = moves_searched + 1;
+        }
+
+        // Prefetch next few moves while processing current move (overlap computation)
+        // This is more aggressive prefetching for the first few moves
+        if USE_TT && move_idx < 3 && move_idx + 1 < ordered_moves.len() {
+            // Prefetch the next 1-2 moves to warm cache
+            let prefetch_end = (move_idx + 3).min(ordered_moves.len());
+            for &next_mv in &ordered_moves[move_idx + 1..prefetch_end] {
+                let next_hash =
+                    crate::search::unified::prefetch::HashCalculator::calculate_move_hash(
+                        pos, next_mv,
+                    );
+                searcher.prefetch_tt(next_hash);
+            }
         }
 
         // Make move
