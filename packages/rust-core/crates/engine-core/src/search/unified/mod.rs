@@ -12,7 +12,9 @@ pub mod pruning;
 use crate::{
     evaluation::evaluate::Evaluator,
     search::{
+        adaptive_prefetcher::AdaptivePrefetcher,
         history::History,
+        prefetch_budget::PrefetchBudget,
         tt::{NodeType, TranspositionTable},
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
@@ -84,6 +86,15 @@ pub struct UnifiedSearcher<
 
     /// Score volatility measurement for window adjustment
     score_volatility: i32,
+
+    /// Runtime flag to disable prefetching (for benchmarking)
+    pub(crate) disable_prefetch: bool,
+
+    /// Adaptive prefetcher for TT (conditionally compiled)
+    pub(crate) adaptive_prefetcher: Option<AdaptivePrefetcher>,
+
+    /// Prefetch budget manager (conditionally compiled)
+    pub(crate) prefetch_budget: Option<PrefetchBudget>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -117,6 +128,17 @@ where
             search_stack,
             score_history: Vec::with_capacity(crate::search::constants::MAX_PLY),
             score_volatility: 0,
+            disable_prefetch: false,
+            adaptive_prefetcher: if USE_TT {
+                Some(AdaptivePrefetcher::new())
+            } else {
+                None
+            },
+            prefetch_budget: if USE_TT {
+                Some(PrefetchBudget::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -145,7 +167,46 @@ where
             search_stack,
             score_history: Vec::with_capacity(crate::search::constants::MAX_PLY),
             score_volatility: 0,
+            disable_prefetch: false,
+            adaptive_prefetcher: if USE_TT {
+                Some(AdaptivePrefetcher::new())
+            } else {
+                None
+            },
+            prefetch_budget: if USE_TT {
+                Some(PrefetchBudget::new())
+            } else {
+                None
+            },
         }
+    }
+
+    /// Disable prefetching (for benchmarking TTOnly mode)
+    pub fn set_disable_prefetch(&mut self, disable: bool) {
+        self.disable_prefetch = disable;
+    }
+
+    /// Get TT statistics (for benchmarking)
+    pub fn get_tt_stats(&self) -> Option<(f32, u64, u64)> {
+        if USE_TT {
+            if let Some(ref tt) = self.tt {
+                let hashfull = tt.hashfull() as f32 / 1000.0;
+                // TODO: Add actual hit/miss stats from TT
+                return Some((hashfull, 0, 0));
+            }
+        }
+        None
+    }
+
+    /// Get adaptive prefetcher statistics (for benchmarking)
+    pub fn get_prefetch_stats(&self) -> Option<(u64, u64)> {
+        if USE_TT {
+            if let Some(ref prefetcher) = self.adaptive_prefetcher {
+                let stats = prefetcher.stats();
+                return Some((stats.hits, stats.misses));
+            }
+        }
+        None
     }
 
     /// Main search entry point
@@ -482,7 +543,7 @@ where
     /// Prefetch transposition table entry (compile-time optimized)
     #[inline(always)]
     pub(crate) fn prefetch_tt(&self, hash: u64) {
-        if USE_TT {
+        if USE_TT && !self.disable_prefetch {
             if let Some(ref tt) = self.tt {
                 tt.prefetch_l1(hash); // Use L1 cache for immediate access
             }
