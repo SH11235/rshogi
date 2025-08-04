@@ -113,22 +113,22 @@ fn bench_bulk_operations(c: &mut Criterion) {
     let mut all_targets = Vec::with_capacity(NUM_BUCKETS);
 
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     for _ in 0..NUM_BUCKETS {
         let keys = [
-            rng.gen::<u64>(),
-            rng.gen::<u64>(),
-            rng.gen::<u64>(),
-            rng.gen::<u64>(),
+            rng.random::<u64>(),
+            rng.random::<u64>(),
+            rng.random::<u64>(),
+            rng.random::<u64>(),
         ];
         all_keys.push(keys);
 
         // 75% hit rate
-        let target = if rng.gen_bool(0.75) {
-            keys[rng.gen_range(0..4)]
+        let target = if rng.random_bool(0.75) {
+            keys[rng.random_range(0..4)]
         } else {
-            rng.gen::<u64>()
+            rng.random::<u64>()
         };
         all_targets.push(target);
     }
