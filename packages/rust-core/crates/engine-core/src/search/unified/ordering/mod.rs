@@ -301,6 +301,7 @@ impl MoveOrdering {
 mod tests {
     use super::*;
     use crate::search::history::History;
+    use crate::usi::parse_usi_square;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -376,8 +377,8 @@ mod tests {
 
         // Verify ordering is still functional after stress test
         let test_move = crate::shogi::Move::normal(
-            crate::shogi::Square::new(6, 6),
-            crate::shogi::Square::new(6, 5),
+            parse_usi_square("3g").unwrap(),
+            parse_usi_square("3f").unwrap(),
             false,
         );
         ordering.update_killer(0, test_move);
@@ -394,18 +395,18 @@ mod tests {
         // Test killer moves consistency
         let test_moves = vec![
             crate::shogi::Move::normal(
-                crate::shogi::Square::new(6, 6),
-                crate::shogi::Square::new(6, 5),
+                parse_usi_square("3g").unwrap(),
+                parse_usi_square("3f").unwrap(),
                 false,
             ),
             crate::shogi::Move::normal(
-                crate::shogi::Square::new(2, 6),
-                crate::shogi::Square::new(2, 5),
+                parse_usi_square("7g").unwrap(),
+                parse_usi_square("7f").unwrap(),
                 false,
             ),
             crate::shogi::Move::normal(
-                crate::shogi::Square::new(7, 6),
-                crate::shogi::Square::new(7, 5),
+                parse_usi_square("2g").unwrap(),
+                parse_usi_square("2f").unwrap(),
                 false,
             ),
         ];

@@ -271,6 +271,8 @@ impl Position {
 
 #[cfg(test)]
 mod tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
 
     #[test]
@@ -335,8 +337,8 @@ mod tests {
 
         // Create a piece and square for testing
         let piece = Piece::new(PieceType::Pawn, Color::Black);
-        let sq1 = Square::new(4, 4);
-        let sq2 = Square::new(5, 5);
+        let sq1 = parse_usi_square("5e").unwrap();
+        let sq2 = parse_usi_square("4f").unwrap();
 
         // Move piece from sq1 to sq2 and back should return original hash
         let hash2 = pos.update_hash_move(hash, sq1, sq2, piece, None);

@@ -536,17 +536,19 @@ lazy_static! {
 
 #[cfg(test)]
 mod tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
 
     #[test]
     fn test_king_attacks() {
         // King in center
-        let sq = Square::new(4, 4);
+        let sq = parse_usi_square("5e").unwrap();
         let attacks = ATTACK_TABLES.king_attacks(sq);
         assert_eq!(attacks.count_ones(), 8); // All 8 adjacent squares
 
         // King in corner
-        let sq = Square::new(0, 0);
+        let sq = parse_usi_square("9a").unwrap();
         let attacks = ATTACK_TABLES.king_attacks(sq);
         assert_eq!(attacks.count_ones(), 3); // Only 3 adjacent squares
     }
@@ -554,40 +556,40 @@ mod tests {
     #[test]
     fn test_pawn_attacks() {
         // Black pawn (Sente)
-        let sq = Square::new(4, 4);
+        let sq = parse_usi_square("5e").unwrap();
         let attacks = ATTACK_TABLES.pawn_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 1);
-        assert!(attacks.test(Square::new(4, 3))); // Black (Sente) moves towards rank 0
+        assert!(attacks.test(parse_usi_square("5d").unwrap())); // Black (Sente) moves towards rank 0
 
         // White pawn (Gote)
         let attacks = ATTACK_TABLES.pawn_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 1);
-        assert!(attacks.test(Square::new(4, 5))); // White (Gote) moves towards rank 8
+        assert!(attacks.test(parse_usi_square("5f").unwrap())); // White (Gote) moves towards rank 8
     }
 
     #[test]
     fn test_knight_attacks() {
         // Black knight in center
-        let sq = Square::new(4, 4);
+        let sq = parse_usi_square("5e").unwrap();
         let attacks = ATTACK_TABLES.knight_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 2);
-        assert!(attacks.test(Square::new(3, 2))); // 2 forward (towards rank 0), 1 left
-        assert!(attacks.test(Square::new(5, 2))); // 2 forward (towards rank 0), 1 right
+        assert!(attacks.test(parse_usi_square("6c").unwrap())); // 2 forward (towards rank 0), 1 left
+        assert!(attacks.test(parse_usi_square("4c").unwrap())); // 2 forward (towards rank 0), 1 right
 
         // Black knight can't move from rank 0 or 1
-        let sq = Square::new(4, 1);
+        let sq = parse_usi_square("5b").unwrap();
         let attacks = ATTACK_TABLES.knight_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 0);
 
         // White knight in center
-        let sq = Square::new(4, 4);
+        let sq = parse_usi_square("5e").unwrap();
         let attacks = ATTACK_TABLES.knight_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 2);
-        assert!(attacks.test(Square::new(3, 6))); // 2 forward (towards rank 8), 1 left
-        assert!(attacks.test(Square::new(5, 6))); // 2 forward (towards rank 8), 1 right
+        assert!(attacks.test(parse_usi_square("6g").unwrap())); // 2 forward (towards rank 8), 1 left
+        assert!(attacks.test(parse_usi_square("4g").unwrap())); // 2 forward (towards rank 8), 1 right
 
         // White knight can't move from rank 7 or 8
-        let sq = Square::new(4, 7);
+        let sq = parse_usi_square("5h").unwrap();
         let attacks = ATTACK_TABLES.knight_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 0);
     }
@@ -595,17 +597,17 @@ mod tests {
     #[test]
     fn test_sliding_attacks() {
         // Rook attacks
-        let sq = Square::new(4, 4);
+        let sq = parse_usi_square("5e").unwrap();
         let occupied = Bitboard::EMPTY;
         let attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
         assert_eq!(attacks.count_ones(), 8 + 8); // 8 vertical + 8 horizontal - 1 (self)
 
         // Rook attacks with blocker
         let mut occupied = Bitboard::EMPTY;
-        occupied.set(Square::new(4, 2)); // Block upward
+        occupied.set(parse_usi_square("5c").unwrap()); // Block upward
         let attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
-        assert!(attacks.test(Square::new(4, 3)));
-        assert!(attacks.test(Square::new(4, 2))); // Can capture blocker
-        assert!(!attacks.test(Square::new(4, 1))); // Cannot go past blocker
+        assert!(attacks.test(parse_usi_square("5d").unwrap()));
+        assert!(attacks.test(parse_usi_square("5c").unwrap())); // Can capture blocker
+        assert!(!attacks.test(parse_usi_square("5b").unwrap())); // Cannot go past blocker
     }
 }

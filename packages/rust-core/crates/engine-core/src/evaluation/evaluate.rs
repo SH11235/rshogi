@@ -364,7 +364,7 @@ impl Evaluator for MaterialEvaluator {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Piece, Square};
+    use crate::{usi::parse_usi_square, Piece};
 
     use super::*;
 
@@ -385,13 +385,15 @@ mod tests {
         // Black has rook, White has bishop
         // Place kings in neutral positions to avoid positional bonus
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::Rook, Color::Black));
-        pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::Bishop, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+        pos.board.put_piece(
+            parse_usi_square("1i").unwrap(),
+            Piece::new(PieceType::Bishop, Color::White),
+        );
 
         let evaluator = MaterialEvaluator;
         let score = evaluator.evaluate(&pos);
@@ -408,17 +410,17 @@ mod tests {
         // Both have promoted pawns
         // Place kings in neutral positions to avoid positional bonus
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::King, Color::White));
 
         let mut tokin_black = Piece::new(PieceType::Pawn, Color::Black);
         tokin_black.promoted = true;
-        pos.board.put_piece(Square::new(0, 0), tokin_black);
+        pos.board.put_piece(parse_usi_square("9a").unwrap(), tokin_black);
 
         let mut tokin_white = Piece::new(PieceType::Pawn, Color::White);
         tokin_white.promoted = true;
-        pos.board.put_piece(Square::new(8, 8), tokin_white);
+        pos.board.put_piece(parse_usi_square("1i").unwrap(), tokin_white);
 
         let evaluator = MaterialEvaluator;
         let score = evaluator.evaluate(&pos);
@@ -433,15 +435,19 @@ mod tests {
 
         // Place kings
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black has a knight in center, white has a knight on edge
-        pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Knight, Color::Black));
-        pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::Knight, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("5e").unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        );
+        pos.board.put_piece(
+            parse_usi_square("9i").unwrap(),
+            Piece::new(PieceType::Knight, Color::White),
+        );
 
         let evaluator = MaterialEvaluator;
         let score = evaluator.evaluate(&pos);
@@ -456,20 +462,20 @@ mod tests {
 
         // Place kings
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black has doubled pawns, white has connected pawns
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
         pos.board
-            .put_piece(Square::new(2, 5), Piece::new(PieceType::Pawn, Color::White));
+            .put_piece(parse_usi_square("7f").unwrap(), Piece::new(PieceType::Pawn, Color::White));
         pos.board
-            .put_piece(Square::new(3, 4), Piece::new(PieceType::Pawn, Color::White));
+            .put_piece(parse_usi_square("6e").unwrap(), Piece::new(PieceType::Pawn, Color::White));
 
         let evaluator = MaterialEvaluator;
         let score = evaluator.evaluate(&pos);
@@ -486,17 +492,19 @@ mod tests {
 
         // Black has castled king with defenders
         pos.board
-            .put_piece(Square::new(1, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("8a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::Lance, Color::Black));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Lance, Color::Black));
         pos.board
-            .put_piece(Square::new(2, 0), Piece::new(PieceType::Gold, Color::Black));
-        pos.board
-            .put_piece(Square::new(1, 1), Piece::new(PieceType::Silver, Color::Black));
+            .put_piece(parse_usi_square("7a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
+        pos.board.put_piece(
+            parse_usi_square("8b").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
 
         // White king is exposed in center
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::White));
 
         let evaluator = MaterialEvaluator;
         let score = evaluator.evaluate(&pos);
@@ -511,17 +519,17 @@ mod tests {
 
         // Place kings
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black has advanced pawn
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
         // White has backward pawn
         pos.board
-            .put_piece(Square::new(5, 2), Piece::new(PieceType::Pawn, Color::White));
+            .put_piece(parse_usi_square("4c").unwrap(), Piece::new(PieceType::Pawn, Color::White));
 
         let evaluator = MaterialEvaluator;
         let score = evaluator.evaluate(&pos);

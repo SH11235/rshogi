@@ -432,7 +432,7 @@ impl History {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Color, PieceType};
+    use crate::{usi::parse_usi_square, Color, PieceType};
 
     use super::*;
 
@@ -440,7 +440,8 @@ mod tests {
     fn test_butterfly_history() {
         let mut history = ButterflyHistory::new();
         let color = Color::Black;
-        let mv = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
+        let mv =
+            Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
 
         // Initial score should be 0
         assert_eq!(history.get(color, mv), 0);
@@ -465,8 +466,10 @@ mod tests {
         let mut history = CounterMoveHistory::new();
         let color = Color::Black;
 
-        let prev_move = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
-        let counter_move = Move::normal(Square::new(8, 3), Square::new(8, 4), false);
+        let prev_move =
+            Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
+        let counter_move =
+            Move::normal(parse_usi_square("1d").unwrap(), parse_usi_square("1e").unwrap(), false);
 
         // Initially no counter move
         assert!(history.get(color, prev_move).is_none());
@@ -482,9 +485,9 @@ mod tests {
         let color = Color::Black;
 
         let prev_piece = PieceType::Pawn as usize;
-        let prev_to = Square::new(2, 6);
+        let prev_to = parse_usi_square("7g").unwrap();
         let curr_piece = PieceType::Pawn as usize;
-        let curr_to = Square::new(8, 4);
+        let curr_to = parse_usi_square("1e").unwrap();
 
         // Initial score should be 0
         assert_eq!(history.get(color, prev_piece, prev_to, curr_piece, curr_to), 0);
@@ -498,7 +501,8 @@ mod tests {
     fn test_history_score_clamping() {
         let mut history = ButterflyHistory::new();
         let color = Color::Black;
-        let mv = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
+        let mv =
+            Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
 
         // Update many times to test clamping
         for _ in 0..100 {

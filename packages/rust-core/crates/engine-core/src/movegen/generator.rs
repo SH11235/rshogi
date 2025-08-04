@@ -1295,7 +1295,7 @@ impl MoveGen {
 
 #[cfg(test)]
 mod tests {
-    use crate::Piece;
+    use crate::{usi::parse_usi_square, Piece};
 
     use super::*;
 
@@ -1324,7 +1324,7 @@ mod tests {
     fn test_movegen_king_moves() {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1337,12 +1337,12 @@ mod tests {
     fn test_movegen_pawn_moves() {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         // Black pawn on rank 5 (not in promotion zone)
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1351,7 +1351,7 @@ mod tests {
         let pawn_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| m.from() == Some(Square::new(4, 5)))
+            .filter(|m| m.from() == Some(parse_usi_square("5f").unwrap()))
             .collect();
         assert_eq!(pawn_moves.len(), 1);
         assert!(!pawn_moves[0].is_promote());
@@ -1361,12 +1361,12 @@ mod tests {
     fn test_movegen_pawn_promotion() {
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         // Black pawn in promotion zone (rank 2, can move to rank 1)
         pos.board
-            .put_piece(Square::new(4, 2), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1375,7 +1375,7 @@ mod tests {
         let pawn_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| m.from() == Some(Square::new(4, 2)))
+            .filter(|m| m.from() == Some(parse_usi_square("5c").unwrap()))
             .collect();
         assert_eq!(pawn_moves.len(), 2); // One promoted, one unpromoted
 
@@ -1391,13 +1391,13 @@ mod tests {
         let mut pos = Position::empty();
         // Black king in check from white rook
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Rook, Color::White));
         pos.board
-            .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1409,7 +1409,7 @@ mod tests {
         let king_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| m.from() == Some(Square::new(4, 0)))
+            .filter(|m| m.from() == Some(parse_usi_square("5a").unwrap()))
             .collect();
         assert!(!king_moves.is_empty());
 
@@ -1417,11 +1417,11 @@ mod tests {
         let gold_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| m.from() == Some(Square::new(3, 1)))
+            .filter(|m| m.from() == Some(parse_usi_square("6b").unwrap()))
             .collect();
-        let block_move = gold_moves
-            .iter()
-            .find(|m| m.to() == Square::new(4, 1) || m.to() == Square::new(4, 2));
+        let block_move = gold_moves.iter().find(|m| {
+            m.to() == parse_usi_square("5b").unwrap() || m.to() == parse_usi_square("5c").unwrap()
+        });
         assert!(block_move.is_some());
     }
 
@@ -1430,13 +1430,13 @@ mod tests {
         let mut pos = Position::empty();
         // Black gold is pinned by white rook
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 2), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1445,7 +1445,7 @@ mod tests {
         let gold_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| m.from() == Some(Square::new(4, 2)))
+            .filter(|m| m.from() == Some(parse_usi_square("5c").unwrap()))
             .collect();
 
         // All gold moves should be on file 4
@@ -1459,17 +1459,17 @@ mod tests {
         let mut pos = Position::empty();
         // White king with no escape squares - White is at top (rank 0)
         pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("6a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos.board
-            .put_piece(Square::new(5, 0), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("4a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos.board
-            .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos.board
-            .put_piece(Square::new(5, 1), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("4b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
@@ -1478,7 +1478,7 @@ mod tests {
         let moves = gen.generate_all();
 
         // Pawn drop at 5b would be checkmate - should not be allowed
-        let sq_5b = Square::new(4, 1); // 5b = file 5 (index 4), rank b (index 1)
+        let sq_5b = parse_usi_square("5b").unwrap(); // 5b = file 5 (index 4), rank b (index 1)
         let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5b);
         assert!(illegal_drop.is_none(), "Drop pawn mate should not be allowed");
     }
@@ -1488,11 +1488,11 @@ mod tests {
         let mut pos = Position::empty();
         // White king with escape square - White is at top
         pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("6a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         // No piece at (5, 0) - king can escape there
 
         // Black has a pawn in hand
@@ -1501,7 +1501,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
-        let sq_5b = Square::new(4, 1);
+        let sq_5b = parse_usi_square("5b").unwrap();
         // Pawn drop at 5b gives check but king can escape - should be allowed
         let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5b);
         assert!(legal_drop.is_some(), "Non-mate pawn drop should be allowed");
@@ -1512,16 +1512,16 @@ mod tests {
         let mut pos = Position::empty();
         // White king trapped - White is at top
         pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("6a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos.board
-            .put_piece(Square::new(5, 0), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("4a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         // White gold that can capture the pawn
         pos.board
-            .put_piece(Square::new(4, 2), Piece::new(PieceType::Gold, Color::White));
+            .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Gold, Color::White));
 
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
@@ -1529,7 +1529,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
-        let sq_5b = Square::new(4, 1);
+        let sq_5b = parse_usi_square("5b").unwrap();
         // Pawn drop at 5b can be captured - should be allowed
         let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5b);
         assert!(legal_drop.is_some(), "Capturable pawn drop should be allowed");
@@ -1540,9 +1540,9 @@ mod tests {
         let mut pos = Position::empty();
         // Black king far away - pawn has no support
         pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
@@ -1550,7 +1550,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
-        let sq_4g = Square::new(4, 7);
+        let sq_4g = parse_usi_square("5h").unwrap();
         // Pawn drop at 4g has no support - king can capture it - should be allowed
         let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_4g);
         assert!(legal_drop.is_some(), "Unsupported pawn drop should be allowed");
@@ -1570,23 +1570,25 @@ mod tests {
 
         // White pieces (now at top of board)
         pos.board
-            .put_piece(Square::new(8, 1), Piece::new(PieceType::King, Color::White)); // 1b
-        pos.board
-            .put_piece(Square::new(7, 1), Piece::new(PieceType::Silver, Color::White)); // 2b - will be pinned
+            .put_piece(parse_usi_square("1b").unwrap(), Piece::new(PieceType::King, Color::White)); // 1b
+        pos.board.put_piece(
+            parse_usi_square("2b").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        ); // 2b - will be pinned
 
         // Black pieces
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::Black)); // 5b - pins silver
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::Black)); // 5b - pins silver
         pos.board
-            .put_piece(Square::new(8, 3), Piece::new(PieceType::Gold, Color::Black)); // 1d - supports pawn
+            .put_piece(parse_usi_square("1d").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 1d - supports pawn
         pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black)); // 9i - far away
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black)); // 9i - far away
 
         // Block escape squares for White king
         pos.board
-            .put_piece(Square::new(7, 0), Piece::new(PieceType::Gold, Color::Black)); // 2a
+            .put_piece(parse_usi_square("2a").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 2a
         pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::Gold, Color::Black)); // 1a
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 1a
 
         // Black has a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn
@@ -1594,7 +1596,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
 
         // Try to drop pawn at 1c (would give check to king at 1b)
-        let sq_1c = Square::new(8, 2); // 1c = file 1 (index 8), rank c (index 2)
+        let sq_1c = parse_usi_square("1c").unwrap(); // 1c = file 1 (index 8), rank c (index 2)
 
         // Verify that drop pawn mate is detected
         assert!(gen.is_drop_pawn_mate(sq_1c, Color::White), "Drop pawn mate should be detected");
@@ -1618,18 +1620,20 @@ mod tests {
 
         // 後手の配置
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
-        pos.board
-            .put_piece(Square::new(3, 7), Piece::new(PieceType::Silver, Color::White)); // 6h
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::King, Color::White)); // 5h
+        pos.board.put_piece(
+            parse_usi_square("6h").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        ); // 6h
 
         // 先手の配置
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a
-                                                                                      // 逃げ場の一部をブロック（でも完全ではない）
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::Black)); // 9a
+                                                                                                    // 逃げ場の一部をブロック（でも完全ではない）
         pos.board
-            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::Black)); // 6i
+            .put_piece(parse_usi_square("6i").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 6i
 
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
@@ -1637,7 +1641,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
-        let sq_5g = Square::new(4, 6);
+        let sq_5g = parse_usi_square("5g").unwrap();
 
         // 打ち歩詰めではないことを確認（5iに逃げられる）
         assert!(
@@ -1659,27 +1663,29 @@ mod tests {
 
         // 後手の配置
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
-        pos.board
-            .put_piece(Square::new(3, 6), Piece::promoted(PieceType::Silver, Color::White)); // 6g - 成銀
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::King, Color::White)); // 5h
+        pos.board.put_piece(
+            parse_usi_square("6g").unwrap(),
+            Piece::promoted(PieceType::Silver, Color::White),
+        ); // 6g - 成銀
 
         // 先手の配置
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::Black)); // 9a
 
         // 玉の逃げ場をブロック
         pos.board
-            .put_piece(Square::new(3, 7), Piece::new(PieceType::Gold, Color::Black)); // 6h
+            .put_piece(parse_usi_square("6h").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 6h
         pos.board
-            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::Black)); // 6i
+            .put_piece(parse_usi_square("6i").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 6i
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::Gold, Color::Black)); // 5i
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5i
         pos.board
-            .put_piece(Square::new(5, 8), Piece::new(PieceType::Gold, Color::Black)); // 4i
+            .put_piece(parse_usi_square("4i").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 4i
         pos.board
-            .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::Black)); // 4h
+            .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 4h
 
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
@@ -1687,7 +1693,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
-        let sq_5g = Square::new(4, 6);
+        let sq_5g = parse_usi_square("5g").unwrap();
 
         // 打ち歩詰めではないことを確認（成銀が取れる）
         assert!(
@@ -1712,15 +1718,15 @@ mod tests {
 
         // 後手の配置
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::King, Color::White)); // 5h
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Rook, Color::White)); // 5d - 遠くから守る
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Rook, Color::White)); // 5d - 遠くから守る
 
         // 先手の配置
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支える
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black)); // 9a
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::Black)); // 9a
 
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
@@ -1728,7 +1734,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
-        let sq_5g = Square::new(4, 6);
+        let sq_5g = parse_usi_square("5g").unwrap();
 
         // 打ち歩詰めではないことを確認（飛車が取れる）
         assert!(
@@ -1750,21 +1756,23 @@ mod tests {
 
         // 後手の配置（1筋の端、rank 0）
         pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::King, Color::White)); // 1a
-        pos.board
-            .put_piece(Square::new(7, 0), Piece::new(PieceType::Silver, Color::White)); // 2a - ピンされる
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White)); // 1a
+        pos.board.put_piece(
+            parse_usi_square("2a").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        ); // 2a - ピンされる
 
         // 先手の配置
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::Black)); // 5a - 銀をピン
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::Black)); // 5a - 銀をピン
         pos.board
-            .put_piece(Square::new(8, 2), Piece::new(PieceType::Gold, Color::Black)); // 1c - 歩を支える
+            .put_piece(parse_usi_square("1c").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 1c - 歩を支える
         pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black)); // 9i
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black)); // 9i
 
         // 玉の逃げ場をブロック（盤端なので元々限定的）
         pos.board
-            .put_piece(Square::new(7, 1), Piece::new(PieceType::Gold, Color::Black)); // 2b
+            .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 2b
 
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
@@ -1772,7 +1780,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
 
         // 1bに歩を打つ
-        let sq_1b = Square::new(8, 1);
+        let sq_1b = parse_usi_square("1b").unwrap();
 
         // 打ち歩詰めが検出されることを確認
         assert!(
@@ -1794,15 +1802,15 @@ mod tests {
 
         // 後手の配置
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::King, Color::White)); // 5h
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::King, Color::White)); // 5h
         pos.board
-            .put_piece(Square::new(1, 7), Piece::new(PieceType::Rook, Color::White)); // 8h
+            .put_piece(parse_usi_square("8h").unwrap(), Piece::new(PieceType::Rook, Color::White)); // 8h
 
         // 先手の配置
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支えるが...
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5f - 歩を支えるが...
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black)); // 5a - 金がピンされている！
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black)); // 5a - 金がピンされている！
 
         // 先手が歩を持っている
         pos.hands[Color::Black as usize][6] = 1;
@@ -1810,7 +1818,7 @@ mod tests {
         let mut gen = MoveGenImpl::new(&pos);
 
         // 5gに歩を打つ
-        let sq_5g = Square::new(4, 6);
+        let sq_5g = parse_usi_square("5g").unwrap();
 
         // 打ち歩詰めではないことを確認（歩に紐がついていない - 金がピンされているため）
         assert!(
@@ -1836,11 +1844,13 @@ mod tests {
         // - 先手の銀(5b)が後手の玉(6c)を取れる位置関係
         // - 正しい実装では、この銀→玉の手は生成されないはず
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::Black)); // 先手玉: 5a
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black)); // 先手玉: 5a
+        pos.board.put_piece(
+            parse_usi_square("5b").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        ); // 先手銀: 5b
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Silver, Color::Black)); // 先手銀: 5b
-        pos.board
-            .put_piece(Square::new(3, 2), Piece::new(PieceType::King, Color::White)); // 後手玉: 6c
+            .put_piece(parse_usi_square("6c").unwrap(), Piece::new(PieceType::King, Color::White)); // 後手玉: 6c
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1850,7 +1860,9 @@ mod tests {
             if !m.is_drop() {
                 if let Some(from) = m.from() {
                     let to = m.to();
-                    if from == Square::new(4, 1) && to == Square::new(3, 2) {
+                    if from == parse_usi_square("5b").unwrap()
+                        && to == parse_usi_square("6c").unwrap()
+                    {
                         panic!("Generated illegal move: silver captures king!");
                     }
                 }
@@ -1867,9 +1879,9 @@ mod tests {
 
         // 先手玉が5五、後手飛車が5八で王手
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1879,7 +1891,7 @@ mod tests {
         let king_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(4, 4)))
+            .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("5e").unwrap()))
             .collect();
 
         // 玉の逃げ場所を確認（5筋以外）
@@ -1895,9 +1907,9 @@ mod tests {
 
         // 先手玉が5一、後手飛車が5八で王手、先手は金を持っている
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
         pos.hands[Color::Black as usize][2] = 1; // 金を持っている
 
         let mut gen = MoveGenImpl::new(&pos);
@@ -1917,18 +1929,22 @@ mod tests {
 
         // 先手玉が5五、後手金が4四で王手、先手銀が3三
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(5, 5), Piece::new(PieceType::Gold, Color::White));
-        pos.board
-            .put_piece(Square::new(6, 6), Piece::new(PieceType::Silver, Color::Black));
+            .put_piece(parse_usi_square("4f").unwrap(), Piece::new(PieceType::Gold, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("3g").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
 
         // 銀で金を取る手があるはず
         let capture_move = moves.as_slice().iter().find(|m| {
-            !m.is_drop() && m.from() == Some(Square::new(6, 6)) && m.to() == Square::new(5, 5)
+            !m.is_drop()
+                && m.from() == Some(parse_usi_square("3g").unwrap())
+                && m.to() == parse_usi_square("4f").unwrap()
         });
 
         assert!(capture_move.is_some(), "Should be able to capture the checking piece");
@@ -1941,11 +1957,13 @@ mod tests {
 
         // 先手玉が5五、後手飛車が5八と角が1九で両王手
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
-        pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::Bishop, Color::White));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("1a").unwrap(),
+            Piece::new(PieceType::Bishop, Color::White),
+        );
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1955,7 +1973,7 @@ mod tests {
             if !m.is_drop() {
                 assert_eq!(
                     m.from(),
-                    Some(Square::new(4, 4)),
+                    Some(parse_usi_square("5e").unwrap()),
                     "Only king moves allowed in double check"
                 );
             } else {
@@ -1971,11 +1989,11 @@ mod tests {
 
         // 先手玉5一、先手金5五、後手飛車5九でピン
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -1984,7 +2002,7 @@ mod tests {
         let gold_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(4, 4)))
+            .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("5e").unwrap()))
             .collect();
 
         for m in &gold_moves {
@@ -1998,12 +2016,16 @@ mod tests {
         let mut pos = Position::empty();
 
         // 桂馬を1筋と9筋に配置 (Black knights at rank 8)
+        pos.board.put_piece(
+            parse_usi_square("1i").unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        ); // 1i
+        pos.board.put_piece(
+            parse_usi_square("9i").unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        ); // 9i
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::Knight, Color::Black)); // 1i
-        pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::Knight, Color::Black)); // 9i
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -2012,21 +2034,21 @@ mod tests {
         let knight1_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(8, 8)))
+            .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("1i").unwrap()))
             .collect();
 
         assert_eq!(knight1_moves.len(), 1);
-        assert_eq!(knight1_moves[0].to(), Square::new(7, 6)); // Black knight jumps to rank 6
+        assert_eq!(knight1_moves[0].to(), parse_usi_square("2g").unwrap()); // Black knight jumps to rank 6
 
         // 9iの桂馬は8gにしか行けない
         let knight9_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(0, 8)))
+            .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("9i").unwrap()))
             .collect();
 
         assert_eq!(knight9_moves.len(), 1);
-        assert_eq!(knight9_moves[0].to(), Square::new(1, 6)); // Black knight jumps to rank 6
+        assert_eq!(knight9_moves[0].to(), parse_usi_square("8g").unwrap()); // Black knight jumps to rank 6
     }
 
     #[test]
@@ -2036,11 +2058,11 @@ mod tests {
 
         // 先手歩を2段目に配置 (Black pawn on rank 1, moving to rank 0)
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
         pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -2050,7 +2072,9 @@ mod tests {
             .as_slice()
             .iter()
             .filter(|m| {
-                !m.is_drop() && m.from() == Some(Square::new(4, 1)) && m.to() == Square::new(4, 0)
+                !m.is_drop()
+                    && m.from() == Some(parse_usi_square("5b").unwrap())
+                    && m.to() == parse_usi_square("5a").unwrap()
             })
             .collect();
 
@@ -2065,11 +2089,11 @@ mod tests {
 
         // 先手香を2段目に配置 (Black lance on rank 1, moving to rank 0)
         pos.board
-            .put_piece(Square::new(0, 1), Piece::new(PieceType::Lance, Color::Black));
+            .put_piece(parse_usi_square("9b").unwrap(), Piece::new(PieceType::Lance, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -2079,7 +2103,7 @@ mod tests {
         let lance_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(0, 1)))
+            .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("9b").unwrap()))
             .collect();
 
         // At least one move should exist
@@ -2087,7 +2111,7 @@ mod tests {
 
         // Any move to rank 0 must be promoted
         for mv in &lance_moves {
-            if mv.to() == Square::new(0, 0) {
+            if mv.to() == parse_usi_square("9a").unwrap() {
                 assert!(mv.is_promote(), "Black lance must promote when moving to rank 0");
             }
         }
@@ -2099,12 +2123,14 @@ mod tests {
         let mut pos = Position::empty();
 
         // 先手桂を3段目に配置 (Black knight on rank 2)
+        pos.board.put_piece(
+            parse_usi_square("8c").unwrap(),
+            Piece::new(PieceType::Knight, Color::Black),
+        );
         pos.board
-            .put_piece(Square::new(1, 2), Piece::new(PieceType::Knight, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         let mut gen = MoveGenImpl::new(&pos);
         let moves = gen.generate_all();
@@ -2113,7 +2139,7 @@ mod tests {
         let knight_moves: Vec<_> = moves
             .as_slice()
             .iter()
-            .filter(|m| !m.is_drop() && m.from() == Some(Square::new(1, 2)))
+            .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("8c").unwrap()))
             .collect();
 
         // Black knight jumps 2 ranks forward (toward rank 0)
