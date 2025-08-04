@@ -418,14 +418,14 @@ mod tests {
         // Verify killers are stored correctly
         for (i, &mv) in test_moves.iter().enumerate() {
             let killers = ordering.killer_table.get(i);
-            assert!(killers.contains(&Some(mv)), "Killer move should be stored at ply {}", i);
+            assert!(killers.contains(&Some(mv)), "Killer move should be stored at ply {i}");
         }
 
         // Clear and verify
         ordering.clear_killers();
         for i in 0..3 {
             let killers = ordering.killer_table.get(i);
-            assert_eq!(killers, [None; 2], "Killers should be cleared at ply {}", i);
+            assert_eq!(killers, [None; 2], "Killers should be cleared at ply {i}");
         }
 
         // Test that the same sequence produces the same results

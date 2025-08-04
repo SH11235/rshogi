@@ -5,12 +5,13 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::search::tt::{NodeType, TranspositionTable};
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
+use std::hint::black_box;
 
 /// Generate random hash values for testing
 fn generate_random_hashes(count: usize) -> Vec<u64> {
-    let mut rng = thread_rng();
-    (0..count).map(|_| rng.gen()).collect()
+    let mut rng = rng();
+    (0..count).map(|_| rng.random()).collect()
 }
 
 /// Benchmark TT probe operations with various hit rates
@@ -30,9 +31,9 @@ fn bench_tt_probe(c: &mut Criterion) {
         let hashes = generate_random_hashes(test_count);
 
         // Store some entries
-        for i in 0..store_count {
+        for (i, &hash) in hashes.iter().enumerate().take(store_count) {
             tt.store(
-                hashes[i],
+                hash,
                 None,
                 (i % 1000) as i16,
                 (i % 500) as i16,
@@ -54,7 +55,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 b.iter(|| {
                     let hash = hashes[idx % hashes.len()];
                     let result = tt.probe(hash);
-                    criterion::black_box(result);
+                    black_box(result);
                     idx += 1;
                 });
             },
@@ -70,7 +71,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 b.iter(|| {
                     let hash = stored_hashes[idx % stored_hashes.len()];
                     let result = tt.probe(hash);
-                    criterion::black_box(result);
+                    black_box(result);
                     idx += 1;
                 });
             },
@@ -86,7 +87,7 @@ fn bench_tt_probe(c: &mut Criterion) {
                 b.iter(|| {
                     let hash = miss_hashes[idx % miss_hashes.len()];
                     let result = tt.probe(hash);
-                    criterion::black_box(result);
+                    black_box(result);
                     idx += 1;
                 });
             },
@@ -116,7 +117,7 @@ fn bench_tt_concurrent(c: &mut Criterion) {
             for _ in 0..100 {
                 let hash = hashes[idx % hashes.len()];
                 let result = tt.probe(hash);
-                criterion::black_box(result);
+                black_box(result);
                 idx += 1;
             }
         });
@@ -160,7 +161,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
             let result = tt_small.probe(hash);
-            criterion::black_box(result);
+            black_box(result);
             idx += 1;
         });
     });
@@ -171,7 +172,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
             let result = tt_medium.probe(hash);
-            criterion::black_box(result);
+            black_box(result);
             idx += 1;
         });
     });
@@ -182,7 +183,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
         b.iter(|| {
             let hash = test_hashes[idx % test_hashes.len()];
             let result = tt_large.probe(hash);
-            criterion::black_box(result);
+            black_box(result);
             idx += 1;
         });
     });
