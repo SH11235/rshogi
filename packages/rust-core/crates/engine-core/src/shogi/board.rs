@@ -956,6 +956,61 @@ impl Position {
         self.board.piece_on(sq)
     }
 
+    /// Validate if a move is pseudo-legal (doesn't check for leaving king in check)
+    /// Returns true if the move appears to be legal based on basic rules
+    pub fn is_pseudo_legal(&self, mv: super::moves::Move) -> bool {
+        if mv.is_null() {
+            return false;
+        }
+
+        if mv.is_drop() {
+            let to = mv.to();
+            // Check destination is empty
+            if self.board.piece_on(to).is_some() {
+                return false;
+            }
+            // Check we have the piece in hand
+            let piece_type = mv.drop_piece_type();
+            let hand_idx = match piece_type_to_hand_index(piece_type) {
+                Ok(idx) => idx,
+                Err(_) => return false,
+            };
+            if self.hands[self.side_to_move as usize][hand_idx] == 0 {
+                return false;
+            }
+        } else {
+            let from = match mv.from() {
+                Some(f) => f,
+                None => return false,
+            };
+            let to = mv.to();
+
+            // Check source has a piece
+            let piece = match self.board.piece_on(from) {
+                Some(p) => p,
+                None => return false,
+            };
+
+            // Check piece belongs to side to move
+            if piece.color != self.side_to_move {
+                return false;
+            }
+
+            // Check destination - if occupied, must be opponent's piece
+            if let Some(dest_piece) = self.board.piece_on(to) {
+                if dest_piece.color == self.side_to_move {
+                    return false;
+                }
+                // Never allow king capture
+                if dest_piece.piece_type == PieceType::King {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     /// Make a move on the position
     pub fn do_move(&mut self, mv: super::moves::Move) -> UndoInfo {
         // Save current hash to history
@@ -1003,6 +1058,17 @@ impl Position {
             // Get moving piece
             let mut piece = self.board.piece_on(from).expect("Move source must have a piece");
 
+            // CRITICAL: Validate that the moving piece belongs to the side to move
+            // This prevents illegal moves where the wrong side's piece is being moved
+            if piece.color != self.side_to_move {
+                eprintln!("ERROR: Attempting to move opponent's piece!");
+                eprintln!("Move: from={from}, to={to}");
+                eprintln!("Moving piece: {piece:?}");
+                eprintln!("Side to move: {:?}", self.side_to_move);
+                eprintln!("Position SFEN: {}", crate::usi::position_to_sfen(self));
+                panic!("Illegal move: attempting to move opponent's piece from {from} to {to}");
+            }
+
             // Save promoted status for undo
             undo_info.moved_piece_was_promoted = piece.promoted;
 
@@ -1016,7 +1082,12 @@ impl Position {
                 undo_info.captured = Some(captured);
                 // Debug check - should never capture king
                 if captured.piece_type == PieceType::King {
-                    println!("Move details: from={from}, to={to}, piece={piece:?}");
+                    eprintln!("ERROR: King capture detected!");
+                    eprintln!("Move: from={from}, to={to}");
+                    eprintln!("Moving piece: {piece:?}");
+                    eprintln!("Captured piece: {captured:?}");
+                    eprintln!("Side to move: {:?}", self.side_to_move);
+                    eprintln!("Position SFEN: {}", crate::usi::position_to_sfen(self));
                     panic!("Illegal move: attempting to capture king at {to}");
                 }
 

@@ -20,6 +20,12 @@ pub struct PrefetchBudget {
     thread_count: usize,
 }
 
+impl Default for PrefetchBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PrefetchBudget {
     /// Create a new prefetch budget manager
     pub fn new() -> Self {

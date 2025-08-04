@@ -124,6 +124,17 @@ where
 
     // Search each move
     for (move_idx, &mv) in ordered_moves.iter().enumerate() {
+        // Validate move before executing (important for TT moves)
+        if !pos.is_pseudo_legal(mv) {
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("WARNING: Skipping illegal move in search at depth {depth}");
+                eprintln!("Move: {}", crate::usi::move_to_usi(&mv));
+                eprintln!("Position: {}", crate::usi::position_to_sfen(pos));
+            }
+            continue;
+        }
+
         // Make move
         let undo_info = pos.do_move(mv);
 
@@ -470,6 +481,17 @@ where
             if stand_pat + material_gain + delta_margin < alpha {
                 continue;
             }
+        }
+
+        // Validate move before executing (important for safety)
+        if !pos.is_pseudo_legal(mv) {
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("WARNING: Skipping illegal move in quiescence search");
+                eprintln!("Move: {}", crate::usi::move_to_usi(&mv));
+                eprintln!("Position: {}", crate::usi::position_to_sfen(pos));
+            }
+            continue;
         }
 
         // Make move
