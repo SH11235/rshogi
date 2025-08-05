@@ -10,6 +10,8 @@ loom = ["dep:loom"]
 large-stack-tests = []
 # Feature to enable nightly-only optimizations (e.g., ARM64 prefetch)
 nightly = []
+# Feature to enable transposition table metrics collection (debug/profiling only)
+tt_metrics = []
 
 [dependencies]
 serde = { workspace = true }
