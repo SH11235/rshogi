@@ -4,7 +4,8 @@
 //! are being exercised. Full integration testing happens through the search tests.
 
 use engine_core::search::history::History;
-use engine_core::shogi::{Move, Square};
+use engine_core::shogi::Move;
+use engine_core::usi::parse_usi_square;
 use engine_core::{Color, PieceType};
 
 #[test]
@@ -13,7 +14,7 @@ fn test_history_tables_basic_functionality() {
     let color = Color::Black;
 
     // Test butterfly history
-    let mv = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
+    let mv = Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
 
     // Initial score should be 0
     assert_eq!(history.get_score(color, mv, None), 0);
@@ -23,7 +24,8 @@ fn test_history_tables_basic_functionality() {
     assert!(history.get_score(color, mv, None) > 0);
 
     // Update with quiet move
-    let quiet_mv = Move::normal(Square::new(7, 7), Square::new(7, 6), false);
+    let quiet_mv =
+        Move::normal(parse_usi_square("2h").unwrap(), parse_usi_square("2g").unwrap(), false);
     history.update_quiet(color, quiet_mv, 3, None);
     assert!(history.get_score(color, quiet_mv, None) < 0);
 }
@@ -33,8 +35,10 @@ fn test_counter_move_functionality() {
     let mut history = History::new();
     let color = Color::Black;
 
-    let prev_move = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
-    let counter_move = Move::normal(Square::new(8, 3), Square::new(8, 4), false);
+    let prev_move =
+        Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
+    let counter_move =
+        Move::normal(parse_usi_square("1d").unwrap(), parse_usi_square("1e").unwrap(), false);
 
     // Initially no counter move
     assert!(history.counter_moves.get(color, prev_move).is_none());
@@ -70,10 +74,20 @@ fn test_history_with_continuation() {
     let color = Color::Black;
 
     // Create moves with piece type information
-    let prev_move =
-        Move::normal_with_piece(Square::new(2, 7), Square::new(2, 6), false, PieceType::Pawn, None);
-    let curr_move =
-        Move::normal_with_piece(Square::new(8, 3), Square::new(8, 4), false, PieceType::Pawn, None);
+    let prev_move = Move::normal_with_piece(
+        parse_usi_square("7h").unwrap(),
+        parse_usi_square("7g").unwrap(),
+        false,
+        PieceType::Pawn,
+        None,
+    );
+    let curr_move = Move::normal_with_piece(
+        parse_usi_square("1d").unwrap(),
+        parse_usi_square("1e").unwrap(),
+        false,
+        PieceType::Pawn,
+        None,
+    );
 
     // Get score with continuation history
     let score1 = history.get_score(color, curr_move, Some(prev_move));
@@ -96,7 +110,7 @@ fn test_history_with_continuation() {
 fn test_history_aging() {
     let mut history = History::new();
     let color = Color::Black;
-    let mv = Move::normal(Square::new(2, 7), Square::new(2, 6), false);
+    let mv = Move::normal(parse_usi_square("7h").unwrap(), parse_usi_square("7g").unwrap(), false);
 
     // Build up history score
     for _ in 0..5 {

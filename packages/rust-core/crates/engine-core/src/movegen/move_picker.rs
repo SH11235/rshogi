@@ -607,7 +607,7 @@ impl Position {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Board, Piece};
+    use crate::{usi::parse_usi_square, Board, Piece};
 
     use super::*;
 
@@ -620,8 +620,8 @@ mod tests {
         // Use a known legal move from starting position
         // Black pawn at rank 6 moves toward rank 0
         let tt_move = Some(Move::normal(
-            Square::new(7, 6), // Black pawn
-            Square::new(7, 5), // One square forward
+            parse_usi_square("2g").unwrap(), // Black pawn
+            parse_usi_square("2f").unwrap(), // One square forward
             false,
         ));
 
@@ -656,18 +656,19 @@ mod tests {
 
     #[test]
     fn test_see_calculation() {
+        use crate::usi::parse_usi_move;
+
         // Create a position where we can test SEE
         let mut pos = Position::startpos();
 
         // Create a position with some captures
-        // 7g7f, 3c3d, 2g2f, 3d3e, 2f2e, 3e3f (pawn advances to create capture)
         let setup_moves = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
-            Move::normal(Square::new(6, 6), Square::new(6, 5), false), // 3c3d
-            Move::normal(Square::new(7, 2), Square::new(7, 3), false), // 2g2f
-            Move::normal(Square::new(6, 5), Square::new(6, 4), false), // 3d3e
-            Move::normal(Square::new(7, 3), Square::new(7, 4), false), // 2f2e
-            Move::normal(Square::new(6, 4), Square::new(6, 3), false), // 3e3f
+            parse_usi_move("7g7f").unwrap(), // 先手の歩
+            parse_usi_move("3c3d").unwrap(), // 後手の歩
+            parse_usi_move("2g2f").unwrap(), // 先手の歩
+            parse_usi_move("3d3e").unwrap(), // 後手の歩
+            parse_usi_move("2f2e").unwrap(), // 先手の歩
+            parse_usi_move("3e3f").unwrap(), // 後手の歩
         ];
 
         for mv in &setup_moves {
@@ -679,8 +680,8 @@ mod tests {
         let picker = MovePicker::new(&pos, None, None, &history, &stack, 1);
 
         // Test capturing the pawn at 3f with our pawn at 3g
-        // This should be a good capture (pawn for pawn = 0)
-        let capture_3f = Move::normal(Square::new(6, 2), Square::new(6, 3), false); // 3g3f
+        // This should be a good capture (pawn for pawn)
+        let capture_3f = parse_usi_move("3g3f").unwrap(); // 先手の歩が後手の歩を取る
         let see_value = picker.see(capture_3f);
         assert_eq!(see_value, 100, "Pawn x Pawn should have SEE value of 100 (pawn value)");
 
@@ -696,10 +697,10 @@ mod tests {
 
         // Make some moves to create capture opportunities
         let moves = [
-            Move::normal(Square::new(2, 6), Square::new(2, 5), false), // Black pawn forward
-            Move::normal(Square::new(3, 2), Square::new(3, 3), false), // White pawn forward
-            Move::normal(Square::new(2, 5), Square::new(2, 4), false), // Black pawn forward
-            Move::normal(Square::new(3, 3), Square::new(3, 4), false), // White pawn forward
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false), // Black pawn forward
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false), // White pawn forward
+            Move::normal(parse_usi_square("7f").unwrap(), parse_usi_square("7e").unwrap(), false), // Black pawn forward
+            Move::normal(parse_usi_square("6d").unwrap(), parse_usi_square("6e").unwrap(), false), // White pawn forward
         ];
 
         for mv in &moves {
@@ -734,9 +735,11 @@ mod tests {
         // Set killer moves (using legal moves from starting position)
         // Black pawns are at rank 6, move toward rank 0
         // 2g2f: file 7, rank 6 -> rank 5
-        let killer1 = Move::normal(Square::new(7, 6), Square::new(7, 5), false);
+        let killer1 =
+            Move::normal(parse_usi_square("2g").unwrap(), parse_usi_square("2f").unwrap(), false);
         // 7g7f: file 2, rank 6 -> rank 5
-        let killer2 = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
+        let killer2 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
         stack.killers[0] = Some(killer1);
         stack.killers[1] = Some(killer2);
 
@@ -769,7 +772,7 @@ mod tests {
         pos.side_to_move = Color::Black;
 
         // Put a black pawn on file 5 (index 4)
-        let sq = Square::new(4, 5); // 5f
+        let sq = parse_usi_square("5f").unwrap(); // 5f
         pos.board.put_piece(
             sq,
             Piece {
@@ -783,11 +786,11 @@ mod tests {
         pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
 
         // Try to drop a pawn in the same file
-        let illegal_drop = Move::drop(PieceType::Pawn, Square::new(4, 3)); // 5d
+        let illegal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5d").unwrap()); // 5d
         assert!(!pos.is_legal_move(illegal_drop), "Should not allow double pawn");
 
         // Try to drop a pawn in a different file (that has no pawn)
-        let legal_drop = Move::drop(PieceType::Pawn, Square::new(3, 3)); // 6d
+        let legal_drop = Move::drop(PieceType::Pawn, parse_usi_square("6d").unwrap()); // 6d
         assert!(pos.is_legal_move(legal_drop), "Should allow pawn drop in different file");
     }
 
@@ -798,7 +801,7 @@ mod tests {
         pos.side_to_move = Color::Black;
 
         // Place white king at 5a (file 4, rank 0)
-        let white_king_sq = Square::new(4, 0);
+        let white_king_sq = parse_usi_square("5a").unwrap();
         pos.board.put_piece(
             white_king_sq,
             Piece {
@@ -809,7 +812,7 @@ mod tests {
         );
 
         // Place black gold at 6a (file 3, rank 0) to prevent king escape
-        let gold_sq = Square::new(3, 0);
+        let gold_sq = parse_usi_square("6a").unwrap();
         pos.board.put_piece(
             gold_sq,
             Piece {
@@ -820,7 +823,7 @@ mod tests {
         );
 
         // Place black gold at 4a (file 5, rank 0) to prevent king escape
-        let gold_sq2 = Square::new(5, 0);
+        let gold_sq2 = parse_usi_square("4a").unwrap();
         pos.board.put_piece(
             gold_sq2,
             Piece {
@@ -831,7 +834,7 @@ mod tests {
         );
 
         // Also place a gold at 6b to protect the gold at 6a
-        let gold_sq3 = Square::new(3, 1);
+        let gold_sq3 = parse_usi_square("6b").unwrap();
         pos.board.put_piece(
             gold_sq3,
             Piece {
@@ -842,7 +845,7 @@ mod tests {
         );
 
         // Place another gold at 4b to protect the gold at 4a
-        let gold_sq4 = Square::new(5, 1);
+        let gold_sq4 = parse_usi_square("4b").unwrap();
         pos.board.put_piece(
             gold_sq4,
             Piece {
@@ -853,7 +856,7 @@ mod tests {
         );
 
         // Place black lance at 5c (file 4, rank 2) to support pawn
-        let lance_sq = Square::new(4, 2);
+        let lance_sq = parse_usi_square("5c").unwrap();
         pos.board.put_piece(
             lance_sq,
             Piece {
@@ -871,7 +874,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop pawn at 5b (file 4, rank 1) - this would be checkmate
-        let checkmate_drop = Move::drop(PieceType::Pawn, Square::new(4, 1));
+        let checkmate_drop = Move::drop(PieceType::Pawn, parse_usi_square("5b").unwrap());
 
         // This should be illegal (uchifuzume)
         let is_legal = pos.is_legal_move(checkmate_drop);
@@ -900,19 +903,19 @@ mod tests {
 
         // White king at 5a (file 4, rank 0)
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // White gold at 5b (file 4, rank 1) - this will be pinned
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Gold, Color::White));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Gold, Color::White));
 
         // Black rook at 5i (file 4, rank 8) - pinning the gold
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::Rook, Color::Black));
 
         // Black gold at 6b (file 3, rank 1) - protects the pawn drop
         pos.board
-            .put_piece(Square::new(3, 1), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
@@ -921,7 +924,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop pawn at 6c (file 3, rank 2) - gold at 5b is pinned and cannot capture
-        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(3, 2));
+        let pawn_drop = Move::drop(PieceType::Pawn, parse_usi_square("6c").unwrap());
 
         // This should be legal since the pinned gold cannot capture
         let is_legal = pos.is_legal_move(pawn_drop);
@@ -939,29 +942,29 @@ mod tests {
 
         // White king at 9a (file 0, rank 0)
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black king at 1i (file 8, rank 8)
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Black lances in same file attacking upward (toward rank 0)
         pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::Black));
+            .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Lance, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Lance, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Lance, Color::Black));
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
 
         // For Black, lance attacks upward (toward rank 0)
         // Check attacks to rank 3 - only the front lance (at rank 4) can attack it
-        let attackers = pos.get_attackers_to(Square::new(4, 3), Color::Black);
+        let attackers = pos.get_attackers_to(parse_usi_square("5d").unwrap(), Color::Black);
 
         // Only the lance at rank 4 should be able to attack rank 3
-        assert!(attackers.test(Square::new(4, 4)), "Front lance should attack");
+        assert!(attackers.test(parse_usi_square("5e").unwrap()), "Front lance should attack");
         assert!(
-            !attackers.test(Square::new(4, 6)),
+            !attackers.test(parse_usi_square("5g").unwrap()),
             "Rear lance should be blocked by front lance"
         );
     }
@@ -977,20 +980,24 @@ mod tests {
 
         // White king at 5a (file 4, rank 0)
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Unpromoted silver at 3b (file 6, rank 1) - can attack (4,1) diagonally
-        pos.board
-            .put_piece(Square::new(5, 2), Piece::new(PieceType::Silver, Color::White));
+        pos.board.put_piece(
+            parse_usi_square("4c").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
 
         // Promoted silver (moves like gold) at 6b (file 3, rank 1)
-        pos.board
-            .put_piece(Square::new(3, 1), Piece::new(PieceType::Silver, Color::White));
-        pos.board.promoted_bb.set(Square::new(3, 1));
+        pos.board.put_piece(
+            parse_usi_square("6b").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+        pos.board.promoted_bb.set(parse_usi_square("6b").unwrap());
 
         // Black king
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
@@ -999,16 +1006,22 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Drop pawn at 5b (file 4, rank 1) - checkmate attempt
-        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(4, 1));
+        let pawn_drop = Move::drop(PieceType::Pawn, parse_usi_square("5b").unwrap());
 
         // Check attackers to the pawn drop square
-        let attackers = pos.get_attackers_to(Square::new(4, 1), Color::White);
+        let attackers = pos.get_attackers_to(parse_usi_square("5b").unwrap(), Color::White);
 
         // Unpromoted silver can attack diagonally
-        assert!(attackers.test(Square::new(5, 2)), "Unpromoted silver should attack diagonally");
+        assert!(
+            attackers.test(parse_usi_square("4c").unwrap()),
+            "Unpromoted silver should attack diagonally"
+        );
 
         // Promoted silver attacks like gold (including orthogonally)
-        assert!(attackers.test(Square::new(3, 1)), "Promoted silver should attack like gold");
+        assert!(
+            attackers.test(parse_usi_square("6b").unwrap()),
+            "Promoted silver should attack like gold"
+        );
 
         // The pawn drop should be illegal due to multiple defenders
         let is_legal = pos.is_legal_move(pawn_drop);
@@ -1026,19 +1039,19 @@ mod tests {
 
         // White king at 1a (file 8, rank 0)
         pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black gold at 2a (file 7, rank 0) - blocks escape
         pos.board
-            .put_piece(Square::new(7, 0), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("2a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         // Black gold at 1c (file 8, rank 2) - protects pawn drop
         pos.board
-            .put_piece(Square::new(8, 2), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("1c").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         // Black gold at 2b (file 7, rank 1) - blocks other escape
         pos.board
-            .put_piece(Square::new(7, 1), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
@@ -1047,7 +1060,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop pawn at 1b (file 8, rank 1) - this would be checkmate
-        let checkmate_drop = Move::drop(PieceType::Pawn, Square::new(8, 1));
+        let checkmate_drop = Move::drop(PieceType::Pawn, parse_usi_square("1b").unwrap());
 
         // This should be illegal (uchifuzume)
         let is_legal = pos.is_legal_move(checkmate_drop);
@@ -1072,25 +1085,25 @@ mod tests {
 
         // White king at 9e (file 0, rank 4)
         pos.board
-            .put_piece(Square::new(0, 4), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9e").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // White's own pieces blocking some escapes
         pos.board
-            .put_piece(Square::new(1, 4), Piece::new(PieceType::Gold, Color::White)); // 8e
+            .put_piece(parse_usi_square("8e").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 8e
         pos.board
-            .put_piece(Square::new(0, 3), Piece::new(PieceType::Gold, Color::White)); // 9d
+            .put_piece(parse_usi_square("9d").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 9d
 
         // Black pieces controlling other squares
         pos.board
-            .put_piece(Square::new(1, 3), Piece::new(PieceType::Gold, Color::Black)); // 8d
+            .put_piece(parse_usi_square("8d").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 8d
         pos.board
-            .put_piece(Square::new(1, 5), Piece::new(PieceType::Gold, Color::Black)); // 8f
+            .put_piece(parse_usi_square("8f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 8f
         pos.board
-            .put_piece(Square::new(0, 5), Piece::new(PieceType::Gold, Color::Black)); // 9f - protects pawn
+            .put_piece(parse_usi_square("9f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 9f - protects pawn
 
         // Black king
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
@@ -1100,7 +1113,7 @@ mod tests {
 
         // Drop pawn at 9d (file 0, rank 3) - but that's occupied by White's own gold
         // Instead drop at 9c (file 0, rank 2) which would give check
-        let checkmate_drop = Move::drop(PieceType::Pawn, Square::new(0, 2));
+        let checkmate_drop = Move::drop(PieceType::Pawn, parse_usi_square("9c").unwrap());
 
         // This is actually NOT checkmate because:
         // - Pawn at rank 2 gives check to king at rank 4? No, Black pawn attacks toward rank 0
@@ -1119,23 +1132,23 @@ mod tests {
 
         // White king at 5e (file 4, rank 4)
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black pieces blocking some escapes but not diagonals
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Gold, Color::Black)); // 5d
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5d
         pos.board
-            .put_piece(Square::new(3, 4), Piece::new(PieceType::Gold, Color::Black)); // 6e
+            .put_piece(parse_usi_square("6e").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 6e
         pos.board
-            .put_piece(Square::new(5, 4), Piece::new(PieceType::Gold, Color::Black)); // 4e
+            .put_piece(parse_usi_square("4e").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 4e
 
         // Black gold supporting the pawn drop
         pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Gold, Color::Black)); // 5g
+            .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5g
 
         // Black king
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
@@ -1144,7 +1157,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop pawn at 5f (file 4, rank 5) - gives check
-        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(4, 5));
+        let pawn_drop = Move::drop(PieceType::Pawn, parse_usi_square("5f").unwrap());
 
         // This should be legal because king can escape diagonally to 6d, 6f, 4d, or 4f
         let is_legal = pos.is_legal_move(pawn_drop);
@@ -1160,27 +1173,27 @@ mod tests {
 
         // Black king at 5i (file 4, rank 8)
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // White gold pieces blocking escape
         pos.board
-            .put_piece(Square::new(3, 8), Piece::new(PieceType::Gold, Color::White)); // 6i
+            .put_piece(parse_usi_square("6i").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 6i
         pos.board
-            .put_piece(Square::new(5, 8), Piece::new(PieceType::Gold, Color::White)); // 4i
+            .put_piece(parse_usi_square("4i").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 4i
 
         // White golds protecting each other
         pos.board
-            .put_piece(Square::new(3, 7), Piece::new(PieceType::Gold, Color::White)); // 6h
+            .put_piece(parse_usi_square("6h").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 6h
         pos.board
-            .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::White)); // 4h
+            .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 4h
 
         // White lance supporting pawn
         pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::White)); // 5g
+            .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Lance, Color::White)); // 5g
 
         // White king
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Give white a pawn in hand
         pos.hands[Color::White as usize][6] = 1;
@@ -1189,7 +1202,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop pawn at 5h (file 4, rank 7) - this would be checkmate
-        let checkmate_drop = Move::drop(PieceType::Pawn, Square::new(4, 7));
+        let checkmate_drop = Move::drop(PieceType::Pawn, parse_usi_square("5h").unwrap());
 
         // This should be illegal (uchifuzume)
         let is_legal = pos.is_legal_move(checkmate_drop);
@@ -1205,21 +1218,23 @@ mod tests {
 
         // White king at 5a (file 4, rank 0)
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black bishop at 1e (file 8, rank 4) - controls diagonal including 5a
-        pos.board
-            .put_piece(Square::new(8, 4), Piece::new(PieceType::Bishop, Color::Black));
+        pos.board.put_piece(
+            parse_usi_square("1e").unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
 
         // Some blocking pieces to prevent other escapes
         pos.board
-            .put_piece(Square::new(3, 0), Piece::new(PieceType::Gold, Color::Black)); // 6a
+            .put_piece(parse_usi_square("6a").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 6a
         pos.board
-            .put_piece(Square::new(5, 0), Piece::new(PieceType::Gold, Color::Black)); // 4a
+            .put_piece(parse_usi_square("4a").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 4a
 
         // Black king
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
@@ -1228,7 +1243,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop pawn at 5b (file 4, rank 1)
-        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(4, 1));
+        let pawn_drop = Move::drop(PieceType::Pawn, parse_usi_square("5b").unwrap());
 
         // The pawn has no direct support, but king cannot capture it because
         // that would put the king in check from the bishop
@@ -1246,23 +1261,25 @@ mod tests {
 
         // White king at 5e (file 4, rank 4)
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Black rook at 5a (file 4, rank 0) - will give check when pawn moves
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::Black));
 
         // Black bishop at 1a (file 8, rank 0) - diagonal check
-        pos.board
-            .put_piece(Square::new(8, 0), Piece::new(PieceType::Bishop, Color::Black));
+        pos.board.put_piece(
+            parse_usi_square("1a").unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
 
         // Black gold supporting the pawn
         pos.board
-            .put_piece(Square::new(4, 6), Piece::new(PieceType::Gold, Color::Black)); // 5g
+            .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 5g
 
         // Black king
         pos.board
-            .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1;
@@ -1271,7 +1288,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop pawn at 5f (file 4, rank 5) - creates double check
-        let pawn_drop = Move::drop(PieceType::Pawn, Square::new(4, 5));
+        let pawn_drop = Move::drop(PieceType::Pawn, parse_usi_square("5f").unwrap());
 
         // Even with double check, if king has escape squares, it's not checkmate
         let is_legal = pos.is_legal_move(pawn_drop);
@@ -1290,7 +1307,7 @@ mod tests {
         pos.side_to_move = Color::Black;
 
         // Place a promoted black pawn on file 5 (index 4)
-        let sq = Square::new(4, 5); // 5f
+        let sq = parse_usi_square("5f").unwrap(); // 5f
         pos.board.put_piece(
             sq,
             Piece {
@@ -1303,10 +1320,10 @@ mod tests {
 
         // Black king
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
         // White king
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Give black a pawn in hand
         pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
@@ -1315,7 +1332,7 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Try to drop a pawn in the same file - should be legal because existing pawn is promoted
-        let legal_drop = Move::drop(PieceType::Pawn, Square::new(4, 3)); // 5d
+        let legal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5d").unwrap()); // 5d
         assert!(
             pos.is_legal_move(legal_drop),
             "Should allow pawn drop when only promoted pawn exists in file"
@@ -1330,17 +1347,17 @@ mod tests {
 
         // Black king
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
         // White king
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Test Black pawn drop on rank 0 (last rank for Black)
         pos.side_to_move = Color::Black;
         pos.hands[Color::Black as usize][6] = 1;
         pos.board.rebuild_occupancy_bitboards();
 
-        let illegal_drop = Move::drop(PieceType::Pawn, Square::new(4, 0)); // 5a
+        let illegal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5a").unwrap()); // 5a
         assert!(
             !pos.is_legal_move(illegal_drop),
             "Black should not be able to drop pawn on rank 0"
@@ -1351,7 +1368,7 @@ mod tests {
         pos.hands[Color::Black as usize][6] = 0; // Remove Black's pawn
         pos.hands[Color::White as usize][6] = 1;
 
-        let illegal_drop = Move::drop(PieceType::Pawn, Square::new(4, 8)); // 5i
+        let illegal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5i").unwrap()); // 5i
         assert!(
             !pos.is_legal_move(illegal_drop),
             "White should not be able to drop pawn on rank 8"
@@ -1366,17 +1383,17 @@ mod tests {
 
         // Black king
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
         // White king
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Test Black lance drop on rank 0 (last rank for Black)
         pos.side_to_move = Color::Black;
         pos.hands[Color::Black as usize][5] = 1; // Lance is index 5
         pos.board.rebuild_occupancy_bitboards();
 
-        let illegal_drop = Move::drop(PieceType::Lance, Square::new(4, 0)); // 5a
+        let illegal_drop = Move::drop(PieceType::Lance, parse_usi_square("5a").unwrap()); // 5a
         assert!(
             !pos.is_legal_move(illegal_drop),
             "Black should not be able to drop lance on rank 0"
@@ -1387,7 +1404,7 @@ mod tests {
         pos.hands[Color::Black as usize][5] = 0; // Remove Black's lance
         pos.hands[Color::White as usize][5] = 1;
 
-        let illegal_drop = Move::drop(PieceType::Lance, Square::new(4, 8)); // 5i
+        let illegal_drop = Move::drop(PieceType::Lance, parse_usi_square("5i").unwrap()); // 5i
         assert!(
             !pos.is_legal_move(illegal_drop),
             "White should not be able to drop lance on rank 8"
@@ -1402,10 +1419,10 @@ mod tests {
 
         // Black king
         pos.board
-            .put_piece(Square::new(8, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
         // White king
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Test Black knight drop
         pos.side_to_move = Color::Black;
@@ -1413,20 +1430,20 @@ mod tests {
         pos.board.rebuild_occupancy_bitboards();
 
         // Cannot drop on rank 0 or 1
-        let illegal_drop1 = Move::drop(PieceType::Knight, Square::new(4, 0)); // 5a
+        let illegal_drop1 = Move::drop(PieceType::Knight, parse_usi_square("5a").unwrap()); // 5a
         assert!(
             !pos.is_legal_move(illegal_drop1),
             "Black should not be able to drop knight on rank 0"
         );
 
-        let illegal_drop2 = Move::drop(PieceType::Knight, Square::new(4, 1)); // 5b
+        let illegal_drop2 = Move::drop(PieceType::Knight, parse_usi_square("5b").unwrap()); // 5b
         assert!(
             !pos.is_legal_move(illegal_drop2),
             "Black should not be able to drop knight on rank 1"
         );
 
         // Can drop on rank 2
-        let legal_drop = Move::drop(PieceType::Knight, Square::new(4, 2)); // 5c
+        let legal_drop = Move::drop(PieceType::Knight, parse_usi_square("5c").unwrap()); // 5c
         assert!(pos.is_legal_move(legal_drop), "Black should be able to drop knight on rank 2");
 
         // Test White knight drop
@@ -1435,20 +1452,20 @@ mod tests {
         pos.hands[Color::White as usize][4] = 1;
 
         // Cannot drop on rank 8 or 7
-        let illegal_drop1 = Move::drop(PieceType::Knight, Square::new(4, 8)); // 5i
+        let illegal_drop1 = Move::drop(PieceType::Knight, parse_usi_square("5i").unwrap()); // 5i
         assert!(
             !pos.is_legal_move(illegal_drop1),
             "White should not be able to drop knight on rank 8"
         );
 
-        let illegal_drop2 = Move::drop(PieceType::Knight, Square::new(4, 7)); // 5h
+        let illegal_drop2 = Move::drop(PieceType::Knight, parse_usi_square("5h").unwrap()); // 5h
         assert!(
             !pos.is_legal_move(illegal_drop2),
             "White should not be able to drop knight on rank 7"
         );
 
         // Can drop on rank 6
-        let legal_drop = Move::drop(PieceType::Knight, Square::new(4, 6)); // 5g
+        let legal_drop = Move::drop(PieceType::Knight, parse_usi_square("5g").unwrap()); // 5g
         assert!(pos.is_legal_move(legal_drop), "White should be able to drop knight on rank 6");
     }
 }

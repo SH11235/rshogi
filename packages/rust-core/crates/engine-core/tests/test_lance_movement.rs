@@ -1,4 +1,5 @@
-use engine_core::shogi::{Color, MoveList, Piece, PieceType, Square};
+use engine_core::shogi::{Color, MoveList, Piece, PieceType};
+use engine_core::usi::parse_usi_square;
 use engine_core::{MoveGen, Position};
 
 #[test]
@@ -8,12 +9,12 @@ fn test_lance_movement_direction() {
 
     // Place Black Lance at rank 7, file 4
     pos.board
-        .put_piece(Square::new(4, 7), Piece::new(PieceType::Lance, Color::Black));
+        .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Lance, Color::Black));
     // Place kings
     pos.board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     pos.side_to_move = Color::Black;
 
@@ -25,17 +26,17 @@ fn test_lance_movement_direction() {
     let lance_moves: Vec<_> = moves
         .as_slice()
         .iter()
-        .filter(|m| !m.is_drop() && m.from() == Some(Square::new(4, 7)))
+        .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("5h").unwrap()))
         .collect();
 
     // Black Lance should be able to move to ranks 6, 5, 4, 3, 2, 1 (not to rank 8)
     let valid_targets = vec![
-        Square::new(4, 6),
-        Square::new(4, 5),
-        Square::new(4, 4),
-        Square::new(4, 3),
-        Square::new(4, 2),
-        Square::new(4, 1),
+        parse_usi_square("5g").unwrap(),
+        parse_usi_square("5f").unwrap(),
+        parse_usi_square("5e").unwrap(),
+        parse_usi_square("5d").unwrap(),
+        parse_usi_square("5c").unwrap(),
+        parse_usi_square("5b").unwrap(),
     ];
 
     for target in valid_targets {
@@ -47,7 +48,7 @@ fn test_lance_movement_direction() {
 
     // Should NOT be able to move to rank 8 (backward)
     assert!(
-        !lance_moves.iter().any(|m| m.to() == Square::new(4, 8)),
+        !lance_moves.iter().any(|m| m.to() == parse_usi_square("5i").unwrap()),
         "Black Lance should NOT be able to move backward to rank 8"
     );
 }
@@ -59,12 +60,12 @@ fn test_white_lance_movement_direction() {
 
     // Place White Lance at rank 1, file 4
     pos.board
-        .put_piece(Square::new(4, 1), Piece::new(PieceType::Lance, Color::White));
+        .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Lance, Color::White));
     // Place kings
     pos.board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     pos.side_to_move = Color::White;
 
@@ -76,17 +77,17 @@ fn test_white_lance_movement_direction() {
     let lance_moves: Vec<_> = moves
         .as_slice()
         .iter()
-        .filter(|m| !m.is_drop() && m.from() == Some(Square::new(4, 1)))
+        .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("5b").unwrap()))
         .collect();
 
     // White Lance should be able to move to ranks 2, 3, 4, 5, 6, 7 (not to rank 0)
     let valid_targets = vec![
-        Square::new(4, 2),
-        Square::new(4, 3),
-        Square::new(4, 4),
-        Square::new(4, 5),
-        Square::new(4, 6),
-        Square::new(4, 7),
+        parse_usi_square("5c").unwrap(),
+        parse_usi_square("5d").unwrap(),
+        parse_usi_square("5e").unwrap(),
+        parse_usi_square("5f").unwrap(),
+        parse_usi_square("5g").unwrap(),
+        parse_usi_square("5h").unwrap(),
     ];
 
     for target in valid_targets {
@@ -98,7 +99,7 @@ fn test_white_lance_movement_direction() {
 
     // Should NOT be able to move to rank 0 (backward)
     assert!(
-        !lance_moves.iter().any(|m| m.to() == Square::new(4, 0)),
+        !lance_moves.iter().any(|m| m.to() == parse_usi_square("5a").unwrap()),
         "White Lance should NOT be able to move backward to rank 0"
     );
 }
@@ -110,13 +111,13 @@ fn test_lance_attack_direction() {
 
     // Place Black king at rank 4
     pos.board
-        .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
     // Place White Lance at rank 6 (below the Black king)
     pos.board
-        .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::White));
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Lance, Color::White));
     // Place White king somewhere
     pos.board
-        .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     pos.side_to_move = Color::Black;
 
@@ -129,7 +130,7 @@ fn test_lance_attack_direction() {
     let king_moves: Vec<_> = moves
         .as_slice()
         .iter()
-        .filter(|m| !m.is_drop() && m.from() == Some(Square::new(4, 4)))
+        .filter(|m| !m.is_drop() && m.from() == Some(parse_usi_square("5e").unwrap()))
         .collect();
 
     // King should have escape moves (not on file 4)
@@ -143,8 +144,8 @@ fn test_lance_attack_direction() {
         if !mv.is_drop() {
             let from = mv.from().unwrap();
             assert!(
-                from == Square::new(4, 4) || // King move
-                mv.to() == Square::new(4, 6) || // Capture Lance
+                from == parse_usi_square("5e").unwrap() || // King move
+                mv.to() == parse_usi_square("5g").unwrap() || // Capture Lance
                 (mv.to().file() == 4 && mv.to().rank() == 5), // Block on rank 5
                 "In check, only king moves, captures, or blocks should be legal"
             );

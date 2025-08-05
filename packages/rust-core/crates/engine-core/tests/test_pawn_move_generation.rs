@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod tests {
     use engine_core::movegen::MoveGen;
-    use engine_core::shogi::{Color, MoveList, PieceType, Position, Square};
+    use engine_core::shogi::{Color, MoveList, PieceType, Position};
+    use engine_core::usi::parse_usi_square;
 
     #[test]
     fn test_initial_pawn_moves() {
@@ -16,8 +17,8 @@ mod tests {
         println!("Total moves from initial position: {}", moves.len());
 
         // Look for pawn moves, specifically from 8g (internal: file=1, rank=6)
-        let sq_8g = Square::new(1, 6);
-        let sq_8f = Square::new(1, 5);
+        let sq_8g = parse_usi_square("8g").unwrap();
+        let sq_8f = parse_usi_square("8f").unwrap();
 
         println!(
             "\nLooking for move from {} (index {}) to {} (index {})",
@@ -67,7 +68,7 @@ mod tests {
         let pos = Position::startpos();
 
         // 8g is at internal coordinates (1, 6)
-        let sq_8g = Square::new(1, 6);
+        let sq_8g = parse_usi_square("8g").unwrap();
         println!(
             "8g internal representation: file={}, rank={}, index={}, display={}",
             sq_8g.file(),

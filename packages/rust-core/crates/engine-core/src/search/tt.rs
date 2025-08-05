@@ -87,8 +87,8 @@ pub(crate) const GENERATION_CYCLE: u16 = MAX_GENERATION_VALUE + (1 << AGE_BITS);
 #[allow(dead_code)]
 const GENERATION_CYCLE_MASK: u16 = (1 << (8 + AGE_BITS)) - 1; // For efficient modulo operation
 
-// Key uses upper 32 bits of hash (lower 32 bits used for indexing)
-const KEY_SHIFT: u8 = 32;
+// Key now uses full 64 bits for accurate collision detection
+// const KEY_SHIFT: u8 = 32; // No longer needed after 64-bit comparison update
 
 /// Number of entries per bucket (default for backward compatibility)
 const BUCKET_SIZE: usize = 4;
@@ -209,8 +209,8 @@ impl TTEntry {
 
     /// Create new TT entry from parameters
     pub fn from_params(params: TTEntryParams) -> Self {
-        // Use upper 32 bits of key
-        let key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
+        // Store full 64-bit key for accurate collision detection
+        let key = params.key;
 
         // Pack move into 16 bits
         let move_data = match params.mv {
@@ -255,7 +255,7 @@ impl TTEntry {
     /// Check if entry matches the given key
     #[inline]
     pub fn matches(&self, key: u64) -> bool {
-        self.key == ((key >> KEY_SHIFT) << KEY_SHIFT)
+        self.key == key
     }
 
     /// Check if entry is empty
@@ -408,15 +408,13 @@ impl TTBucket {
 
     /// Probe bucket for matching entry using SIMD when available
     fn probe(&self, key: u64) -> Option<TTEntry> {
-        let target_key = (key >> KEY_SHIFT) << KEY_SHIFT;
-
         // Try SIMD-optimized path first
         if self.probe_simd_available() {
-            return self.probe_simd_impl(target_key);
+            return self.probe_simd_impl(key);
         }
 
         // Fallback to scalar implementation
-        self.probe_scalar(target_key)
+        self.probe_scalar(key)
     }
 
     /// Check if SIMD probe is available
@@ -466,14 +464,12 @@ impl TTBucket {
     fn probe_scalar(&self, target_key: u64) -> Option<TTEntry> {
         // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
-        let mut matched_key = 0u64;
 
         // Load keys with early termination
         for i in 0..BUCKET_SIZE {
             let key = self.entries[i * 2].load(Ordering::Relaxed);
             if key == target_key {
                 matching_idx = Some(i);
-                matched_key = key;
                 break; // Early termination - key optimization
             }
         }
@@ -485,7 +481,7 @@ impl TTBucket {
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: matched_key,
+                key: target_key,
                 data,
             };
 
@@ -541,9 +537,15 @@ impl TTBucket {
                                 break;
                             }
                             // Otherwise, retry the CAS operation
-                            // Exponential backoff to reduce contention
-                            for _ in 0..(1 << retry_count.min(3)) {
-                                std::hint::spin_loop();
+                            // Linear backoff to reduce contention
+                            if retry_count < 3 {
+                                // Spin for a few iterations (linear)
+                                for _ in 0..(retry_count * 2) {
+                                    std::hint::spin_loop();
+                                }
+                            } else {
+                                // After 3 retries, yield to OS scheduler
+                                std::thread::yield_now();
                             }
                         }
                     }
@@ -707,12 +709,10 @@ impl FlexibleTTBucket {
 
     /// Probe bucket for matching entry
     fn probe(&self, key: u64) -> Option<TTEntry> {
-        let target_key = (key >> KEY_SHIFT) << KEY_SHIFT;
-
         match self.size {
-            BucketSize::Small => self.probe_4(target_key),
-            BucketSize::Medium => self.probe_8(target_key),
-            BucketSize::Large => self.probe_16(target_key),
+            BucketSize::Small => self.probe_4(key),
+            BucketSize::Medium => self.probe_8(key),
+            BucketSize::Large => self.probe_16(key),
         }
     }
 
@@ -805,14 +805,12 @@ impl FlexibleTTBucket {
     fn probe_scalar_4(&self, target_key: u64) -> Option<TTEntry> {
         // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
-        let mut matched_key = 0u64;
 
         // Load keys with early termination
         for i in 0..4 {
             let key = self.entries[i * 2].load(Ordering::Relaxed);
-            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+            if key == target_key {
                 matching_idx = Some(i);
-                matched_key = key;
                 break; // Early termination - key optimization
             }
         }
@@ -824,7 +822,7 @@ impl FlexibleTTBucket {
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: matched_key,
+                key: target_key,
                 data,
             };
 
@@ -839,14 +837,12 @@ impl FlexibleTTBucket {
     fn probe_scalar_8(&self, target_key: u64) -> Option<TTEntry> {
         // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
-        let mut matched_key = 0u64;
 
         // Load keys with early termination
         for i in 0..8 {
             let key = self.entries[i * 2].load(Ordering::Relaxed);
-            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+            if key == target_key {
                 matching_idx = Some(i);
-                matched_key = key;
                 break; // Early termination - key optimization
             }
         }
@@ -858,7 +854,7 @@ impl FlexibleTTBucket {
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: matched_key,
+                key: target_key,
                 data,
             };
 
@@ -873,14 +869,12 @@ impl FlexibleTTBucket {
     fn probe_scalar_16(&self, target_key: u64) -> Option<TTEntry> {
         // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
-        let mut matched_key = 0u64;
 
         // Load keys with early termination
         for i in 0..16 {
             let key = self.entries[i * 2].load(Ordering::Relaxed);
-            if (key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+            if key == target_key {
                 matching_idx = Some(i);
-                matched_key = key;
                 break; // Early termination - key optimization
             }
         }
@@ -892,7 +886,7 @@ impl FlexibleTTBucket {
 
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
-                key: matched_key,
+                key: target_key,
                 data,
             };
 
@@ -915,14 +909,14 @@ impl FlexibleTTBucket {
     /// Store in 4-entry bucket
     fn store_4(&self, params: TTEntryParams, current_age: u8) {
         let new_entry = TTEntry::from_params(params);
-        let target_key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
+        let target_key = params.key;
 
         // Check for existing entry
         for i in 0..4 {
             let idx = i * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
-            if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+            if old_key == target_key {
                 // Update existing entry
                 self.entries[idx].store(new_entry.key, Ordering::Release);
                 self.entries[idx + 1].store(new_entry.data, Ordering::Release);
@@ -942,14 +936,14 @@ impl FlexibleTTBucket {
     /// Store in 8-entry bucket
     fn store_8(&self, params: TTEntryParams, current_age: u8) {
         let new_entry = TTEntry::from_params(params);
-        let target_key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
+        let target_key = params.key;
 
         // Check for existing entry
         for i in 0..8 {
             let idx = i * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
-            if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+            if old_key == target_key {
                 // Update existing entry
                 self.entries[idx].store(new_entry.key, Ordering::Release);
                 self.entries[idx + 1].store(new_entry.data, Ordering::Release);
@@ -969,14 +963,14 @@ impl FlexibleTTBucket {
     /// Store in 16-entry bucket
     fn store_16(&self, params: TTEntryParams, current_age: u8) {
         let new_entry = TTEntry::from_params(params);
-        let target_key = (params.key >> KEY_SHIFT) << KEY_SHIFT;
+        let target_key = params.key;
 
         // Check for existing entry
         for i in 0..16 {
             let idx = i * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
-            if (old_key >> KEY_SHIFT) << KEY_SHIFT == target_key {
+            if old_key == target_key {
                 // Update existing entry
                 self.entries[idx].store(new_entry.key, Ordering::Release);
                 self.entries[idx + 1].store(new_entry.data, Ordering::Release);
@@ -1136,6 +1130,8 @@ pub struct TranspositionTable {
     /// Bucket size configuration
     #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
+    /// Adaptive prefetch manager
+    prefetcher: Option<crate::search::adaptive_prefetcher::AdaptivePrefetcher>,
 }
 
 impl TranspositionTable {
@@ -1168,6 +1164,7 @@ impl TranspositionTable {
             num_buckets,
             age: 0,
             bucket_size: None,
+            prefetcher: None,
         }
     }
 
@@ -1202,6 +1199,7 @@ impl TranspositionTable {
             num_buckets,
             age: 0,
             bucket_size: Some(bucket_size),
+            prefetcher: None,
         }
     }
 
@@ -1215,11 +1213,22 @@ impl TranspositionTable {
     pub fn probe(&self, hash: u64) -> Option<TTEntry> {
         let idx = self.bucket_index(hash);
 
-        if let Some(ref flexible_buckets) = self.flexible_buckets {
+        let result = if let Some(ref flexible_buckets) = self.flexible_buckets {
             flexible_buckets[idx].probe(hash)
         } else {
             self.buckets[idx].probe(hash)
+        };
+
+        // Record hit/miss for adaptive prefetcher
+        if let Some(ref prefetcher) = self.prefetcher {
+            if result.is_some() {
+                prefetcher.record_hit();
+            } else {
+                prefetcher.record_miss();
+            }
         }
+
+        result
     }
 
     /// Store entry in transposition table
@@ -1304,13 +1313,30 @@ impl TranspositionTable {
         let mut filled = 0;
         let mut total = 0;
 
-        for i in 0..sample_buckets {
-            for j in 0..BUCKET_SIZE {
-                let idx = j * 2;
-                total += 1;
-                // Use Relaxed for sampling - no synchronization needed
-                if self.buckets[i].entries[idx].load(Ordering::Relaxed) != 0 {
-                    filled += 1;
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            // Flexible bucket implementation
+            for bucket in flexible_buckets.iter().take(sample_buckets) {
+                let entries_per_bucket = bucket.size.entries();
+
+                for j in 0..entries_per_bucket {
+                    let idx = j * 2;
+                    total += 1;
+                    // Use Relaxed for sampling - no synchronization needed
+                    if bucket.entries[idx].load(Ordering::Relaxed) != 0 {
+                        filled += 1;
+                    }
+                }
+            }
+        } else {
+            // Legacy bucket implementation
+            for i in 0..sample_buckets {
+                for j in 0..BUCKET_SIZE {
+                    let idx = j * 2;
+                    total += 1;
+                    // Use Relaxed for sampling - no synchronization needed
+                    if self.buckets[i].entries[idx].load(Ordering::Relaxed) != 0 {
+                        filled += 1;
+                    }
                 }
             }
         }
@@ -1410,6 +1436,30 @@ impl TranspositionTable {
     pub fn prefetch_l3(&self, hash: u64) {
         self.prefetch(hash, 2);
     }
+
+    /// Enable adaptive prefetch statistics tracking
+    pub fn enable_prefetch_stats(&mut self) {
+        if self.prefetcher.is_none() {
+            self.prefetcher = Some(crate::search::adaptive_prefetcher::AdaptivePrefetcher::new());
+        }
+    }
+
+    /// Disable adaptive prefetch statistics tracking
+    pub fn disable_prefetch_stats(&mut self) {
+        self.prefetcher = None;
+    }
+
+    /// Get prefetch statistics
+    pub fn prefetch_stats(&self) -> Option<crate::search::adaptive_prefetcher::PrefetchStats> {
+        self.prefetcher.as_ref().map(|p| p.stats())
+    }
+
+    /// Reset prefetch statistics
+    pub fn reset_prefetch_stats(&self) {
+        if let Some(ref prefetcher) = self.prefetcher {
+            prefetcher.reset();
+        }
+    }
 }
 
 // Ensure proper alignment
@@ -1433,7 +1483,10 @@ mod alignment_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shogi::{Move, Square};
+    use crate::{
+        shogi::{Move, Square},
+        usi::parse_usi_square,
+    };
 
     // Test SIMD probe produces same results as scalar
     #[test]
@@ -1530,7 +1583,11 @@ mod tests {
     fn test_bucket_operations() {
         let bucket = TTBucket::new();
         let hash1 = 0x1234567890ABCDEF;
-        let mv = Some(Move::normal(Square::new(2, 7), Square::new(2, 6), false));
+        let mv = Some(Move::normal(
+            parse_usi_square("7h").unwrap(),
+            parse_usi_square("7g").unwrap(),
+            false,
+        ));
 
         // Store entry
         let entry = TTEntry::new(hash1, mv, 100, 50, 10, NodeType::Exact, 0);
@@ -1571,7 +1628,11 @@ mod tests {
     fn test_transposition_table() {
         let tt = TranspositionTable::new(1);
         let hash = 0x1234567890ABCDEF;
-        let mv = Some(Move::normal(Square::new(7, 7), Square::new(7, 6), false));
+        let mv = Some(Move::normal(
+            parse_usi_square("2h").unwrap(),
+            parse_usi_square("2g").unwrap(),
+            false,
+        ));
 
         // Store and retrieve
         tt.store(hash, mv, 1500, 1000, 8, NodeType::LowerBound);
@@ -2120,12 +2181,12 @@ mod tests {
         for (i, &hash) in test_hashes.iter().enumerate() {
             // SIMD path
             if bucket.probe_simd_available() {
-                let simd_result = bucket.probe_simd_8(hash >> KEY_SHIFT << KEY_SHIFT);
+                let simd_result = bucket.probe_simd_8(hash);
                 assert!(simd_result.is_some(), "SIMD probe failed for entry {i}");
             }
 
             // Scalar path
-            let scalar_result = bucket.probe_scalar_8(hash >> KEY_SHIFT << KEY_SHIFT);
+            let scalar_result = bucket.probe_scalar_8(hash);
             assert!(scalar_result.is_some(), "Scalar probe failed for entry {i}");
 
             // Full probe (uses dispatch)
@@ -2138,6 +2199,8 @@ mod tests {
 
 #[cfg(test)]
 mod parallel_tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
     use std::sync::Arc;
     use std::thread;
@@ -2256,8 +2319,8 @@ mod parallel_tests {
 
         // Store an entry
         let mv = crate::shogi::Move::make_normal(
-            crate::shogi::Square::new(7, 7),
-            crate::shogi::Square::new(7, 6),
+            parse_usi_square("2h").unwrap(),
+            parse_usi_square("2g").unwrap(),
         );
 
         tt.store(hash, Some(mv), 100, 50, 10, NodeType::Exact);

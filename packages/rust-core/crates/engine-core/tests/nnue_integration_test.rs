@@ -5,7 +5,8 @@ use engine_core::{
     evaluate::Evaluator,
     nnue::{weights::load_weights, NNUEEvaluatorWrapper},
     search::SearchLimits,
-    Color, Piece, PieceType, Position, Square,
+    usi::parse_usi_square,
+    Color, Piece, PieceType, Position,
 };
 
 #[test]
@@ -139,11 +140,11 @@ fn test_nnue_evaluation_with_mock_weights() {
         // Create a different position
         let mut pos = Position::empty();
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(5, 7), Piece::new(PieceType::Gold, Color::Black));
+            .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Gold, Color::Black));
         pos
     }];
 
