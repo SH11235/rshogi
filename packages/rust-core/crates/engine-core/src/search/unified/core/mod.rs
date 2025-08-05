@@ -31,6 +31,11 @@ where
 {
     use crate::time_management::TimeControl;
 
+    // If stop_flag is present, use more frequent polling for responsiveness
+    if searcher.context.limits().stop_flag.is_some() {
+        return 0x1F; // Check every 32 nodes for responsive stop handling
+    }
+
     // Check if we have FixedNodes in either limits or time manager
     if let TimeControl::FixedNodes { .. } = &searcher.context.limits().time_control {
         return 0x3F; // Check every 64 nodes
@@ -274,8 +279,15 @@ where
         }
     }
 
-    // Check stop flag periodically (every 1024 nodes) to minimize overhead
-    if searcher.stats.nodes & 0x3FF == 0 && searcher.context.should_stop() {
+    // Check stop flag periodically to minimize overhead
+    // Use more frequent checking if stop_flag is present
+    let stop_check_interval = if searcher.context.limits().stop_flag.is_some() {
+        0x3F // Check every 64 nodes when stop_flag is present
+    } else {
+        0x3FF // Check every 1024 nodes for normal operation
+    };
+
+    if searcher.stats.nodes & stop_check_interval == 0 && searcher.context.should_stop() {
         // Store partial evaluation in TT before returning
         if USE_TT && depth > 0 {
             let eval = searcher.evaluator.evaluate(pos);
@@ -399,6 +411,18 @@ where
                 return alpha; // Return current best value
             }
         }
+    }
+
+    // Check stop flag periodically to minimize overhead
+    // Use more frequent checking if stop_flag is present
+    let stop_check_interval = if searcher.context.limits().stop_flag.is_some() {
+        0x3F // Check every 64 nodes when stop_flag is present
+    } else {
+        0x3FF // Check every 1024 nodes for normal operation
+    };
+
+    if searcher.stats.nodes & stop_check_interval == 0 && searcher.context.should_stop() {
+        return alpha;
     }
 
     // Stand pat
