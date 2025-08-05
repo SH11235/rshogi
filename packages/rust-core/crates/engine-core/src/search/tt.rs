@@ -537,7 +537,22 @@ impl TTBucket {
                     m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                if old_key == 0 || old_key == target_key {
+                if old_key == target_key {
+                    // Write-Through for existing entry update - No CAS needed!
+                    // IMPORTANT: Store data first, then key to ensure consistency
+                    // This order matches the reader protocol in probe()
+                    // Optimized: data store can be Relaxed, only key needs Release
+                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+                    self.entries[idx].store(new_entry.key, Ordering::Release);
+
+                    // Record metrics
+                    if let Some(m) = metrics {
+                        m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return;
+                } else if old_key == 0 {
+                    // Empty slot - use CAS for safety
                     // Record CAS attempt
                     if let Some(m) = metrics {
                         m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -558,13 +573,7 @@ impl TTBucket {
                             if let Some(m) = metrics {
                                 m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if old_key == target_key {
-                                    m.update_existing
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                } else {
-                                    m.replace_empty
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
+                                m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             return;
                         }
