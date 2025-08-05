@@ -1,0 +1,109 @@
+//! Basic parallel search test for Thread Sanitizer validation
+
+use engine_core::{
+    evaluation::evaluate::MaterialEvaluator,
+    search::{
+        parallel::{SearchThread, SharedSearchState},
+        SearchLimitsBuilder, TranspositionTable,
+    },
+    shogi::Position,
+};
+use std::sync::{atomic::AtomicBool, Arc};
+use std::thread;
+
+#[test]
+fn test_parallel_search_no_data_races() {
+    // Create shared resources
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let shared_state = Arc::new(SharedSearchState::new(stop_flag.clone()));
+
+    // Create multiple threads
+    let num_threads = 4;
+    let mut handles = vec![];
+
+    for id in 0..num_threads {
+        let evaluator = evaluator.clone();
+        let tt = tt.clone();
+        let shared_state = shared_state.clone();
+
+        let handle = thread::spawn(move || {
+            let mut thread = SearchThread::new(id, evaluator, tt, shared_state);
+            let mut position = Position::startpos();
+
+            // Set a short time limit
+            let limits = SearchLimitsBuilder::default().fixed_time_ms(10).build();
+
+            // Run search
+            let depth = thread.get_start_depth(1);
+            let _result = thread.search(&mut position, limits, depth);
+
+            // Simulate some work
+            for _ in 0..100 {
+                if thread.should_stop() {
+                    break;
+                }
+                // Add some nodes
+                thread.shared_state.add_nodes(1);
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Let threads run for a bit
+    thread::sleep(std::time::Duration::from_millis(50));
+
+    // Stop all threads
+    stop_flag.store(true, std::sync::atomic::Ordering::Release);
+
+    // Wait for all threads to complete
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Verify some basic properties
+    assert!(shared_state.get_nodes() > 0);
+}
+
+#[test]
+fn test_shared_history_concurrent_access() {
+    use engine_core::search::parallel::SharedHistory;
+    use engine_core::shogi::{Color, PieceType, Square};
+
+    let history = Arc::new(SharedHistory::new());
+    let mut handles = vec![];
+
+    // Create multiple threads that update the same history entries
+    for thread_id in 0..8 {
+        let history = history.clone();
+
+        let handle = thread::spawn(move || {
+            for i in 0..100 {
+                let square = Square::new((thread_id % 9) as u8, (i % 9) as u8);
+                history.update(Color::Black, PieceType::Pawn, square, 10);
+                history.update(Color::White, PieceType::Rook, square, 20);
+
+                // Read values
+                let _val1 = history.get(Color::Black, PieceType::Pawn, square);
+                let _val2 = history.get(Color::White, PieceType::Rook, square);
+
+                // Occasionally age the history
+                if i % 20 == 0 {
+                    history.age();
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all threads
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Clear history from main thread while others might still be reading
+    history.clear();
+}
