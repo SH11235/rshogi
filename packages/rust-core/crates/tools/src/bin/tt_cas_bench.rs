@@ -160,6 +160,9 @@ fn run_benchmark(
         atomic_loads: AtomicU64::new(m.atomic_loads.load(Ordering::Relaxed)),
         prefetch_count: AtomicU64::new(m.prefetch_count.load(Ordering::Relaxed)),
         prefetch_hits: AtomicU64::new(m.prefetch_hits.load(Ordering::Relaxed)),
+        depth_filtered: AtomicU64::new(m.depth_filtered.load(Ordering::Relaxed)),
+        hashfull_filtered: AtomicU64::new(m.hashfull_filtered.load(Ordering::Relaxed)),
+        effective_updates: AtomicU64::new(m.effective_updates.load(Ordering::Relaxed)),
     });
 
     (total_duration, total_nodes, metrics)
