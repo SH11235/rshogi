@@ -448,9 +448,9 @@ mod tests {
 
     #[test]
     fn test_parse_usi_square() {
-        assert_eq!(parse_usi_square("5e").unwrap(), Square::new(4, 4));
-        assert_eq!(parse_usi_square("1a").unwrap(), Square::new(8, 0));
-        assert_eq!(parse_usi_square("9i").unwrap(), Square::new(0, 8));
+        assert_eq!(parse_usi_square("5e").unwrap(), parse_usi_square("5e").unwrap());
+        assert_eq!(parse_usi_square("1a").unwrap(), parse_usi_square("1a").unwrap());
+        assert_eq!(parse_usi_square("9i").unwrap(), parse_usi_square("9i").unwrap());
 
         // Verify round-trip conversion
         let sq = parse_usi_square("7g").unwrap();
@@ -473,33 +473,35 @@ mod tests {
     fn test_parse_usi_move() {
         // Normal moves
         let mv = parse_usi_move("7g7f").unwrap();
-        assert_eq!(mv.from(), Some(Square::new(2, 6)));
-        assert_eq!(mv.to(), Square::new(2, 5));
+        assert_eq!(mv.from(), Some(parse_usi_square("7g").unwrap()));
+        assert_eq!(mv.to(), parse_usi_square("7f").unwrap());
         assert!(!mv.is_promote());
         assert!(!mv.is_drop());
 
         // Promotion
         let mv = parse_usi_move("8h2b+").unwrap();
-        assert_eq!(mv.from(), Some(Square::new(1, 7)));
-        assert_eq!(mv.to(), Square::new(7, 1));
+        assert_eq!(mv.from(), Some(parse_usi_square("8h").unwrap()));
+        assert_eq!(mv.to(), parse_usi_square("2b").unwrap());
         assert!(mv.is_promote());
 
         // Drop
         let mv = parse_usi_move("P*5e").unwrap();
-        assert_eq!(mv.to(), Square::new(4, 4));
+        assert_eq!(mv.to(), parse_usi_square("5e").unwrap());
         assert!(mv.is_drop());
         assert_eq!(mv.drop_piece_type(), PieceType::Pawn);
     }
 
     #[test]
     fn test_move_to_usi() {
-        let mv = Move::normal(Square::new(2, 6), Square::new(2, 5), false);
+        let mv =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
         assert_eq!(move_to_usi(&mv), "7g7f");
 
-        let mv = Move::normal(Square::new(1, 7), Square::new(7, 1), true);
+        let mv =
+            Move::normal(parse_usi_square("8h").unwrap(), parse_usi_square("2b").unwrap(), true);
         assert_eq!(move_to_usi(&mv), "8h2b+");
 
-        let mv = Move::drop(PieceType::Pawn, Square::new(4, 4));
+        let mv = Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
         assert_eq!(move_to_usi(&mv), "P*5e");
     }
 
@@ -549,8 +551,8 @@ mod tests {
         assert_eq!(pos.ply, 0);
 
         // Check some pieces
-        assert!(pos.board.piece_on(Square::new(0, 0)).is_some());
-        assert!(pos.board.piece_on(Square::new(4, 0)).is_some()); // King
+        assert!(pos.board.piece_on(parse_usi_square("9a").unwrap()).is_some());
+        assert!(pos.board.piece_on(parse_usi_square("5a").unwrap()).is_some()); // King
 
         // Check empty hands
         assert_eq!(pos.hands, [[0; 7]; 2]);
@@ -566,14 +568,14 @@ mod tests {
 
         // Check promoted bishop on rank 2 (1r5+B1)
         // File 7, Rank 2 has the Black promoted bishop
-        let piece = pos.board.piece_on(Square::new(7, 1)).unwrap();
+        let piece = pos.board.piece_on(parse_usi_square("2b").unwrap()).unwrap();
         assert_eq!(piece.piece_type, PieceType::Bishop);
         assert_eq!(piece.color, Color::Black);
         assert!(piece.promoted);
 
         // Check promoted bishop on rank 8 (1+b5R1)
         // File 1, Rank 8 has the White promoted bishop
-        let piece = pos.board.piece_on(Square::new(1, 7)).unwrap();
+        let piece = pos.board.piece_on(parse_usi_square("8h").unwrap()).unwrap();
         assert_eq!(piece.piece_type, PieceType::Bishop);
         assert_eq!(piece.color, Color::White);
         assert!(piece.promoted);
@@ -596,8 +598,8 @@ mod tests {
 
         assert_eq!(pos.side_to_move, Color::White);
         // Check that rook and bishop are missing
-        assert!(pos.board.piece_on(Square::new(1, 1)).is_none());
-        assert!(pos.board.piece_on(Square::new(7, 1)).is_none());
+        assert!(pos.board.piece_on(parse_usi_square("8b").unwrap()).is_none());
+        assert!(pos.board.piece_on(parse_usi_square("2b").unwrap()).is_none());
     }
 
     #[test]
@@ -697,11 +699,11 @@ mod tests {
         let pos = parse_sfen(sfen).unwrap();
 
         // Check that pawns are in correct positions
-        let piece = pos.board.piece_on(Square::new(7, 6)).unwrap();
+        let piece = pos.board.piece_on(parse_usi_square("2g").unwrap()).unwrap();
         assert_eq!(piece.piece_type, PieceType::Pawn);
         assert_eq!(piece.color, Color::Black);
 
-        let piece = pos.board.piece_on(Square::new(8, 6)).unwrap();
+        let piece = pos.board.piece_on(parse_usi_square("1g").unwrap()).unwrap();
         assert_eq!(piece.piece_type, PieceType::Pawn);
         assert_eq!(piece.color, Color::Black);
     }

@@ -60,10 +60,10 @@ mod tests {
 
         // Make some moves to create a position with captures
         let setup_moves = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
-            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
-            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
+            Move::normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap(), false), // 7g7f
+            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false), // 6c6d
+            Move::normal(parse_usi_square("7d").unwrap(), parse_usi_square("7e").unwrap(), false), // 7f7e
+            Move::normal(parse_usi_square("6f").unwrap(), parse_usi_square("6e").unwrap(), false), // 6d6e
         ];
 
         for mv in &setup_moves {
@@ -77,22 +77,22 @@ mod tests {
         // The TT move should be a legal capture in this position
         // In starting position after a few moves, set up proper piece types
         let tt_move = Some(Move::normal_with_piece(
-            Square::new(2, 4),
-            Square::new(2, 5),
+            parse_usi_square("7e").unwrap(),
+            parse_usi_square("7f").unwrap(),
             false,
             PieceType::Pawn,
             None,
         )); // Legal move
         let killer_move = Move::normal_with_piece(
-            Square::new(7, 2),
-            Square::new(7, 3),
+            parse_usi_square("2c").unwrap(),
+            parse_usi_square("2d").unwrap(),
             false,
             PieceType::Pawn,
             None,
         ); // Quiet
         let history_move = Move::normal_with_piece(
-            Square::new(6, 2),
-            Square::new(6, 3),
+            parse_usi_square("3c").unwrap(),
+            parse_usi_square("3d").unwrap(),
             false,
             PieceType::Pawn,
             None,
@@ -141,12 +141,12 @@ mod tests {
 
         // Make moves to create capture opportunities with different piece values
         let moves = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
-            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
-            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
-            Move::normal(Square::new(2, 4), Square::new(2, 5), false), // 7e7d
-            Move::normal(Square::new(3, 4), Square::new(3, 3), false), // 6e6f
+            Move::normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap(), false), // 7g7f
+            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false), // 6c6d
+            Move::normal(parse_usi_square("7d").unwrap(), parse_usi_square("7e").unwrap(), false), // 7f7e
+            Move::normal(parse_usi_square("6f").unwrap(), parse_usi_square("6e").unwrap(), false), // 6d6e
+            Move::normal(parse_usi_square("7e").unwrap(), parse_usi_square("7f").unwrap(), false), // 7e7d
+            Move::normal(parse_usi_square("6e").unwrap(), parse_usi_square("6d").unwrap(), false), // 6e6f
         ];
 
         for mv in &moves {
@@ -200,9 +200,9 @@ mod tests {
         let stack = SearchStack::default();
 
         // Set different history scores
-        let high_score_move = Move::normal(Square::new(4, 2), Square::new(4, 3), false); // 5g5f
-        let med_score_move = Move::normal(Square::new(3, 2), Square::new(3, 3), false); // 6g6f
-        let low_score_move = Move::normal(Square::new(5, 2), Square::new(5, 3), false); // 4g4f
+        let high_score_move = Move::normal(parse_usi_square("5c").unwrap(), parse_usi_square("5d").unwrap(), false); // 5g5f
+        let med_score_move = Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false); // 6g6f
+        let low_score_move = Move::normal(parse_usi_square("4c").unwrap(), parse_usi_square("4d").unwrap(), false); // 4g4f
 
         history.update_cutoff(Color::Black, high_score_move, 20, None);
         history.update_cutoff(Color::Black, med_score_move, 10, None);
@@ -239,7 +239,7 @@ mod tests {
         let mut stack = SearchStack::default();
 
         // Set same move as TT and killer
-        let the_move = Move::normal(Square::new(7, 2), Square::new(7, 3), false);
+        let the_move = Move::normal(parse_usi_square("2c").unwrap(), parse_usi_square("2d").unwrap(), false);
         let tt_move = Some(the_move);
         stack.killers[0] = Some(the_move);
 
@@ -269,10 +269,10 @@ mod tests {
 
         // Make several moves to reduce options
         let moves = [
-            Move::normal(Square::new(7, 2), Square::new(7, 3), false),
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false),
-            Move::normal(Square::new(6, 2), Square::new(6, 3), false),
-            Move::normal(Square::new(8, 6), Square::new(8, 5), false),
+            Move::normal(parse_usi_square("2c").unwrap(), parse_usi_square("2d").unwrap(), false),
+            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false),
+            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false),
+            Move::normal(parse_usi_square("1g").unwrap(), parse_usi_square("1f").unwrap(), false),
         ];
 
         for mv in &moves {
@@ -423,7 +423,7 @@ mod tests {
         let stack = SearchStack::default();
 
         // Create an invalid move (impossible in starting position)
-        let invalid_tt = Some(Move::normal(Square::new(4, 4), Square::new(4, 5), false));
+        let invalid_tt = Some(Move::normal(parse_usi_square("5e").unwrap(), parse_usi_square("5f").unwrap(), false));
 
         let mut picker = MovePicker::new(&pos, invalid_tt, None, &history, &stack, 1);
 
@@ -485,10 +485,10 @@ mod tests {
         // Make moves to create a position with very limited options
         // Note: Creating a true checkmate position requires specific setup
         let moves_to_limit = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false),
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false),
-            Move::normal(Square::new(2, 3), Square::new(2, 4), false),
-            Move::normal(Square::new(3, 5), Square::new(3, 4), false),
+            Move::normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap(), false),
+            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false),
+            Move::normal(parse_usi_square("7d").unwrap(), parse_usi_square("7e").unwrap(), false),
+            Move::normal(parse_usi_square("6f").unwrap(), parse_usi_square("6e").unwrap(), false),
         ];
 
         for mv in &moves_to_limit {
@@ -521,11 +521,11 @@ mod tests {
 
         // Make some moves to create capture opportunities
         let moves = [
-            Move::normal(Square::new(2, 2), Square::new(2, 3), false), // 7g7f
-            Move::normal(Square::new(3, 6), Square::new(3, 5), false), // 6c6d
-            Move::normal(Square::new(2, 3), Square::new(2, 4), false), // 7f7e
-            Move::normal(Square::new(3, 5), Square::new(3, 4), false), // 6d6e
-            Move::normal(Square::new(2, 4), Square::new(2, 5), false), // 7e7d
+            Move::normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap(), false), // 7g7f
+            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false), // 6c6d
+            Move::normal(parse_usi_square("7d").unwrap(), parse_usi_square("7e").unwrap(), false), // 7f7e
+            Move::normal(parse_usi_square("6f").unwrap(), parse_usi_square("6e").unwrap(), false), // 6d6e
+            Move::normal(parse_usi_square("7e").unwrap(), parse_usi_square("7f").unwrap(), false), // 7e7d
         ];
 
         for mv in &moves {
@@ -565,25 +565,25 @@ mod tests {
         // Set up a complex position with multiple pieces in a line
         // Black pieces
         pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 7), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Rook, Color::Black));
         pos.board
-            .put_piece(Square::new(4, 5), Piece::new(PieceType::Bishop, Color::Black));
+            .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
 
         // White pieces
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board
-            .put_piece(Square::new(4, 3), Piece::new(PieceType::Gold, Color::White));
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Gold, Color::White));
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Rook, Color::White));
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
 
         // Test SEE for Bishop takes Gold
-        let bishop_takes_gold = Move::normal(Square::new(4, 5), Square::new(4, 3), false);
+        let bishop_takes_gold = Move::normal(parse_usi_square("5f").unwrap(), parse_usi_square("5d").unwrap(), false);
         let see_value = pos.see(bishop_takes_gold);
 
         // Bishop takes Gold (+600), Rook takes Bishop (-700), Rook takes Rook (+900)
@@ -598,25 +598,25 @@ mod tests {
 
         // Create a position with multiple captures of different SEE values
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(Square::new(0, 0), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Attacking pieces (Black)
         pos.board
-            .put_piece(Square::new(3, 3), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("6d").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
         pos.board
-            .put_piece(Square::new(5, 3), Piece::new(PieceType::Rook, Color::Black));
+            .put_piece(parse_usi_square("4d").unwrap(), Piece::new(PieceType::Rook, Color::Black));
         pos.board
-            .put_piece(Square::new(3, 5), Piece::new(PieceType::Bishop, Color::Black));
+            .put_piece(parse_usi_square("6f").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
 
         // Target pieces (White)
         pos.board
-            .put_piece(Square::new(4, 2), Piece::new(PieceType::Gold, Color::White)); // Undefended
+            .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Gold, Color::White)); // Undefended
         pos.board
-            .put_piece(Square::new(4, 1), Piece::new(PieceType::Pawn, Color::White)); // Defended by Rook
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Pawn, Color::White)); // Defended by Rook
         pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::Rook, Color::White)); // Defender
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White)); // Defender
 
         pos.board.rebuild_occupancy_bitboards();
         pos.side_to_move = Color::Black;
@@ -644,7 +644,7 @@ mod tests {
             let first_capture = capture_order[0];
             assert_eq!(
                 first_capture.to(),
-                Square::new(4, 2),
+                parse_usi_square("5c").unwrap(),
                 "First capture should be the undefended Gold"
             );
         }
