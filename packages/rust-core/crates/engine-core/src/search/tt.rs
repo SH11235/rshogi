@@ -8,7 +8,7 @@
 use crate::{shogi::Move, util};
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
-use util::sync_compat::{AtomicU16, AtomicU64, AtomicU8, Ordering};
+use util::sync_compat::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 // Re-export SIMD types
 use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
@@ -1868,6 +1868,19 @@ pub struct TranspositionTable {
     hashfull_estimate: AtomicU16,
     /// Node counter for periodic hashfull updates
     node_counter: AtomicU64,
+    /// GC flag - set when table is nearly full
+    need_gc: AtomicBool,
+    /// GC progress - next bucket to process
+    gc_progress: AtomicU64,
+    /// Age distance threshold for GC (entries with age_distance >= this are cleared)
+    gc_threshold_age_distance: u8,
+    /// Counter for consecutive high hashfull states
+    high_hashfull_counter: AtomicU16,
+    /// GC metrics
+    #[cfg(feature = "tt_metrics")]
+    gc_triggered: StdAtomicU64,
+    #[cfg(feature = "tt_metrics")]
+    gc_entries_cleared: StdAtomicU64,
 }
 
 impl TranspositionTable {
@@ -1910,6 +1923,14 @@ impl TranspositionTable {
             occupied_bitmap,
             hashfull_estimate: AtomicU16::new(0),
             node_counter: AtomicU64::new(0),
+            need_gc: AtomicBool::new(false),
+            gc_progress: AtomicU64::new(0),
+            gc_threshold_age_distance: 4, // Default: clear entries with age distance >= 4
+            high_hashfull_counter: AtomicU16::new(0),
+            #[cfg(feature = "tt_metrics")]
+            gc_triggered: StdAtomicU64::new(0),
+            #[cfg(feature = "tt_metrics")]
+            gc_entries_cleared: StdAtomicU64::new(0),
         }
     }
 
@@ -1954,6 +1975,14 @@ impl TranspositionTable {
             occupied_bitmap,
             hashfull_estimate: AtomicU16::new(0),
             node_counter: AtomicU64::new(0),
+            need_gc: AtomicBool::new(false),
+            gc_progress: AtomicU64::new(0),
+            gc_threshold_age_distance: 4, // Default: clear entries with age distance >= 4
+            high_hashfull_counter: AtomicU16::new(0),
+            #[cfg(feature = "tt_metrics")]
+            gc_triggered: StdAtomicU64::new(0),
+            #[cfg(feature = "tt_metrics")]
+            gc_entries_cleared: StdAtomicU64::new(0),
         }
     }
 
@@ -2074,6 +2103,29 @@ impl TranspositionTable {
         let node_count = self.node_counter.fetch_add(1, Ordering::Relaxed);
         if node_count % 256 == 0 {
             self.update_hashfull_estimate();
+
+            // Check GC trigger conditions
+            let hf = self.hashfull_estimate();
+
+            // Immediate trigger at 99%
+            if hf >= 990 && !self.need_gc.load(Ordering::Relaxed) {
+                self.need_gc.store(true, Ordering::Relaxed);
+                #[cfg(feature = "tt_metrics")]
+                self.gc_triggered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Gradual trigger at 95% if sustained
+            else if hf >= 950 {
+                let high_count = self.high_hashfull_counter.fetch_add(1, Ordering::Relaxed);
+                if high_count >= 10 && !self.need_gc.load(Ordering::Relaxed) {
+                    // 10 * 256 = 2560 nodes at high hashfull
+                    self.need_gc.store(true, Ordering::Relaxed);
+                    #[cfg(feature = "tt_metrics")]
+                    self.gc_triggered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                // Reset counter if hashfull drops below threshold
+                self.high_hashfull_counter.store(0, Ordering::Relaxed);
+            }
         }
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
@@ -2114,6 +2166,11 @@ impl TranspositionTable {
         // Reset estimates and counters
         self.hashfull_estimate.store(0, Ordering::Relaxed);
         self.node_counter.store(0, Ordering::Relaxed);
+        self.high_hashfull_counter.store(0, Ordering::Relaxed);
+
+        // Reset GC state
+        self.need_gc.store(false, Ordering::Relaxed);
+        self.gc_progress.store(0, Ordering::Relaxed);
 
         self.age = 0;
     }
@@ -2218,6 +2275,136 @@ impl TranspositionTable {
     /// Get current hashfull estimate
     pub fn hashfull_estimate(&self) -> u16 {
         self.hashfull_estimate.load(Ordering::Relaxed)
+    }
+
+    /// Calculate age distance between current age and entry age
+    #[inline]
+    fn calculate_age_distance(&self, entry_age: u8) -> u8 {
+        ((GENERATION_CYCLE + self.age as u16 - entry_age as u16) & (AGE_MASK as u16)) as u8
+    }
+
+    /// Check if bucket is empty
+    fn is_bucket_empty(&self, bucket_idx: usize) -> bool {
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            let bucket = &flexible_buckets[bucket_idx];
+            for i in 0..bucket.size.entries() {
+                if bucket.entries[i * 2].load(Ordering::Relaxed) != 0 {
+                    return false;
+                }
+            }
+        } else {
+            let bucket = &self.buckets[bucket_idx];
+            for i in 0..BUCKET_SIZE {
+                if bucket.entries[i * 2].load(Ordering::Relaxed) != 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Unmark bucket as occupied in the bitmap
+    #[inline]
+    fn unmark_bucket_occupied(&self, bucket_idx: usize) {
+        let byte_idx = bucket_idx / 8;
+        let bit_idx = bucket_idx % 8;
+        if byte_idx < self.occupied_bitmap.len() {
+            self.occupied_bitmap[byte_idx].fetch_and(!(1 << bit_idx), Ordering::Relaxed);
+        }
+    }
+
+    /// Clear old entries in a specific bucket
+    fn clear_old_entries_in_bucket(&self, bucket_idx: usize) {
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            let bucket = &flexible_buckets[bucket_idx];
+            let entries_per_bucket = bucket.size.entries();
+
+            for i in 0..entries_per_bucket {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let key = bucket.entries[key_idx].load(Ordering::Relaxed);
+                if key != 0 {
+                    let data = bucket.entries[data_idx].load(Ordering::Relaxed);
+                    let entry = TTEntry { key, data };
+                    let age_distance = self.calculate_age_distance(entry.age());
+
+                    if age_distance >= self.gc_threshold_age_distance {
+                        // Clear the entry
+                        bucket.entries[key_idx].store(0, Ordering::Relaxed);
+                        bucket.entries[data_idx].store(0, Ordering::Relaxed);
+
+                        #[cfg(feature = "tt_metrics")]
+                        self.gc_entries_cleared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        } else {
+            let bucket = &self.buckets[bucket_idx];
+
+            for i in 0..BUCKET_SIZE {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let key = bucket.entries[key_idx].load(Ordering::Relaxed);
+                if key != 0 {
+                    let data = bucket.entries[data_idx].load(Ordering::Relaxed);
+                    let entry = TTEntry { key, data };
+                    let age_distance = self.calculate_age_distance(entry.age());
+
+                    if age_distance >= self.gc_threshold_age_distance {
+                        // Clear the entry
+                        bucket.entries[key_idx].store(0, Ordering::Relaxed);
+                        bucket.entries[data_idx].store(0, Ordering::Relaxed);
+
+                        #[cfg(feature = "tt_metrics")]
+                        self.gc_entries_cleared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
+        // Update bitmap if bucket is now empty
+        if self.is_bucket_empty(bucket_idx) {
+            self.unmark_bucket_occupied(bucket_idx);
+        }
+    }
+
+    /// Perform incremental garbage collection
+    /// Returns true if GC is complete
+    pub fn incremental_gc(&self, buckets_per_call: usize) -> bool {
+        if !self.need_gc.load(Ordering::Relaxed) {
+            return true; // GC not needed
+        }
+
+        let start_bucket =
+            self.gc_progress.fetch_add(buckets_per_call as u64, Ordering::Relaxed) as usize;
+        let end_bucket = (start_bucket + buckets_per_call).min(self.num_buckets);
+
+        // Process buckets
+        for bucket_idx in start_bucket..end_bucket {
+            self.clear_old_entries_in_bucket(bucket_idx);
+        }
+
+        // Check if we've processed all buckets
+        if end_bucket >= self.num_buckets {
+            // GC complete - reset state
+            self.gc_progress.store(0, Ordering::Relaxed);
+            self.need_gc.store(false, Ordering::Relaxed);
+            self.high_hashfull_counter.store(0, Ordering::Relaxed);
+
+            // Update hashfull estimate after GC
+            self.update_hashfull_estimate();
+
+            return true;
+        }
+
+        false // GC still in progress
+    }
+
+    /// Check if GC should be triggered
+    pub fn should_trigger_gc(&self) -> bool {
+        self.need_gc.load(Ordering::Relaxed)
     }
 
     /// Prefetch bucket for the given hash with cache level hint
@@ -2504,6 +2691,102 @@ mod tests {
 
         // Should NOT be filtered
         assert_eq!(metrics.hashfull_filtered.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_gc_trigger() {
+        let tt = TranspositionTable::new(1); // 1MB table
+
+        // Initially GC should not be needed
+        assert!(!tt.should_trigger_gc());
+
+        // Simulate high hashfull scenario
+        // First set a high hashfull estimate
+        tt.hashfull_estimate.store(990, Ordering::Relaxed);
+
+        // Directly trigger GC (simulating what store_entry would do)
+        tt.need_gc.store(true, Ordering::Relaxed);
+
+        assert!(tt.should_trigger_gc());
+
+        // Test gradual trigger
+        tt.need_gc.store(false, Ordering::Relaxed);
+        tt.hashfull_estimate.store(950, Ordering::Relaxed);
+
+        // Simulate multiple high hashfull updates
+        for _ in 0..11 {
+            tt.high_hashfull_counter.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Check if counter would trigger GC
+        if tt.high_hashfull_counter.load(Ordering::Relaxed) >= 10 {
+            tt.need_gc.store(true, Ordering::Relaxed);
+        }
+
+        assert!(tt.should_trigger_gc());
+    }
+
+    #[test]
+    fn test_incremental_gc() {
+        let mut tt = TranspositionTable::new(1); // 1MB table
+        let position = crate::shogi::Position::startpos();
+
+        // Fill table with entries of different ages
+        for i in 0..1000 {
+            let hash = position.hash + i;
+            tt.store_with_params(TTEntryParams {
+                key: hash,
+                mv: None,
+                score: 100,
+                eval: 50,
+                depth: 5,
+                node_type: NodeType::Exact,
+                age: (i % 8) as u8, // Various ages
+                is_pv: false,
+                ..Default::default()
+            });
+        }
+
+        // Advance age to make some entries old
+        tt.age = 6;
+
+        // Trigger GC
+        tt.need_gc.store(true, Ordering::Relaxed);
+
+        // Run incremental GC
+        let mut complete = false;
+        let mut iterations = 0;
+        while !complete && iterations < 1000 {
+            complete = tt.incremental_gc(256);
+            iterations += 1;
+        }
+
+        assert!(complete);
+        assert!(!tt.should_trigger_gc());
+
+        // Verify some entries were cleared
+        #[cfg(feature = "tt_metrics")]
+        {
+            let cleared = tt.gc_entries_cleared.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(cleared > 0);
+        }
+    }
+
+    #[test]
+    fn test_age_distance_calculation() {
+        let mut tt = TranspositionTable::new(1);
+
+        // Test various age combinations
+        tt.age = 5;
+        assert_eq!(tt.calculate_age_distance(5), 0); // Same age
+        assert_eq!(tt.calculate_age_distance(4), 1); // 1 generation old
+        assert_eq!(tt.calculate_age_distance(3), 2); // 2 generations old
+        assert_eq!(tt.calculate_age_distance(1), 4); // 4 generations old
+
+        // Test wraparound
+        tt.age = 1;
+        assert_eq!(tt.calculate_age_distance(7), 2); // Wrapped around
+        assert_eq!(tt.calculate_age_distance(6), 3); // Wrapped around
     }
 
     use crate::{
