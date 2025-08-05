@@ -8,7 +8,7 @@
 use crate::{shogi::Move, util};
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
-use util::sync_compat::{AtomicU64, Ordering};
+use util::sync_compat::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 // Re-export SIMD types
 use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
@@ -595,7 +595,11 @@ impl TTBucket {
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) -> UpdateResult {
-        try_update_entry_generic(&self.entries, idx, old_key, new_entry, metrics)
+        #[cfg(feature = "tt_metrics")]
+        let result = try_update_entry_generic(&self.entries, idx, old_key, new_entry, metrics);
+        #[cfg(not(feature = "tt_metrics"))]
+        let result = try_update_entry_generic(&self.entries, idx, old_key, new_entry, None);
+        result
     }
 
     /// Internal store implementation with optional metrics
@@ -624,7 +628,11 @@ impl TTBucket {
                 }
 
                 // Try to update existing entry
-                match self.try_update_entry(idx, old_key, &new_entry, metrics) {
+                #[cfg(feature = "tt_metrics")]
+                let update_result = self.try_update_entry(idx, old_key, &new_entry, metrics);
+                #[cfg(not(feature = "tt_metrics"))]
+                let update_result = self.try_update_entry(idx, old_key, &new_entry, None);
+                match update_result {
                     UpdateResult::Updated | UpdateResult::Filtered => return,
                     UpdateResult::NotFound => {} // Continue to next check
                 }
@@ -816,7 +824,11 @@ impl FlexibleTTBucket {
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) -> UpdateResult {
-        try_update_entry_generic(&self.entries, idx, old_key, new_entry, metrics)
+        #[cfg(feature = "tt_metrics")]
+        let result = try_update_entry_generic(&self.entries, idx, old_key, new_entry, metrics);
+        #[cfg(not(feature = "tt_metrics"))]
+        let result = try_update_entry_generic(&self.entries, idx, old_key, new_entry, None);
+        result
     }
 
     /// Probe bucket for matching entry
@@ -1064,7 +1076,11 @@ impl FlexibleTTBucket {
                 }
 
                 // Try to update existing entry
-                match self.try_update_entry(idx, old_key, &new_entry, metrics) {
+                #[cfg(feature = "tt_metrics")]
+                let update_result = self.try_update_entry(idx, old_key, &new_entry, metrics);
+                #[cfg(not(feature = "tt_metrics"))]
+                let update_result = self.try_update_entry(idx, old_key, &new_entry, None);
+                match update_result {
                     UpdateResult::Updated | UpdateResult::Filtered => return,
                     UpdateResult::NotFound => {} // Continue to next check
                 }
@@ -1264,7 +1280,11 @@ impl FlexibleTTBucket {
                 }
 
                 // Try to update existing entry
-                match self.try_update_entry(idx, old_key, &new_entry, metrics) {
+                #[cfg(feature = "tt_metrics")]
+                let update_result = self.try_update_entry(idx, old_key, &new_entry, metrics);
+                #[cfg(not(feature = "tt_metrics"))]
+                let update_result = self.try_update_entry(idx, old_key, &new_entry, None);
+                match update_result {
                     UpdateResult::Updated | UpdateResult::Filtered => return,
                     UpdateResult::NotFound => {} // Continue to next check
                 }
@@ -1842,6 +1862,12 @@ pub struct TranspositionTable {
     /// Detailed metrics for performance analysis
     #[cfg(feature = "tt_metrics")]
     pub metrics: Option<DetailedTTMetrics>,
+    /// Occupied bitmap - 1 bit per bucket to track occupancy
+    occupied_bitmap: Vec<AtomicU8>,
+    /// Hashfull estimate using exponential moving average
+    hashfull_estimate: AtomicU16,
+    /// Node counter for periodic hashfull updates
+    node_counter: AtomicU64,
 }
 
 impl TranspositionTable {
@@ -1868,6 +1894,10 @@ impl TranspositionTable {
             buckets.push(TTBucket::new());
         }
 
+        // Initialize occupied bitmap - 1 bit per bucket
+        let bitmap_size = num_buckets.div_ceil(8); // Round up to nearest byte
+        let occupied_bitmap = (0..bitmap_size).map(|_| AtomicU8::new(0)).collect();
+
         TranspositionTable {
             buckets,
             flexible_buckets: None,
@@ -1877,6 +1907,9 @@ impl TranspositionTable {
             prefetcher: None,
             #[cfg(feature = "tt_metrics")]
             metrics: None,
+            occupied_bitmap,
+            hashfull_estimate: AtomicU16::new(0),
+            node_counter: AtomicU64::new(0),
         }
     }
 
@@ -1905,6 +1938,10 @@ impl TranspositionTable {
             flexible_buckets.push(FlexibleTTBucket::new(bucket_size));
         }
 
+        // Initialize occupied bitmap - 1 bit per bucket
+        let bitmap_size = num_buckets.div_ceil(8); // Round up to nearest byte
+        let occupied_bitmap = (0..bitmap_size).map(|_| AtomicU8::new(0)).collect();
+
         TranspositionTable {
             buckets: Vec::new(), // Empty for flexible mode
             flexible_buckets: Some(flexible_buckets),
@@ -1914,6 +1951,9 @@ impl TranspositionTable {
             prefetcher: None,
             #[cfg(feature = "tt_metrics")]
             metrics: None,
+            occupied_bitmap,
+            hashfull_estimate: AtomicU16::new(0),
+            node_counter: AtomicU64::new(0),
         }
     }
 
@@ -2001,7 +2041,40 @@ impl TranspositionTable {
             params.score
         );
 
+        // Hashfull-based filtering
+        #[cfg(feature = "hashfull_filter")]
+        {
+            let hf = self.hashfull_estimate();
+
+            // 70% threshold - filter shallow entries
+            if hf >= 700 && params.depth < 3 {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(ref metrics) = self.metrics {
+                    metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                return;
+            }
+
+            // 85% threshold - filter non-exact entries
+            if hf >= 850 && params.node_type != NodeType::Exact {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(ref metrics) = self.metrics {
+                    metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                return;
+            }
+        }
+
         let idx = self.bucket_index(params.key);
+
+        // Mark bucket as occupied
+        self.mark_bucket_occupied(idx);
+
+        // Update node counter and check if we need to update hashfull estimate
+        let node_count = self.node_counter.fetch_add(1, Ordering::Relaxed);
+        if node_count % 256 == 0 {
+            self.update_hashfull_estimate();
+        }
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             #[cfg(feature = "tt_metrics")]
@@ -2032,6 +2105,16 @@ impl TranspositionTable {
                 }
             }
         }
+
+        // Clear occupied bitmap
+        for byte in &self.occupied_bitmap {
+            byte.store(0, Ordering::Relaxed);
+        }
+
+        // Reset estimates and counters
+        self.hashfull_estimate.store(0, Ordering::Relaxed);
+        self.node_counter.store(0, Ordering::Relaxed);
+
         self.age = 0;
     }
 
@@ -2081,6 +2164,60 @@ impl TranspositionTable {
     /// Get table size in entries
     pub fn size(&self) -> usize {
         self.num_buckets * BUCKET_SIZE
+    }
+
+    /// Mark bucket as occupied in the bitmap
+    #[inline(always)]
+    fn mark_bucket_occupied(&self, bucket_idx: usize) {
+        let byte_idx = bucket_idx / 8;
+        let bit_idx = bucket_idx % 8;
+        if byte_idx < self.occupied_bitmap.len() {
+            self.occupied_bitmap[byte_idx].fetch_or(1 << bit_idx, Ordering::Relaxed);
+        }
+    }
+
+    /// Check if bucket is occupied
+    #[inline(always)]
+    fn is_bucket_occupied(&self, bucket_idx: usize) -> bool {
+        let byte_idx = bucket_idx / 8;
+        let bit_idx = bucket_idx % 8;
+        if byte_idx < self.occupied_bitmap.len() {
+            let byte_val = self.occupied_bitmap[byte_idx].load(Ordering::Relaxed);
+            (byte_val & (1 << bit_idx)) != 0
+        } else {
+            false
+        }
+    }
+
+    /// Update hashfull estimate using exponential moving average
+    fn update_hashfull_estimate(&self) {
+        // Sample 64 buckets for efficiency
+        const SAMPLE_SIZE: usize = 64;
+        let sample_buckets = SAMPLE_SIZE.min(self.num_buckets);
+
+        // Use a simple linear congruential generator for pseudo-random sampling
+        let seed = self.node_counter.load(Ordering::Relaxed);
+        let start_idx = ((seed * 1103515245 + 12345) >> 16) as usize % self.num_buckets;
+
+        let mut filled = 0;
+        for i in 0..sample_buckets {
+            let bucket_idx = (start_idx + i) % self.num_buckets;
+            if self.is_bucket_occupied(bucket_idx) {
+                filled += 1;
+            }
+        }
+
+        let sample_hashfull = (filled * 1000) / sample_buckets;
+
+        // Exponential moving average: new = (old * 7 + sample) / 8
+        let old_estimate = self.hashfull_estimate.load(Ordering::Relaxed);
+        let new_estimate = ((old_estimate as u32 * 7 + sample_hashfull as u32) / 8) as u16;
+        self.hashfull_estimate.store(new_estimate, Ordering::Relaxed);
+    }
+
+    /// Get current hashfull estimate
+    pub fn hashfull_estimate(&self) -> u16 {
+        self.hashfull_estimate.load(Ordering::Relaxed)
     }
 
     /// Prefetch bucket for the given hash with cache level hint
@@ -2223,6 +2360,152 @@ mod alignment_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bitmap_operations() {
+        let tt = TranspositionTable::new(1); // 1MB table
+
+        // Initially all buckets should be unoccupied
+        assert!(!tt.is_bucket_occupied(0));
+        assert!(!tt.is_bucket_occupied(100));
+
+        // Mark some buckets as occupied
+        tt.mark_bucket_occupied(0);
+        tt.mark_bucket_occupied(100);
+        tt.mark_bucket_occupied(255);
+
+        // Check they are marked
+        assert!(tt.is_bucket_occupied(0));
+        assert!(tt.is_bucket_occupied(100));
+        assert!(tt.is_bucket_occupied(255));
+
+        // Check others remain unoccupied
+        assert!(!tt.is_bucket_occupied(1));
+        assert!(!tt.is_bucket_occupied(99));
+        assert!(!tt.is_bucket_occupied(256));
+    }
+
+    #[test]
+    fn test_hashfull_estimate() {
+        let tt = TranspositionTable::new(1); // 1MB table
+
+        // Initially estimate should be 0
+        assert_eq!(tt.hashfull_estimate(), 0);
+
+        // Mark some buckets and update estimate
+        for i in 0..64 {
+            tt.mark_bucket_occupied(i);
+        }
+        tt.update_hashfull_estimate();
+
+        // Since we marked all 64 sampled buckets, estimate should be 1000
+        // But due to EMA, it won't jump immediately
+        let estimate = tt.hashfull_estimate();
+        assert!(estimate > 0);
+
+        // Multiple updates should converge
+        for _ in 0..10 {
+            tt.update_hashfull_estimate();
+        }
+        // After convergence, should be close to 1000 if all sampled buckets are occupied
+        // But exact value depends on sampling
+    }
+
+    #[test]
+    fn test_store_updates_bitmap() {
+        let tt = TranspositionTable::new(1); // 1MB table
+        let position = crate::shogi::Position::startpos();
+        let hash = position.hash;
+        let bucket_idx = tt.bucket_index(hash);
+
+        // Initially bucket should be unoccupied
+        assert!(!tt.is_bucket_occupied(bucket_idx));
+
+        // Store an entry
+        tt.store(hash, None, 100, 50, 5, NodeType::Exact);
+
+        // Bucket should now be occupied
+        assert!(tt.is_bucket_occupied(bucket_idx));
+    }
+
+    #[test]
+    fn test_clear_resets_bitmap() {
+        let mut tt = TranspositionTable::new(1); // 1MB table
+
+        // Mark some buckets and set estimate
+        for i in 0..100 {
+            tt.mark_bucket_occupied(i);
+        }
+        tt.hashfull_estimate.store(500, Ordering::Relaxed);
+        tt.node_counter.store(1000, Ordering::Relaxed);
+
+        // Clear the table
+        tt.clear();
+
+        // All buckets should be unoccupied
+        for i in 0..100 {
+            assert!(!tt.is_bucket_occupied(i));
+        }
+
+        // Estimates and counters should be reset
+        assert_eq!(tt.hashfull_estimate(), 0);
+        assert_eq!(tt.node_counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[cfg(all(feature = "hashfull_filter", feature = "tt_metrics"))]
+    fn test_hashfull_filtering() {
+        let mut tt = TranspositionTable::new(1); // 1MB table
+        tt.enable_metrics();
+
+        // Set hashfull estimate to 750 (75%)
+        tt.hashfull_estimate.store(750, Ordering::Relaxed);
+
+        // Try to store a shallow entry (depth=2)
+        let position = crate::shogi::Position::startpos();
+        tt.store(
+            position.hash,
+            None,
+            100,
+            50,
+            2, // shallow depth
+            NodeType::LowerBound,
+        );
+
+        // Should be filtered
+        let metrics = tt.metrics.as_ref().unwrap();
+        assert_eq!(metrics.hashfull_filtered.load(Ordering::Relaxed), 1);
+
+        // Set hashfull estimate to 900 (90%)
+        tt.hashfull_estimate.store(900, Ordering::Relaxed);
+
+        // Try to store a non-exact entry
+        tt.store(
+            position.hash + 1,
+            None,
+            100,
+            50,
+            10,                   // deep enough
+            NodeType::LowerBound, // not exact
+        );
+
+        // Should be filtered
+        assert_eq!(metrics.hashfull_filtered.load(Ordering::Relaxed), 2);
+
+        // Try to store an exact entry
+        tt.store(
+            position.hash + 2,
+            None,
+            100,
+            50,
+            10,
+            NodeType::Exact, // exact node
+        );
+
+        // Should NOT be filtered
+        assert_eq!(metrics.hashfull_filtered.load(Ordering::Relaxed), 2);
+    }
+
     use crate::{
         shogi::{Move, Square},
         usi::parse_usi_square,

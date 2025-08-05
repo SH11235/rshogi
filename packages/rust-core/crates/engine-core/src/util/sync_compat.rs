@@ -6,10 +6,10 @@
 
 // Atomic types
 #[cfg(feature = "loom")]
-pub use loom::sync::atomic::{AtomicU64, Ordering};
+pub use loom::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 #[cfg(not(feature = "loom"))]
-pub use std::sync::atomic::{AtomicU64, Ordering};
+pub use std::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 // Arc
 #[cfg(feature = "loom")]
