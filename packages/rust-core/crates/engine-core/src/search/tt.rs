@@ -13,6 +13,22 @@ use util::sync_compat::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 // Re-export SIMD types
 use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
 
+/// Get depth threshold based on hashfull - optimized branch version
+#[inline(always)]
+fn get_depth_threshold(hf: u16) -> u8 {
+    // Early return for most common case
+    if hf < 600 {
+        return 0;
+    }
+
+    match hf {
+        600..=800 => 2,
+        801..=900 => 3,
+        901..=950 => 4,
+        _ => 5,
+    }
+}
+
 // Bit layout constants for TTEntry data field
 // Optimized layout (64 bits total) - Version 2.1:
 // [63-48]: move (16 bits)
@@ -615,24 +631,25 @@ impl TTBucket {
         None
     }
 
-    /// Store entry in bucket with metrics tracking
-    fn store_with_metrics(
+    /// Store entry in bucket with metrics tracking and mode
+    fn store_with_metrics_and_mode(
         &self,
         new_entry: TTEntry,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
         #[cfg(feature = "tt_metrics")]
-        self.store_internal(new_entry, current_age, metrics);
+        self.store_internal(new_entry, current_age, empty_slot_mode, metrics);
         #[cfg(not(feature = "tt_metrics"))]
-        self.store_internal(new_entry, current_age, None)
+        self.store_internal(new_entry, current_age, empty_slot_mode, None)
     }
 
     /// Store entry in bucket (used in tests)
     #[cfg(test)]
     fn store(&self, new_entry: TTEntry, current_age: u8) {
-        self.store_internal(new_entry, current_age, None)
+        self.store_internal(new_entry, current_age, false, None)
     }
 
     /// Try to update an existing entry with depth filtering
@@ -657,6 +674,7 @@ impl TTBucket {
         &self,
         new_entry: TTEntry,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
@@ -707,6 +725,11 @@ impl TTBucket {
                     break;
                 }
             }
+        }
+
+        // If empty slot mode is enabled, skip replacement
+        if empty_slot_mode {
+            return;
         }
 
         // Second pass: find least valuable entry to replace using SIMD if available
@@ -1070,27 +1093,38 @@ impl FlexibleTTBucket {
         self.probe_scalar_impl::<16>(target_key)
     }
 
-    /// Store entry in bucket
-    fn store(
+    /// Store entry in bucket with empty slot mode
+    fn store_with_mode(
         &self,
         params: TTEntryParams,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
         match self.size {
             #[cfg(feature = "tt_metrics")]
-            BucketSize::Small => self.store_4(params, current_age, metrics),
+            BucketSize::Small => {
+                self.store_4_with_mode(params, current_age, empty_slot_mode, metrics)
+            }
             #[cfg(not(feature = "tt_metrics"))]
-            BucketSize::Small => self.store_4(params, current_age, None),
+            BucketSize::Small => self.store_4_with_mode(params, current_age, empty_slot_mode, None),
             #[cfg(feature = "tt_metrics")]
-            BucketSize::Medium => self.store_8(params, current_age, metrics),
+            BucketSize::Medium => {
+                self.store_8_with_mode(params, current_age, empty_slot_mode, metrics)
+            }
             #[cfg(not(feature = "tt_metrics"))]
-            BucketSize::Medium => self.store_8(params, current_age, None),
+            BucketSize::Medium => {
+                self.store_8_with_mode(params, current_age, empty_slot_mode, None)
+            }
             #[cfg(feature = "tt_metrics")]
-            BucketSize::Large => self.store_16(params, current_age, metrics),
+            BucketSize::Large => {
+                self.store_16_with_mode(params, current_age, empty_slot_mode, metrics)
+            }
             #[cfg(not(feature = "tt_metrics"))]
-            BucketSize::Large => self.store_16(params, current_age, None),
+            BucketSize::Large => {
+                self.store_16_with_mode(params, current_age, empty_slot_mode, None)
+            }
         }
     }
 
@@ -1099,6 +1133,7 @@ impl FlexibleTTBucket {
         &self,
         params: TTEntryParams,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
@@ -1291,6 +1326,11 @@ impl FlexibleTTBucket {
             }
         }
 
+        // If empty slot mode is enabled, skip replacement
+        if empty_slot_mode {
+            return;
+        }
+
         // Find worst entry to replace
         let (worst_idx, _) = match N {
             4 => self.find_worst_entry_4(current_age),
@@ -1357,46 +1397,49 @@ impl FlexibleTTBucket {
         }
     }
 
-    /// Store in 4-entry bucket
-    fn store_4(
+    /// Store in 4-entry bucket with mode
+    fn store_4_with_mode(
         &self,
         params: TTEntryParams,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
         #[cfg(feature = "tt_metrics")]
-        self.store_impl::<4>(params, current_age, metrics);
+        self.store_impl::<4>(params, current_age, empty_slot_mode, metrics);
         #[cfg(not(feature = "tt_metrics"))]
-        self.store_impl::<4>(params, current_age, None);
+        self.store_impl::<4>(params, current_age, empty_slot_mode, None);
     }
 
-    /// Store in 8-entry bucket
-    fn store_8(
+    /// Store in 8-entry bucket with mode
+    fn store_8_with_mode(
         &self,
         params: TTEntryParams,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
         #[cfg(feature = "tt_metrics")]
-        self.store_impl::<8>(params, current_age, metrics);
+        self.store_impl::<8>(params, current_age, empty_slot_mode, metrics);
         #[cfg(not(feature = "tt_metrics"))]
-        self.store_impl::<8>(params, current_age, None);
+        self.store_impl::<8>(params, current_age, empty_slot_mode, None);
     }
 
-    /// Store in 16-entry bucket
-    fn store_16(
+    /// Store in 16-entry bucket with mode
+    fn store_16_with_mode(
         &self,
         params: TTEntryParams,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
         #[cfg(feature = "tt_metrics")]
-        self.store_impl::<16>(params, current_age, metrics);
+        self.store_impl::<16>(params, current_age, empty_slot_mode, metrics);
         #[cfg(not(feature = "tt_metrics"))]
-        self.store_impl::<16>(params, current_age, None);
+        self.store_impl::<16>(params, current_age, empty_slot_mode, None);
     }
 
     /// Generic find worst entry implementation for N-entry bucket using SIMD
@@ -1714,6 +1757,10 @@ pub struct TranspositionTable {
     gc_triggered: StdAtomicU64,
     #[cfg(feature = "tt_metrics")]
     gc_entries_cleared: StdAtomicU64,
+    /// Empty slot mode control
+    empty_slot_mode_enabled: AtomicBool,
+    /// Last hashfull for hysteresis control
+    empty_slot_mode_last_hf: AtomicU16,
 }
 
 impl TranspositionTable {
@@ -1764,6 +1811,8 @@ impl TranspositionTable {
             gc_triggered: StdAtomicU64::new(0),
             #[cfg(feature = "tt_metrics")]
             gc_entries_cleared: StdAtomicU64::new(0),
+            empty_slot_mode_enabled: AtomicBool::new(false),
+            empty_slot_mode_last_hf: AtomicU16::new(0),
         }
     }
 
@@ -1816,6 +1865,8 @@ impl TranspositionTable {
             gc_triggered: StdAtomicU64::new(0),
             #[cfg(feature = "tt_metrics")]
             gc_entries_cleared: StdAtomicU64::new(0),
+            empty_slot_mode_enabled: AtomicBool::new(false),
+            empty_slot_mode_last_hf: AtomicU16::new(0),
         }
     }
 
@@ -1903,13 +1954,16 @@ impl TranspositionTable {
             params.score
         );
 
-        // Hashfull-based filtering
+        // Hashfull-based filtering with dynamic depth LUT
         #[cfg(feature = "hashfull_filter")]
         {
             let hf = self.hashfull_estimate();
 
-            // 70% threshold - filter shallow entries
-            if hf >= 700 && params.depth < 3 {
+            // Get depth threshold using optimized branch
+            let depth_threshold = get_depth_threshold(hf);
+
+            // Filter based on dynamic depth threshold
+            if depth_threshold > 0 && params.depth < depth_threshold {
                 #[cfg(feature = "tt_metrics")]
                 if let Some(ref metrics) = self.metrics {
                     metrics.hashfull_filtered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1917,7 +1971,7 @@ impl TranspositionTable {
                 return;
             }
 
-            // 85% threshold - filter non-exact entries
+            // Additional filtering for non-exact entries at high hashfull
             if hf >= 850 && params.node_type != NodeType::Exact {
                 #[cfg(feature = "tt_metrics")]
                 if let Some(ref metrics) = self.metrics {
@@ -1940,6 +1994,9 @@ impl TranspositionTable {
             // Check GC trigger conditions
             let hf = self.hashfull_estimate();
 
+            // Update empty slot mode with hysteresis
+            self.update_empty_slot_mode(hf);
+
             // Immediate trigger at 99%
             if hf >= 990 && !self.need_gc.load(Ordering::Relaxed) {
                 self.need_gc.store(true, Ordering::Relaxed);
@@ -1961,17 +2018,30 @@ impl TranspositionTable {
             }
         }
 
+        // Check if empty slot mode is enabled
+        let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
+
         if let Some(ref flexible_buckets) = self.flexible_buckets {
             #[cfg(feature = "tt_metrics")]
-            flexible_buckets[idx].store(params, self.age, self.metrics.as_ref());
+            flexible_buckets[idx].store_with_mode(
+                params,
+                self.age,
+                empty_slot_mode,
+                self.metrics.as_ref(),
+            );
             #[cfg(not(feature = "tt_metrics"))]
-            flexible_buckets[idx].store(params, self.age, None);
+            flexible_buckets[idx].store_with_mode(params, self.age, empty_slot_mode, None);
         } else {
             let entry = TTEntry::from_params(params);
             #[cfg(feature = "tt_metrics")]
-            self.buckets[idx].store_with_metrics(entry, self.age, self.metrics.as_ref());
+            self.buckets[idx].store_with_metrics_and_mode(
+                entry,
+                self.age,
+                empty_slot_mode,
+                self.metrics.as_ref(),
+            );
             #[cfg(not(feature = "tt_metrics"))]
-            self.buckets[idx].store_with_metrics(entry, self.age, None);
+            self.buckets[idx].store_with_metrics_and_mode(entry, self.age, empty_slot_mode, None);
         }
     }
 
@@ -2108,6 +2178,32 @@ impl TranspositionTable {
     /// Get current hashfull estimate
     pub fn hashfull_estimate(&self) -> u16 {
         self.hashfull_estimate.load(Ordering::Relaxed)
+    }
+
+    /// Update empty slot mode based on hashfull with hysteresis
+    fn update_empty_slot_mode(&self, current_hf: u16) {
+        let was_enabled = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
+
+        // Get threshold based on bucket size if available - more relaxed thresholds
+        let (enable_threshold, disable_threshold) = if let Some(bucket_size) = self.bucket_size {
+            match bucket_size {
+                BucketSize::Small => (200, 300),  // 4-entry: 20-30%
+                BucketSize::Medium => (150, 250), // 8-entry: 15-25%
+                BucketSize::Large => (100, 200),  // 16-entry: 10-20%
+            }
+        } else {
+            (200, 300) // Default for legacy mode
+        };
+
+        if !was_enabled && current_hf < enable_threshold {
+            // Enable empty slot mode when hashfull drops below lower threshold
+            self.empty_slot_mode_enabled.store(true, Ordering::Relaxed);
+        } else if was_enabled && current_hf >= disable_threshold {
+            // Disable empty slot mode when hashfull rises above upper threshold
+            self.empty_slot_mode_enabled.store(false, Ordering::Relaxed);
+        }
+
+        self.empty_slot_mode_last_hf.store(current_hf, Ordering::Relaxed);
     }
 
     /// Calculate age distance between current age and entry age
@@ -2481,18 +2577,18 @@ mod tests {
         // Set hashfull estimate to 750 (75%)
         tt.hashfull_estimate.store(750, Ordering::Relaxed);
 
-        // Try to store a shallow entry (depth=2)
+        // Try to store a shallow entry (depth=1) - should be filtered at 75%
         let position = crate::shogi::Position::startpos();
         tt.store(
             position.hash,
             None,
             100,
             50,
-            2, // shallow depth
+            1, // very shallow depth - will be filtered when threshold is 2
             NodeType::LowerBound,
         );
 
-        // Should be filtered
+        // Should be filtered (750 is in 600-800 range, so depth < 2 is filtered)
         let metrics = tt.metrics.as_ref().unwrap();
         assert_eq!(metrics.hashfull_filtered.load(Ordering::Relaxed), 1);
 
@@ -2692,7 +2788,7 @@ mod tests {
         let test_entry = TTEntry::new(0x1234567890ABCDEF, None, 100, -50, 10, NodeType::Exact, 0);
 
         // Store an entry
-        bucket.store_with_metrics(test_entry, 0, None);
+        bucket.store_with_metrics_and_mode(test_entry, 0, false, None);
 
         // Test both SIMD and scalar paths produce same result
         let simd_result = if bucket.probe_simd_available() {
@@ -2732,7 +2828,7 @@ mod tests {
                 },
                 i as u8,
             );
-            bucket.store_with_metrics(entry, 0, None);
+            bucket.store_with_metrics_and_mode(entry, 0, false, None);
         }
 
         // Test both SIMD and scalar find worst entry
@@ -2786,11 +2882,11 @@ mod tests {
         // Store an entry with depth 10
         let key = 0x1234567890ABCDEF;
         let entry1 = TTEntry::new(key, None, 100, 50, 10, NodeType::Exact, 0);
-        bucket.store_with_metrics(entry1, 0, Some(&metrics));
+        bucket.store_with_metrics_and_mode(entry1, 0, false, Some(&metrics));
 
         // Try to update with a shallower entry (depth 5)
         let entry2 = TTEntry::new(key, None, 200, 60, 5, NodeType::Exact, 0);
-        bucket.store_with_metrics(entry2, 0, Some(&metrics));
+        bucket.store_with_metrics_and_mode(entry2, 0, false, Some(&metrics));
 
         // The update should be filtered
         assert_eq!(metrics.depth_filtered.load(Ordering::Relaxed), 1);
@@ -2805,7 +2901,7 @@ mod tests {
 
         // Try to update with a deeper entry (depth 15)
         let entry3 = TTEntry::new(key, None, 300, 70, 15, NodeType::Exact, 0);
-        bucket.store_with_metrics(entry3, 0, Some(&metrics));
+        bucket.store_with_metrics_and_mode(entry3, 0, false, Some(&metrics));
 
         // This update should succeed
         assert_eq!(metrics.depth_filtered.load(Ordering::Relaxed), 1); // Still 1
@@ -2839,7 +2935,7 @@ mod tests {
                         let key = 0x1000 + (thread_id as u64);
                         let score = (thread_id * 100 + i) as i16;
                         let entry = TTEntry::new(key, None, score, 0, 10, NodeType::Exact, 0);
-                        bucket.store_with_metrics(entry, 0, None);
+                        bucket.store_with_metrics_and_mode(entry, 0, false, None);
                     }
                 })
             })
@@ -2977,6 +3073,9 @@ mod tests {
     fn test_cache_line_optimization() {
         // Test that accessing entries in the same bucket is fast
         let tt = TranspositionTable::new(1);
+
+        // Set hashfull high to avoid empty slot mode
+        tt.hashfull_estimate.store(500, Ordering::Relaxed);
 
         // Find hashes that map to the same bucket but have different keys
         let bucket_idx = 100_usize; // Choose a specific bucket
@@ -3295,7 +3394,7 @@ mod tests {
         for i in 2..BUCKET_SIZE {
             let hash = 0x1000 * (i as u64 + 1);
             let entry = TTEntry::new(hash, None, 50, 25, 5, NodeType::LowerBound, 0);
-            bucket.store_with_metrics(entry, 0, None);
+            bucket.store_with_metrics_and_mode(entry, 0, false, None);
         }
 
         // PV entry should still be there
@@ -3346,7 +3445,7 @@ mod tests {
                 is_pv: false,
                 ..Default::default()
             };
-            bucket.store(params, 0, None);
+            bucket.store_with_mode(params, 0, false, None);
 
             // Retrieve entry
             let found = bucket.probe(hash);
@@ -3411,7 +3510,7 @@ mod tests {
                 is_pv: false,
                 ..Default::default()
             };
-            bucket.store(params, 0, None);
+            bucket.store_with_mode(params, 0, false, None);
         }
 
         // After storing 8 unique entries in an 8-entry bucket, all should be retrievable
@@ -3437,7 +3536,7 @@ mod tests {
             is_pv: true,
             ..Default::default()
         };
-        bucket.store(new_params, 0, None);
+        bucket.store_with_mode(new_params, 0, false, None);
 
         // New entry should be stored
         assert!(bucket.probe(new_hash).is_some());
@@ -3471,7 +3570,7 @@ mod tests {
                 is_pv: false,
                 ..Default::default()
             };
-            bucket.store(params, 0, None);
+            bucket.store_with_mode(params, 0, false, None);
         }
 
         // Test both SIMD and scalar probe paths
@@ -3560,6 +3659,10 @@ mod parallel_tests {
     #[test]
     fn test_cas_different_positions() {
         let tt = Arc::new(TranspositionTable::new(1));
+
+        // Set hashfull to avoid empty slot mode in parallel test
+        tt.hashfull_estimate.store(500, Ordering::Relaxed);
+
         let num_threads = 4;
         let operations_per_thread = 100;
 
