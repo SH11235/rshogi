@@ -64,3 +64,7 @@ harness = false
 [[bench]]
 name = "tt_memory_barrier_bench"
 harness = false
+
+[[bench]]
+name = "tt_real_search_bench"
+harness = false
