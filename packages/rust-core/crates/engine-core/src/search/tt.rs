@@ -6,6 +6,7 @@
 //! - Better memory locality
 
 use crate::{shogi::Move, util};
+#[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
 use util::sync_compat::{AtomicU64, Ordering};
 
@@ -445,9 +446,8 @@ impl TTBucket {
 
         // Use SIMD to find matching key
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
-            // Use fence for synchronization (Phase 1 approach)
-            std::sync::atomic::fence(Ordering::Acquire);
-            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            // Use Acquire ordering on data load for synchronization
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -477,9 +477,8 @@ impl TTBucket {
 
         // If we found a match, load data with fence + Relaxed
         if let Some(idx) = matching_idx {
-            // Use fence for synchronization (Phase 1 approach)
-            std::sync::atomic::fence(Ordering::Acquire);
-            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            // Use Acquire ordering on data load for synchronization
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
             let entry = TTEntry {
                 key: target_key,
                 data,
@@ -498,9 +497,13 @@ impl TTBucket {
         &self,
         new_entry: TTEntry,
         current_age: u8,
-        metrics: Option<&DetailedTTMetrics>,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
-        self.store_internal(new_entry, current_age, metrics)
+        #[cfg(feature = "tt_metrics")]
+        self.store_internal(new_entry, current_age, metrics);
+        #[cfg(not(feature = "tt_metrics"))]
+        self.store_internal(new_entry, current_age, None)
     }
 
     /// Store entry in bucket (used in tests)
@@ -514,7 +517,8 @@ impl TTBucket {
         &self,
         new_entry: TTEntry,
         current_age: u8,
-        metrics: Option<&DetailedTTMetrics>,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
         let target_key = new_entry.key;
 
@@ -532,6 +536,7 @@ impl TTBucket {
                 let old_key = self.entries[idx].load(Ordering::Relaxed);
 
                 // Record atomic load
+                #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
                     m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -541,6 +546,7 @@ impl TTBucket {
                     self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                     // Record metrics
+                    #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
                         m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -552,6 +558,7 @@ impl TTBucket {
                     self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
 
                     // Record CAS attempt
+                    #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
                         m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -568,6 +575,7 @@ impl TTBucket {
                             // No need for additional key store
 
                             // Record metrics
+                            #[cfg(feature = "tt_metrics")]
                             if let Some(m) = metrics {
                                 m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
@@ -577,6 +585,7 @@ impl TTBucket {
                         }
                         Err(_) => {
                             // Record CAS failure
+                            #[cfg(feature = "tt_metrics")]
                             if let Some(m) = metrics {
                                 m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
@@ -819,9 +828,8 @@ impl FlexibleTTBucket {
         }
 
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
-            // Add acquire fence before reading data
-            std::sync::atomic::fence(Ordering::Acquire);
-            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            // Use Acquire ordering on data load for synchronization
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -842,9 +850,8 @@ impl FlexibleTTBucket {
         }
 
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_8(&keys, target_key) {
-            // Add acquire fence before reading data
-            std::sync::atomic::fence(Ordering::Acquire);
-            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            // Use Acquire ordering on data load for synchronization
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -873,9 +880,8 @@ impl FlexibleTTBucket {
 
         // If we found a match, load data with fence + Relaxed
         if let Some(idx) = matching_idx {
-            // Use fence for synchronization (Phase 1 approach)
-            std::sync::atomic::fence(Ordering::Acquire);
-            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            // Use Acquire ordering on data load for synchronization
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
             let entry = TTEntry {
                 key: target_key,
                 data,
@@ -904,9 +910,8 @@ impl FlexibleTTBucket {
 
         // If we found a match, load data with fence + Relaxed
         if let Some(idx) = matching_idx {
-            // Use fence for synchronization (Phase 1 approach)
-            std::sync::atomic::fence(Ordering::Acquire);
-            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            // Use Acquire ordering on data load for synchronization
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
             let entry = TTEntry {
                 key: target_key,
                 data,
@@ -935,9 +940,8 @@ impl FlexibleTTBucket {
 
         // If we found a match, load data with fence + Relaxed
         if let Some(idx) = matching_idx {
-            // Use fence for synchronization (Phase 1 approach)
-            std::sync::atomic::fence(Ordering::Acquire);
-            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
+            // Use Acquire ordering on data load for synchronization
+            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
             let entry = TTEntry {
                 key: target_key,
                 data,
@@ -951,16 +955,37 @@ impl FlexibleTTBucket {
     }
 
     /// Store entry in bucket
-    fn store(&self, params: TTEntryParams, current_age: u8, metrics: Option<&DetailedTTMetrics>) {
+    fn store(
+        &self,
+        params: TTEntryParams,
+        current_age: u8,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) {
         match self.size {
+            #[cfg(feature = "tt_metrics")]
             BucketSize::Small => self.store_4(params, current_age, metrics),
+            #[cfg(not(feature = "tt_metrics"))]
+            BucketSize::Small => self.store_4(params, current_age, None),
+            #[cfg(feature = "tt_metrics")]
             BucketSize::Medium => self.store_8(params, current_age, metrics),
+            #[cfg(not(feature = "tt_metrics"))]
+            BucketSize::Medium => self.store_8(params, current_age, None),
+            #[cfg(feature = "tt_metrics")]
             BucketSize::Large => self.store_16(params, current_age, metrics),
+            #[cfg(not(feature = "tt_metrics"))]
+            BucketSize::Large => self.store_16(params, current_age, None),
         }
     }
 
     /// Store in 4-entry bucket
-    fn store_4(&self, params: TTEntryParams, current_age: u8, metrics: Option<&DetailedTTMetrics>) {
+    fn store_4(
+        &self,
+        params: TTEntryParams,
+        current_age: u8,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) {
         let new_entry = TTEntry::from_params(params);
         let target_key = params.key;
 
@@ -975,6 +1000,7 @@ impl FlexibleTTBucket {
                 let old_key = self.entries[idx].load(Ordering::Relaxed);
 
                 // Record atomic load
+                #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
                     m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -984,6 +1010,7 @@ impl FlexibleTTBucket {
                     self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                     // Record metrics
+                    #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
                         m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -991,53 +1018,123 @@ impl FlexibleTTBucket {
                     }
                     return;
                 } else if old_key == 0 {
-                    // Empty slot - write data first, then CAS
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
-
-                    // Record CAS attempt
-                    if let Some(m) = metrics {
-                        m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-
-                    match self.entries[idx].compare_exchange_weak(
-                        0,
-                        new_entry.key,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            // CAS succeeded - Release ordering ensures data is visible
-
-                            // Record metrics
-                            if let Some(m) = metrics {
-                                m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
-                                m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            return;
+                    // Empty slot - optimization based on architecture
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        // x86_64 TSO: CAS first to avoid wasted data writes
+                        // Record CAS attempt
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        Err(_) => {
-                            if let Some(m) = metrics {
-                                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            retry_count += 1;
-                            if retry_count >= MAX_CAS_RETRIES {
-                                break;
-                            }
 
-                            // Check if slot is still relevant
-                            let current_key = self.entries[idx].load(Ordering::Relaxed);
-                            if current_key != 0 && current_key != target_key {
-                                break;
-                            }
+                        match self.entries[idx].compare_exchange_weak(
+                            0,
+                            new_entry.key,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                // CAS succeeded - now write data
+                                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
-                            // Backoff strategy
-                            if retry_count < 3 {
-                                for _ in 0..(retry_count * 2) {
-                                    std::hint::spin_loop();
+                                // Record metrics
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_successes
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    m.atomic_stores
+                                        .fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
+                                    m.replace_empty
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
-                            } else {
-                                std::thread::yield_now();
+                                return;
+                            }
+                            Err(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_failures
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                retry_count += 1;
+                                if retry_count >= MAX_CAS_RETRIES {
+                                    break;
+                                }
+
+                                // Check if slot is still relevant
+                                let current_key = self.entries[idx].load(Ordering::Relaxed);
+                                if current_key != 0 && current_key != target_key {
+                                    break;
+                                }
+
+                                // Backoff strategy
+                                if retry_count < 3 {
+                                    for _ in 0..(retry_count * 2) {
+                                        std::hint::spin_loop();
+                                    }
+                                } else {
+                                    std::thread::yield_now();
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        // Other architectures: write data first, then CAS
+                        self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+
+                        // Record CAS attempt
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+
+                        match self.entries[idx].compare_exchange_weak(
+                            0,
+                            new_entry.key,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                // CAS succeeded - Release ordering ensures data is visible
+
+                                // Record metrics
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_successes
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    m.atomic_stores
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
+                                    m.replace_empty
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                return;
+                            }
+                            Err(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_failures
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                retry_count += 1;
+                                if retry_count >= MAX_CAS_RETRIES {
+                                    break;
+                                }
+
+                                // Check if slot is still relevant
+                                let current_key = self.entries[idx].load(Ordering::Relaxed);
+                                if current_key != 0 && current_key != target_key {
+                                    break;
+                                }
+
+                                // Backoff strategy
+                                if retry_count < 3 {
+                                    for _ in 0..(retry_count * 2) {
+                                        std::hint::spin_loop();
+                                    }
+                                } else {
+                                    std::thread::yield_now();
+                                }
                             }
                         }
                     }
@@ -1055,6 +1152,7 @@ impl FlexibleTTBucket {
         let old_key = self.entries[idx].load(Ordering::Relaxed);
 
         // Record atomic load
+        #[cfg(feature = "tt_metrics")]
         if let Some(m) = metrics {
             m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1069,6 +1167,7 @@ impl FlexibleTTBucket {
             self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
             // Record metrics
+            #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
                 m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
@@ -1078,13 +1177,22 @@ impl FlexibleTTBucket {
                     m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-        } else if let Some(m) = metrics {
-            m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            #[cfg(feature = "tt_metrics")]
+            if let Some(m) = metrics {
+                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
     /// Store in 8-entry bucket
-    fn store_8(&self, params: TTEntryParams, current_age: u8, metrics: Option<&DetailedTTMetrics>) {
+    fn store_8(
+        &self,
+        params: TTEntryParams,
+        current_age: u8,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) {
         let new_entry = TTEntry::from_params(params);
         let target_key = params.key;
 
@@ -1099,6 +1207,7 @@ impl FlexibleTTBucket {
                 let old_key = self.entries[idx].load(Ordering::Relaxed);
 
                 // Record atomic load
+                #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
                     m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -1108,6 +1217,7 @@ impl FlexibleTTBucket {
                     self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                     // Record metrics
+                    #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
                         m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1115,53 +1225,123 @@ impl FlexibleTTBucket {
                     }
                     return;
                 } else if old_key == 0 {
-                    // Empty slot - write data first, then CAS
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
-
-                    // Record CAS attempt
-                    if let Some(m) = metrics {
-                        m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-
-                    match self.entries[idx].compare_exchange_weak(
-                        0,
-                        new_entry.key,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            // CAS succeeded - Release ordering ensures data is visible
-
-                            // Record metrics
-                            if let Some(m) = metrics {
-                                m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
-                                m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            return;
+                    // Empty slot - optimization based on architecture
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        // x86_64 TSO: CAS first to avoid wasted data writes
+                        // Record CAS attempt
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        Err(_) => {
-                            if let Some(m) = metrics {
-                                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            retry_count += 1;
-                            if retry_count >= MAX_CAS_RETRIES {
-                                break;
-                            }
 
-                            // Check if slot is still relevant
-                            let current_key = self.entries[idx].load(Ordering::Relaxed);
-                            if current_key != 0 && current_key != target_key {
-                                break;
-                            }
+                        match self.entries[idx].compare_exchange_weak(
+                            0,
+                            new_entry.key,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                // CAS succeeded - now write data
+                                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
-                            // Backoff strategy
-                            if retry_count < 3 {
-                                for _ in 0..(retry_count * 2) {
-                                    std::hint::spin_loop();
+                                // Record metrics
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_successes
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    m.atomic_stores
+                                        .fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
+                                    m.replace_empty
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
-                            } else {
-                                std::thread::yield_now();
+                                return;
+                            }
+                            Err(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_failures
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                retry_count += 1;
+                                if retry_count >= MAX_CAS_RETRIES {
+                                    break;
+                                }
+
+                                // Check if slot is still relevant
+                                let current_key = self.entries[idx].load(Ordering::Relaxed);
+                                if current_key != 0 && current_key != target_key {
+                                    break;
+                                }
+
+                                // Backoff strategy
+                                if retry_count < 3 {
+                                    for _ in 0..(retry_count * 2) {
+                                        std::hint::spin_loop();
+                                    }
+                                } else {
+                                    std::thread::yield_now();
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        // Other architectures: write data first, then CAS
+                        self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+
+                        // Record CAS attempt
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+
+                        match self.entries[idx].compare_exchange_weak(
+                            0,
+                            new_entry.key,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                // CAS succeeded - Release ordering ensures data is visible
+
+                                // Record metrics
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_successes
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    m.atomic_stores
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
+                                    m.replace_empty
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                return;
+                            }
+                            Err(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(m) = metrics {
+                                    m.cas_failures
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                retry_count += 1;
+                                if retry_count >= MAX_CAS_RETRIES {
+                                    break;
+                                }
+
+                                // Check if slot is still relevant
+                                let current_key = self.entries[idx].load(Ordering::Relaxed);
+                                if current_key != 0 && current_key != target_key {
+                                    break;
+                                }
+
+                                // Backoff strategy
+                                if retry_count < 3 {
+                                    for _ in 0..(retry_count * 2) {
+                                        std::hint::spin_loop();
+                                    }
+                                } else {
+                                    std::thread::yield_now();
+                                }
                             }
                         }
                     }
@@ -1179,6 +1359,7 @@ impl FlexibleTTBucket {
         let old_key = self.entries[idx].load(Ordering::Relaxed);
 
         // Record atomic load
+        #[cfg(feature = "tt_metrics")]
         if let Some(m) = metrics {
             m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1193,6 +1374,7 @@ impl FlexibleTTBucket {
             self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
             // Record metrics
+            #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
                 m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
@@ -1202,8 +1384,11 @@ impl FlexibleTTBucket {
                     m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-        } else if let Some(m) = metrics {
-            m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            #[cfg(feature = "tt_metrics")]
+            if let Some(m) = metrics {
+                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -1212,7 +1397,8 @@ impl FlexibleTTBucket {
         &self,
         params: TTEntryParams,
         current_age: u8,
-        metrics: Option<&DetailedTTMetrics>,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
         let new_entry = TTEntry::from_params(params);
         let target_key = params.key;
@@ -1223,6 +1409,7 @@ impl FlexibleTTBucket {
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
             // Record atomic load
+            #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
                 m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -1232,6 +1419,7 @@ impl FlexibleTTBucket {
                 self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                 // Record metrics
+                #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
                     m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1249,31 +1437,78 @@ impl FlexibleTTBucket {
         let old_key = self.entries[idx].load(Ordering::Relaxed);
 
         // Record atomic load
+        #[cfg(feature = "tt_metrics")]
         if let Some(m) = metrics {
             m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Attempt atomic update of the key
-        if self.entries[idx]
-            .compare_exchange(old_key, new_entry.key, Ordering::Release, Ordering::Relaxed)
-            .is_ok()
+        // Architecture-specific optimization for empty slots
+        #[cfg(target_arch = "x86_64")]
         {
-            // CAS already published the key with Release ordering
-            self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+            // x86_64 TSO: Always do CAS first to avoid wasted data writes
+            if self.entries[idx]
+                .compare_exchange(old_key, new_entry.key, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                // CAS succeeded - now write data
+                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
-            // Record metrics
-            if let Some(m) = metrics {
-                m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
-                if old_key == 0 {
-                    m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Record metrics
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
+                    if old_key == 0 {
+                        m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            } else {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-        } else if let Some(m) = metrics {
-            m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // Other architectures: for empty slots, write data first then CAS
+            if old_key == 0 {
+                // Empty slot - write data first
+                self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+            }
+
+            // Attempt atomic update of the key
+            if self.entries[idx]
+                .compare_exchange(old_key, new_entry.key, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                // CAS succeeded
+                if old_key != 0 {
+                    // Non-empty slot - write data after successful CAS
+                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                }
+
+                // Record metrics
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if old_key == 0 {
+                        m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already written
+                        m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
+                        m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            } else {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -1408,6 +1643,7 @@ impl FlexibleTTBucket {
 }
 
 /// Detailed metrics for analyzing TT performance and CAS overhead
+#[cfg(feature = "tt_metrics")]
 #[derive(Debug, Default)]
 pub struct DetailedTTMetrics {
     // CAS-related (future use)
@@ -1429,6 +1665,7 @@ pub struct DetailedTTMetrics {
     pub prefetch_hits: StdAtomicU64,  // Prefetch hit count
 }
 
+#[cfg(feature = "tt_metrics")]
 impl DetailedTTMetrics {
     /// Create new metrics instance
     pub fn new() -> Self {
@@ -1509,6 +1746,7 @@ pub struct TranspositionTable {
     /// Adaptive prefetch manager
     prefetcher: Option<crate::search::adaptive_prefetcher::AdaptivePrefetcher>,
     /// Detailed metrics for performance analysis
+    #[cfg(feature = "tt_metrics")]
     pub metrics: Option<DetailedTTMetrics>,
 }
 
@@ -1543,6 +1781,7 @@ impl TranspositionTable {
             age: 0,
             bucket_size: None,
             prefetcher: None,
+            #[cfg(feature = "tt_metrics")]
             metrics: None,
         }
     }
@@ -1579,11 +1818,13 @@ impl TranspositionTable {
             age: 0,
             bucket_size: Some(bucket_size),
             prefetcher: None,
+            #[cfg(feature = "tt_metrics")]
             metrics: None,
         }
     }
 
     /// Enable detailed metrics collection
+    #[cfg(feature = "tt_metrics")]
     pub fn enable_metrics(&mut self) {
         self.metrics = Some(DetailedTTMetrics::new());
     }
@@ -1614,6 +1855,7 @@ impl TranspositionTable {
         }
 
         // Record metrics if enabled
+        #[cfg(feature = "tt_metrics")]
         if let Some(ref metrics) = self.metrics {
             if result.is_some() {
                 metrics.prefetch_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1668,10 +1910,16 @@ impl TranspositionTable {
         let idx = self.bucket_index(params.key);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
+            #[cfg(feature = "tt_metrics")]
             flexible_buckets[idx].store(params, self.age, self.metrics.as_ref());
+            #[cfg(not(feature = "tt_metrics"))]
+            flexible_buckets[idx].store(params, self.age, None);
         } else {
             let entry = TTEntry::from_params(params);
+            #[cfg(feature = "tt_metrics")]
             self.buckets[idx].store_with_metrics(entry, self.age, self.metrics.as_ref());
+            #[cfg(not(feature = "tt_metrics"))]
+            self.buckets[idx].store_with_metrics(entry, self.age, None);
         }
     }
 
@@ -1746,6 +1994,7 @@ impl TranspositionTable {
     #[inline(always)]
     pub fn prefetch(&self, hash: u64, hint: i32) {
         // Record prefetch count
+        #[cfg(feature = "tt_metrics")]
         if let Some(ref metrics) = self.metrics {
             metrics.prefetch_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
