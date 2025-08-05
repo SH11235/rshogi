@@ -6,6 +6,7 @@
 //! - Better memory locality
 
 use crate::{shogi::Move, util};
+use std::sync::atomic::AtomicU64 as StdAtomicU64;
 use util::sync_compat::{AtomicU64, Ordering};
 
 // Bit layout constants for TTEntry data field
@@ -493,8 +494,29 @@ impl TTBucket {
         None
     }
 
-    /// Store entry in bucket using improved replacement strategy with SIMD
+    /// Store entry in bucket with metrics tracking
+    fn store_with_metrics(
+        &self,
+        new_entry: TTEntry,
+        current_age: u8,
+        metrics: Option<&DetailedTTMetrics>,
+    ) {
+        self.store_internal(new_entry, current_age, metrics)
+    }
+
+    /// Store entry in bucket (used in tests)
+    #[cfg(test)]
     fn store(&self, new_entry: TTEntry, current_age: u8) {
+        self.store_internal(new_entry, current_age, None)
+    }
+
+    /// Internal store implementation with optional metrics
+    fn store_internal(
+        &self,
+        new_entry: TTEntry,
+        current_age: u8,
+        metrics: Option<&DetailedTTMetrics>,
+    ) {
         let target_key = new_entry.key;
 
         // First pass: look for exact match or empty slot
@@ -510,7 +532,17 @@ impl TTBucket {
                 // Use Relaxed for speculative read in CAS loop
                 let old_key = self.entries[idx].load(Ordering::Relaxed);
 
+                // Record atomic load
+                if let Some(m) = metrics {
+                    m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+
                 if old_key == 0 || old_key == target_key {
+                    // Record CAS attempt
+                    if let Some(m) = metrics {
+                        m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+
                     // Try to atomically update the key
                     match self.entries[idx].compare_exchange_weak(
                         old_key,
@@ -521,9 +553,26 @@ impl TTBucket {
                         Ok(_) => {
                             // Key successfully updated, now store the data
                             self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+                            // Record metrics
+                            if let Some(m) = metrics {
+                                m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if old_key == target_key {
+                                    m.update_existing
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                } else {
+                                    m.replace_empty
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
                             return;
                         }
                         Err(_) => {
+                            // Record CAS failure
+                            if let Some(m) = metrics {
+                                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
                             retry_count += 1;
                             if retry_count >= MAX_CAS_RETRIES {
                                 // Too many retries, give up on this slot
@@ -898,16 +947,16 @@ impl FlexibleTTBucket {
     }
 
     /// Store entry in bucket
-    fn store(&self, params: TTEntryParams, current_age: u8) {
+    fn store(&self, params: TTEntryParams, current_age: u8, metrics: Option<&DetailedTTMetrics>) {
         match self.size {
-            BucketSize::Small => self.store_4(params, current_age),
-            BucketSize::Medium => self.store_8(params, current_age),
-            BucketSize::Large => self.store_16(params, current_age),
+            BucketSize::Small => self.store_4(params, current_age, metrics),
+            BucketSize::Medium => self.store_8(params, current_age, metrics),
+            BucketSize::Large => self.store_16(params, current_age, metrics),
         }
     }
 
     /// Store in 4-entry bucket
-    fn store_4(&self, params: TTEntryParams, current_age: u8) {
+    fn store_4(&self, params: TTEntryParams, current_age: u8, metrics: Option<&DetailedTTMetrics>) {
         let new_entry = TTEntry::from_params(params);
         let target_key = params.key;
 
@@ -916,10 +965,21 @@ impl FlexibleTTBucket {
             let idx = i * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
+            // Record atomic load
+            if let Some(m) = metrics {
+                m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
             if old_key == target_key {
                 // Update existing entry
                 self.entries[idx].store(new_entry.key, Ordering::Release);
                 self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+                // Record metrics
+                if let Some(m) = metrics {
+                    m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+                }
                 return;
             }
         }
@@ -928,13 +988,31 @@ impl FlexibleTTBucket {
         let (worst_idx, _) = self.find_worst_entry_4(current_age);
         let idx = worst_idx * 2;
 
+        // Check if the slot is empty
+        let was_empty = self.entries[idx].load(Ordering::Relaxed) == 0;
+
+        // Record atomic load
+        if let Some(m) = metrics {
+            m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // Store new entry
         self.entries[idx].store(new_entry.key, Ordering::Release);
         self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+        // Record metrics
+        if let Some(m) = metrics {
+            if was_empty {
+                m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Store in 8-entry bucket
-    fn store_8(&self, params: TTEntryParams, current_age: u8) {
+    fn store_8(&self, params: TTEntryParams, current_age: u8, metrics: Option<&DetailedTTMetrics>) {
         let new_entry = TTEntry::from_params(params);
         let target_key = params.key;
 
@@ -943,10 +1021,21 @@ impl FlexibleTTBucket {
             let idx = i * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
+            // Record atomic load
+            if let Some(m) = metrics {
+                m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
             if old_key == target_key {
                 // Update existing entry
                 self.entries[idx].store(new_entry.key, Ordering::Release);
                 self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+                // Record metrics
+                if let Some(m) = metrics {
+                    m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+                }
                 return;
             }
         }
@@ -955,13 +1044,36 @@ impl FlexibleTTBucket {
         let (worst_idx, _) = self.find_worst_entry_8(current_age);
         let idx = worst_idx * 2;
 
+        // Check if the slot is empty
+        let was_empty = self.entries[idx].load(Ordering::Relaxed) == 0;
+
+        // Record atomic load
+        if let Some(m) = metrics {
+            m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // Store new entry
         self.entries[idx].store(new_entry.key, Ordering::Release);
         self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+        // Record metrics
+        if let Some(m) = metrics {
+            if was_empty {
+                m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Store in 16-entry bucket
-    fn store_16(&self, params: TTEntryParams, current_age: u8) {
+    fn store_16(
+        &self,
+        params: TTEntryParams,
+        current_age: u8,
+        metrics: Option<&DetailedTTMetrics>,
+    ) {
         let new_entry = TTEntry::from_params(params);
         let target_key = params.key;
 
@@ -970,10 +1082,21 @@ impl FlexibleTTBucket {
             let idx = i * 2;
             let old_key = self.entries[idx].load(Ordering::Relaxed);
 
+            // Record atomic load
+            if let Some(m) = metrics {
+                m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
             if old_key == target_key {
                 // Update existing entry
                 self.entries[idx].store(new_entry.key, Ordering::Release);
                 self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+                // Record metrics
+                if let Some(m) = metrics {
+                    m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+                }
                 return;
             }
         }
@@ -982,9 +1105,27 @@ impl FlexibleTTBucket {
         let (worst_idx, _) = self.find_worst_entry_16(current_age);
         let idx = worst_idx * 2;
 
+        // Check if the slot is empty
+        let was_empty = self.entries[idx].load(Ordering::Relaxed) == 0;
+
+        // Record atomic load
+        if let Some(m) = metrics {
+            m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // Store new entry
         self.entries[idx].store(new_entry.key, Ordering::Release);
         self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+
+        // Record metrics
+        if let Some(m) = metrics {
+            if was_empty {
+                m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Find worst entry in 4-entry bucket using SIMD
@@ -1117,6 +1258,92 @@ impl FlexibleTTBucket {
     }
 }
 
+/// Detailed metrics for analyzing TT performance and CAS overhead
+#[derive(Debug, Default)]
+pub struct DetailedTTMetrics {
+    // CAS-related (future use)
+    pub cas_attempts: StdAtomicU64,
+    pub cas_successes: StdAtomicU64,
+    pub cas_failures: StdAtomicU64,
+
+    // Update pattern analysis
+    pub update_existing: StdAtomicU64, // Updates to existing entries
+    pub replace_empty: StdAtomicU64,   // Using empty entries
+    pub replace_worst: StdAtomicU64,   // Replacing worst entries
+
+    // Atomic operation statistics
+    pub atomic_stores: StdAtomicU64, // Number of store operations
+    pub atomic_loads: StdAtomicU64,  // Number of load operations
+
+    // Prefetch statistics
+    pub prefetch_count: StdAtomicU64, // Number of prefetch executions
+    pub prefetch_hits: StdAtomicU64,  // Prefetch hit count
+}
+
+impl DetailedTTMetrics {
+    /// Create new metrics instance
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset all metrics to zero
+    pub fn reset(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        self.cas_attempts.store(0, Relaxed);
+        self.cas_successes.store(0, Relaxed);
+        self.cas_failures.store(0, Relaxed);
+        self.update_existing.store(0, Relaxed);
+        self.replace_empty.store(0, Relaxed);
+        self.replace_worst.store(0, Relaxed);
+        self.atomic_stores.store(0, Relaxed);
+        self.atomic_loads.store(0, Relaxed);
+        self.prefetch_count.store(0, Relaxed);
+        self.prefetch_hits.store(0, Relaxed);
+    }
+
+    /// Print metrics summary
+    pub fn print_summary(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let total_updates = self.update_existing.load(Relaxed)
+            + self.replace_empty.load(Relaxed)
+            + self.replace_worst.load(Relaxed);
+
+        println!("=== TT Detailed Metrics ===");
+        println!("Update patterns:");
+        println!(
+            "  Existing updates: {} ({:.1}%)",
+            self.update_existing.load(Relaxed),
+            self.update_existing.load(Relaxed) as f64 / total_updates as f64 * 100.0
+        );
+        println!(
+            "  Empty slots used: {} ({:.1}%)",
+            self.replace_empty.load(Relaxed),
+            self.replace_empty.load(Relaxed) as f64 / total_updates as f64 * 100.0
+        );
+        println!(
+            "  Worst replaced: {} ({:.1}%)",
+            self.replace_worst.load(Relaxed),
+            self.replace_worst.load(Relaxed) as f64 / total_updates as f64 * 100.0
+        );
+
+        println!("\nAtomic operations:");
+        println!("  Stores: {}", self.atomic_stores.load(Relaxed));
+        println!("  Loads: {}", self.atomic_loads.load(Relaxed));
+
+        println!("\nPrefetch statistics:");
+        println!("  Prefetch count: {}", self.prefetch_count.load(Relaxed));
+
+        if self.cas_attempts.load(Relaxed) > 0 {
+            println!("\nCAS operations:");
+            println!("  Attempts: {}", self.cas_attempts.load(Relaxed));
+            println!("  Successes: {}", self.cas_successes.load(Relaxed));
+            println!("  Failures: {}", self.cas_failures.load(Relaxed));
+        }
+    }
+}
+
 /// Optimized transposition table with bucket structure
 pub struct TranspositionTable {
     /// Table buckets (legacy fixed-size)
@@ -1132,6 +1359,8 @@ pub struct TranspositionTable {
     bucket_size: Option<BucketSize>,
     /// Adaptive prefetch manager
     prefetcher: Option<crate::search::adaptive_prefetcher::AdaptivePrefetcher>,
+    /// Detailed metrics for performance analysis
+    pub metrics: Option<DetailedTTMetrics>,
 }
 
 impl TranspositionTable {
@@ -1165,6 +1394,7 @@ impl TranspositionTable {
             age: 0,
             bucket_size: None,
             prefetcher: None,
+            metrics: None,
         }
     }
 
@@ -1200,7 +1430,13 @@ impl TranspositionTable {
             age: 0,
             bucket_size: Some(bucket_size),
             prefetcher: None,
+            metrics: None,
         }
+    }
+
+    /// Enable detailed metrics collection
+    pub fn enable_metrics(&mut self) {
+        self.metrics = Some(DetailedTTMetrics::new());
     }
 
     /// Get bucket index from zobrist hash
@@ -1225,6 +1461,13 @@ impl TranspositionTable {
                 prefetcher.record_hit();
             } else {
                 prefetcher.record_miss();
+            }
+        }
+
+        // Record metrics if enabled
+        if let Some(ref metrics) = self.metrics {
+            if result.is_some() {
+                metrics.prefetch_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -1276,10 +1519,10 @@ impl TranspositionTable {
         let idx = self.bucket_index(params.key);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
-            flexible_buckets[idx].store(params, self.age);
+            flexible_buckets[idx].store(params, self.age, self.metrics.as_ref());
         } else {
             let entry = TTEntry::from_params(params);
-            self.buckets[idx].store(entry, self.age);
+            self.buckets[idx].store_with_metrics(entry, self.age, self.metrics.as_ref());
         }
     }
 
@@ -1353,6 +1596,11 @@ impl TranspositionTable {
     /// hint: 0=L1, 1=L2, 2=L3, 3=NTA (non-temporal)
     #[inline(always)]
     pub fn prefetch(&self, hash: u64, hint: i32) {
+        // Record prefetch count
+        if let Some(ref metrics) = self.metrics {
+            metrics.prefetch_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
         let idx = self.bucket_index(hash);
 
         #[cfg(target_arch = "x86_64")]
@@ -1495,7 +1743,7 @@ mod tests {
         let test_entry = TTEntry::new(0x1234567890ABCDEF, None, 100, -50, 10, NodeType::Exact, 0);
 
         // Store an entry
-        bucket.store(test_entry, 0);
+        bucket.store_with_metrics(test_entry, 0, None);
 
         // Test both SIMD and scalar paths produce same result
         let simd_result = if bucket.probe_simd_available() {
@@ -1535,7 +1783,7 @@ mod tests {
                 },
                 i as u8,
             );
-            bucket.store(entry, 0);
+            bucket.store_with_metrics(entry, 0, None);
         }
 
         // Test both SIMD and scalar find worst entry
@@ -1998,7 +2246,7 @@ mod tests {
         for i in 2..BUCKET_SIZE {
             let hash = 0x1000 * (i as u64 + 1);
             let entry = TTEntry::new(hash, None, 50, 25, 5, NodeType::LowerBound, 0);
-            bucket.store(entry, 0);
+            bucket.store_with_metrics(entry, 0, None);
         }
 
         // PV entry should still be there
@@ -2049,7 +2297,7 @@ mod tests {
                 is_pv: false,
                 ..Default::default()
             };
-            bucket.store(params, 0);
+            bucket.store(params, 0, None);
 
             // Retrieve entry
             let found = bucket.probe(hash);
@@ -2114,7 +2362,7 @@ mod tests {
                 is_pv: false,
                 ..Default::default()
             };
-            bucket.store(params, 0);
+            bucket.store(params, 0, None);
         }
 
         // After storing 8 unique entries in an 8-entry bucket, all should be retrievable
@@ -2140,7 +2388,7 @@ mod tests {
             is_pv: true,
             ..Default::default()
         };
-        bucket.store(new_params, 0);
+        bucket.store(new_params, 0, None);
 
         // New entry should be stored
         assert!(bucket.probe(new_hash).is_some());
@@ -2174,7 +2422,7 @@ mod tests {
                 is_pv: false,
                 ..Default::default()
             };
-            bucket.store(params, 0);
+            bucket.store(params, 0, None);
         }
 
         // Test both SIMD and scalar probe paths
