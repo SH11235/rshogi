@@ -192,23 +192,4 @@ where
             }
         }
     }
-
-    /// Get history score for a move (used for selective prefetching)
-    #[inline]
-    #[allow(dead_code)]
-    fn get_history_score(&self, mv: Move) -> i32 {
-        if let Ok(_history) = self.history.lock() {
-            // Get history score based on move type
-            if mv.is_drop() {
-                0 // No history for drops
-            } else {
-                // Use simplified history lookup
-                // Since we don't have direct access to History.get(), we return 0
-                // The move ordering already considers history, so this is not critical
-                0
-            }
-        } else {
-            0
-        }
-    }
 }
