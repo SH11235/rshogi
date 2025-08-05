@@ -17,7 +17,3 @@ criterion = { version = "0.6", features = ["html_reports"] }
 rand = { workspace = true }
 rand_xoshiro = { workspace = true }
 rayon = "1.10"
-
-[[bin]]
-name = "tt_hashfull_bench"
-path = "src/bin/tt_hashfull_bench.rs"
