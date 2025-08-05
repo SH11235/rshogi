@@ -18,8 +18,15 @@ pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const 
 where
     E: Evaluator + Send + Sync + 'static,
 {
-    // Check stop flag periodically (every 1024 nodes) to minimize overhead
-    if searcher.stats.nodes & 0x3FF == 0 && searcher.context.should_stop() {
+    // Check stop flag periodically to minimize overhead
+    // Use more frequent checking if stop_flag is present
+    let check_interval = if searcher.context.limits().stop_flag.is_some() {
+        0x3F // Check every 64 nodes when stop_flag is present
+    } else {
+        0x3FF // Check every 1024 nodes for normal operation
+    };
+
+    if searcher.stats.nodes & check_interval == 0 && searcher.context.should_stop() {
         return alpha;
     }
 
