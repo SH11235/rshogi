@@ -548,7 +548,7 @@ fn main() {
         },
         TestPosition {
             name: "Complex endgame",
-            sfen: "8l/4+R4/4ppp2/8p/9/8P/4PPP2/4S4/4K4 b GS2r2b2g2s3n3l10p 1",
+            sfen: "8l/4k4/4ppp2/8p/9/8P/4PPP2/4S4/4K4 b GS2r2b2g2s3n3l10p 1",
         },
     ];
 
