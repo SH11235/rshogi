@@ -115,19 +115,7 @@ where
         moves.as_slice().to_vec()
     };
 
-    // Phase 2: Selective prefetch for promising moves
-    // HOTFIX: Limit prefetch to reasonable depths to avoid exponential growth
-    if USE_TT && depth > 2 && depth <= 6 {
-        // Get killer moves from search stack
-        let killers = if crate::search::types::SearchStack::is_valid_ply(ply) {
-            &searcher.search_stack[ply as usize].killers
-        } else {
-            &[None, None]
-        };
-
-        // Use selective prefetch which only prefetches promising moves
-        searcher.selective_prefetch(pos, &ordered_moves, killers, depth);
-    }
+    // Skip selective prefetch - let individual moves control their own prefetching
 
     // Early futility pruning check
     let can_do_futility = USE_PRUNING
@@ -145,7 +133,7 @@ where
     };
 
     // Search moves
-    for (move_idx, &mv) in ordered_moves.iter().enumerate() {
+    for &mv in ordered_moves.iter() {
         // Futility pruning for quiet moves
         if USE_PRUNING
             && can_do_futility
@@ -170,27 +158,15 @@ where
             searcher.search_stack[ply as usize].move_count = moves_searched + 1;
         }
 
-        // Prefetch next few moves while processing current move (overlap computation)
-        // This is more aggressive prefetching for the first few moves
-        // HOTFIX: Also limit this to reasonable depths
-        if USE_TT && depth <= 6 && move_idx < 3 && move_idx + 1 < ordered_moves.len() {
-            // Prefetch the next 1-2 moves to warm cache
-            let prefetch_end = (move_idx + 3).min(ordered_moves.len());
-            for &next_mv in &ordered_moves[move_idx + 1..prefetch_end] {
-                let next_hash =
-                    crate::search::unified::prefetch::HashCalculator::calculate_move_hash(
-                        pos, next_mv,
-                    );
-                searcher.prefetch_tt(next_hash);
-            }
-        }
+        // Skip aggressive prefetching - it has shown negative performance impact
 
         // Make move
         let undo_info = pos.do_move(mv);
         searcher.stats.nodes += 1;
 
-        // Prefetch TT entry for the new position
-        if USE_TT {
+        // Simple optimization: selective prefetch
+        if USE_TT && !crate::search::tt_filter::should_skip_prefetch(depth, moves_searched as usize)
+        {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
 
@@ -366,7 +342,11 @@ where
             NodeType::Exact
         };
 
-        searcher.store_tt(hash, depth, best_score, node_type, best_move);
+        // Simple optimization: skip shallow nodes
+        if !crate::search::tt_filter::should_skip_tt_store(depth, false) {
+            let boosted_depth = crate::search::tt_filter::boost_tt_depth(depth, node_type);
+            searcher.store_tt(hash, boosted_depth, best_score, node_type, best_move);
+        }
     }
 
     best_score
