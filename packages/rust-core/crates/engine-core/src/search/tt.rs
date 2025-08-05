@@ -738,10 +738,9 @@ impl TTBucket {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    // CAS succeeded - write data with Relaxed
-                    // The Release ordering from CAS already ensures visibility for readers
-                    // who will load the key with Acquire ordering
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+                    // CAS succeeded - write data with Release
+                    // This ensures readers see the complete entry
+                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                     // Record metrics
                     #[cfg(feature = "tt_metrics")]
@@ -755,9 +754,8 @@ impl TTBucket {
                     // Phase 5 optimization: Check if another thread wrote the same key
                     if current == new_entry.key {
                         // Same key - just update the data
-                        // Use Relaxed ordering since key hasn't changed and reader will
-                        // see the key first with Acquire ordering
-                        self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+                        // Use Release ordering to ensure reader sees the updated data
+                        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                         #[cfg(feature = "tt_metrics")]
                         if let Some(m) = metrics {
@@ -1170,9 +1168,8 @@ impl FlexibleTTBucket {
                                 // Phase 5 optimization: Check if another thread wrote the same key
                                 if current == target_key {
                                     // Same key - just update the data
-                                    // Use Relaxed ordering since key hasn't changed and reader will
-                                    // see the key first with Acquire ordering
-                                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+                                    // Use Release ordering to ensure reader sees the updated data
+                                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                                     #[cfg(feature = "tt_metrics")]
                                     if let Some(m) = metrics {
@@ -1247,9 +1244,8 @@ impl FlexibleTTBucket {
                                 // Phase 5 optimization: Check if another thread wrote the same key
                                 if current == target_key {
                                     // Same key - just update the data
-                                    // Use Relaxed ordering since key hasn't changed and reader will
-                                    // see the key first with Acquire ordering
-                                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+                                    // Use Release ordering to ensure reader sees the updated data
+                                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                                     #[cfg(feature = "tt_metrics")]
                                     if let Some(m) = metrics {
