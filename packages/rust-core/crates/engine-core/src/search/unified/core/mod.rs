@@ -85,6 +85,16 @@ pub(super) fn search_root_with_window<
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // Complete any remaining garbage collection from previous search
+    #[cfg(feature = "hashfull_filter")]
+    if USE_TT {
+        if let Some(ref tt) = searcher.tt {
+            while tt.should_trigger_gc() {
+                tt.incremental_gc(512); // Larger batch size before search starts
+            }
+        }
+    }
+
     let mut alpha = initial_alpha;
     let beta = initial_beta;
     let mut best_score = -SEARCH_INF;
@@ -110,22 +120,7 @@ where
         moves.as_slice().to_vec()
     };
 
-    // Phase 2: Improved prefetching strategy
-    if USE_TT {
-        // Prefetch PV line from previous iteration if available
-        let prev_pv = searcher.pv_table.get_line(0);
-        if !prev_pv.is_empty() {
-            searcher.prefetch_pv_line(pos, prev_pv, depth);
-        }
-
-        // Selective prefetch for top moves (killer moves + best ordered moves)
-        let killers = if !searcher.search_stack.is_empty() {
-            &searcher.search_stack[0].killers
-        } else {
-            &[None, None]
-        };
-        searcher.selective_prefetch(pos, &ordered_moves, killers, depth);
-    }
+    // Skip prefetching - it has shown negative performance impact
 
     // Search each move
     for (move_idx, &mv) in ordered_moves.iter().enumerate() {
@@ -146,8 +141,8 @@ where
         // Increment node counter
         searcher.stats.nodes += 1;
 
-        // Prefetch TT entry for the new position
-        if USE_TT {
+        // Prefetch TT entry for the new position (root moves are always important)
+        if USE_TT && !searcher.disable_prefetch {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
 
@@ -185,16 +180,7 @@ where
             if let Some(ref tm) = searcher.time_manager {
                 if tm.should_stop(searcher.stats.nodes) {
                     searcher.context.stop();
-                    // Store partial results in TT before stopping
-                    if USE_TT && score > best_score {
-                        searcher.store_tt(
-                            pos.zobrist_hash,
-                            depth,
-                            score,
-                            crate::search::tt::NodeType::LowerBound,
-                            Some(mv),
-                        );
-                    }
+                    // Skip TT storage when stopping - adds overhead
                     break;
                 }
             }
@@ -202,17 +188,7 @@ where
 
         // Check for timeout
         if searcher.context.should_stop() {
-            // Store partial results in TT before stopping
-            if USE_TT && best_score > -SEARCH_INF {
-                let best_mv = if pv.is_empty() { None } else { Some(pv[0]) };
-                searcher.store_tt(
-                    pos.zobrist_hash,
-                    depth,
-                    best_score,
-                    crate::search::tt::NodeType::LowerBound,
-                    best_mv,
-                );
-            }
+            // Skip TT storage when stopping - adds overhead
             break;
         }
 
@@ -279,6 +255,21 @@ where
         }
     }
 
+    // Check for transposition table garbage collection
+    #[cfg(feature = "hashfull_filter")]
+    if USE_TT {
+        const GC_CHECK_INTERVAL: u64 = 0xFFF; // Check every 4096 nodes
+        if (searcher.stats.nodes & GC_CHECK_INTERVAL) == 0 {
+            if let Some(ref tt) = searcher.tt {
+                if tt.should_trigger_gc() {
+                    // Adjust batch size based on search depth
+                    let gc_batch_size = if depth < 10 { 128 } else { 256 };
+                    tt.incremental_gc(gc_batch_size);
+                }
+            }
+        }
+    }
+
     // Check stop flag periodically to minimize overhead
     // Use more frequent checking if stop_flag is present
     let stop_check_interval = if searcher.context.limits().stop_flag.is_some() {
@@ -288,17 +279,8 @@ where
     };
 
     if searcher.stats.nodes & stop_check_interval == 0 && searcher.context.should_stop() {
-        // Store partial evaluation in TT before returning
-        if USE_TT && depth > 0 {
-            let eval = searcher.evaluator.evaluate(pos);
-            searcher.store_tt(
-                pos.zobrist_hash,
-                0, // Minimal depth since we're aborting
-                eval,
-                crate::search::tt::NodeType::UpperBound,
-                None,
-            );
-        }
+        // Skip TT storage when aborting search - it adds overhead with minimal benefit
+        // The partial evaluation is likely to be overwritten anyway
         return 0;
     }
 
@@ -521,10 +503,8 @@ where
         // Make move
         let undo_info = pos.do_move(mv);
 
-        // Prefetch TT entry for the new position (even in quiescence)
-        if USE_TT {
-            searcher.prefetch_tt(pos.zobrist_hash);
-        }
+        // Skip prefetch in quiescence - adds overhead with minimal benefit
+        // (Controlled by tt_filter module)
 
         // Recursive search
         let score = -quiescence_search(searcher, pos, -beta, -alpha, ply + 1);

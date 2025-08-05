@@ -6,7 +6,6 @@
 pub mod context;
 pub mod core;
 pub mod ordering;
-pub mod prefetch;
 pub mod pruning;
 
 use crate::{
@@ -14,7 +13,6 @@ use crate::{
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
         history::History,
-        prefetch_budget::PrefetchBudget,
         tt::{NodeType, TranspositionTable},
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
@@ -92,9 +90,6 @@ pub struct UnifiedSearcher<
 
     /// Adaptive prefetcher for TT (conditionally compiled)
     pub(crate) adaptive_prefetcher: Option<AdaptivePrefetcher>,
-
-    /// Prefetch budget manager (conditionally compiled)
-    pub(crate) prefetch_budget: Option<PrefetchBudget>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -134,11 +129,6 @@ where
             } else {
                 None
             },
-            prefetch_budget: if USE_TT {
-                Some(PrefetchBudget::new())
-            } else {
-                None
-            },
         }
     }
 
@@ -170,11 +160,6 @@ where
             disable_prefetch: false,
             adaptive_prefetcher: if USE_TT {
                 Some(AdaptivePrefetcher::new())
-            } else {
-                None
-            },
-            prefetch_budget: if USE_TT {
-                Some(PrefetchBudget::new())
             } else {
                 None
             },
