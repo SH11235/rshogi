@@ -8,8 +8,10 @@
 use crate::{shogi::Move, util};
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
-use std::sync::OnceLock;
 use util::sync_compat::{AtomicU64, Ordering};
+
+// Re-export SIMD types
+use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
 
 // Bit layout constants for TTEntry data field
 // Optimized layout (64 bits total) - Version 2.1:
@@ -104,22 +106,6 @@ const BUCKET_SIZE: usize = 4;
 #[inline(always)]
 fn extract_depth(data: u64) -> u8 {
     ((data >> DEPTH_SHIFT) & DEPTH_MASK as u64) as u8
-}
-
-/// Check if SIMD is enabled - cached for performance
-#[inline(always)]
-fn simd_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
-    })
 }
 
 /// Generic helper to try updating an existing entry with depth filtering
@@ -701,6 +687,13 @@ impl TTBucket {
         simd_enabled()
     }
 
+    /// Get SIMD kind for choosing optimal implementation
+    #[inline]
+    #[allow(dead_code)]
+    fn store_simd_kind(&self) -> SimdKind {
+        simd_kind()
+    }
+
     /// Find worst entry using SIMD priority calculation
     fn find_worst_entry_simd(&self, current_age: u8) -> (usize, i32) {
         // Prepare data for SIMD priority calculation
@@ -839,6 +832,12 @@ impl FlexibleTTBucket {
     fn probe_4(&self, target_key: u64) -> Option<TTEntry> {
         // Try SIMD-optimized path first
         if self.probe_simd_available() {
+            // Future optimization: select implementation based on SIMD kind
+            // match self.probe_simd_kind() {
+            //     SimdKind::Avx2 => return self.probe_avx2_4(target_key),
+            //     SimdKind::Sse2 => return self.probe_sse2_4(target_key),
+            //     SimdKind::None => {}
+            // }
             return self.probe_simd_4(target_key);
         }
         // Fallback to scalar
@@ -865,6 +864,13 @@ impl FlexibleTTBucket {
     #[inline]
     fn probe_simd_available(&self) -> bool {
         simd_enabled()
+    }
+
+    /// Get SIMD kind for choosing optimal implementation
+    #[inline]
+    #[allow(dead_code)]
+    fn probe_simd_kind(&self) -> SimdKind {
+        simd_kind()
     }
 
     /// SIMD probe for 4 entries
