@@ -549,6 +549,11 @@ where
             }
         }
     }
+
+    /// Enable or disable TT prefetching
+    pub fn set_prefetch_enabled(&mut self, enabled: bool) {
+        self.disable_prefetch = !enabled;
+    }
 }
 
 /// Type aliases for common configurations
