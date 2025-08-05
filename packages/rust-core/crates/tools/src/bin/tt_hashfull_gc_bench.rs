@@ -32,12 +32,12 @@ fn main() {
     let table_sizes = vec![1, 8, 16]; // MB
 
     for (config_name, features) in configs {
-        println!("\n## Configuration: {}", config_name);
-        println!("Features: {:?}", features);
+        println!("\n## Configuration: {config_name}");
+        println!("Features: {features:?}");
         println!("{}", "-".repeat(60));
 
         for size_mb in &table_sizes {
-            println!("\n### Table size: {}MB", size_mb);
+            println!("\n### Table size: {size_mb}MB");
             let results = run_benchmark(*size_mb, &features);
             print_results(&results);
         }
@@ -102,7 +102,7 @@ fn run_benchmark(size_mb: usize, _features: &[&str]) -> BenchmarkResults {
             let hashfull = tt.hashfull();
             let estimate = tt.hashfull_estimate();
             if i % 50000 == 0 {
-                println!("  Progress: {} ops, hashfull={} (est={})", i, hashfull, estimate);
+                println!("  Progress: {i} ops, hashfull={hashfull} (est={estimate})");
             }
         }
     }
@@ -173,9 +173,9 @@ fn run_stability_test(size_mb: usize) {
     let cv = std_dev / avg_rate * 100.0;
 
     println!("\n  Stability Analysis:");
-    println!("  Average rate: {:.0} ops/s", avg_rate);
-    println!("  Std deviation: {:.0} ops/s", std_dev);
-    println!("  Coefficient of variation: {:.1}%", cv);
+    println!("  Average rate: {avg_rate:.0} ops/s");
+    println!("  Std deviation: {std_dev:.0} ops/s");
+    println!("  Coefficient of variation: {cv:.1}%");
     println!(
         "  Stability: {}",
         if cv < 5.0 {
@@ -207,6 +207,6 @@ fn print_results(results: &BenchmarkResults) {
 
     if results.cas_attempts > 0 {
         let cas_success_rate = results.cas_successes as f64 / results.cas_attempts as f64 * 100.0;
-        println!("  CAS success rate: {:.1}%", cas_success_rate);
+        println!("  CAS success rate: {cas_success_rate:.1}%");
     }
 }
