@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+# Default features
+default = ["hashfull_filter"]
 # Loom feature for parallel safety testing (not available on WASM)
 loom = ["dep:loom"]
 # Feature for tests that require large stack size
@@ -12,6 +14,8 @@ large-stack-tests = []
 nightly = []
 # Feature to enable transposition table metrics collection (debug/profiling only)
 tt_metrics = []
+# Feature to enable hashfull-based filtering
+hashfull_filter = []
 
 [dependencies]
 serde = { workspace = true }

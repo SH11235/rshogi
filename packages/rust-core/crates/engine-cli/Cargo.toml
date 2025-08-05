@@ -8,7 +8,7 @@ name = "engine-cli"
 path = "src/main.rs"
 
 [dependencies]
-engine-core = { path = "../engine-core" }
+engine-core = { path = "../engine-core", features = ["hashfull_filter"] }
 anyhow = { workspace = true }
 log = { workspace = true }
 clap = { workspace = true }
