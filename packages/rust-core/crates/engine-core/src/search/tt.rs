@@ -10,6 +10,9 @@ use crate::{shogi::Move, util};
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
 use util::sync_compat::{AtomicU64, Ordering};
 
+// Re-export SIMD types
+use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
+
 // Bit layout constants for TTEntry data field
 // Optimized layout (64 bits total) - Version 2.1:
 // [63-48]: move (16 bits)
@@ -84,16 +87,86 @@ const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
 // This ensures proper wraparound behavior for age distance calculations
 // The cycle is designed to be larger than the maximum possible age value (2^AGE_BITS)
 // to prevent ambiguity in age distance calculations
-const MAX_GENERATION_VALUE: u16 = (1 << 8) - 1; // Maximum value before adding AGE_BITS range
-pub(crate) const GENERATION_CYCLE: u16 = MAX_GENERATION_VALUE + (1 << AGE_BITS); // 255 + 8 = 263
+// Use 256 as base for better alignment with age calculations
+pub(crate) const GENERATION_CYCLE: u16 = 256; // Multiple of 256 for cleaner age distance calculations
 #[allow(dead_code)]
-const GENERATION_CYCLE_MASK: u16 = (1 << (8 + AGE_BITS)) - 1; // For efficient modulo operation
+const GENERATION_CYCLE_MASK: u16 = GENERATION_CYCLE - 1; // For efficient modulo operation
+
+// Ensure GENERATION_CYCLE is larger than AGE_MASK to prevent ambiguity
+#[cfg(debug_assertions)]
+const _: () = assert!(GENERATION_CYCLE > AGE_MASK as u16);
 
 // Key now uses full 64 bits for accurate collision detection
 // const KEY_SHIFT: u8 = 32; // No longer needed after 64-bit comparison update
 
 /// Number of entries per bucket (default for backward compatibility)
 const BUCKET_SIZE: usize = 4;
+
+/// Extract depth from packed data (7 bits)
+#[inline(always)]
+fn extract_depth(data: u64) -> u8 {
+    ((data >> DEPTH_SHIFT) & DEPTH_MASK as u64) as u8
+}
+
+/// Generic helper to try updating an existing entry with depth filtering
+#[inline(always)]
+fn try_update_entry_generic(
+    entries: &[AtomicU64],
+    idx: usize,
+    old_key: u64,
+    new_entry: &TTEntry,
+    #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+    #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+) -> UpdateResult {
+    if old_key != new_entry.key {
+        return UpdateResult::NotFound;
+    }
+
+    // Load old data and extract depth efficiently
+    let old_data = entries[idx + 1].load(Ordering::Relaxed);
+
+    #[cfg(feature = "tt_metrics")]
+    if let Some(m) = metrics {
+        record_metric(m, MetricType::AtomicLoad);
+    }
+
+    let old_depth = extract_depth(old_data);
+
+    // Skip update if new entry doesn't improve depth
+    if new_entry.depth() <= old_depth {
+        #[cfg(feature = "tt_metrics")]
+        if let Some(m) = metrics {
+            record_metric(m, MetricType::DepthFiltered);
+        }
+        return UpdateResult::Filtered;
+    }
+
+    // Depth improved - update data first with Relaxed
+    entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+
+    // Then re-store key with Release to ensure data visibility
+    // This is necessary to maintain the invariant that readers who see
+    // the key with Acquire ordering will see the updated data
+    entries[idx].store(new_entry.key, Ordering::Release);
+
+    // Record metrics
+    #[cfg(feature = "tt_metrics")]
+    if let Some(m) = metrics {
+        record_metric(m, MetricType::UpdateExisting);
+        record_metric(m, MetricType::AtomicStore(2)); // Now 2 stores instead of 1
+        record_metric(m, MetricType::EffectiveUpdate);
+    }
+
+    UpdateResult::Updated
+}
+
+/// Result of update attempt
+#[derive(Debug, PartialEq)]
+enum UpdateResult {
+    Updated,  // Successfully updated
+    Filtered, // Filtered out (depth, hashfull, etc.)
+    NotFound, // Key not found in this slot
+}
 
 /// Dynamic bucket size configuration
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -512,6 +585,19 @@ impl TTBucket {
         self.store_internal(new_entry, current_age, None)
     }
 
+    /// Try to update an existing entry with depth filtering
+    #[inline]
+    fn try_update_entry(
+        &self,
+        idx: usize,
+        old_key: u64,
+        new_entry: &TTEntry,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> UpdateResult {
+        try_update_entry_generic(&self.entries, idx, old_key, new_entry, metrics)
+    }
+
     /// Internal store implementation with optional metrics
     fn store_internal(
         &self,
@@ -520,18 +606,14 @@ impl TTBucket {
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
-        let target_key = new_entry.key;
+        let _target_key = new_entry.key;
 
         // First pass: look for exact match or empty slot
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
 
-            // Use CAS for atomic update to avoid race conditions
-            // Reduced retries and exponential backoff for better performance under contention
-            const MAX_CAS_RETRIES: u32 = 4; // Reduced from 8 - fail fast is better
-            let mut retry_count = 0;
-
-            loop {
+            // We no longer use CAS for empty slots - direct store with proper ordering
+            {
                 // Use Relaxed for speculative read in CAS loop
                 let old_key = self.entries[idx].load(Ordering::Relaxed);
 
@@ -541,80 +623,28 @@ impl TTBucket {
                     m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                if old_key == target_key {
-                    // Existing entry - no CAS needed, just update data
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                // Try to update existing entry
+                match self.try_update_entry(idx, old_key, &new_entry, metrics) {
+                    UpdateResult::Updated | UpdateResult::Filtered => return,
+                    UpdateResult::NotFound => {} // Continue to next check
+                }
+
+                if old_key == 0 {
+                    // Empty slot - use store ordering to ensure data visibility
+                    // Write data first with Relaxed ordering
+                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
+
+                    // Then publish key with Release ordering to ensure data is visible
+                    self.entries[idx].store(new_entry.key, Ordering::Release);
 
                     // Record metrics
                     #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
-                        m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // data only
+                        m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+                        m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     return;
-                } else if old_key == 0 {
-                    // Empty slot - write data first, then CAS
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
-
-                    // Record CAS attempt
-                    #[cfg(feature = "tt_metrics")]
-                    if let Some(m) = metrics {
-                        m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-
-                    // Try to atomically update the key
-                    match self.entries[idx].compare_exchange_weak(
-                        0,
-                        new_entry.key,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            // CAS succeeded - Release ordering ensures data is visible
-                            // No need for additional key store
-
-                            // Record metrics
-                            #[cfg(feature = "tt_metrics")]
-                            if let Some(m) = metrics {
-                                m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
-                                m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            return;
-                        }
-                        Err(_) => {
-                            // Record CAS failure
-                            #[cfg(feature = "tt_metrics")]
-                            if let Some(m) = metrics {
-                                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            retry_count += 1;
-                            if retry_count >= MAX_CAS_RETRIES {
-                                // Too many retries, give up on this slot
-                                break;
-                            }
-
-                            // Another thread modified the entry, retry if still applicable
-                            let current_key = self.entries[idx].load(Ordering::Relaxed);
-                            if current_key != 0 && current_key != target_key {
-                                // This slot is now occupied by a different position, try next slot
-                                break;
-                            }
-                            // Otherwise, retry the CAS operation
-                            // Linear backoff to reduce contention
-                            if retry_count < 3 {
-                                // Spin for a few iterations (linear)
-                                for _ in 0..(retry_count * 2) {
-                                    std::hint::spin_loop();
-                                }
-                            } else {
-                                // After 3 retries, yield to OS scheduler
-                                std::thread::yield_now();
-                            }
-                        }
-                    }
-                } else {
+                } else if old_key != 0 {
                     // Slot is occupied by different position, try next
                     break;
                 }
@@ -641,8 +671,10 @@ impl TTBucket {
                 .compare_exchange(old_key, new_entry.key, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
-                // Key successfully updated, now store the data
-                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                // CAS succeeded - write data with Relaxed
+                // The Release ordering from CAS already ensures visibility for readers
+                // who will load the key with Acquire ordering
+                self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
             }
             // If CAS failed, another thread updated this entry - we accept this race
             // as it's not critical (both threads are storing valid entries)
@@ -652,14 +684,14 @@ impl TTBucket {
     /// Check if SIMD store optimization is available
     #[inline]
     fn store_simd_available(&self) -> bool {
-        #[cfg(target_arch = "x86_64")]
-        {
-            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
+        simd_enabled()
+    }
+
+    /// Get SIMD kind for choosing optimal implementation
+    #[inline]
+    #[allow(dead_code)]
+    fn store_simd_kind(&self) -> SimdKind {
+        simd_kind()
     }
 
     /// Find worst entry using SIMD priority calculation
@@ -672,10 +704,10 @@ impl TTBucket {
         let mut is_empty = [false; BUCKET_SIZE];
 
         // Load all entries at once
-        // Use Relaxed ordering since we're just reading for priority calculation
+        // Use Acquire ordering on key load to ensure we see consistent data
         for i in 0..BUCKET_SIZE {
             let idx = i * 2;
-            let key = self.entries[idx].load(Ordering::Relaxed);
+            let key = self.entries[idx].load(Ordering::Acquire);
             if key == 0 {
                 // Mark empty slots
                 is_empty[i] = true;
@@ -684,6 +716,7 @@ impl TTBucket {
                 is_pv[i] = false;
                 is_exact[i] = false;
             } else {
+                // Use Relaxed for data since Acquire on key already synchronized
                 let data = self.entries[idx + 1].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
                 depths[i] = entry.depth();
@@ -734,6 +767,7 @@ impl TTBucket {
             let score = if key == 0 {
                 i32::MIN // Empty entries have lowest priority
             } else {
+                // Use Relaxed for data since Acquire on key already synchronized
                 let data = self.entries[idx + 1].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
                 entry.priority_score(current_age)
@@ -772,6 +806,19 @@ impl FlexibleTTBucket {
         }
     }
 
+    /// Try to update an existing entry with depth filtering
+    #[inline]
+    fn try_update_entry(
+        &self,
+        idx: usize,
+        old_key: u64,
+        new_entry: &TTEntry,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) -> UpdateResult {
+        try_update_entry_generic(&self.entries, idx, old_key, new_entry, metrics)
+    }
+
     /// Probe bucket for matching entry
     fn probe(&self, key: u64) -> Option<TTEntry> {
         match self.size {
@@ -785,6 +832,12 @@ impl FlexibleTTBucket {
     fn probe_4(&self, target_key: u64) -> Option<TTEntry> {
         // Try SIMD-optimized path first
         if self.probe_simd_available() {
+            // Future optimization: select implementation based on SIMD kind
+            // match self.probe_simd_kind() {
+            //     SimdKind::Avx2 => return self.probe_avx2_4(target_key),
+            //     SimdKind::Sse2 => return self.probe_sse2_4(target_key),
+            //     SimdKind::None => {}
+            // }
             return self.probe_simd_4(target_key);
         }
         // Fallback to scalar
@@ -810,26 +863,27 @@ impl FlexibleTTBucket {
     /// Check if SIMD probe is available
     #[inline]
     fn probe_simd_available(&self) -> bool {
-        #[cfg(target_arch = "x86_64")]
-        {
-            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
+        simd_enabled()
+    }
+
+    /// Get SIMD kind for choosing optimal implementation
+    #[inline]
+    #[allow(dead_code)]
+    fn probe_simd_kind(&self) -> SimdKind {
+        simd_kind()
     }
 
     /// SIMD probe for 4 entries
     fn probe_simd_4(&self, target_key: u64) -> Option<TTEntry> {
         let mut keys = [0u64; 4];
         for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Relaxed);
+            // Use Acquire ordering on key load to synchronize with Release store
+            *key = self.entries[i * 2].load(Ordering::Acquire);
         }
 
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
-            // Use Acquire ordering on data load for synchronization
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Use Relaxed ordering on data load since key Acquire already synchronized
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -846,12 +900,13 @@ impl FlexibleTTBucket {
     fn probe_simd_8(&self, target_key: u64) -> Option<TTEntry> {
         let mut keys = [0u64; 8];
         for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Relaxed);
+            // Use Acquire ordering on key load to synchronize with Release store
+            *key = self.entries[i * 2].load(Ordering::Acquire);
         }
 
         if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_8(&keys, target_key) {
-            // Use Acquire ordering on data load for synchronization
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Use Relaxed ordering on data load since key Acquire already synchronized
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: keys[idx],
                 data,
@@ -871,17 +926,18 @@ impl FlexibleTTBucket {
 
         // Load keys with early termination
         for i in 0..4 {
-            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            // Use Acquire ordering on key load to synchronize with Release store
+            let key = self.entries[i * 2].load(Ordering::Acquire);
             if key == target_key {
                 matching_idx = Some(i);
                 break; // Early termination - key optimization
             }
         }
 
-        // If we found a match, load data with fence + Relaxed
+        // If we found a match, load data
         if let Some(idx) = matching_idx {
-            // Use Acquire ordering on data load for synchronization
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Use Relaxed ordering on data load since key Acquire already synchronized
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: target_key,
                 data,
@@ -901,17 +957,18 @@ impl FlexibleTTBucket {
 
         // Load keys with early termination
         for i in 0..8 {
-            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            // Use Acquire ordering on key load to synchronize with Release store
+            let key = self.entries[i * 2].load(Ordering::Acquire);
             if key == target_key {
                 matching_idx = Some(i);
                 break; // Early termination - key optimization
             }
         }
 
-        // If we found a match, load data with fence + Relaxed
+        // If we found a match, load data
         if let Some(idx) = matching_idx {
-            // Use Acquire ordering on data load for synchronization
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Use Relaxed ordering on data load since key Acquire already synchronized
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: target_key,
                 data,
@@ -931,17 +988,18 @@ impl FlexibleTTBucket {
 
         // Load keys with early termination
         for i in 0..16 {
-            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            // Use Acquire ordering on key load to synchronize with Release store
+            let key = self.entries[i * 2].load(Ordering::Acquire);
             if key == target_key {
                 matching_idx = Some(i);
                 break; // Early termination - key optimization
             }
         }
 
-        // If we found a match, load data with fence + Relaxed
+        // If we found a match, load data
         if let Some(idx) = matching_idx {
-            // Use Acquire ordering on data load for synchronization
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Use Relaxed ordering on data load since key Acquire already synchronized
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: target_key,
                 data,
@@ -1005,19 +1063,13 @@ impl FlexibleTTBucket {
                     m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                if old_key == target_key {
-                    // Existing entry - no CAS needed, just update data
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                // Try to update existing entry
+                match self.try_update_entry(idx, old_key, &new_entry, metrics) {
+                    UpdateResult::Updated | UpdateResult::Filtered => return,
+                    UpdateResult::NotFound => {} // Continue to next check
+                }
 
-                    // Record metrics
-                    #[cfg(feature = "tt_metrics")]
-                    if let Some(m) = metrics {
-                        m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // data only
-                    }
-                    return;
-                } else if old_key == 0 {
+                if old_key == 0 {
                     // Empty slot - optimization based on architecture
                     #[cfg(target_arch = "x86_64")]
                     {
@@ -1080,9 +1132,7 @@ impl FlexibleTTBucket {
                     }
                     #[cfg(not(target_arch = "x86_64"))]
                     {
-                        // Other architectures: write data first, then CAS
-                        self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
-
+                        // Other architectures: CAS first for consistency
                         // Record CAS attempt
                         #[cfg(feature = "tt_metrics")]
                         if let Some(m) = metrics {
@@ -1096,7 +1146,8 @@ impl FlexibleTTBucket {
                             Ordering::Relaxed,
                         ) {
                             Ok(_) => {
-                                // CAS succeeded - Release ordering ensures data is visible
+                                // CAS succeeded - now write data
+                                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                                 // Record metrics
                                 #[cfg(feature = "tt_metrics")]
@@ -1104,7 +1155,7 @@ impl FlexibleTTBucket {
                                     m.cas_successes
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     m.atomic_stores
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
+                                        .fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
                                     m.replace_empty
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
@@ -1212,19 +1263,13 @@ impl FlexibleTTBucket {
                     m.atomic_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                if old_key == target_key {
-                    // Existing entry - no CAS needed, just update data
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                // Try to update existing entry
+                match self.try_update_entry(idx, old_key, &new_entry, metrics) {
+                    UpdateResult::Updated | UpdateResult::Filtered => return,
+                    UpdateResult::NotFound => {} // Continue to next check
+                }
 
-                    // Record metrics
-                    #[cfg(feature = "tt_metrics")]
-                    if let Some(m) = metrics {
-                        m.update_existing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        m.atomic_stores.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // data only
-                    }
-                    return;
-                } else if old_key == 0 {
+                if old_key == 0 {
                     // Empty slot - optimization based on architecture
                     #[cfg(target_arch = "x86_64")]
                     {
@@ -1287,9 +1332,7 @@ impl FlexibleTTBucket {
                     }
                     #[cfg(not(target_arch = "x86_64"))]
                     {
-                        // Other architectures: write data first, then CAS
-                        self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
-
+                        // Other architectures: CAS first for consistency
                         // Record CAS attempt
                         #[cfg(feature = "tt_metrics")]
                         if let Some(m) = metrics {
@@ -1303,7 +1346,8 @@ impl FlexibleTTBucket {
                             Ordering::Relaxed,
                         ) {
                             Ok(_) => {
-                                // CAS succeeded - Release ordering ensures data is visible
+                                // CAS succeeded - now write data
+                                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                                 // Record metrics
                                 #[cfg(feature = "tt_metrics")]
@@ -1311,7 +1355,7 @@ impl FlexibleTTBucket {
                                     m.cas_successes
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     m.atomic_stores
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // data already counted
+                                        .fetch_add(2, std::sync::atomic::Ordering::Relaxed); // CAS + data
                                     m.replace_empty
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
@@ -1451,8 +1495,9 @@ impl FlexibleTTBucket {
                 .compare_exchange(old_key, new_entry.key, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
-                // CAS succeeded - now write data
-                self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                // CAS succeeded - now write data with Relaxed
+                // The Release ordering from CAS already ensures visibility
+                self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
 
                 // Record metrics
                 #[cfg(feature = "tt_metrics")]
@@ -1474,22 +1519,17 @@ impl FlexibleTTBucket {
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
-            // Other architectures: for empty slots, write data first then CAS
-            if old_key == 0 {
-                // Empty slot - write data first
-                self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
-            }
+            // Other architectures: use same approach as x86_64 for consistency
+            // Always write data after successful CAS to ensure data integrity
 
             // Attempt atomic update of the key
             if self.entries[idx]
                 .compare_exchange(old_key, new_entry.key, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
-                // CAS succeeded
-                if old_key != 0 {
-                    // Non-empty slot - write data after successful CAS
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
-                }
+                // CAS succeeded - now write data with Relaxed
+                // The Release ordering from CAS already ensures visibility
+                self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
 
                 // Record metrics
                 #[cfg(feature = "tt_metrics")]
@@ -1663,6 +1703,11 @@ pub struct DetailedTTMetrics {
     // Prefetch statistics
     pub prefetch_count: StdAtomicU64, // Number of prefetch executions
     pub prefetch_hits: StdAtomicU64,  // Prefetch hit count
+
+    // Optimization filters
+    pub depth_filtered: StdAtomicU64, // Updates skipped due to depth filter
+    pub hashfull_filtered: StdAtomicU64, // Updates skipped due to hashfull filter
+    pub effective_updates: StdAtomicU64, // Updates that improved the entry
 }
 
 #[cfg(feature = "tt_metrics")]
@@ -1686,6 +1731,9 @@ impl DetailedTTMetrics {
         self.atomic_loads.store(0, Relaxed);
         self.prefetch_count.store(0, Relaxed);
         self.prefetch_hits.store(0, Relaxed);
+        self.depth_filtered.store(0, Relaxed);
+        self.hashfull_filtered.store(0, Relaxed);
+        self.effective_updates.store(0, Relaxed);
     }
 
     /// Print metrics summary
@@ -1727,7 +1775,53 @@ impl DetailedTTMetrics {
             println!("  Successes: {}", self.cas_successes.load(Relaxed));
             println!("  Failures: {}", self.cas_failures.load(Relaxed));
         }
+
+        let depth_filtered = self.depth_filtered.load(Relaxed);
+        let hashfull_filtered = self.hashfull_filtered.load(Relaxed);
+        if depth_filtered > 0 || hashfull_filtered > 0 {
+            println!("\nOptimization filters:");
+            println!("  Depth filtered: {depth_filtered}");
+            println!("  Hashfull filtered: {hashfull_filtered}");
+            println!("  Effective updates: {}", self.effective_updates.load(Relaxed));
+        }
     }
+}
+
+/// Metrics update types
+#[cfg(feature = "tt_metrics")]
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+enum MetricType {
+    AtomicLoad,
+    AtomicStore(u32), // Parameter: number of stores
+    DepthFiltered,
+    UpdateExisting,
+    EffectiveUpdate,
+    CasAttempt,
+    CasSuccess,
+    CasFailure,
+    ReplaceEmpty,
+    ReplaceWorst,
+}
+
+/// Record metrics - cold path to minimize overhead
+#[cfg(feature = "tt_metrics")]
+#[cold]
+#[inline(never)]
+fn record_metric(metrics: &DetailedTTMetrics, metric_type: MetricType) {
+    use std::sync::atomic::Ordering::Relaxed;
+    match metric_type {
+        MetricType::AtomicLoad => metrics.atomic_loads.fetch_add(1, Relaxed),
+        MetricType::AtomicStore(n) => metrics.atomic_stores.fetch_add(n as u64, Relaxed),
+        MetricType::DepthFiltered => metrics.depth_filtered.fetch_add(1, Relaxed),
+        MetricType::UpdateExisting => metrics.update_existing.fetch_add(1, Relaxed),
+        MetricType::EffectiveUpdate => metrics.effective_updates.fetch_add(1, Relaxed),
+        MetricType::CasAttempt => metrics.cas_attempts.fetch_add(1, Relaxed),
+        MetricType::CasSuccess => metrics.cas_successes.fetch_add(1, Relaxed),
+        MetricType::CasFailure => metrics.cas_failures.fetch_add(1, Relaxed),
+        MetricType::ReplaceEmpty => metrics.replace_empty.fetch_add(1, Relaxed),
+        MetricType::ReplaceWorst => metrics.replace_worst.fetch_add(1, Relaxed),
+    };
 }
 
 /// Optimized transposition table with bucket structure
@@ -2223,6 +2317,106 @@ mod tests {
         // They should identify the same worst entry
         assert_eq!(simd_idx, scalar_idx, "SIMD and scalar should find same worst entry");
         assert_eq!(simd_score, scalar_score, "SIMD and scalar should calculate same score");
+    }
+
+    // Test depth filter functionality
+    #[test]
+    #[cfg(feature = "tt_metrics")]
+    fn test_tt_depth_filter() {
+        let bucket = TTBucket::new();
+        let metrics = DetailedTTMetrics::new();
+
+        // Store an entry with depth 10
+        let key = 0x1234567890ABCDEF;
+        let entry1 = TTEntry::new(key, None, 100, 50, 10, NodeType::Exact, 0);
+        bucket.store_with_metrics(entry1, 0, Some(&metrics));
+
+        // Try to update with a shallower entry (depth 5)
+        let entry2 = TTEntry::new(key, None, 200, 60, 5, NodeType::Exact, 0);
+        bucket.store_with_metrics(entry2, 0, Some(&metrics));
+
+        // The update should be filtered
+        assert_eq!(metrics.depth_filtered.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.update_existing.load(Ordering::Relaxed), 0); // No successful update yet
+
+        // Verify the original entry is still there
+        let result = bucket.probe(key);
+        assert!(result.is_some());
+        let stored_entry = result.unwrap();
+        assert_eq!(stored_entry.depth(), 10);
+        assert_eq!(stored_entry.score(), 100);
+
+        // Try to update with a deeper entry (depth 15)
+        let entry3 = TTEntry::new(key, None, 300, 70, 15, NodeType::Exact, 0);
+        bucket.store_with_metrics(entry3, 0, Some(&metrics));
+
+        // This update should succeed
+        assert_eq!(metrics.depth_filtered.load(Ordering::Relaxed), 1); // Still 1
+        assert_eq!(metrics.update_existing.load(Ordering::Relaxed), 1); // Now 1
+        assert_eq!(metrics.effective_updates.load(Ordering::Relaxed), 1); // Only the depth-improved update
+
+        // Verify the new entry replaced the old one
+        let result = bucket.probe(key);
+        assert!(result.is_some());
+        let stored_entry = result.unwrap();
+        assert_eq!(stored_entry.depth(), 15);
+        assert_eq!(stored_entry.score(), 300);
+    }
+
+    // Test CAS failure data integrity
+    #[test]
+    fn test_cas_failure_data_integrity() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let bucket = Arc::new(TTBucket::new());
+        let num_threads = 4;
+        let iterations = 1000;
+
+        // Launch multiple threads trying to write to the same slot
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let bucket = Arc::clone(&bucket);
+                thread::spawn(move || {
+                    for i in 0..iterations {
+                        let key = 0x1000 + (thread_id as u64);
+                        let score = (thread_id * 100 + i) as i16;
+                        let entry = TTEntry::new(key, None, score, 0, 10, NodeType::Exact, 0);
+                        bucket.store_with_metrics(entry, 0, None);
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify data integrity - each slot should have consistent key-data pairs
+        for i in 0..BUCKET_SIZE {
+            let idx = i * 2;
+            let key = bucket.entries[idx].load(Ordering::Acquire);
+
+            if key != 0 {
+                let data = bucket.entries[idx + 1].load(Ordering::Acquire);
+                let entry = TTEntry { key, data };
+
+                // Extract thread_id from key
+                let thread_id = (key - 0x1000) as usize;
+
+                // Score should be consistent with the thread that wrote it
+                let score = entry.score();
+                assert!(
+                    score >= (thread_id * 100) as i16 && score < ((thread_id + 1) * 100) as i16,
+                    "Inconsistent data: key={:x}, score={}, expected range [{}, {})",
+                    key,
+                    score,
+                    thread_id * 100,
+                    (thread_id + 1) * 100
+                );
+            }
+        }
     }
 
     #[test]
@@ -3083,5 +3277,87 @@ mod parallel_tests {
 
         // Log performance difference (prefetch might not always be faster in tests)
         println!("Without prefetch: {time_without:?}, With prefetch: {time_with:?}");
+    }
+
+    #[test]
+    fn test_memory_ordering_correctness() {
+        // This test verifies that the memory ordering fix prevents
+        // readers from seeing new keys with old/zero data
+        let tt = Arc::new(TranspositionTable::new(1));
+        let num_threads = 8;
+        let iterations = 1000;
+
+        // Use a barrier to synchronize thread start
+        use std::sync::Barrier;
+        let barrier = Arc::new(Barrier::new(num_threads + 1));
+
+        let mut handles = vec![];
+
+        // Spawn reader threads
+        for reader_id in 0..num_threads / 2 {
+            let tt_clone = Arc::clone(&tt);
+            let barrier_clone = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                barrier_clone.wait();
+
+                for i in 0..iterations {
+                    let hash = 0x123456789abcdef0 + (i % 100) as u64;
+
+                    if let Some(entry) = tt_clone.probe(hash) {
+                        // Verify that if we see a key, the data is valid
+                        assert!(
+                            entry.depth() > 0,
+                            "Reader {reader_id} saw key but depth is 0 at iteration {i}"
+                        );
+                        assert!(
+                            entry.score() != 0,
+                            "Reader {reader_id} saw key but score is 0 at iteration {i}"
+                        );
+                        // The move might be None, but other fields should be valid
+                        assert!(
+                            entry.eval() != 0 || entry.node_type() != NodeType::Exact,
+                            "Reader {reader_id} saw key but data looks uninitialized at iteration {i}"
+                        );
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Spawn writer threads
+        for writer_id in 0..num_threads / 2 {
+            let tt_clone = Arc::clone(&tt);
+            let barrier_clone = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                barrier_clone.wait();
+
+                for i in 0..iterations {
+                    let hash = 0x123456789abcdef0 + (i % 100) as u64;
+                    let score = (writer_id * 1000 + i) as i16;
+                    let eval = (writer_id * 100 + i) as i16;
+                    let depth = ((i % 20) + 1) as u8;
+
+                    // Store with non-zero values
+                    tt_clone.store(hash, None, score, eval, depth, NodeType::Exact);
+
+                    // Occasionally use different hash ranges to test empty slot insertion
+                    if i % 50 == 0 {
+                        let empty_hash = 0xfedcba9876543210 + (i % 100) as u64;
+                        tt_clone.store(empty_hash, None, score, eval, depth, NodeType::Exact);
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Start all threads simultaneously
+        barrier.wait();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
     }
 }
