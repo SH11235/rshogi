@@ -3,6 +3,7 @@ pub mod common;
 pub mod constants;
 pub mod history;
 pub mod limits;
+pub mod parallel;
 pub mod prefetch_budget;
 pub mod search_basic;
 pub mod search_enhanced;
