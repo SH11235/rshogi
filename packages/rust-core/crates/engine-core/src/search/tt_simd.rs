@@ -3,8 +3,57 @@
 //! This module provides SIMD implementations for performance-critical
 //! TT operations, with automatic fallback to scalar implementations.
 
+use std::sync::OnceLock;
+
 #[allow(unused_imports)]
 use crate::search::tt::{AGE_MASK, GENERATION_CYCLE};
+
+/// SIMD support detection
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimdKind {
+    None,
+    #[cfg(target_arch = "x86_64")]
+    Sse2,
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+}
+
+/// Detect SIMD support once at runtime
+pub fn simd_kind() -> SimdKind {
+    static KIND: OnceLock<SimdKind> = OnceLock::new();
+
+    *KIND.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx2") {
+                SimdKind::Avx2
+            } else {
+                // SSE2 is baseline for x86_64
+                SimdKind::Sse2
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                SimdKind::Neon
+            } else {
+                SimdKind::None
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            SimdKind::None
+        }
+    })
+}
+
+/// Check if any SIMD is available
+#[inline]
+pub fn simd_enabled() -> bool {
+    simd_kind() != SimdKind::None
+}
 
 // Scalar implementations (fallback)
 pub mod scalar {
