@@ -14,10 +14,6 @@ pub struct PrefetchBudget {
     remaining: AtomicU32,
     /// Maximum budget per frame (in bytes)
     max_per_frame: u32,
-    /// L2 cache capacity in bytes
-    l2_capacity_bytes: usize,
-    /// Number of threads (for budget distribution)
-    thread_count: usize,
 }
 
 impl Default for PrefetchBudget {
@@ -43,8 +39,6 @@ impl PrefetchBudget {
         Self {
             remaining: AtomicU32::new(max_per_frame),
             max_per_frame,
-            l2_capacity_bytes: l2_capacity,
-            thread_count: THREAD_COUNT,
         }
     }
 
@@ -56,8 +50,6 @@ impl PrefetchBudget {
         Self {
             remaining: AtomicU32::new(max_per_frame),
             max_per_frame,
-            l2_capacity_bytes: l2_capacity,
-            thread_count,
         }
     }
 
