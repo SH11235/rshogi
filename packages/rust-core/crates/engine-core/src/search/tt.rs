@@ -108,7 +108,7 @@ fn extract_depth(data: u64) -> u8 {
     ((data >> DEPTH_SHIFT) & DEPTH_MASK as u64) as u8
 }
 
-/// Generic helper to try updating an existing entry with depth filtering
+/// Generic helper to try updating an existing entry with depth filtering using CAS
 #[inline(always)]
 fn try_update_entry_generic(
     entries: &[AtomicU64],
@@ -141,23 +141,73 @@ fn try_update_entry_generic(
         return UpdateResult::Filtered;
     }
 
-    // Depth improved - update data first with Relaxed
-    entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
-
-    // Then re-store key with Release to ensure data visibility
-    // This is necessary to maintain the invariant that readers who see
-    // the key with Acquire ordering will see the updated data
-    entries[idx].store(new_entry.key, Ordering::Release);
-
-    // Record metrics
+    // Use CAS to update data atomically
+    // This makes CAS operations more observable for Phase 5 optimization
     #[cfg(feature = "tt_metrics")]
     if let Some(m) = metrics {
-        record_metric(m, MetricType::UpdateExisting);
-        record_metric(m, MetricType::AtomicStore(2)); // Now 2 stores instead of 1
-        record_metric(m, MetricType::EffectiveUpdate);
+        m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    UpdateResult::Updated
+    match entries[idx + 1].compare_exchange_weak(
+        old_data,
+        new_entry.data,
+        Ordering::Release,
+        Ordering::Relaxed,
+    ) {
+        Ok(_) => {
+            // CAS succeeded - data updated with proper memory ordering
+            #[cfg(feature = "tt_metrics")]
+            if let Some(m) = metrics {
+                m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                record_metric(m, MetricType::UpdateExisting);
+                record_metric(m, MetricType::AtomicStore(1)); // Only 1 CAS operation
+                record_metric(m, MetricType::EffectiveUpdate);
+            }
+            UpdateResult::Updated
+        }
+        Err(current_data) => {
+            // CAS failed - check if another thread updated with same key
+            if extract_depth(current_data) >= new_entry.depth() {
+                // Another thread already updated with better/equal depth
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Check if it was the same key (Phase 5 optimization case)
+                    if old_key == new_entry.key {
+                        m.cas_key_match.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                UpdateResult::Filtered
+            } else {
+                // Retry once if depth is still better
+                match entries[idx + 1].compare_exchange_weak(
+                    current_data,
+                    new_entry.data,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            record_metric(m, MetricType::UpdateExisting);
+                            record_metric(m, MetricType::AtomicStore(1));
+                            record_metric(m, MetricType::EffectiveUpdate);
+                        }
+                        UpdateResult::Updated
+                    }
+                    Err(_) => {
+                        // Give up after second failure
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(m) = metrics {
+                            m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        UpdateResult::Filtered
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Result of update attempt
@@ -705,7 +755,9 @@ impl TTBucket {
                     // Phase 5 optimization: Check if another thread wrote the same key
                     if current == new_entry.key {
                         // Same key - just update the data
-                        self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                        // Use Relaxed ordering since key hasn't changed and reader will
+                        // see the key first with Acquire ordering
+                        self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
 
                         #[cfg(feature = "tt_metrics")]
                         if let Some(m) = metrics {
@@ -830,6 +882,8 @@ impl TTBucket {
 }
 
 /// Flexible bucket that can hold variable number of entries
+/// Note: For optimal performance, consider using fixed-size TTBucket when possible
+/// as it guarantees cache line alignment
 struct FlexibleTTBucket {
     /// Atomic entries (keys and data interleaved)
     entries: Box<[AtomicU64]>,
@@ -1116,7 +1170,9 @@ impl FlexibleTTBucket {
                                 // Phase 5 optimization: Check if another thread wrote the same key
                                 if current == target_key {
                                     // Same key - just update the data
-                                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                                    // Use Relaxed ordering since key hasn't changed and reader will
+                                    // see the key first with Acquire ordering
+                                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
 
                                     #[cfg(feature = "tt_metrics")]
                                     if let Some(m) = metrics {
@@ -1191,7 +1247,9 @@ impl FlexibleTTBucket {
                                 // Phase 5 optimization: Check if another thread wrote the same key
                                 if current == target_key {
                                     // Same key - just update the data
-                                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                                    // Use Relaxed ordering since key hasn't changed and reader will
+                                    // see the key first with Acquire ordering
+                                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
 
                                     #[cfg(feature = "tt_metrics")]
                                     if let Some(m) = metrics {
@@ -1283,7 +1341,9 @@ impl FlexibleTTBucket {
                 // Phase 5 optimization: Check if another thread wrote the same key
                 if current == target_key {
                     // Same key - just update the data
-                    self.entries[idx + 1].store(new_entry.data, Ordering::Release);
+                    // Use Relaxed ordering since key hasn't changed and reader will
+                    // see the key first with Acquire ordering
+                    self.entries[idx + 1].store(new_entry.data, Ordering::Relaxed);
 
                     #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
@@ -2557,7 +2617,7 @@ mod tests {
         if let Some(metrics) = &tt.metrics {
             let cas_key_match = metrics.cas_key_match.load(Ordering::Relaxed);
             // We expect at least some key matches in high contention scenario
-            println!("CAS key matches in test: {}", cas_key_match);
+            println!("CAS key matches in test: {cas_key_match}");
         }
     }
 
