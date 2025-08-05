@@ -22,24 +22,12 @@ struct DetailedMetrics {
     nodes: u64,
     nps: f64,
     elapsed_ms: u128,
-    tt_hits: u64,
-    tt_misses: u64,
-    tt_depth_insufficient: u64,
-    tt_cutoffs: u64,
     prefetch_issued: u64,
     prefetch_hits: u64,
     hashfull: f32,
 }
 
 impl DetailedMetrics {
-    fn tt_hit_rate(&self) -> f32 {
-        if self.tt_hits + self.tt_misses == 0 {
-            0.0
-        } else {
-            self.tt_hits as f32 / (self.tt_hits + self.tt_misses) as f32 * 100.0
-        }
-    }
-
     fn prefetch_hit_rate(&self) -> f32 {
         if self.prefetch_issued == 0 {
             0.0
@@ -168,7 +156,7 @@ fn compare_modes(sfen: &str, description: &str, depth: u8) {
         0.0
     };
 
-    let node_reduction_prefetch = if no_tt.nodes > 0 {
+    let _node_reduction_prefetch = if no_tt.nodes > 0 {
         ((no_tt.nodes as f64 - tt_prefetch.nodes as f64) / no_tt.nodes as f64) * 100.0
     } else {
         0.0
