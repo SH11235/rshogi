@@ -153,6 +153,7 @@ fn run_benchmark(
         cas_attempts: AtomicU64::new(m.cas_attempts.load(Ordering::Relaxed)),
         cas_successes: AtomicU64::new(m.cas_successes.load(Ordering::Relaxed)),
         cas_failures: AtomicU64::new(m.cas_failures.load(Ordering::Relaxed)),
+        cas_key_match: AtomicU64::new(m.cas_key_match.load(Ordering::Relaxed)),
         update_existing: AtomicU64::new(m.update_existing.load(Ordering::Relaxed)),
         replace_empty: AtomicU64::new(m.replace_empty.load(Ordering::Relaxed)),
         replace_worst: AtomicU64::new(m.replace_worst.load(Ordering::Relaxed)),
