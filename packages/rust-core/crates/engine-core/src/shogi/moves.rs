@@ -340,12 +340,14 @@ impl<'a> IntoIterator for &'a MoveList {
 
 #[cfg(test)]
 mod tests {
+    use crate::usi::parse_usi_square;
+
     use super::*;
 
     #[test]
     fn test_normal_move() {
-        let from = Square::new(2, 2);
-        let to = Square::new(2, 3);
+        let from = parse_usi_square("7c").unwrap();
+        let to = parse_usi_square("7d").unwrap();
         let m = Move::normal(from, to, false);
 
         assert_eq!(m.from(), Some(from));
@@ -356,8 +358,8 @@ mod tests {
 
     #[test]
     fn test_promotion_move() {
-        let from = Square::new(2, 2);
-        let to = Square::new(2, 1);
+        let from = parse_usi_square("7c").unwrap();
+        let to = parse_usi_square("7b").unwrap();
         let m = Move::normal(from, to, true);
 
         assert_eq!(m.from(), Some(from));
@@ -368,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_drop_move() {
-        let to = Square::new(4, 4);
+        let to = parse_usi_square("5e").unwrap();
         let m = Move::drop(PieceType::Pawn, to);
 
         assert_eq!(m.from(), None);
@@ -382,13 +384,15 @@ mod tests {
     fn test_move_display() {
         // With Black=top coordinate system:
         // Black pieces at ranks 0-2, White at ranks 6-8
-        let m1 = Move::normal(Square::new(2, 2), Square::new(2, 3), false);
+        let m1 =
+            Move::normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap(), false);
         assert_eq!(m1.to_string(), "7c7d");
 
-        let m2 = Move::normal(Square::new(2, 6), Square::new(2, 7), true);
+        let m2 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7h").unwrap(), true);
         assert_eq!(m2.to_string(), "7g7h+");
 
-        let m3 = Move::drop(PieceType::Pawn, Square::new(4, 4));
+        let m3 = Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap());
         assert_eq!(m3.to_string(), "Pawn*5e");
     }
 
@@ -397,15 +401,19 @@ mod tests {
         let mut list = MoveList::new();
         assert!(list.is_empty());
 
-        list.push(Move::normal(Square::new(2, 2), Square::new(2, 3), false));
-        list.push(Move::drop(PieceType::Pawn, Square::new(4, 4)));
+        list.push(Move::normal(
+            parse_usi_square("7c").unwrap(),
+            parse_usi_square("7d").unwrap(),
+            false,
+        ));
+        list.push(Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap()));
 
         assert_eq!(list.len(), 2);
         assert!(!list.is_empty());
 
         // Test indexing
         let m0 = list[0];
-        assert_eq!(m0.to(), Square::new(2, 3));
+        assert_eq!(m0.to(), parse_usi_square("7d").unwrap());
 
         // Test iteration
         let moves: Vec<Move> = list.into_iter().collect();
@@ -417,16 +425,18 @@ mod tests {
         // 32ビットエンコーディングの全パターンテスト
 
         // 通常の移動（成りなし）
-        let m1 = Move::normal(Square::new(0, 0), Square::new(8, 8), false);
-        assert_eq!(m1.from(), Some(Square::new(0, 0)));
-        assert_eq!(m1.to(), Square::new(8, 8));
+        let m1 =
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("1i").unwrap(), false);
+        assert_eq!(m1.from(), Some(parse_usi_square("9a").unwrap()));
+        assert_eq!(m1.to(), parse_usi_square("1i").unwrap());
         assert!(!m1.is_promote());
         assert!(!m1.is_drop());
 
         // 通常の移動（成りあり）
-        let m2 = Move::normal(Square::new(4, 2), Square::new(4, 6), true);
-        assert_eq!(m2.from(), Some(Square::new(4, 2)));
-        assert_eq!(m2.to(), Square::new(4, 6));
+        let m2 =
+            Move::normal(parse_usi_square("5c").unwrap(), parse_usi_square("5g").unwrap(), true);
+        assert_eq!(m2.from(), Some(parse_usi_square("5c").unwrap()));
+        assert_eq!(m2.to(), parse_usi_square("5g").unwrap());
         assert!(m2.is_promote());
         assert!(!m2.is_drop());
 
@@ -442,9 +452,9 @@ mod tests {
         ];
 
         for pt in &piece_types {
-            let m = Move::drop(*pt, Square::new(4, 4));
+            let m = Move::drop(*pt, parse_usi_square("5e").unwrap());
             assert_eq!(m.from(), None);
-            assert_eq!(m.to(), Square::new(4, 4));
+            assert_eq!(m.to(), parse_usi_square("5e").unwrap());
             assert!(m.is_drop());
             assert!(!m.is_promote());
             assert_eq!(m.drop_piece_type(), *pt);
@@ -509,14 +519,16 @@ mod tests {
         assert!(Move::NULL.is_null());
         assert_eq!(Move::NULL.to_u16(), 0);
 
-        let normal_move = Move::normal(Square::new(0, 0), Square::new(0, 1), false);
+        let normal_move =
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false);
         assert!(!normal_move.is_null());
     }
 
     #[test]
     fn test_move_is_capture_hint() {
         // キャプチャヒントのテスト
-        let m1 = Move::normal(Square::new(0, 0), Square::new(0, 1), false);
+        let m1 =
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false);
         assert!(!m1.is_capture_hint());
 
         // キャプチャヒントを設定（実装がある場合）
@@ -589,9 +601,9 @@ mod tests {
         // イテレータの正確性テスト
         let mut list = MoveList::new();
         let moves_data = vec![
-            Move::normal(Square::new(0, 0), Square::new(0, 1), false),
-            Move::normal(Square::new(1, 1), Square::new(1, 2), true),
-            Move::drop(PieceType::Pawn, Square::new(4, 4)),
+            Move::normal(parse_usi_square("9a").unwrap(), parse_usi_square("9b").unwrap(), false),
+            Move::normal(parse_usi_square("8b").unwrap(), parse_usi_square("8c").unwrap(), true),
+            Move::drop(PieceType::Pawn, parse_usi_square("5e").unwrap()),
         ];
 
         for m in &moves_data {
@@ -613,10 +625,10 @@ mod tests {
 
         // 角の升目
         let corners = [
-            Square::new(0, 0), // 9九
-            Square::new(8, 0), // 1九
-            Square::new(0, 8), // 9一
-            Square::new(8, 8), // 1一
+            parse_usi_square("9a").unwrap(), // 9九
+            parse_usi_square("1a").unwrap(), // 1九
+            parse_usi_square("9i").unwrap(), // 9一
+            parse_usi_square("1i").unwrap(), // 1一
         ];
 
         for &from in &corners {
@@ -638,8 +650,8 @@ mod tests {
     #[test]
     fn test_move_with_piece_type() {
         // Test normal_with_piece API
-        let from = Square::new(2, 2);
-        let to = Square::new(2, 3);
+        let from = parse_usi_square("7c").unwrap();
+        let to = parse_usi_square("7d").unwrap();
 
         // Test without capture
         let m1 = Move::normal_with_piece(from, to, false, PieceType::Pawn, None);
@@ -670,14 +682,15 @@ mod tests {
     #[test]
     fn test_backward_compatibility() {
         // Test that old Move::normal creates moves with unknown piece type
-        let m = Move::normal(Square::new(2, 2), Square::new(2, 3), false);
+        let m =
+            Move::normal(parse_usi_square("7c").unwrap(), parse_usi_square("7d").unwrap(), false);
         assert_eq!(m.piece_type(), None); // Unknown piece type
         assert_eq!(m.captured_piece_type(), None);
 
         // Test u16 compatibility (loses piece type info)
         let m_with_type = Move::normal_with_piece(
-            Square::new(2, 2),
-            Square::new(2, 3),
+            parse_usi_square("7c").unwrap(),
+            parse_usi_square("7d").unwrap(),
             false,
             PieceType::Pawn,
             Some(PieceType::Gold),
@@ -686,8 +699,8 @@ mod tests {
         let u16_decoded = Move::from_u16(u16_encoded);
 
         // Basic move info preserved
-        assert_eq!(u16_decoded.from(), Some(Square::new(2, 2)));
-        assert_eq!(u16_decoded.to(), Square::new(2, 3));
+        assert_eq!(u16_decoded.from(), Some(parse_usi_square("7c").unwrap()));
+        assert_eq!(u16_decoded.to(), parse_usi_square("7d").unwrap());
         assert!(!u16_decoded.is_promote());
 
         // But piece type info is lost

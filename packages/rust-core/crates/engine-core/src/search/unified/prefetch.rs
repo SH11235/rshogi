@@ -92,17 +92,27 @@ where
         killer_moves: &[Option<Move>],
         depth: u8,
     ) {
-        if !USE_TT || moves.is_empty() {
+        if !USE_TT || moves.is_empty() || self.disable_prefetch {
             return;
         }
 
         // Phase 2: Selective prefetching - only prefetch promising moves
         // This reduces overhead significantly compared to blanket prefetching
 
+        // Check budget if available
+        const BUCKET_SIZE_BYTES: u32 = 64; // Size of one TT bucket
+
         // 1. Prefetch killer moves first (most likely to cause cutoffs)
         for killer in killer_moves.iter().filter_map(|k| k.as_ref()) {
             // Check if killer move is in the move list
             if moves.contains(killer) {
+                // Check budget before prefetching
+                if let Some(ref budget) = self.prefetch_budget {
+                    if !budget.try_consume(BUCKET_SIZE_BYTES) {
+                        return; // Budget exhausted
+                    }
+                }
+
                 let hash = HashCalculator::calculate_move_hash(pos, *killer);
                 self.prefetch_tt(hash);
             }
@@ -112,6 +122,13 @@ where
         // These are already sorted by history heuristic and other factors
         let max_prefetch = if depth > 6 { 3 } else { 2 };
         for &mv in moves.iter().take(max_prefetch) {
+            // Check budget before prefetching
+            if let Some(ref budget) = self.prefetch_budget {
+                if !budget.try_consume(BUCKET_SIZE_BYTES) {
+                    break; // Budget exhausted
+                }
+            }
+
             let hash = HashCalculator::calculate_move_hash(pos, mv);
             self.prefetch_tt(hash);
         }
@@ -122,7 +139,7 @@ where
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn prefetch_next_moves(&self, pos: &Position, moves: &[Move], max_prefetch: usize) {
-        if !USE_TT {
+        if !USE_TT || self.disable_prefetch {
             return;
         }
 
@@ -139,7 +156,7 @@ where
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn prefetch_during_movegen(&self, pos: &Position) {
-        if !USE_TT {
+        if !USE_TT || self.disable_prefetch {
             return;
         }
 
@@ -157,7 +174,7 @@ where
     /// Uses accurate lightweight hash calculation and cache level optimization
     #[inline]
     pub(crate) fn prefetch_pv_line(&self, pos: &Position, pv: &[Move], _depth: u8) {
-        if !USE_TT || pv.is_empty() {
+        if !USE_TT || pv.is_empty() || self.disable_prefetch {
             return;
         }
 
@@ -173,25 +190,6 @@ where
                 // Use L2 cache for moves 2-4 in PV
                 tt.prefetch(hash, 1); // hint=1 for L2 cache
             }
-        }
-    }
-
-    /// Get history score for a move (used for selective prefetching)
-    #[inline]
-    #[allow(dead_code)]
-    fn get_history_score(&self, mv: Move) -> i32 {
-        if let Ok(_history) = self.history.lock() {
-            // Get history score based on move type
-            if mv.is_drop() {
-                0 // No history for drops
-            } else {
-                // Use simplified history lookup
-                // Since we don't have direct access to History.get(), we return 0
-                // The move ordering already considers history, so this is not critical
-                0
-            }
-        } else {
-            0
         }
     }
 }

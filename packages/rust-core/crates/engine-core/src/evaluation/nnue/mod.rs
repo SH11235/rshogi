@@ -215,7 +215,7 @@ impl Evaluator for NNUEEvaluatorWrapper {
 
 #[cfg(test)]
 mod tests {
-    use crate::{shogi::Move, Piece, PieceType, Square};
+    use crate::{shogi::Move, usi::parse_usi_square, Piece, PieceType};
 
     use super::*;
 
@@ -237,10 +237,11 @@ mod tests {
 
         // Add a piece but no kings
         pos.board
-            .put_piece(Square::new(4, 4), Piece::new(PieceType::Pawn, Color::Black));
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
         // Try to make a move - should fail due to missing kings
-        let mv = Move::make_normal(Square::new(4, 4), Square::new(4, 3));
+        let mv =
+            Move::make_normal(parse_usi_square("5e").unwrap(), parse_usi_square("5d").unwrap());
         let result = wrapper.do_move(&pos, mv);
 
         assert!(result.is_err());
