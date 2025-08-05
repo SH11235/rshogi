@@ -12,6 +12,8 @@ large-stack-tests = []
 nightly = []
 # Feature to enable transposition table metrics collection (debug/profiling only)
 tt_metrics = []
+# Feature to enable hashfull-based filtering
+hashfull_filter = []
 
 [dependencies]
 serde = { workspace = true }
