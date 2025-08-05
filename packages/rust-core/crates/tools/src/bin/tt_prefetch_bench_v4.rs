@@ -19,6 +19,9 @@ use engine_core::{
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Score type for benchmark (using i32 to avoid overflow)
+type Score = i32;
+
 /// Test modes for comprehensive benchmarking
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TestMode {
@@ -135,7 +138,7 @@ impl BenchmarkEngine {
     }
 
     /// Search with mode-specific TT handling
-    fn search(&mut self, depth: u8, prefetch_enabled: bool) -> (Option<Move>, i16) {
+    fn search(&mut self, depth: u8, prefetch_enabled: bool) -> (Option<Move>, Score) {
         self.nodes_searched = 0;
         self.tt_hits = 0;
         self.tt_probes = 0;
@@ -151,15 +154,15 @@ impl BenchmarkEngine {
     fn alpha_beta_root(
         &mut self,
         depth: u8,
-        mut alpha: i16,
-        beta: i16,
+        mut alpha: Score,
+        beta: Score,
         prefetch_enabled: bool,
-    ) -> (Option<Move>, i16) {
+    ) -> (Option<Move>, Score) {
         self.nodes_searched += 1;
 
         if depth == 0 {
             let evaluator = MaterialEvaluator;
-            return (None, evaluator.evaluate(&self.position) as i16);
+            return (None, evaluator.evaluate(&self.position) as Score);
         }
 
         let hash = self.position.zobrist_hash();
@@ -171,12 +174,13 @@ impl BenchmarkEngine {
                     // No TT access
                 }
                 TestMode::TTNoCAS => {
-                    // Read-only probe (no store)
+                    // Read-only probe (no store) - measures pure lookup overhead
+                    // Always results in 0% hit rate as no entries are stored
                     self.tt_probes += 1;
                     if let Some(entry) = tt.probe(hash) {
                         self.tt_hits += 1;
                         if entry.depth() >= depth {
-                            return (entry.get_move(), entry.score());
+                            return (entry.get_move(), entry.score() as Score);
                         }
                     }
                 }
@@ -192,15 +196,18 @@ impl BenchmarkEngine {
                         gen.generate_all(&self.position, &mut move_list);
                         let moves = move_list;
                         for (i, mv) in moves.iter().take(4).enumerate() {
-                            let mut child_pos = self.position.clone();
-                            child_pos.do_move(*mv);
-                            let child_hash = child_pos.zobrist_hash();
+                            // Make move temporarily to get hash
+                            let undo_info = self.position.do_move(*mv);
+                            let child_hash = self.position.zobrist_hash();
+                            self.position.undo_move(*mv, undo_info);
 
-                            // Adaptive prefetch distance
-                            match i {
-                                0 => tt.prefetch_l1(child_hash),
-                                1 => tt.prefetch_l1(child_hash),
-                                _ => tt.prefetch_l2(child_hash),
+                            // Adaptive prefetch based on depth and priority
+                            if depth <= 4 && i == 0 {
+                                tt.prefetch_l1(child_hash); // Shallow depth, first move: L1
+                            } else if depth <= 6 {
+                                tt.prefetch_l2(child_hash); // Medium depth: L2
+                            } else {
+                                tt.prefetch_l3(child_hash); // Deep depth: L3
                             }
                         }
                     }
@@ -208,7 +215,7 @@ impl BenchmarkEngine {
                     if let Some(entry) = tt.probe(hash) {
                         self.tt_hits += 1;
                         if entry.depth() >= depth {
-                            return (entry.get_move(), entry.score());
+                            return (entry.get_move(), entry.score() as Score);
                         }
                     }
                 }
@@ -225,16 +232,16 @@ impl BenchmarkEngine {
         }
 
         let mut best_move = None;
-        let mut best_score = -30001;
+        let mut best_score: Score = -30001;
 
         for mv in moves {
-            let mut new_pos = self.position.clone();
-            new_pos.do_move(mv);
-            let old_pos = std::mem::replace(&mut self.position, new_pos);
+            // Make move
+            let undo_info = self.position.do_move(mv);
 
             let score = -self.alpha_beta(depth - 1, -beta, -alpha, prefetch_enabled);
 
-            self.position = old_pos;
+            // Unmake move
+            self.position.undo_move(mv, undo_info);
 
             if score > best_score {
                 best_score = score;
@@ -261,19 +268,25 @@ impl BenchmarkEngine {
                     NodeType::Exact
                 };
 
-                tt.store(hash, best_move, best_score, 0, depth, node_type);
+                tt.store(hash, best_move, best_score as i16, 0, depth, node_type);
             }
         }
 
         (best_move, best_score)
     }
 
-    fn alpha_beta(&mut self, depth: u8, mut alpha: i16, beta: i16, prefetch_enabled: bool) -> i16 {
+    fn alpha_beta(
+        &mut self,
+        depth: u8,
+        mut alpha: Score,
+        beta: Score,
+        prefetch_enabled: bool,
+    ) -> Score {
         self.nodes_searched += 1;
 
         if depth == 0 {
             let evaluator = MaterialEvaluator;
-            return evaluator.evaluate(&self.position) as i16;
+            return evaluator.evaluate(&self.position) as Score;
         }
 
         let hash = self.position.zobrist_hash();
@@ -285,12 +298,14 @@ impl BenchmarkEngine {
                     // No TT access
                 }
                 TestMode::TTNoCAS => {
-                    // Read-only probe
+                    // Read-only probe - measures pure lookup overhead without CAS
+                    // Note: This mode never stores entries, so hit% will be 0%
+                    // This is intentional to isolate read-only access cost
                     self.tt_probes += 1;
                     if let Some(entry) = tt.probe(hash) {
                         self.tt_hits += 1;
                         if entry.depth() >= depth {
-                            return entry.score();
+                            return entry.score() as Score;
                         }
                     }
                 }
@@ -307,15 +322,18 @@ impl BenchmarkEngine {
                         let prefetch_count = (depth as usize / 2).min(3);
 
                         for (i, mv) in moves.iter().take(prefetch_count).enumerate() {
-                            let mut child_pos = self.position.clone();
-                            child_pos.do_move(*mv);
-                            let child_hash = child_pos.zobrist_hash();
+                            // Make move temporarily to get hash
+                            let undo_info = self.position.do_move(*mv);
+                            let child_hash = self.position.zobrist_hash();
+                            self.position.undo_move(*mv, undo_info);
 
-                            // Use different cache levels based on priority
-                            if i == 0 && depth > 4 {
-                                tt.prefetch_l1(child_hash);
+                            // Adaptive prefetch based on depth and priority
+                            if depth <= 4 && i == 0 {
+                                tt.prefetch_l1(child_hash); // Shallow depth, first move: L1
+                            } else if depth <= 6 {
+                                tt.prefetch_l2(child_hash); // Medium depth: L2
                             } else {
-                                tt.prefetch_l2(child_hash);
+                                tt.prefetch_l3(child_hash); // Deep depth: L3 (avoid L1 pollution)
                             }
                         }
                     }
@@ -323,7 +341,7 @@ impl BenchmarkEngine {
                     if let Some(entry) = tt.probe(hash) {
                         self.tt_hits += 1;
                         if entry.depth() >= depth {
-                            return entry.score();
+                            return entry.score() as Score;
                         }
                     }
                 }
@@ -339,16 +357,16 @@ impl BenchmarkEngine {
             return -30000; // Simplified checkmate score
         }
 
-        let mut best_score = -30001;
+        let mut best_score: Score = -30001;
 
         for mv in moves {
-            let mut new_pos = self.position.clone();
-            new_pos.do_move(mv);
-            let old_pos = std::mem::replace(&mut self.position, new_pos);
+            // Make move
+            let undo_info = self.position.do_move(mv);
 
             let score = -self.alpha_beta(depth - 1, -beta, -alpha, prefetch_enabled);
 
-            self.position = old_pos;
+            // Unmake move
+            self.position.undo_move(mv, undo_info);
 
             if score > best_score {
                 best_score = score;
@@ -374,7 +392,7 @@ impl BenchmarkEngine {
                     NodeType::Exact
                 };
 
-                tt.store(hash, None, best_score, 0, depth, node_type);
+                tt.store(hash, None, best_score as i16, 0, depth, node_type);
             }
         }
 
@@ -487,8 +505,12 @@ fn print_depth_results(depth: u8, position: &TestPosition, results: &[BenchResul
         results.iter().find(|r| r.mode == TestMode::TTNoCAS),
         results.iter().find(|r| r.mode == TestMode::TTOnly),
     ) {
-        let overhead = 100.0 * ((cas.time_ms as f64 / nocas.time_ms as f64) - 1.0);
-        println!("  CAS overhead: {overhead:.1}%");
+        if nocas.time_ms == 0 || cas.time_ms == 0 {
+            println!("  CAS overhead: N/A (time too short)");
+        } else {
+            let overhead = 100.0 * ((cas.time_ms as f64 / nocas.time_ms as f64) - 1.0);
+            println!("  CAS overhead: {overhead:.1}%");
+        }
     }
 
     // Prefetch benefit
@@ -533,9 +555,6 @@ fn main() {
     // Test depths
     let depths = vec![4, 5, 6, 7];
 
-    // Create transposition table (128MB)
-    let tt = Arc::new(TranspositionTable::new_with_config(128, None));
-
     // Test each depth
     for depth in depths {
         println!("\n{}", "=".repeat(100));
@@ -553,22 +572,19 @@ fn main() {
                 TestMode::TTOnly,
                 TestMode::TTPrefetch,
             ] {
-                // Clear TT between tests for fair comparison
-                if mode != TestMode::NoTT {
-                    // Note: This requires mutable access to TT
-                    // In real implementation, we'd create new TT or use different approach
-                }
+                // Create fresh TT for each test mode to ensure fair comparison
+                let tt = if mode == TestMode::NoTT {
+                    None
+                } else {
+                    let mut tt = TranspositionTable::new_with_config(128, None);
+                    // Enable prefetch statistics for TTPrefetch mode
+                    if mode == TestMode::TTPrefetch {
+                        tt.enable_prefetch_stats();
+                    }
+                    Some(Arc::new(tt))
+                };
 
-                let result = run_benchmark(
-                    position,
-                    depth,
-                    mode,
-                    if mode == TestMode::NoTT {
-                        None
-                    } else {
-                        Some(Arc::clone(&tt))
-                    },
-                );
+                let result = run_benchmark(position, depth, mode, tt);
 
                 results.push(result);
             }
