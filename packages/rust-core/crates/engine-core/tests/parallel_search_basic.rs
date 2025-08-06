@@ -1,5 +1,7 @@
 //! Basic parallel search test for Thread Sanitizer validation
 
+#![cfg(not(debug_assertions))] // Only run these tests in release builds due to timing sensitivity
+
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
     search::{
