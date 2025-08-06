@@ -125,11 +125,9 @@ impl SharedHistory {
         // - 従来の手動CASループ: loop { load(); compare_exchange(); } → 読み取り無駄が発生
         // - fetch_update: 内部で効率的にload+CAS実行 → CPUの最適化機能をフル活用
         // - 結果: より少ない命令とメモリアクセスで同じ結果を実現
-        self.table[idx]
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old_value| {
-                Some(old_value.saturating_add(bonus).min(10000))
-            })
-            .expect("fetch_update should always succeed with Some(...)");
+        let _ = self.table[idx].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old_value| {
+            Some(old_value.saturating_add(bonus).min(10000))
+        });
     }
 
     /// Age all history scores (divide by 2)
