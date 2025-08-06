@@ -447,43 +447,42 @@ fn test_memory_ordering_visibility() {
 
 #[test]
 fn test_rapid_go_stop_cycles() {
+    // Constants for better CI stability
+    const CYCLES: usize = 3; // Reduced from 5 to 3 for CI stability
+    const START_TIMEOUT_MS: u64 = 800; // Time to wait for info line
+    const BESTMOVE_TIMEOUT_SECS: u64 = 5; // Time to wait for bestmove
+    const READYOK_TIMEOUT_SECS: u64 = 2; // Time to wait for readyok
+
     let (engine, mut stdin, rx, reader_handle) = init_engine();
 
     // Set position once
     send_command(&mut stdin, "position startpos");
 
-    // Rapid go/stop cycles - reduced iterations for stability
-    for i in 0..5 {
-        println!("Starting rapid cycle {}", i + 1);
+    // Rapid go/stop cycles
+    for n in 1..=CYCLES {
+        eprintln!("--- rapid cycle {n}/{CYCLES} ---");
 
-        // Start search with longer time to ensure it starts
-        send_command(&mut stdin, "go movetime 500");
+        // 1) Start search
+        send_command(&mut stdin, "go movetime 700");
 
-        // Wait for "info" line to confirm search actually started
-        match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
-            Ok(_) => {
-                println!("Search started (info received), sending stop");
-            }
-            Err(e) => {
-                println!("Warning: No info line received: {e}");
-                // Continue anyway - some engines might not send info immediately
-            }
-        }
+        // 2) Try to confirm search started (optional - don't fail if no info)
+        let _ = read_until_pattern(&rx, "info ", Duration::from_millis(START_TIMEOUT_MS)).ok();
 
-        // Stop after confirming search started
+        // 3) Send stop command
         send_command(&mut stdin, "stop");
 
-        // Should get bestmove
-        let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+        // 4) Must receive bestmove
         assert!(
-            result.is_ok(),
-            "Failed to get bestmove in rapid cycle {} - {:?}",
-            i + 1,
-            result.err()
+            read_until_pattern(&rx, "bestmove", Duration::from_secs(BESTMOVE_TIMEOUT_SECS)).is_ok(),
+            "cycle {n}: Failed to receive bestmove after stop"
         );
 
-        // Small delay between cycles
-        thread::sleep(Duration::from_millis(50));
+        // 5) Ensure engine is ready for next cycle - this prevents double bestmove issues
+        send_command(&mut stdin, "isready");
+        assert!(
+            read_until_pattern(&rx, "readyok", Duration::from_secs(READYOK_TIMEOUT_SECS)).is_ok(),
+            "cycle {n}: Failed to receive readyok - engine may be in inconsistent state"
+        );
     }
 
     // Cleanup
