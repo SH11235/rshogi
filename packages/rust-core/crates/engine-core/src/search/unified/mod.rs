@@ -12,7 +12,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
-        history::History,
+        history::{CounterMoveHistory, History},
         tt::{NodeType, TranspositionTable},
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
@@ -538,6 +538,38 @@ where
     /// Enable or disable TT prefetching
     pub fn set_prefetch_enabled(&mut self, enabled: bool) {
         self.disable_prefetch = !enabled;
+    }
+
+    /// Set history table (for parallel search)
+    pub fn set_history(&mut self, history: History) {
+        if let Ok(mut h) = self.history.lock() {
+            *h = history;
+        }
+    }
+
+    /// Get history table (for parallel search)
+    pub fn get_history(&self) -> History {
+        if let Ok(h) = self.history.lock() {
+            h.clone()
+        } else {
+            History::new()
+        }
+    }
+
+    /// Set counter moves (for parallel search)
+    pub fn set_counter_moves(&mut self, counter_moves: CounterMoveHistory) {
+        if let Ok(mut h) = self.history.lock() {
+            h.counter_moves = counter_moves;
+        }
+    }
+
+    /// Get counter moves (for parallel search)
+    pub fn get_counter_moves(&self) -> CounterMoveHistory {
+        if let Ok(h) = self.history.lock() {
+            h.counter_moves.clone()
+        } else {
+            CounterMoveHistory::new()
+        }
     }
 }
 
