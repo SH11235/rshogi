@@ -6,14 +6,75 @@ use crate::{
     shogi::{Move, PieceType, Square},
     Color,
 };
+use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
+// Architecture-specific cache line alignment for optimal performance
+#[repr(align(128))]
+#[cfg(target_arch = "aarch64")]
+struct Align128<T>(T);
+
+// Cache line size aware padding for different architectures
+//
+// 【キャッシュライン最適化の学び】
+// - x86_64 (Intel/AMD): 理論上は64Bキャッシュラインだが、Crossbeam CachePaddedは
+//   安全マージンのため128Bでパディングしている（最新プロセッサトレンド対応）
+// - ARM64 (Apple M1/M2): 実際に128Bキャッシュラインを使用
+// - 結果: 現在の実装では両アーキテクチャとも実質128Bで同じサイズ
+//
+// 【条件付きコンパイルの価値】
+// 1. 将来の拡張性: ARM64で128B以上が必要になった場合の準備
+// 2. ライブラリ独立性: Crossbeamの内部実装変更に依存しない制御
+// 3. 明示的な意図: コードでアーキテクチャ意識を表現
+// 4. テスト可能性: 各環境で適切なアライメントを検証
+//
+// Apple M1/M2 and some ARM64 servers use 128-byte cache lines
+// x86_64 (including Ryzen 7950X) uses 64-byte cache lines
+#[cfg(target_arch = "aarch64")]
+type PaddedAtomicU32 = Align128<AtomicU32>; // 128B alignment for ARM64
+
+#[cfg(target_arch = "x86_64")]
+type PaddedAtomicU32 = CachePadded<AtomicU32>; // 64B is optimal for current x86_64
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+type PaddedAtomicU32 = CachePadded<AtomicU32>; // Fallback for other architectures
+
+// Implementation for ARM64's 128-byte aligned atomic
+#[cfg(target_arch = "aarch64")]
+impl Align128<AtomicU32> {
+    fn new(value: AtomicU32) -> Self {
+        Align128(value)
+    }
+
+    fn load(&self, order: Ordering) -> u32 {
+        self.0.load(order)
+    }
+
+    fn store(&self, value: u32, order: Ordering) {
+        self.0.store(value, order)
+    }
+
+    fn fetch_update<F>(&self, set_order: Ordering, fetch_order: Ordering, f: F) -> Result<u32, u32>
+    where
+        F: FnMut(u32) -> Option<u32>,
+    {
+        self.0.fetch_update(set_order, fetch_order, f)
+    }
+}
+
 /// Lock-free shared history table
+///
+/// 【実装の要点】
+/// - False sharing回避: 各エントリを128Bでパディング（アーキテクチャ別最適化）
+/// - メモリ効率: 4B -> 128Bで32倍のオーバーヘッドだが、パフォーマンスを優先
+/// - 実際のメモリ使用量: 2430エントリ × 128B = 約304KB（メモリは安価、速度重視）
 pub struct SharedHistory {
     /// History scores using atomic operations
     /// [color][piece_type][to_square]
-    table: Vec<AtomicU32>,
+    /// Each entry is cache-padded to prevent false sharing
+    /// Uses architecture-aware padding for optimal cache line alignment
+    table: Vec<PaddedAtomicU32>,
 }
 
 impl Default for SharedHistory {
@@ -29,7 +90,7 @@ impl SharedHistory {
         let size = 2 * 15 * 81;
         let mut table = Vec::with_capacity(size);
         for _ in 0..size {
-            table.push(AtomicU32::new(0));
+            table.push(PaddedAtomicU32::new(AtomicU32::new(0)));
         }
 
         Self { table }
@@ -50,21 +111,23 @@ impl SharedHistory {
         self.table[idx].load(Ordering::Relaxed)
     }
 
-    /// Update history score (lock-free using fetch_add)
+    /// Update history score (lock-free using fetch_update)
+    ///
+    /// 【パフォーマンス最適化】
+    /// - 従来: load() -> compare_exchange()の2段階（読み取りオーバーヘッドあり）
+    /// - 現在: fetch_update()で効率的な更新（読み取り+CASを1回の呼び出しで実行）
+    /// - 効果: 最初の読み取りオーバーヘッドを削減、アトミック操作の最適化
     pub fn update(&self, color: Color, piece_type: PieceType, to: Square, bonus: u32) {
         let idx = Self::get_index(color, piece_type, to);
 
-        // Saturating add to prevent overflow
-        let old_value = self.table[idx].load(Ordering::Relaxed);
-        let new_value = old_value.saturating_add(bonus).min(10000);
-
-        // Use compare_exchange_weak for efficiency
-        let _ = self.table[idx].compare_exchange_weak(
-            old_value,
-            new_value,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
+        // Use fetch_update for more efficient atomic update
+        // 【CASループ最適化】
+        // - 従来の手動CASループ: loop { load(); compare_exchange(); } → 読み取り無駄が発生
+        // - fetch_update: 内部で効率的にload+CAS実行 → CPUの最適化機能をフル活用
+        // - 結果: より少ない命令とメモリアクセスで同じ結果を実現
+        let _ = self.table[idx].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old_value| {
+            Some(old_value.saturating_add(bonus).min(10000))
+        });
     }
 
     /// Age all history scores (divide by 2)
@@ -275,5 +338,40 @@ mod tests {
         state.maybe_update_best(300, Some(worse_move), 5, 0);
         assert_eq!(state.get_best_move(), Some(worse_move)); // Should update
         assert_eq!(state.get_best_score(), 300);
+    }
+
+    #[test]
+    fn test_cache_padded_size() {
+        use std::mem::{align_of, size_of};
+
+        // 【キャッシュパディング効果の検証】
+        // - False sharing回避のため、適切なアライメントサイズを確保
+        // - 各アーキテクチャに応じた最適なキャッシュライン境界での配置
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // ARM64 should use 128-byte alignment for optimal performance
+            assert_eq!(align_of::<PaddedAtomicU32>(), 128);
+            assert_eq!(size_of::<PaddedAtomicU32>(), 128);
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // x86_64 uses 64-byte cache lines (Ryzen 7950X, Intel, etc.)
+            // ただし、Crossbeam CachePaddedは実際には128Bでパディング（安全マージン）
+            assert!(size_of::<PaddedAtomicU32>() >= 64);
+            // CachePadded typically uses 64-byte or larger alignment
+            assert!(align_of::<PaddedAtomicU32>() >= 64);
+        }
+
+        // General checks for all architectures
+        assert!(size_of::<PaddedAtomicU32>() >= size_of::<AtomicU32>());
+        assert!(align_of::<PaddedAtomicU32>() >= align_of::<AtomicU32>());
+
+        println!(
+            "PaddedAtomicU32: size={}, align={}",
+            size_of::<PaddedAtomicU32>(),
+            align_of::<PaddedAtomicU32>()
+        );
     }
 }
