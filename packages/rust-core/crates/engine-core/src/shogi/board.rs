@@ -2120,6 +2120,27 @@ impl Position {
             }
         }
     }
+
+    /// Count pieces of given type on board for both colors
+    pub fn count_piece_on_board(&self, piece_type: PieceType) -> u16 {
+        let black_count =
+            self.board.piece_bb[Color::Black as usize][piece_type as usize].count_ones();
+        let white_count =
+            self.board.piece_bb[Color::White as usize][piece_type as usize].count_ones();
+        (black_count + white_count) as u16
+    }
+
+    /// Count pieces in hand
+    pub fn count_piece_in_hand(&self, color: Color, piece_type: PieceType) -> u16 {
+        match piece_type {
+            PieceType::King => 0,
+            _ => {
+                let hand_idx = piece_type_to_hand_index(piece_type)
+                    .expect("Non-King piece type should be valid for hand");
+                self.hands[color as usize][hand_idx] as u16
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3531,5 +3552,46 @@ mod tests {
             ns_per_call < max_ns,
             "get_lance_attackers_to is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
+    }
+
+    #[test]
+    fn test_count_piece_on_board() {
+        // Test with starting position
+        let pos = Position::startpos();
+
+        // Check piece counts
+        assert_eq!(pos.count_piece_on_board(PieceType::King), 2);
+        assert_eq!(pos.count_piece_on_board(PieceType::Rook), 2);
+        assert_eq!(pos.count_piece_on_board(PieceType::Bishop), 2);
+        assert_eq!(pos.count_piece_on_board(PieceType::Gold), 4);
+        assert_eq!(pos.count_piece_on_board(PieceType::Silver), 4);
+        assert_eq!(pos.count_piece_on_board(PieceType::Knight), 4);
+        assert_eq!(pos.count_piece_on_board(PieceType::Lance), 4);
+        assert_eq!(pos.count_piece_on_board(PieceType::Pawn), 18);
+
+        // Test with empty position
+        let empty_pos = Position::empty();
+        assert_eq!(empty_pos.count_piece_on_board(PieceType::Rook), 0);
+        assert_eq!(empty_pos.count_piece_on_board(PieceType::Pawn), 0);
+    }
+
+    #[test]
+    fn test_count_piece_in_hand() {
+        let mut pos = Position::empty();
+
+        // Add some pieces to hands
+        pos.hands[Color::Black as usize][0] = 1; // Rook
+        pos.hands[Color::Black as usize][1] = 2; // Bishop
+        pos.hands[Color::White as usize][6] = 5; // Pawn
+
+        // Test counts
+        assert_eq!(pos.count_piece_in_hand(Color::Black, PieceType::Rook), 1);
+        assert_eq!(pos.count_piece_in_hand(Color::Black, PieceType::Bishop), 2);
+        assert_eq!(pos.count_piece_in_hand(Color::Black, PieceType::Pawn), 0);
+        assert_eq!(pos.count_piece_in_hand(Color::White, PieceType::Pawn), 5);
+
+        // King should always return 0
+        assert_eq!(pos.count_piece_in_hand(Color::Black, PieceType::King), 0);
+        assert_eq!(pos.count_piece_in_hand(Color::White, PieceType::King), 0);
     }
 }

@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let batch_results: Vec<_> = chunk
             .par_iter()
             .map(|(idx, sfen)| {
-                let engine = Engine::new(EngineType::Material);
+                let mut engine = Engine::new(EngineType::Material);
 
                 match Position::from_sfen(sfen) {
                     Ok(mut position) => {
@@ -257,7 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let retry_results: Vec<_> = timeout_positions
             .par_iter()
             .map(|(_idx, sfen)| {
-                let engine = Engine::new(EngineType::Material);
+                let mut engine = Engine::new(EngineType::Material);
 
                 match Position::from_sfen(sfen) {
                     Ok(mut position) => {
