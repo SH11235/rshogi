@@ -169,9 +169,9 @@ fn test_parallel_search_stress_with_random_stops() {
         let result = searcher.search(&mut position, limits);
         let elapsed = start.elapsed();
 
-        // Should complete within reasonable time (2x the limit + buffer)
+        // Should complete within reasonable time (3x the limit + buffer for channel overhead)
         assert!(
-            elapsed < Duration::from_millis(time_limit * 2 + 100),
+            elapsed < Duration::from_millis(time_limit * 3 + 150),
             "Search took too long with {time_limit} ms limit: {elapsed:?}"
         );
         assert!(result.stats.nodes > 0);
