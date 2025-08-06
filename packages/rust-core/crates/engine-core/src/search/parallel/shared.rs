@@ -52,21 +52,25 @@ impl SharedHistory {
         self.table[idx].load(Ordering::Relaxed)
     }
 
-    /// Update history score (lock-free using fetch_add)
+    /// Update history score (lock-free using CAS loop)
     pub fn update(&self, color: Color, piece_type: PieceType, to: Square, bonus: u32) {
         let idx = Self::get_index(color, piece_type, to);
 
-        // Saturating add to prevent overflow
-        let old_value = self.table[idx].load(Ordering::Relaxed);
-        let new_value = old_value.saturating_add(bonus).min(10000);
+        // CAS loop to ensure update succeeds even under high contention
+        loop {
+            let old_value = self.table[idx].load(Ordering::Relaxed);
+            let new_value = old_value.saturating_add(bonus).min(10000);
 
-        // Use compare_exchange_weak for efficiency
-        let _ = self.table[idx].compare_exchange_weak(
-            old_value,
-            new_value,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
+            match self.table[idx].compare_exchange_weak(
+                old_value,
+                new_value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(_) => continue, // Retry on failure
+            }
+        }
     }
 
     /// Age all history scores (divide by 2)
@@ -216,6 +220,7 @@ impl SharedSearchState {
 mod tests {
     use super::*;
     use crate::shogi::{Color, Move, PieceType, Square};
+    use std::mem::size_of;
     use std::sync::{atomic::AtomicBool, Arc};
 
     #[test]
@@ -277,5 +282,17 @@ mod tests {
         state.maybe_update_best(300, Some(worse_move), 5, 0);
         assert_eq!(state.get_best_move(), Some(worse_move)); // Should update
         assert_eq!(state.get_best_score(), 300);
+    }
+
+    #[test]
+    fn test_cache_padded_size() {
+        // Ensure CachePadded maintains at least cache line size alignment
+        // This prevents false sharing issues across different crossbeam versions
+        // Note: Some systems may use 128-byte cache lines
+        assert!(size_of::<CachePadded<AtomicU32>>() >= 64);
+        assert!(size_of::<CachePadded<AtomicU64>>() >= 64);
+
+        // Also verify they're the same size (consistent padding)
+        assert_eq!(size_of::<CachePadded<AtomicU32>>(), size_of::<CachePadded<AtomicU64>>());
     }
 }
