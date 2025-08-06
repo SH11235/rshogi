@@ -201,10 +201,7 @@ mod tests {
                 assert_eq!(
                     thread.get_start_depth(base_depth),
                     expected as u8,
-                    "Thread {} with base depth {} should return {}",
-                    thread_id,
-                    base_depth,
-                    expected
+                    "Thread {thread_id} with base depth {base_depth} should return {expected}"
                 );
             }
         } // thread is dropped here, freeing stack memory
