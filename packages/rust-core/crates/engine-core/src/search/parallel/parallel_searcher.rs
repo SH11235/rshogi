@@ -385,8 +385,8 @@ mod tests {
         let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
         let mut position = Position::startpos();
 
-        // Very short search with time limit to avoid infinite loop
-        let limits = SearchLimitsBuilder::default().depth(2).fixed_time_ms(50).build();
+        // Search with depth limit only
+        let limits = SearchLimitsBuilder::default().depth(2).build();
 
         let result = searcher.search(&mut position, limits);
 

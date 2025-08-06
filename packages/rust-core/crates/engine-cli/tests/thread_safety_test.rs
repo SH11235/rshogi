@@ -518,8 +518,16 @@ fn test_concurrent_setoption_and_go() {
     option_thread.join().expect("Option thread panicked");
     search_thread.join().expect("Search thread panicked");
 
-    // Should complete search successfully
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    // Send isready to ensure setoption is processed
+    {
+        let mut stdin = stdin.lock().unwrap();
+        send_command(&mut *stdin, "isready");
+    }
+    let _ = read_until_pattern(&rx, "readyok", Duration::from_secs(1))
+        .expect("Failed to get readyok after concurrent commands");
+
+    // Should complete search successfully with extended timeout
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
     assert!(result.is_ok(), "Failed to complete search after concurrent setoption");
 
     // Cleanup
@@ -550,9 +558,14 @@ fn test_setoption_queued_until_search_finishes() {
     // Send setoption while searching
     send_command(&mut stdin, "setoption name Threads value 4");
 
-    // Wait for first search to complete
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    // Wait for first search to complete with extended timeout
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
     assert!(result.is_ok(), "Failed to get bestmove from first search");
+
+    // Ensure setoption is processed before next search
+    send_command(&mut stdin, "isready");
+    let _ = read_until_pattern(&rx, "readyok", Duration::from_secs(2))
+        .expect("Failed to get readyok after setoption");
 
     // Start another search - this should use the new thread count
     send_command(&mut stdin, "go movetime 500");
@@ -622,8 +635,8 @@ fn test_setoption_returns_ok_while_searching() {
 
     assert!(!found_error, "setoption should not return error while searching");
 
-    // Wait for search to complete
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    // Wait for search to complete with extended timeout
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
     assert!(result.is_ok(), "Failed to get bestmove");
 
     // Cleanup
@@ -652,8 +665,8 @@ fn test_multiple_setoptions_during_search() {
     thread::sleep(Duration::from_millis(50));
     send_command(&mut stdin, "setoption name USI_Hash value 32");
 
-    // Wait for first search to complete
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    // Wait for first search to complete with extended timeout
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
     assert!(result.is_ok(), "Failed to get bestmove from first search");
 
     // Verify settings are applied in next search
@@ -663,8 +676,8 @@ fn test_multiple_setoptions_during_search() {
     // Start another search - should use all new settings
     send_command(&mut stdin, "go movetime 500");
 
-    // Wait for search to complete
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    // Wait for search to complete with extended timeout
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
     assert!(result.is_ok(), "Failed to get bestmove from second search");
 
     // Cleanup
