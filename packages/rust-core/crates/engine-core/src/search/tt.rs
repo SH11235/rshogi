@@ -577,10 +577,10 @@ impl TTBucket {
     /// SIMD-optimized probe implementation
     fn probe_simd_impl(&self, target_key: u64) -> Option<TTEntry> {
         // Load all 4 keys at once for SIMD comparison
-        // Use Relaxed ordering for initial loads to avoid unnecessary barriers
+        // Use Acquire ordering for key loads to ensure proper synchronization with Release stores
         let mut keys = [0u64; BUCKET_SIZE];
         for (i, key) in keys.iter_mut().enumerate() {
-            *key = self.entries[i * 2].load(Ordering::Relaxed);
+            *key = self.entries[i * 2].load(Ordering::Acquire);
         }
 
         // Use SIMD to find matching key
@@ -605,9 +605,9 @@ impl TTBucket {
         // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
 
-        // Load keys with early termination
+        // Load keys with early termination using Acquire ordering
         for i in 0..BUCKET_SIZE {
-            let key = self.entries[i * 2].load(Ordering::Relaxed);
+            let key = self.entries[i * 2].load(Ordering::Acquire);
             if key == target_key {
                 matching_idx = Some(i);
                 break; // Early termination - key optimization
