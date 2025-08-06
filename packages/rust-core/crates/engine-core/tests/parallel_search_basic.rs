@@ -1,15 +1,18 @@
 //! Basic parallel search test for Thread Sanitizer validation
 
+#![cfg(not(debug_assertions))] // Only run these tests in release builds due to timing sensitivity
+
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
     search::{
-        parallel::{SearchThread, SharedSearchState},
+        parallel::{ParallelSearcher, SearchThread, SharedSearchState},
         SearchLimitsBuilder, TranspositionTable,
     },
     shogi::Position,
 };
 use std::sync::{atomic::AtomicBool, Arc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[test]
 fn test_parallel_search_no_data_races() {
@@ -29,7 +32,7 @@ fn test_parallel_search_no_data_races() {
         let shared_state = shared_state.clone();
 
         let handle = thread::spawn(move || {
-            let mut thread = SearchThread::new(id, evaluator, tt, shared_state);
+            let mut thread = SearchThread::new(id, evaluator, tt, shared_state, None);
             let mut position = Position::startpos();
 
             // Set a short time limit
@@ -106,4 +109,73 @@ fn test_shared_history_concurrent_access() {
 
     // Clear history from main thread while others might still be reading
     history.clear();
+}
+
+#[test]
+fn test_parallel_searcher_integration() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut position = Position::startpos();
+
+    // Test with time limit
+    let limits = SearchLimitsBuilder::default().fixed_time_ms(50).depth(5).build();
+
+    let result = searcher.search(&mut position, limits);
+
+    // Verify results
+    assert!(result.best_move.is_some(), "Should find a best move");
+    assert!(result.stats.nodes > 0, "Should search some nodes");
+    assert!(result.stats.depth > 0, "Should reach some depth");
+}
+
+#[test]
+fn test_barrier_deadlock_prevention() {
+    // Test that early stop doesn't cause deadlock
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut position = Position::startpos();
+
+    // Very short time limit to trigger early stop
+    let limits = SearchLimitsBuilder::default().depth(10).fixed_time_ms(10).build();
+
+    let start = Instant::now();
+    let result = searcher.search(&mut position, limits);
+    let elapsed = start.elapsed();
+
+    // Should complete quickly without deadlock
+    assert!(elapsed < Duration::from_millis(200), "Search took too long: {elapsed:?}");
+    assert!(result.stats.nodes > 0);
+}
+
+#[test]
+fn test_parallel_search_stress_with_random_stops() {
+    // Run multiple iterations with different stop timing
+    for i in 0..5 {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+        let mut position = Position::startpos();
+
+        // Vary time limit between 10-50ms
+        let time_limit = 10 + i * 10;
+
+        let limits = SearchLimitsBuilder::default()
+            .depth(15) // High depth to ensure threads are working
+            .fixed_time_ms(time_limit)
+            .build();
+
+        let start = Instant::now();
+        let result = searcher.search(&mut position, limits);
+        let elapsed = start.elapsed();
+
+        // Should complete within reasonable time (3x the limit + buffer for channel overhead)
+        assert!(
+            elapsed < Duration::from_millis(time_limit * 3 + 150),
+            "Search took too long with {time_limit} ms limit: {elapsed:?}"
+        );
+        assert!(result.stats.nodes > 0);
+    }
 }
