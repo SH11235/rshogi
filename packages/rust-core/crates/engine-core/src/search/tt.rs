@@ -45,7 +45,7 @@ fn get_depth_threshold(hf: u16) -> u8 {
 //          - Bit 17: Mate threat flag
 //          - Bit 16: Reserved for future use
 // [15-2]: static eval (14 bits) - Optimized from 16 bits, supports ±8191
-// [1-0]: Reserved (2 bits) - For future extensions
+// [1-0]: Reserved (2 bits) - Bit 0: ABDADA_CUT_FLAG, Bit 1: Reserved for future use
 
 const MOVE_SHIFT: u8 = 48;
 const MOVE_BITS: u8 = 16;
@@ -98,6 +98,9 @@ const EVAL_MIN: i16 = -(1 << (EVAL_BITS - 1)); // -8192
 const RESERVED_BITS: u8 = 2;
 #[allow(dead_code)]
 const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
+
+// ABDADA flag for duplicate detection (Phase 3 optimization)
+const ABDADA_CUT_FLAG: u64 = 1 << 0; // Use bit 0 from reserved bits
 
 // Apery-style generation cycle constants
 // This ensures proper wraparound behavior for age distance calculations
@@ -1912,6 +1915,165 @@ impl TranspositionTable {
         result
     }
 
+    /// Set ABDADA exact cut flag for the given hash
+    /// Returns true if flag was successfully set, false if entry not found
+    pub fn set_exact_cut(&self, hash: u64) -> bool {
+        let idx = self.bucket_index(hash);
+
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            let bucket = &flexible_buckets[idx];
+            let entries_per_bucket = bucket.size.entries();
+
+            // Find the entry with matching key
+            for i in 0..entries_per_bucket {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
+                if stored_key == hash {
+                    // Entry found, set ABDADA flag with infinite retry
+                    // This is a rare path (only on exact hash match), so spinning is acceptable
+                    loop {
+                        let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
+                        let new_data = old_data | ABDADA_CUT_FLAG;
+
+                        match bucket.entries[data_idx].compare_exchange_weak(
+                            old_data,
+                            new_data,
+                            Ordering::Release, // Write ordering guarantee
+                            Ordering::Acquire, // Read on failure
+                        ) {
+                            Ok(_) => return true,
+                            Err(_) => {
+                                // In high contention, yield to OS scheduler
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Legacy bucket implementation
+            let bucket = &self.buckets[idx];
+
+            // Find the entry with matching key
+            for i in 0..BUCKET_SIZE {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
+                if stored_key == hash {
+                    // Entry found, set ABDADA flag with infinite retry
+                    // This is a rare path (only on exact hash match), so spinning is acceptable
+                    loop {
+                        let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
+                        let new_data = old_data | ABDADA_CUT_FLAG;
+
+                        match bucket.entries[data_idx].compare_exchange_weak(
+                            old_data,
+                            new_data,
+                            Ordering::Release, // Write ordering guarantee
+                            Ordering::Acquire, // Read on failure
+                        ) {
+                            Ok(_) => return true,
+                            Err(_) => {
+                                // In high contention, yield to OS scheduler
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        false // Entry not found
+    }
+
+    /// Check if ABDADA exact cut flag is set for the given hash
+    ///
+    /// Note: This only checks the flag bit. The entry's depth/score fields
+    /// may be stale if only the flag was updated by another thread.
+    pub fn has_exact_cut(&self, hash: u64) -> bool {
+        if let Some(entry) = self.probe(hash) {
+            (entry.data & ABDADA_CUT_FLAG) != 0
+        } else {
+            false
+        }
+    }
+
+    /// Clear ABDADA exact cut flag for the given hash (used during age update)
+    pub fn clear_exact_cut(&self, hash: u64) -> bool {
+        let idx = self.bucket_index(hash);
+
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            let bucket = &flexible_buckets[idx];
+            let entries_per_bucket = bucket.size.entries();
+
+            // Find the entry with matching key
+            for i in 0..entries_per_bucket {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
+                if stored_key == hash {
+                    // Entry found, clear ABDADA flag with infinite retry
+                    // This is a rare path (only on exact hash match), so spinning is acceptable
+                    loop {
+                        let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
+                        let new_data = old_data & !ABDADA_CUT_FLAG;
+
+                        match bucket.entries[data_idx].compare_exchange_weak(
+                            old_data,
+                            new_data,
+                            Ordering::Release,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => return true,
+                            Err(_) => {
+                                // In high contention, yield to OS scheduler
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Legacy bucket implementation
+            let bucket = &self.buckets[idx];
+
+            // Find the entry with matching key
+            for i in 0..BUCKET_SIZE {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
+                if stored_key == hash {
+                    // Entry found, clear ABDADA flag with infinite retry
+                    // This is a rare path (only on exact hash match), so spinning is acceptable
+                    loop {
+                        let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
+                        let new_data = old_data & !ABDADA_CUT_FLAG;
+
+                        match bucket.entries[data_idx].compare_exchange_weak(
+                            old_data,
+                            new_data,
+                            Ordering::Release,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => return true,
+                            Err(_) => {
+                                // In high contention, yield to OS scheduler
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        false // Entry not found
+    }
+
     /// Store entry in transposition table
     pub fn store(
         &self,
@@ -2620,6 +2782,98 @@ mod tests {
 
         // Should NOT be filtered
         assert_eq!(metrics.hashfull_filtered.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_abdada_flag_operations() {
+        let tt = TranspositionTable::new(1); // 1MB table
+        let hash = 0x1234567890ABCDEF;
+
+        // Store an entry
+        tt.store(hash, None, 100, 50, 5, NodeType::Exact);
+
+        // Initially, exact cut flag should not be set
+        assert!(!tt.has_exact_cut(hash));
+
+        // Set the exact cut flag
+        assert!(tt.set_exact_cut(hash));
+
+        // Now the flag should be set
+        assert!(tt.has_exact_cut(hash));
+
+        // Clear the flag
+        assert!(tt.clear_exact_cut(hash));
+
+        // Flag should be cleared
+        assert!(!tt.has_exact_cut(hash));
+
+        // Test non-existent entry
+        let non_existent_hash = 0xFEDCBA0987654321;
+        assert!(!tt.has_exact_cut(non_existent_hash));
+        assert!(!tt.set_exact_cut(non_existent_hash));
+        assert!(!tt.clear_exact_cut(non_existent_hash));
+    }
+
+    #[test]
+    fn test_abdada_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tt = Arc::new(TranspositionTable::new(4)); // 4MB table
+        let hash = 0xDEADBEEF12345678;
+
+        // Store an entry
+        tt.store(hash, None, 200, 100, 10, NodeType::LowerBound);
+
+        // Create multiple threads trying to set the flag concurrently
+        let mut handles = vec![];
+        for _ in 0..8 {
+            let tt_clone = Arc::clone(&tt);
+            let handle = thread::spawn(move || {
+                // Each thread tries to set the flag multiple times
+                let mut success_count = 0;
+                for _ in 0..100 {
+                    if tt_clone.set_exact_cut(hash) {
+                        success_count += 1;
+                    }
+                }
+                success_count
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // All threads should succeed in setting the flag
+        for count in results {
+            assert!(count > 0);
+        }
+
+        // The flag should still be set
+        assert!(tt.has_exact_cut(hash));
+    }
+
+    #[test]
+    fn test_abdada_flag_persistence() {
+        let tt = TranspositionTable::new(1); // 1MB table
+        let hash = 0xCAFEBABE87654321;
+
+        // Store entry with some values
+        tt.store(hash, None, 150, 75, 8, NodeType::Exact);
+
+        // Set the flag
+        assert!(tt.set_exact_cut(hash));
+
+        // Probe the entry and verify other fields are intact
+        let entry = tt.probe(hash).unwrap();
+        assert_eq!(entry.score(), 150);
+        assert_eq!(entry.eval(), 75);
+        assert_eq!(entry.depth(), 8);
+        assert_eq!(entry.node_type(), NodeType::Exact);
+
+        // Flag should still be set
+        assert!(tt.has_exact_cut(hash));
     }
 
     #[test]

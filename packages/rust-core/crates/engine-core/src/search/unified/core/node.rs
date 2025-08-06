@@ -114,6 +114,22 @@ where
             }
         }
 
+        // ABDADA: Check if sibling node found exact cut
+        if depth > 2 {
+            if let Some(ref tt) = searcher.tt {
+                if tt.has_exact_cut(hash) {
+                    // Early return with the stored score if available
+                    if let Some(entry) = tt_entry {
+                        // Only trust the early cutoff if the entry has sufficient depth
+                        if entry.depth() >= depth.saturating_sub(1) {
+                            return entry.score() as i32;
+                        }
+                    }
+                    // If no score available or depth insufficient, continue searching
+                }
+            }
+        }
+
         tt_entry.and_then(|entry| entry.get_move())
     } else {
         None
@@ -328,6 +344,14 @@ where
                             }
                         }
                     }
+
+                    // ABDADA: Set exact cut flag for siblings
+                    if USE_TT && depth > 2 {
+                        if let Some(ref tt) = searcher.tt {
+                            tt.set_exact_cut(hash);
+                        }
+                    }
+
                     break;
                 }
             }
@@ -471,5 +495,39 @@ mod tests {
 
         // With pruning should search fewer nodes
         assert!(searcher_with_pruning.stats.nodes < searcher_no_pruning.stats.nodes);
+    }
+
+    #[test]
+    fn test_abdada_integration() {
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(5).build());
+
+        let mut pos = Position::startpos();
+        let hash = pos.zobrist_hash;
+
+        // First search to populate TT
+        let _score1 = search_node(&mut searcher, &mut pos, 4, -1000, 1000, 0);
+
+        // Simulate beta cutoff by setting exact cut flag
+        if let Some(ref tt) = searcher.tt {
+            tt.set_exact_cut(hash);
+        }
+
+        // Reset node count
+        let nodes_before = searcher.stats.nodes;
+
+        // Second search should return early due to ABDADA flag
+        let score2 = search_node(&mut searcher, &mut pos, 4, -1000, 1000, 0);
+
+        // Should have searched very few nodes due to early return
+        let nodes_after = searcher.stats.nodes;
+        assert!(
+            nodes_after - nodes_before < 10,
+            "ABDADA early return should minimize node count"
+        );
+
+        // Scores might differ due to early return, but should be reasonable
+        assert!(score2.abs() < 10000);
     }
 }
