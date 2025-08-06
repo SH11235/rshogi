@@ -3,7 +3,7 @@
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
     search::{
-        parallel::{SearchThread, SharedSearchState},
+        parallel::{ParallelSearcher, SearchThread, SharedSearchState},
         SearchLimitsBuilder, TranspositionTable,
     },
     shogi::Position,
@@ -106,4 +106,23 @@ fn test_shared_history_concurrent_access() {
 
     // Clear history from main thread while others might still be reading
     history.clear();
+}
+
+#[test]
+fn test_parallel_searcher_integration() {
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(TranspositionTable::new(16));
+
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+    let mut position = Position::startpos();
+
+    // Test with time limit
+    let limits = SearchLimitsBuilder::default().fixed_time_ms(50).depth(5).build();
+
+    let result = searcher.search(&mut position, limits);
+
+    // Verify results
+    assert!(result.best_move.is_some(), "Should find a best move");
+    assert!(result.stats.nodes > 0, "Should search some nodes");
+    assert!(result.stats.depth > 0, "Should reach some depth");
 }

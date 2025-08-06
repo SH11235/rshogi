@@ -268,7 +268,10 @@ impl EngineAdapter {
 
     /// Initialize the engine
     pub fn initialize(&mut self) -> Result<()> {
-        // Engine is ready
+        // Apply thread count to engine
+        if let Some(ref mut engine) = self.engine {
+            engine.set_threads(self.threads);
+        }
         Ok(())
     }
 
@@ -301,12 +304,18 @@ impl EngineAdapter {
             }
             "Threads" => {
                 if let Some(val) = value {
-                    self.threads = val.parse::<usize>().map_err(|_| {
+                    let threads = val.parse::<usize>().map_err(|_| {
                         anyhow!(
                             "Invalid thread count: '{}'. Must be a number between 1 and 256",
                             val
                         )
                     })?;
+                    self.threads = threads;
+
+                    // Apply to engine if it exists
+                    if let Some(ref mut engine) = self.engine {
+                        engine.set_threads(threads);
+                    }
                 }
             }
             "USI_Ponder" => {
@@ -325,6 +334,8 @@ impl EngineAdapter {
                     };
                     if let Some(ref mut engine) = self.engine {
                         engine.set_engine_type(engine_type);
+                        // Re-apply thread count after engine type change
+                        engine.set_threads(self.threads);
                     } else {
                         return Err(anyhow!("Engine is currently in use"));
                     }
