@@ -97,6 +97,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 evaluator.clone(),
                 tt.clone(),
                 shared_state.clone(),
+                Some(duplication_stats.clone()),
             )));
             threads.push(thread);
         }
@@ -142,6 +143,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Stop all threads
         self.shared_state.set_stop();
 
+        // Release barrier one more time to unblock any waiting threads
+        // This prevents deadlock when workers are waiting at barrier
+        self.start_barrier.wait();
+
         // Wait for worker threads
         let mut handles = self.handles.lock().unwrap();
         for handle in handles.drain(..) {
@@ -182,9 +187,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // Worker thread search loop
                 for iteration in 1.. {
+                    // Check stop flag before waiting on barrier to avoid deadlock
+                    if shared_state.should_stop() {
+                        break;
+                    }
+
                     // Wait for all threads to be ready
                     barrier.wait();
 
+                    // Double-check after barrier wait
                     if shared_state.should_stop() {
                         break;
                     }
@@ -194,8 +205,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                     let _result = thread.search(&mut position, limits.clone(), depth);
 
-                    // Update node count
-                    shared_state.add_nodes(thread.searcher.nodes());
+                    // Update node count (differential)
+                    thread.report_nodes();
                 }
             });
 
@@ -237,8 +248,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             }
 
-            // Update node count
-            self.shared_state.add_nodes(thread.searcher.nodes());
+            // Update node count (differential)
+            thread.report_nodes();
         }
 
         // Get final best move from shared state

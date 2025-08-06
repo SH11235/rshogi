@@ -21,11 +21,8 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
     pub id: usize,
 
     /// The actual searcher instance
-    /// Uses standard TT configuration
+    /// Uses shared TT from parallel coordinator
     pub searcher: UnifiedSearcher<E, true, true, 16>,
-
-    /// Shared TT reference (overrides searcher's internal TT)
-    pub shared_tt: Arc<crate::search::TranspositionTable>,
 
     /// Thread-local history table
     pub local_history: History,
@@ -44,6 +41,9 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
 
     /// Reference to shared state
     pub shared_state: Arc<SharedSearchState>,
+
+    /// Last reported node count (for differential updates)
+    pub last_nodes: u64,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
@@ -53,21 +53,26 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         evaluator: Arc<E>,
         tt: Arc<crate::search::TranspositionTable>,
         shared_state: Arc<SharedSearchState>,
+        duplication_stats: Option<Arc<super::DuplicationStats>>,
     ) -> Self {
-        // Create searcher with standard configuration
-        // We'll override TT access in search methods
-        let searcher = UnifiedSearcher::with_arc(evaluator);
+        // Create searcher with shared TT
+        let mut searcher = UnifiedSearcher::with_shared_tt(evaluator, tt);
+
+        // Set duplication stats if provided
+        if let Some(stats) = duplication_stats {
+            searcher.set_duplication_stats(stats);
+        }
 
         Self {
             id,
             searcher,
-            shared_tt: tt,
             local_history: History::new(),
             local_counter_moves: CounterMoveHistory::new(),
             local_killers: KillerTable::new(),
             thread_local_pv: Vec::new(),
             generation: 0,
             shared_state,
+            last_nodes: 0,
         }
     }
 
@@ -89,6 +94,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         self.local_killers.clear();
         self.thread_local_pv.clear();
         self.generation = 0;
+        self.last_nodes = 0;
     }
 
     /// Search from this thread
@@ -126,12 +132,25 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             self.generation,
         );
 
+        // TODO: Sync with SharedHistory if needed
+        // This requires History -> SharedHistory conversion logic
+
         result
     }
 
     /// Check if this thread should stop
     pub fn should_stop(&self) -> bool {
         self.shared_state.should_stop()
+    }
+
+    /// Report node count difference to shared state
+    pub fn report_nodes(&mut self) {
+        let current_nodes = self.searcher.nodes();
+        let diff = current_nodes.saturating_sub(self.last_nodes);
+        if diff > 0 {
+            self.shared_state.add_nodes(diff);
+            self.last_nodes = current_nodes;
+        }
     }
 }
 
@@ -148,7 +167,7 @@ mod tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        let thread = SearchThread::new(0, evaluator, tt, shared_state);
+        let thread = SearchThread::new(0, evaluator, tt, shared_state, None);
         assert_eq!(thread.id, 0);
     }
 
@@ -160,28 +179,32 @@ mod tests {
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
         // Main thread (id=0) should follow normal iterative deepening
-        let main_thread = SearchThread::new(0, evaluator.clone(), tt.clone(), shared_state.clone());
+        let main_thread =
+            SearchThread::new(0, evaluator.clone(), tt.clone(), shared_state.clone(), None);
         assert_eq!(main_thread.get_start_depth(1), 1);
         assert_eq!(main_thread.get_start_depth(5), 5);
         assert_eq!(main_thread.get_start_depth(10), 10);
 
         // Helper thread 1 should skip 1 depth
-        let helper1 = SearchThread::new(1, evaluator.clone(), tt.clone(), shared_state.clone());
+        let helper1 =
+            SearchThread::new(1, evaluator.clone(), tt.clone(), shared_state.clone(), None);
         assert_eq!(helper1.get_start_depth(1), 2); // 1 + 1
         assert_eq!(helper1.get_start_depth(5), 6); // 5 + 1
 
         // Helper thread 2 should skip 2 depths
-        let helper2 = SearchThread::new(2, evaluator.clone(), tt.clone(), shared_state.clone());
+        let helper2 =
+            SearchThread::new(2, evaluator.clone(), tt.clone(), shared_state.clone(), None);
         assert_eq!(helper2.get_start_depth(1), 3); // 1 + 2
         assert_eq!(helper2.get_start_depth(5), 7); // 5 + 2
 
         // Helper thread 3 should skip 3 depths
-        let helper3 = SearchThread::new(3, evaluator.clone(), tt.clone(), shared_state.clone());
+        let helper3 =
+            SearchThread::new(3, evaluator.clone(), tt.clone(), shared_state.clone(), None);
         assert_eq!(helper3.get_start_depth(1), 4); // 1 + 3
         assert_eq!(helper3.get_start_depth(5), 8); // 5 + 3
 
         // Helper thread 4 should cycle back to skip 1 depth
-        let helper4 = SearchThread::new(4, evaluator, tt, shared_state);
+        let helper4 = SearchThread::new(4, evaluator, tt, shared_state, None);
         assert_eq!(helper4.get_start_depth(1), 2); // 1 + 1
     }
 }
