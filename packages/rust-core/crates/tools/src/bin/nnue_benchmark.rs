@@ -48,12 +48,12 @@ fn main() {
         println!("\nPosition {}:", i + 1);
 
         // Material evaluator benchmark
-        let material_engine = Engine::new(EngineType::Material);
-        let material_result = benchmark_engine(&material_engine, pos.clone(), "Material");
+        let mut material_engine = Engine::new(EngineType::Material);
+        let material_result = benchmark_engine(&mut material_engine, pos.clone(), "Material");
 
         // NNUE evaluator benchmark
-        let nnue_engine = Engine::new(EngineType::Nnue);
-        let nnue_result = benchmark_engine(&nnue_engine, pos.clone(), "NNUE");
+        let mut nnue_engine = Engine::new(EngineType::Nnue);
+        let nnue_result = benchmark_engine(&mut nnue_engine, pos.clone(), "NNUE");
 
         // Compare results
         println!("\nSearch Comparison:");
@@ -79,7 +79,7 @@ fn main() {
     println!("Search NPS (Material): {} nodes/sec", general_result.nps);
 }
 
-fn benchmark_engine(engine: &Engine, mut pos: Position, name: &str) -> (f64, i32) {
+fn benchmark_engine(engine: &mut Engine, mut pos: Position, name: &str) -> (f64, i32) {
     println!("\n  {name} Engine:");
 
     let limits = SearchLimits::builder()
@@ -108,7 +108,7 @@ fn test_nnue_performance() {
     use std::time::Duration;
     // Simple performance regression test
     let pos = Position::startpos();
-    let engine = Engine::new(EngineType::Nnue);
+    let mut engine = Engine::new(EngineType::Nnue);
 
     let limits = SearchLimits::builder().depth(4).fixed_time_ms(100).build();
 

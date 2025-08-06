@@ -8,7 +8,7 @@ use engine_core::{
     Position,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,7 +23,7 @@ impl SearchTester {
         Self { engine }
     }
 
-    fn search_with_depth(&self, pos: &mut Position, depth: u8) -> Duration {
+    fn search_with_depth(&mut self, pos: &mut Position, depth: u8) -> Duration {
         let limits = SearchLimitsBuilder::default().depth(depth).build();
         let start = Instant::now();
         let result = self.engine.search(pos, limits);
@@ -31,7 +31,7 @@ impl SearchTester {
         start.elapsed()
     }
 
-    fn search_with_time(&self, pos: &mut Position, time_ms: u64) -> u64 {
+    fn search_with_time(&mut self, pos: &mut Position, time_ms: u64) -> u64 {
         let limits = SearchLimitsBuilder::default().fixed_time_ms(time_ms).build();
         let result = self.engine.search(pos, limits);
         assert!(result.best_move.is_some());
@@ -41,7 +41,7 @@ impl SearchTester {
 
 #[test]
 fn test_search_response_time() {
-    let tester = SearchTester::new(EngineType::Material);
+    let mut tester = SearchTester::new(EngineType::Material);
     let mut pos = Position::startpos();
 
     // Search to depth 3 should complete quickly
@@ -52,7 +52,7 @@ fn test_search_response_time() {
 
 #[test]
 fn test_search_produces_output() {
-    let tester = SearchTester::new(EngineType::Material);
+    let mut tester = SearchTester::new(EngineType::Material);
     let mut pos = Position::startpos();
 
     // Fixed time search should complete within time limit
@@ -69,7 +69,7 @@ fn test_search_produces_output() {
 
 #[test]
 fn test_search_with_stop_flag() {
-    let engine = Arc::new(Engine::new(EngineType::Material));
+    let engine = Arc::new(Mutex::new(Engine::new(EngineType::Material)));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     // Start search in thread
@@ -82,7 +82,8 @@ fn test_search_with_stop_flag() {
             .stop_flag(stop_flag_clone)
             .build();
         let start = Instant::now();
-        let result = engine_clone.search(&mut pos, limits);
+        let mut engine = engine_clone.lock().unwrap();
+        let result = engine.search(&mut pos, limits);
         (result.best_move.is_some(), start.elapsed())
     });
 
@@ -98,7 +99,7 @@ fn test_search_with_stop_flag() {
 
 #[test]
 fn test_depth_search_terminates() {
-    let tester = SearchTester::new(EngineType::Material);
+    let mut tester = SearchTester::new(EngineType::Material);
     let mut pos = Position::startpos();
 
     // Test depth 5 search (performance issue should be fixed)
@@ -117,11 +118,11 @@ fn test_depth_search_terminates() {
 #[test]
 #[ignore] // This test requires large stack size
 fn test_enhanced_search_performance() {
-    let tester = SearchTester::new(EngineType::Enhanced);
+    let mut tester = SearchTester::new(EngineType::Enhanced);
     let mut pos = Position::startpos();
 
     // Enhanced should search deeper in same time
-    let basic_tester = SearchTester::new(EngineType::Material);
+    let mut basic_tester = SearchTester::new(EngineType::Material);
     let mut pos2 = Position::startpos();
 
     let basic_nodes = basic_tester.search_with_time(&mut pos2, 100);
@@ -152,7 +153,7 @@ fn test_engine_type_switching() {
 
 #[test]
 fn test_various_positions() {
-    let tester = SearchTester::new(EngineType::Material);
+    let mut tester = SearchTester::new(EngineType::Material);
 
     // Test various positions
     let positions = [
@@ -179,7 +180,7 @@ fn test_various_positions() {
 
 #[test]
 fn test_concurrent_searches() {
-    let engine = Arc::new(Engine::new(EngineType::Material));
+    let engine = Arc::new(Mutex::new(Engine::new(EngineType::Material)));
     let mut handles = vec![];
 
     // Spawn multiple threads doing searches
@@ -189,7 +190,8 @@ fn test_concurrent_searches() {
             let mut pos = Position::startpos();
             let limits = SearchLimitsBuilder::default().depth(3).build();
             let start = Instant::now();
-            let result = engine_clone.search(&mut pos, limits);
+            let mut engine = engine_clone.lock().unwrap();
+            let result = engine.search(&mut pos, limits);
             let elapsed = start.elapsed();
             let nodes = result.stats.nodes;
             println!("Thread {i} completed in {elapsed:?} with {nodes} nodes");
