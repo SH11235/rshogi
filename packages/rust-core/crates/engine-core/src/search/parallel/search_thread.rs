@@ -178,33 +178,35 @@ mod tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        // Main thread (id=0) should follow normal iterative deepening
-        let main_thread =
-            SearchThread::new(0, evaluator.clone(), tt.clone(), shared_state.clone(), None);
-        assert_eq!(main_thread.get_start_depth(1), 1);
-        assert_eq!(main_thread.get_start_depth(5), 5);
-        assert_eq!(main_thread.get_start_depth(10), 10);
+        // Test each thread ID separately to avoid stack overflow in release builds
+        for thread_id in 0..5 {
+            let thread = SearchThread::new(
+                thread_id,
+                evaluator.clone(),
+                tt.clone(),
+                shared_state.clone(),
+                None,
+            );
 
-        // Helper thread 1 should skip 1 depth
-        let helper1 =
-            SearchThread::new(1, evaluator.clone(), tt.clone(), shared_state.clone(), None);
-        assert_eq!(helper1.get_start_depth(1), 2); // 1 + 1
-        assert_eq!(helper1.get_start_depth(5), 6); // 5 + 1
+            // Calculate expected skip based on thread ID
+            let skip = if thread_id == 0 {
+                0 // Main thread: no skip
+            } else {
+                ((thread_id - 1) % 3) + 1 // Helpers: skip 1-3 cyclically
+            };
 
-        // Helper thread 2 should skip 2 depths
-        let helper2 =
-            SearchThread::new(2, evaluator.clone(), tt.clone(), shared_state.clone(), None);
-        assert_eq!(helper2.get_start_depth(1), 3); // 1 + 2
-        assert_eq!(helper2.get_start_depth(5), 7); // 5 + 2
-
-        // Helper thread 3 should skip 3 depths
-        let helper3 =
-            SearchThread::new(3, evaluator.clone(), tt.clone(), shared_state.clone(), None);
-        assert_eq!(helper3.get_start_depth(1), 4); // 1 + 3
-        assert_eq!(helper3.get_start_depth(5), 8); // 5 + 3
-
-        // Helper thread 4 should cycle back to skip 1 depth
-        let helper4 = SearchThread::new(4, evaluator, tt, shared_state, None);
-        assert_eq!(helper4.get_start_depth(1), 2); // 1 + 1
+            // Test various depths
+            for base_depth in [1, 5, 10] {
+                let expected = base_depth + skip;
+                assert_eq!(
+                    thread.get_start_depth(base_depth),
+                    expected as u8,
+                    "Thread {} with base depth {} should return {}",
+                    thread_id,
+                    base_depth,
+                    expected
+                );
+            }
+        } // thread is dropped here, freeing stack memory
     }
 }
