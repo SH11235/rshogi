@@ -2,7 +2,7 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
-use log::{error, info};
+use log::{debug, error, info};
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -14,6 +14,10 @@ use crate::{
     time_management::GamePhase,
     Position,
 };
+
+/// Game phase thresholds
+const OPENING_END_PLY: u16 = 40;
+const MIDDLEGAME_END_PLY: u16 = 120;
 
 /// Type alias for unified searchers
 type MaterialSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
@@ -168,23 +172,25 @@ impl Engine {
     /// Detect game phase based on position
     fn detect_game_phase(&self, position: &Position) -> GamePhase {
         // Simple implementation based on move count
-        // Can be enhanced later with piece count analysis
+        // TODO: Can be enhanced later with piece count analysis
+        // e.g., checking major piece count for more accurate endgame detection
         match position.ply {
-            0..=40 => GamePhase::Opening,
-            41..=120 => GamePhase::MiddleGame,
+            0..=OPENING_END_PLY => GamePhase::Opening,
+            ply if ply <= MIDDLEGAME_END_PLY => GamePhase::MiddleGame,
             _ => GamePhase::EndGame,
         }
     }
 
     /// Calculate active threads based on game phase
+    #[allow(clippy::manual_div_ceil)] // For compatibility with Rust < 1.73
     fn calculate_active_threads(&self, position: &Position) -> usize {
         let phase = self.detect_game_phase(position);
         let base_threads = self.num_threads;
 
         match phase {
-            GamePhase::Opening => base_threads,             // All threads
-            GamePhase::MiddleGame => base_threads,          // All threads
-            GamePhase::EndGame => base_threads.div_ceil(2), // Half threads (rounded up)
+            GamePhase::Opening => base_threads,           // All threads
+            GamePhase::MiddleGame => base_threads,        // All threads
+            GamePhase::EndGame => (base_threads + 1) / 2, // Half threads (rounded up)
         }
     }
 
@@ -195,7 +201,7 @@ impl Engine {
 
         // Calculate active threads for this phase
         let active_threads = self.calculate_active_threads(pos);
-        info!(
+        debug!(
             "Engine::search called with engine_type: {:?}, parallel: {}, active_threads: {} (phase: {:?})",
             self.engine_type,
             self.use_parallel,
@@ -225,18 +231,18 @@ impl Engine {
                     }
                 }
                 EngineType::Nnue => {
-                    log::info!("Starting NNUE search");
+                    debug!("Starting NNUE search");
                     let mut searcher_guard = self.nnue_basic_searcher.lock().unwrap();
                     if let Some(searcher) = searcher_guard.as_mut() {
                         let result = searcher.search(pos, limits);
-                        log::info!("NNUE search completed");
+                        debug!("NNUE search completed");
                         result
                     } else {
                         panic!("NNUE searcher not initialized");
                     }
                 }
                 EngineType::Enhanced => {
-                    log::info!("Starting Enhanced search");
+                    debug!("Starting Enhanced search");
                     let mut searcher_guard = self.material_enhanced_searcher.lock().unwrap();
                     if let Some(searcher) = searcher_guard.as_mut() {
                         searcher.search(pos, limits)
@@ -245,7 +251,7 @@ impl Engine {
                     }
                 }
                 EngineType::EnhancedNnue => {
-                    log::info!("Starting Enhanced NNUE search");
+                    debug!("Starting Enhanced NNUE search");
                     let mut searcher_guard = self.nnue_enhanced_searcher.lock().unwrap();
                     if let Some(searcher) = searcher_guard.as_mut() {
                         searcher.search(pos, limits)
@@ -264,7 +270,7 @@ impl Engine {
         limits: SearchLimits,
         active_threads: usize,
     ) -> SearchResult {
-        info!("Starting parallel material search with {active_threads} active threads");
+        debug!("Starting parallel material search with {active_threads} active threads");
 
         // Initialize parallel searcher if needed or if thread count changed
         let mut searcher_guard = self.material_parallel_searcher.lock().unwrap();
@@ -272,10 +278,12 @@ impl Engine {
             *searcher_guard = Some(MaterialParallelSearcher::new(
                 self.material_evaluator.clone(),
                 self.shared_tt.clone(),
-                active_threads,
+                self.num_threads, // Use max threads, not active threads
             ));
-        } else if let Some(searcher) = searcher_guard.as_mut() {
-            // Adjust thread count if different
+        }
+
+        // Always adjust to current active thread count
+        if let Some(searcher) = searcher_guard.as_mut() {
             searcher.adjust_thread_count(active_threads);
         }
 
@@ -293,7 +301,7 @@ impl Engine {
         limits: SearchLimits,
         active_threads: usize,
     ) -> SearchResult {
-        info!("Starting parallel NNUE search with {active_threads} active threads");
+        debug!("Starting parallel NNUE search with {active_threads} active threads");
 
         // Initialize parallel searcher if needed or if thread count changed
         let mut searcher_guard = self.nnue_parallel_searcher.lock().unwrap();
@@ -304,10 +312,12 @@ impl Engine {
             *searcher_guard = Some(NnueParallelSearcher::new(
                 Arc::new(nnue_proxy),
                 self.shared_tt.clone(),
-                active_threads,
+                self.num_threads, // Use max threads, not active threads
             ));
-        } else if let Some(searcher) = searcher_guard.as_mut() {
-            // Adjust thread count if different
+        }
+
+        // Always adjust to current active thread count
+        if let Some(searcher) = searcher_guard.as_mut() {
             searcher.adjust_thread_count(active_threads);
         }
 
