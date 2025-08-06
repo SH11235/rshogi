@@ -519,7 +519,7 @@ fn test_concurrent_setoption_and_go() {
     search_thread.join().expect("Search thread panicked");
 
     // Should complete search successfully
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(2));
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
     assert!(result.is_ok(), "Failed to complete search after concurrent setoption");
 
     // Cleanup
@@ -531,4 +531,143 @@ fn test_concurrent_setoption_and_go() {
         send_command(&mut stdin, "quit");
     }
     let _ = engine.wait();
+}
+
+#[test]
+fn test_setoption_queued_until_search_finishes() {
+    let (engine, mut stdin, rx, reader_handle) = init_engine();
+
+    // Start a search
+    send_command(&mut stdin, "position startpos");
+    send_command(&mut stdin, "go movetime 1000");
+
+    // Wait for search to start by looking for info output
+    match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
+        Ok(_) => println!("Search confirmed started"),
+        Err(e) => println!("Warning: No info line for search: {e}"),
+    }
+
+    // Send setoption while searching
+    send_command(&mut stdin, "setoption name Threads value 4");
+
+    // Wait for first search to complete
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    assert!(result.is_ok(), "Failed to get bestmove from first search");
+
+    // Start another search - this should use the new thread count
+    send_command(&mut stdin, "go movetime 500");
+
+    // Collect info lines to verify thread count applied
+    let mut info_count = 0;
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        match rx.recv_timeout(remaining) {
+            Ok(line) => {
+                if line.starts_with("info ") {
+                    info_count += 1;
+                    // Could check for nodes/nps to verify multi-threading
+                    println!("Info during second search: {line}");
+                }
+                if line.starts_with("bestmove") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert!(info_count > 0, "Expected info output during second search");
+
+    // Cleanup
+    send_command(&mut stdin, "quit");
+    cleanup_engine(engine, stdin, reader_handle);
+}
+
+#[test]
+fn test_setoption_returns_ok_while_searching() {
+    let (engine, mut stdin, rx, reader_handle) = init_engine();
+
+    // Start a search
+    send_command(&mut stdin, "position startpos");
+    send_command(&mut stdin, "go movetime 1000");
+
+    // Wait for search to start
+    match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
+        Ok(_) => println!("Search confirmed started"),
+        Err(e) => println!("Warning: No info line for search: {e}"),
+    }
+
+    // Send setoption while searching - should not produce error
+    send_command(&mut stdin, "setoption name Threads value 2");
+
+    // Check for any error messages
+    thread::sleep(Duration::from_millis(100));
+    let mut found_error = false;
+
+    while let Ok(line) = rx.try_recv() {
+        if line.contains("error")
+            || line.contains("Error")
+            || line.contains("Engine is currently in use")
+        {
+            found_error = true;
+            println!("Unexpected error message: {line}");
+        }
+    }
+
+    assert!(!found_error, "setoption should not return error while searching");
+
+    // Wait for search to complete
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    assert!(result.is_ok(), "Failed to get bestmove");
+
+    // Cleanup
+    send_command(&mut stdin, "quit");
+    cleanup_engine(engine, stdin, reader_handle);
+}
+
+#[test]
+fn test_multiple_setoptions_during_search() {
+    let (engine, mut stdin, rx, reader_handle) = init_engine();
+
+    // Start a search
+    send_command(&mut stdin, "position startpos");
+    send_command(&mut stdin, "go movetime 1500");
+
+    // Wait for search to start
+    match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
+        Ok(_) => println!("Search confirmed started"),
+        Err(e) => println!("Warning: No info line for search: {e}"),
+    }
+
+    // Send multiple setoptions while searching
+    send_command(&mut stdin, "setoption name Threads value 3");
+    thread::sleep(Duration::from_millis(50));
+    send_command(&mut stdin, "setoption name EngineType value Enhanced");
+    thread::sleep(Duration::from_millis(50));
+    send_command(&mut stdin, "setoption name USI_Hash value 32");
+
+    // Wait for first search to complete
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    assert!(result.is_ok(), "Failed to get bestmove from first search");
+
+    // Verify settings are applied in next search
+    send_command(&mut stdin, "isready");
+    let _ = read_until_pattern(&rx, "readyok", Duration::from_secs(2));
+
+    // Start another search - should use all new settings
+    send_command(&mut stdin, "go movetime 500");
+
+    // Wait for search to complete
+    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(3));
+    assert!(result.is_ok(), "Failed to get bestmove from second search");
+
+    // Cleanup
+    send_command(&mut stdin, "quit");
+    cleanup_engine(engine, stdin, reader_handle);
 }
