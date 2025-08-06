@@ -29,6 +29,7 @@ rand_xoshiro = { workspace = true }
 smallvec = "1.15"
 parking_lot = "0.12"
 crossbeam = "0.8"
+crossbeam-utils = "0.8"
 
 # Loom is only available for non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -68,4 +69,8 @@ harness = false
 
 [[bench]]
 name = "tt_real_search_bench"
+harness = false
+
+[[bench]]
+name = "false_sharing_bench"
 harness = false

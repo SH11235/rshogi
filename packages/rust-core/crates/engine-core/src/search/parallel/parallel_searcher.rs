@@ -9,6 +9,7 @@ use crate::{
     time_management::TimeManager,
 };
 use crossbeam::channel::Sender;
+use crossbeam_utils::CachePadded;
 use log::{debug, info};
 use std::{
     sync::{
@@ -31,12 +32,23 @@ enum IterationSignal {
 }
 
 /// Statistics for measuring search duplication
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DuplicationStats {
     /// Nodes that were not in TT (unique work)
-    pub unique_nodes: AtomicU64,
+    /// Cache-padded to prevent false sharing
+    pub unique_nodes: CachePadded<AtomicU64>,
     /// Total nodes searched by all threads
-    pub total_nodes: AtomicU64,
+    /// Cache-padded to prevent false sharing
+    pub total_nodes: CachePadded<AtomicU64>,
+}
+
+impl Default for DuplicationStats {
+    fn default() -> Self {
+        Self {
+            unique_nodes: CachePadded::new(AtomicU64::new(0)),
+            total_nodes: CachePadded::new(AtomicU64::new(0)),
+        }
+    }
 }
 
 impl DuplicationStats {
