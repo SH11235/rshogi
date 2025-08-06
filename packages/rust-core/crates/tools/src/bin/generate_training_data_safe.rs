@@ -19,7 +19,7 @@ fn process_position_with_timeout(
     let (tx, rx) = std::sync::mpsc::channel();
 
     std::thread::spawn(move || {
-        let engine = Engine::new(EngineType::Material);
+        let mut engine = Engine::new(EngineType::Material);
 
         match Position::from_sfen(&sfen_str) {
             Ok(mut position) => {

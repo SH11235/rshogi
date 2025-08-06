@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Time limit: {}ms", args.time);
 
     // Create engine
-    let engine = Engine::new(engine_type);
+    let mut engine = Engine::new(engine_type);
 
     // Create search limits
     let stop_flag = Arc::new(AtomicBool::new(false));
