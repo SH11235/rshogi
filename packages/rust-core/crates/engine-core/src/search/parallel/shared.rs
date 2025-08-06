@@ -101,7 +101,7 @@ pub struct SharedSearchState {
     nodes_searched: AtomicU64,
 
     /// Stop flag for all threads
-    stop_flag: Arc<AtomicBool>,
+    pub stop_flag: Arc<AtomicBool>,
 
     /// Shared history table
     pub history: Arc<SharedHistory>,

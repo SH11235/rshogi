@@ -1,0 +1,315 @@
+//! Parallel search coordinator using Lazy SMP
+//!
+//! Manages multiple search threads and aggregates their results
+
+use crate::{
+    evaluation::evaluate::Evaluator,
+    search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
+    shogi::Position,
+    time_management::TimeManager,
+};
+use log::{debug, info};
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Barrier, Mutex,
+    },
+    thread,
+    time::Duration,
+};
+
+use super::{SearchThread, SharedSearchState};
+
+/// Statistics for measuring search duplication
+#[derive(Debug, Default)]
+pub struct DuplicationStats {
+    /// Nodes that were not in TT (unique work)
+    pub unique_nodes: AtomicU64,
+    /// Total nodes searched by all threads
+    pub total_nodes: AtomicU64,
+}
+
+impl DuplicationStats {
+    /// Get duplication percentage (0-100)
+    pub fn get_duplication_percentage(&self) -> f64 {
+        let total = self.total_nodes.load(Ordering::Relaxed);
+        let unique = self.unique_nodes.load(Ordering::Relaxed);
+
+        if total == 0 {
+            0.0
+        } else {
+            ((total - unique) as f64 / total as f64) * 100.0
+        }
+    }
+
+    /// Reset statistics
+    pub fn reset(&self) {
+        self.unique_nodes.store(0, Ordering::Relaxed);
+        self.total_nodes.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Parallel search coordinator
+pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
+    /// Shared transposition table
+    _tt: Arc<TranspositionTable>,
+
+    /// Shared evaluator
+    _evaluator: Arc<E>,
+
+    /// Time manager for the search
+    time_manager: Option<Arc<TimeManager>>,
+
+    /// Shared search state
+    shared_state: Arc<SharedSearchState>,
+
+    /// Number of search threads
+    num_threads: usize,
+
+    /// Search threads
+    threads: Vec<Arc<Mutex<SearchThread<E>>>>,
+
+    /// Thread handles (populated during search)
+    handles: Mutex<Vec<thread::JoinHandle<()>>>,
+
+    /// Duplication statistics
+    duplication_stats: Arc<DuplicationStats>,
+
+    /// Barrier for synchronizing thread starts
+    start_barrier: Arc<Barrier>,
+}
+
+impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
+    /// Create a new parallel searcher
+    pub fn new(evaluator: Arc<E>, tt: Arc<TranspositionTable>, num_threads: usize) -> Self {
+        assert!(num_threads > 0, "Need at least one thread");
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let shared_state = Arc::new(SharedSearchState::new(stop_flag));
+        let duplication_stats = Arc::new(DuplicationStats::default());
+        let start_barrier = Arc::new(Barrier::new(num_threads + 1)); // +1 for main thread
+
+        // Create search threads
+        let mut threads = Vec::with_capacity(num_threads);
+        for id in 0..num_threads {
+            let thread = Arc::new(Mutex::new(SearchThread::new(
+                id,
+                evaluator.clone(),
+                tt.clone(),
+                shared_state.clone(),
+            )));
+            threads.push(thread);
+        }
+
+        Self {
+            _tt: tt,
+            _evaluator: evaluator,
+            time_manager: None,
+            shared_state,
+            num_threads,
+            threads,
+            handles: Mutex::new(Vec::new()),
+            duplication_stats,
+            start_barrier,
+        }
+    }
+
+    /// Set time manager for the search
+    pub fn set_time_manager(&mut self, time_manager: Arc<TimeManager>) {
+        self.time_manager = Some(time_manager);
+    }
+
+    /// Main search entry point
+    pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
+        info!("Starting parallel search with {} threads", self.num_threads);
+
+        // Reset shared state
+        self.shared_state.reset();
+        self.duplication_stats.reset();
+
+        // Start time management thread if we have time limits
+        let time_handle = self
+            .time_manager
+            .as_ref()
+            .map(|tm| self.start_time_management_thread(tm.clone()));
+
+        // Start worker threads
+        self.start_worker_threads(position.clone(), limits.clone());
+
+        // Main thread coordinates iterative deepening
+        let result = self.coordinate_search(position, limits);
+
+        // Stop all threads
+        self.shared_state.set_stop();
+
+        // Wait for worker threads
+        let mut handles = self.handles.lock().unwrap();
+        for handle in handles.drain(..) {
+            let _ = handle.join();
+        }
+
+        // Stop time management thread
+        if let Some(handle) = time_handle {
+            let _ = handle.join();
+        }
+
+        // Log duplication statistics
+        let dup_pct = self.duplication_stats.get_duplication_percentage();
+        info!("Search complete. Duplication: {dup_pct:.1}%");
+
+        result
+    }
+
+    /// Start worker threads
+    fn start_worker_threads(&self, position: Position, limits: SearchLimits) {
+        let mut handles = self.handles.lock().unwrap();
+        handles.clear();
+
+        for (id, thread) in self.threads.iter().enumerate() {
+            if id == 0 {
+                continue; // Main thread is handled separately
+            }
+
+            let thread = thread.clone();
+            let mut position = position.clone();
+            let limits = limits.clone();
+            let barrier = self.start_barrier.clone();
+            let shared_state = self.shared_state.clone();
+
+            let handle = thread::spawn(move || {
+                let mut thread = thread.lock().unwrap();
+                thread.reset();
+
+                // Worker thread search loop
+                for iteration in 1.. {
+                    // Wait for all threads to be ready
+                    barrier.wait();
+
+                    if shared_state.should_stop() {
+                        break;
+                    }
+
+                    let depth = thread.get_start_depth(iteration);
+                    debug!("Thread {id} starting depth {depth}");
+
+                    let _result = thread.search(&mut position, limits.clone(), depth);
+
+                    // Update node count
+                    shared_state.add_nodes(thread.searcher.nodes());
+                }
+            });
+
+            handles.push(handle);
+        }
+    }
+
+    /// Coordinate search from main thread
+    fn coordinate_search(&self, position: &mut Position, limits: SearchLimits) -> SearchResult {
+        let mut best_result = SearchResult::new(None, i32::MIN, SearchStats::default());
+        let main_thread = self.threads[0].clone();
+
+        // Iterative deepening loop
+        for iteration in 1.. {
+            // Signal all threads to start this iteration
+            self.start_barrier.wait();
+
+            if self.shared_state.should_stop() {
+                break;
+            }
+
+            // Main thread searches at normal depth
+            let mut thread = main_thread.lock().unwrap();
+            let depth = thread.get_start_depth(iteration);
+
+            info!("Starting iteration {iteration} (depth {depth})");
+            let result = thread.search(position, limits.clone(), depth);
+
+            // Update best result
+            if result.score > best_result.score || result.stats.depth > best_result.stats.depth {
+                best_result = result;
+            }
+
+            // Check depth limit
+            if let Some(max_depth) = limits.depth {
+                if depth >= max_depth {
+                    info!("Reached maximum depth {max_depth}");
+                    break;
+                }
+            }
+
+            // Update node count
+            self.shared_state.add_nodes(thread.searcher.nodes());
+        }
+
+        // Get final best move from shared state
+        if let Some(best_move) = self.shared_state.get_best_move() {
+            best_result.stats.pv = vec![best_move];
+            best_result.score = self.shared_state.get_best_score();
+            best_result.stats.depth = self.shared_state.get_best_depth();
+        }
+
+        best_result.stats.nodes = self.shared_state.get_nodes();
+        best_result
+    }
+
+    /// Start time management thread
+    fn start_time_management_thread(
+        &self,
+        time_manager: Arc<TimeManager>,
+    ) -> thread::JoinHandle<()> {
+        let shared_state = self.shared_state.clone();
+
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(10)); // Check every 10ms
+
+                if shared_state.should_stop() {
+                    break;
+                }
+
+                // Check if we should stop due to time (also updates node count)
+                let nodes = shared_state.get_nodes();
+                if time_manager.should_stop(nodes) {
+                    info!("Time limit reached, stopping search");
+                    shared_state.set_stop();
+                    time_manager.force_stop();
+                    break;
+                }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{evaluation::evaluate::MaterialEvaluator, search::SearchLimitsBuilder};
+
+    #[test]
+    fn test_parallel_searcher_creation() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+
+        let searcher = ParallelSearcher::new(evaluator, tt, 4);
+        assert_eq!(searcher.num_threads, 4);
+        assert_eq!(searcher.threads.len(), 4);
+    }
+
+    #[test]
+    fn test_parallel_search_basic() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
+        let mut position = Position::startpos();
+
+        // Very short search with time limit to avoid infinite loop
+        let limits = SearchLimitsBuilder::default().depth(2).fixed_time_ms(50).build();
+
+        let result = searcher.search(&mut position, limits);
+
+        // Should find a move
+        assert!(!result.stats.pv.is_empty());
+        assert!(result.stats.nodes > 0);
+    }
+}
