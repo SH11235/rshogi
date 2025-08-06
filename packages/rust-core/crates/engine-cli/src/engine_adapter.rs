@@ -117,6 +117,10 @@ pub struct EngineAdapter {
     ponder_state: PonderState,
     /// Active ponder hit flag (shared with searcher during ponder)
     active_ponder_hit_flag: Option<Arc<AtomicBool>>,
+    /// Pending engine type to apply when engine is returned
+    pending_engine_type: Option<EngineType>,
+    /// Pending evaluation file to apply when engine is returned
+    pending_eval_file: Option<String>,
 }
 
 /// State for managing ponder (think on opponent's time) functionality
@@ -145,10 +149,33 @@ impl EngineAdapter {
     }
 
     /// Return the engine after use
-    pub fn return_engine(&mut self, engine: Engine) {
+    pub fn return_engine(&mut self, mut engine: Engine) {
         if self.engine.is_some() {
             log::warn!("Engine returned while another engine instance exists");
         }
+
+        // Apply any pending options
+        if let Some(engine_type) = self.pending_engine_type.take() {
+            log::info!("Applying queued EngineType: {engine_type:?}");
+            engine.set_engine_type(engine_type);
+        }
+
+        // Always sync thread count (especially after engine type change)
+        engine.set_threads(self.threads);
+
+        // Apply pending evaluation file if applicable
+        if let Some(eval_file) = self.pending_eval_file.take() {
+            let engine_type = engine.get_engine_type();
+            if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
+                log::info!("Applying queued EvalFile: {eval_file}");
+                if let Err(e) = engine.load_nnue_weights(&eval_file) {
+                    log::error!("Failed to load queued NNUE weights: {e}");
+                }
+            } else {
+                log::debug!("Queued EvalFile ignored for non-NNUE engine type: {engine_type:?}");
+            }
+        }
+
         self.engine = Some(engine);
     }
 
@@ -225,6 +252,8 @@ impl EngineAdapter {
             pv_stability_slope: 5,
             ponder_state: PonderState::default(),
             active_ponder_hit_flag: None,
+            pending_engine_type: None,
+            pending_eval_file: None,
         };
 
         // Initialize options
@@ -315,6 +344,8 @@ impl EngineAdapter {
                     // Apply to engine if it exists
                     if let Some(ref mut engine) = self.engine {
                         engine.set_threads(threads);
+                    } else {
+                        log::info!("Threads option queued: {threads}");
                     }
                 }
             }
@@ -337,7 +368,8 @@ impl EngineAdapter {
                         // Re-apply thread count after engine type change
                         engine.set_threads(self.threads);
                     } else {
-                        return Err(anyhow!("Engine is currently in use"));
+                        self.pending_engine_type = Some(engine_type);
+                        log::info!("EngineType option queued: {engine_type:?}");
                     }
                 }
             }
@@ -425,7 +457,8 @@ impl EngineAdapter {
                                 );
                             }
                         } else {
-                            return Err(anyhow!("Engine is currently in use"));
+                            self.pending_eval_file = Some(path.to_string());
+                            log::info!("EvalFile option queued: {path}");
                         }
                     }
                 }
