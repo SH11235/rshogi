@@ -60,7 +60,7 @@ impl DuplicationStats {
         if total == 0 {
             0.0
         } else {
-            ((total - unique) as f64 / total as f64) * 100.0
+            ((total - unique) as f64) * 100.0 / (total as f64)
         }
     }
 
