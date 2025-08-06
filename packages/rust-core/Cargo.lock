@@ -355,6 +355,7 @@ dependencies = [
  "anyhow",
  "criterion 0.6.0",
  "crossbeam",
+ "crossbeam-utils",
  "flate2",
  "lazy_static",
  "log",
