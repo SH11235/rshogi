@@ -5,6 +5,7 @@ use crate::{
     search::{constants::SEARCH_INF, tt::NodeType, unified::UnifiedSearcher},
     shogi::{Move, Position},
 };
+use std::sync::atomic::Ordering;
 
 /// Search a single node in the tree
 pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
@@ -103,7 +104,17 @@ where
 
     // Try TT move first if available
     let tt_move = if USE_TT {
-        searcher.probe_tt(hash).and_then(|entry| entry.get_move())
+        let tt_entry = searcher.probe_tt(hash);
+
+        // Update duplication statistics if available
+        if let Some(ref stats) = searcher.duplication_stats {
+            stats.total_nodes.fetch_add(1, Ordering::Relaxed);
+            if tt_entry.is_none() {
+                stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        tt_entry.and_then(|entry| entry.get_move())
     } else {
         None
     };
