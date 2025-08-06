@@ -4,13 +4,14 @@
 
 mod killer_table;
 
+// Re-export KillerTable for parallel search
+pub use killer_table::KillerTable;
+
 use crate::{
     search::{history::History, types::SearchStack},
     shogi::{Move, MoveList, Position},
 };
 use std::sync::{Arc, Mutex};
-
-pub use killer_table::KillerTable;
 
 /// Move ordering state
 pub struct MoveOrdering {
