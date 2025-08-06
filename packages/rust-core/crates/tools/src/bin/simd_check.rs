@@ -30,7 +30,7 @@ fn main() {
     println!("Test 1: Single search (AVX2 should be used if available)");
     {
         let mut pos = Position::startpos();
-        let engine = Engine::new(EngineType::Nnue);
+        let mut engine = Engine::new(EngineType::Nnue);
         let limits = SearchLimits::builder().depth(5).fixed_time_ms(100).build();
 
         let result = engine.search(&mut pos, limits);
@@ -47,7 +47,7 @@ fn main() {
 
         for i in 0..5 {
             let mut pos = Position::startpos();
-            let engine = Engine::new(EngineType::Nnue);
+            let mut engine = Engine::new(EngineType::Nnue);
             let limits = SearchLimits::builder().depth(5).fixed_time_ms(100).build();
 
             let result = engine.search(&mut pos, limits);
