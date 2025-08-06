@@ -8,17 +8,27 @@ use crate::{
     shogi::Position,
     time_management::TimeManager,
 };
+use crossbeam::channel::Sender;
 use log::{debug, info};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Barrier, Mutex,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
 };
 
 use super::{SearchThread, SharedSearchState};
+
+/// Signal sent to worker threads
+#[derive(Clone)]
+enum IterationSignal {
+    /// Start a new iteration at specified depth
+    StartIteration(usize),
+    /// Stop all threads
+    Stop,
+}
 
 /// Statistics for measuring search duplication
 #[derive(Debug, Default)]
@@ -75,8 +85,8 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Duplication statistics
     duplication_stats: Arc<DuplicationStats>,
 
-    /// Barrier for synchronizing thread starts
-    start_barrier: Arc<Barrier>,
+    /// Channels for sending signals to worker threads
+    start_signals: Vec<Sender<IterationSignal>>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
@@ -87,7 +97,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
         let duplication_stats = Arc::new(DuplicationStats::default());
-        let start_barrier = Arc::new(Barrier::new(num_threads + 1)); // +1 for main thread
 
         // Create search threads
         let mut threads = Vec::with_capacity(num_threads);
@@ -111,7 +120,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             threads,
             handles: Mutex::new(Vec::new()),
             duplication_stats,
-            start_barrier,
+            start_signals: Vec::new(),
         }
     }
 
@@ -143,9 +152,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Stop all threads
         self.shared_state.set_stop();
 
-        // Release barrier one more time to unblock any waiting threads
-        // This prevents deadlock when workers are waiting at barrier
-        self.start_barrier.wait();
+        // Send stop signal to all workers
+        for sender in &self.start_signals {
+            let _ = sender.send(IterationSignal::Stop);
+        }
 
         // Wait for worker threads
         let mut handles = self.handles.lock().unwrap();
@@ -166,19 +176,25 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 
     /// Start worker threads
-    fn start_worker_threads(&self, position: Position, limits: SearchLimits) {
+    fn start_worker_threads(&mut self, position: Position, limits: SearchLimits) {
         let mut handles = self.handles.lock().unwrap();
         handles.clear();
+
+        // Clear old channels and create new ones
+        self.start_signals.clear();
 
         for (id, thread) in self.threads.iter().enumerate() {
             if id == 0 {
                 continue; // Main thread is handled separately
             }
 
+            // Create channel for this worker
+            let (sender, receiver) = crossbeam::channel::unbounded();
+            self.start_signals.push(sender);
+
             let thread = thread.clone();
             let mut position = position.clone();
             let limits = limits.clone();
-            let barrier = self.start_barrier.clone();
             let shared_state = self.shared_state.clone();
 
             let handle = thread::spawn(move || {
@@ -186,27 +202,37 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 thread.reset();
 
                 // Worker thread search loop
-                for iteration in 1.. {
-                    // Check stop flag before waiting on barrier to avoid deadlock
-                    if shared_state.should_stop() {
-                        break;
+                loop {
+                    // Try to receive signal with timeout
+                    match receiver.recv_timeout(Duration::from_millis(10)) {
+                        Ok(IterationSignal::StartIteration(iteration)) => {
+                            // Check stop flag before starting
+                            if shared_state.should_stop() {
+                                thread.report_nodes();
+                                break;
+                            }
+
+                            let depth = thread.get_start_depth(iteration);
+                            debug!("Thread {id} starting depth {depth}");
+
+                            let _result = thread.search(&mut position, limits.clone(), depth);
+
+                            // Update node count (differential)
+                            thread.report_nodes();
+                        }
+                        Ok(IterationSignal::Stop) => {
+                            thread.report_nodes();
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - check stop flag
+                            if shared_state.should_stop() {
+                                thread.report_nodes();
+                                break;
+                            }
+                            // Continue waiting
+                        }
                     }
-
-                    // Wait for all threads to be ready
-                    barrier.wait();
-
-                    // Double-check after barrier wait
-                    if shared_state.should_stop() {
-                        break;
-                    }
-
-                    let depth = thread.get_start_depth(iteration);
-                    debug!("Thread {id} starting depth {depth}");
-
-                    let _result = thread.search(&mut position, limits.clone(), depth);
-
-                    // Update node count (differential)
-                    thread.report_nodes();
                 }
             });
 
@@ -221,8 +247,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Iterative deepening loop
         for iteration in 1.. {
-            // Signal all threads to start this iteration
-            self.start_barrier.wait();
+            // Signal all worker threads to start this iteration
+            for sender in &self.start_signals {
+                let _ = sender.send(IterationSignal::StartIteration(iteration));
+            }
 
             if self.shared_state.should_stop() {
                 break;
@@ -252,6 +280,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             thread.report_nodes();
         }
 
+        // Report final nodes from main thread
+        let mut thread = main_thread.lock().unwrap();
+        thread.report_nodes();
+
         // Get final best move from shared state
         if let Some(best_move) = self.shared_state.get_best_move() {
             best_result.stats.pv = vec![best_move];
@@ -260,6 +292,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         best_result.stats.nodes = self.shared_state.get_nodes();
+
+        // Set duplication percentage
+        best_result.stats.duplication_percentage =
+            Some(self.duplication_stats.get_duplication_percentage());
+
         best_result
     }
 
