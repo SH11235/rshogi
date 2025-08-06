@@ -11,9 +11,22 @@ use crate::{
     },
     shogi::{Move, Position},
 };
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Duration;
 
 use super::shared::SharedSearchState;
+
+/// Thread state for park control
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(u8)]
+enum ThreadState {
+    Idle = 0,
+    Searching = 1,
+}
 
 /// Individual search thread with local state
 pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
@@ -44,6 +57,12 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
 
     /// Last reported node count (for differential updates)
     pub last_nodes: u64,
+
+    /// Thread state for park control
+    pub state: Arc<AtomicU8>,
+
+    /// Thread handle for unpark operations
+    pub thread_handle: Option<thread::Thread>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
@@ -73,6 +92,8 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             generation: 0,
             shared_state,
             last_nodes: 0,
+            state: Arc::new(AtomicU8::new(ThreadState::Searching as u8)),
+            thread_handle: None,
         }
     }
 
@@ -152,6 +173,57 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             self.last_nodes = current_nodes;
         }
     }
+
+    /// Search iteration with park control for idle threads
+    pub fn search_iteration(
+        &mut self,
+        position: &mut Position,
+        limits: SearchLimits,
+        depth: u8,
+        max_depth: u8,
+    ) -> SearchResult {
+        // Set state to searching
+        self.state.store(ThreadState::Searching as u8, Ordering::Release);
+
+        // Perform the search
+        let result = self.search(position, limits, depth);
+
+        // Check if this thread should park (deep searches completed, not main thread)
+        if depth >= max_depth.saturating_sub(1) && self.id > 0 {
+            // Check stop flag before parking (prevent lost wake-up)
+            if self.should_stop() {
+                return result;
+            }
+
+            // Set idle state
+            self.state.store(ThreadState::Idle as u8, Ordering::Release);
+
+            // Park with timeout for helper threads
+            thread::park_timeout(Duration::from_millis(2));
+
+            // Restore searching state after waking up
+            self.state.store(ThreadState::Searching as u8, Ordering::Release);
+        }
+
+        result
+    }
+
+    /// Set thread handle for unpark operations
+    pub fn set_thread_handle(&mut self, handle: thread::Thread) {
+        self.thread_handle = Some(handle);
+    }
+
+    /// Unpark this thread if it's parked
+    pub fn unpark(&self) {
+        if let Some(ref handle) = self.thread_handle {
+            handle.unpark();
+        }
+    }
+
+    /// Check if thread is idle
+    pub fn is_idle(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ThreadState::Idle as u8
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +241,28 @@ mod tests {
 
         let thread = SearchThread::new(0, evaluator, tt, shared_state, None);
         assert_eq!(thread.id, 0);
+        assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
+    }
+
+    #[test]
+    fn test_thread_state_transitions() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let shared_state = Arc::new(SharedSearchState::new(stop_flag));
+
+        let thread = SearchThread::new(1, evaluator, tt, shared_state, None);
+
+        // Initially searching
+        assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
+
+        // Transition to idle
+        thread.state.store(ThreadState::Idle as u8, Ordering::Release);
+        assert!(thread.is_idle());
+
+        // Back to searching
+        thread.state.store(ThreadState::Searching as u8, Ordering::Release);
+        assert!(!thread.is_idle());
     }
 
     #[test]
