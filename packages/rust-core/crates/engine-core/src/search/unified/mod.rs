@@ -13,6 +13,7 @@ use crate::{
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
         history::{CounterMoveHistory, History},
+        parallel::DuplicationStats,
         tt::{NodeType, TranspositionTable},
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
@@ -56,7 +57,8 @@ pub struct UnifiedSearcher<
     evaluator: Arc<E>,
 
     /// Transposition table (conditionally compiled)
-    tt: Option<TranspositionTable>,
+    /// Wrapped in Arc for sharing between parallel searchers
+    tt: Option<Arc<TranspositionTable>>,
 
     /// Move ordering history (shared with move ordering)
     history: Arc<Mutex<History>>,
@@ -90,6 +92,9 @@ pub struct UnifiedSearcher<
 
     /// Adaptive prefetcher for TT (conditionally compiled)
     pub(crate) adaptive_prefetcher: Option<AdaptivePrefetcher>,
+
+    /// Duplication statistics for parallel search (optional)
+    duplication_stats: Option<Arc<DuplicationStats>>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -110,7 +115,7 @@ where
         Self {
             evaluator: Arc::new(evaluator),
             tt: if USE_TT {
-                Some(TranspositionTable::new(TT_SIZE_MB))
+                Some(Arc::new(TranspositionTable::new(TT_SIZE_MB)))
             } else {
                 None
             },
@@ -129,6 +134,7 @@ where
             } else {
                 None
             },
+            duplication_stats: None,
         }
     }
 
@@ -144,7 +150,7 @@ where
         Self {
             evaluator,
             tt: if USE_TT {
-                Some(TranspositionTable::new(TT_SIZE_MB))
+                Some(Arc::new(TranspositionTable::new(TT_SIZE_MB)))
             } else {
                 None
             },
@@ -163,12 +169,49 @@ where
             } else {
                 None
             },
+            duplication_stats: None,
+        }
+    }
+
+    /// Create a new unified searcher with shared transposition table
+    pub fn with_shared_tt(evaluator: Arc<E>, tt: Arc<TranspositionTable>) -> Self {
+        let history = Arc::new(Mutex::new(History::new()));
+        // Pre-allocate search stack for maximum search depth
+        let mut search_stack = Vec::with_capacity(crate::search::constants::MAX_PLY + 1);
+        for ply in 0..=crate::search::constants::MAX_PLY {
+            search_stack.push(SearchStack::new(ply as u16));
+        }
+
+        Self {
+            evaluator,
+            tt: if USE_TT { Some(tt) } else { None },
+            history: history.clone(),
+            ordering: ordering::MoveOrdering::new(history),
+            pv_table: core::PVTable::new(),
+            stats: SearchStats::default(),
+            context: context::SearchContext::new(),
+            time_manager: None,
+            search_stack,
+            score_history: Vec::with_capacity(crate::search::constants::MAX_PLY),
+            score_volatility: 0,
+            disable_prefetch: false,
+            adaptive_prefetcher: if USE_TT {
+                Some(AdaptivePrefetcher::new())
+            } else {
+                None
+            },
+            duplication_stats: None,
         }
     }
 
     /// Disable prefetching (for benchmarking TTOnly mode)
     pub fn set_disable_prefetch(&mut self, disable: bool) {
         self.disable_prefetch = disable;
+    }
+
+    /// Set duplication statistics for parallel search
+    pub fn set_duplication_stats(&mut self, stats: Arc<DuplicationStats>) {
+        self.duplication_stats = Some(stats);
     }
 
     /// Get TT statistics (for benchmarking)
@@ -594,6 +637,26 @@ mod tests {
         let evaluator = MaterialEvaluator;
         let searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
         assert_eq!(searcher.nodes(), 0);
+    }
+
+    #[test]
+    fn test_shared_tt_creation() {
+        // Test that we can create a searcher with a shared TT
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(crate::search::TranspositionTable::new(16));
+
+        // Create two searchers with the same TT
+        let searcher1 =
+            UnifiedSearcher::<_, true, false, 16>::with_shared_tt(evaluator.clone(), tt.clone());
+        let searcher2 =
+            UnifiedSearcher::<_, true, false, 16>::with_shared_tt(evaluator, tt.clone());
+
+        // Both searchers should start with 0 nodes
+        assert_eq!(searcher1.nodes(), 0);
+        assert_eq!(searcher2.nodes(), 0);
+
+        // The TT should be the same Arc instance
+        assert!(Arc::ptr_eq(searcher1.tt.as_ref().unwrap(), searcher2.tt.as_ref().unwrap()));
     }
 
     #[test]
