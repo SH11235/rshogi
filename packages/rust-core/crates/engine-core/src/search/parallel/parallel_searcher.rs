@@ -163,17 +163,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             self.time_manager = None;
         }
 
-        // Start time management thread if we have time limits
-        let time_handle = self
-            .time_manager
-            .as_ref()
-            .map(|tm| self.start_time_management_thread(tm.clone()));
-
         // Start worker threads
         self.start_worker_threads(position.clone(), limits.clone());
 
         // Main thread coordinates iterative deepening
         let result = self.coordinate_search(position, limits);
+
+        // Note: Time management thread is now started inside coordinate_search
 
         // Stop all threads
         self.shared_state.set_stop();
@@ -186,11 +182,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Wait for worker threads
         let mut handles = self.handles.lock().unwrap();
         for handle in handles.drain(..) {
-            let _ = handle.join();
-        }
-
-        // Stop time management thread
-        if let Some(handle) = time_handle {
             let _ = handle.join();
         }
 
@@ -270,11 +261,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     fn coordinate_search(&self, position: &mut Position, limits: SearchLimits) -> SearchResult {
         let mut best_result = SearchResult::new(None, i32::MIN, SearchStats::default());
         let main_thread = self.threads[0].clone();
+        let mut time_handle: Option<thread::JoinHandle<()>> = None;
 
         // Iterative deepening loop
         for iteration in 1.. {
-            // Check stop flag BEFORE starting new iteration
-            if self.shared_state.should_stop() {
+            // Check stop flag BEFORE starting new iteration (except first iteration)
+            if iteration > 1 && self.shared_state.should_stop() {
                 break;
             }
 
@@ -295,6 +287,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 best_result = result;
             }
 
+            // Start time management thread after first iteration completes
+            if iteration == 1 && time_handle.is_none() {
+                if let Some(tm) = &self.time_manager {
+                    time_handle = Some(self.start_time_management_thread(tm.clone()));
+                }
+            }
+
             // Check depth limit
             if let Some(max_depth) = limits.depth {
                 if depth >= max_depth {
@@ -313,6 +312,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Get final best move from shared state
         if let Some(best_move) = self.shared_state.get_best_move() {
+            best_result.best_move = Some(best_move);
             best_result.stats.pv = vec![best_move];
             best_result.score = self.shared_state.get_best_score();
             best_result.stats.depth = self.shared_state.get_best_depth();
@@ -323,6 +323,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Set duplication percentage
         best_result.stats.duplication_percentage =
             Some(self.duplication_stats.get_duplication_percentage());
+
+        // Stop time management thread if it was started
+        if let Some(handle) = time_handle {
+            self.shared_state.set_stop();
+            let _ = handle.join();
+        }
 
         best_result
     }
