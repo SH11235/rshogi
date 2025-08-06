@@ -11,13 +11,58 @@ use crate::{
     search::parallel::ParallelSearcher,
     search::unified::UnifiedSearcher,
     search::{SearchLimits, SearchResult, TranspositionTable},
+    shogi::{Color, PieceType},
     time_management::GamePhase,
     Position,
 };
 
 /// Game phase thresholds
 const OPENING_END_PLY: u16 = 40;
-const MIDDLEGAME_END_PLY: u16 = 120;
+
+/// Piece phase weights (Chess-inspired, adapted for Shogi)
+const PHASE_WEIGHTS: [(PieceType, u16); 6] = [
+    (PieceType::Rook, 4),
+    (PieceType::Bishop, 4),
+    (PieceType::Gold, 3),
+    (PieceType::Silver, 2),
+    (PieceType::Knight, 2),
+    (PieceType::Lance, 2),
+    // Pawn and King have weight 0
+];
+
+/// Calculate initial phase total at compile time
+const fn calculate_initial_phase_total() -> u16 {
+    // Initial piece counts for each type
+    // Rook: 2, Bishop: 2, Gold: 4, Silver: 4, Knight: 4, Lance: 4
+    let mut total = 0u16;
+    let mut i = 0;
+
+    // Manually calculate for each piece type
+    while i < PHASE_WEIGHTS.len() {
+        let (piece_type, weight) = PHASE_WEIGHTS[i];
+        let count = match piece_type {
+            PieceType::Rook => 2,
+            PieceType::Bishop => 2,
+            PieceType::Gold => 4,
+            PieceType::Silver => 4,
+            PieceType::Knight => 4,
+            PieceType::Lance => 4,
+            _ => 0,
+        };
+        total += weight * count;
+        i += 1;
+    }
+    total
+}
+
+/// Total phase value at game start (calculated at compile time)
+/// Rook: 2*4=8, Bishop: 2*4=8, Gold: 4*3=12, Silver: 4*2=8, Knight: 4*2=8, Lance: 4*2=8
+/// Total: 8 + 8 + 12 + 8 + 8 + 8 = 52
+const INITIAL_PHASE_TOTAL: u16 = calculate_initial_phase_total();
+
+/// Phase thresholds (0-128 scale)
+const PHASE_OPENING_THRESHOLD: u8 = 96;
+const PHASE_ENDGAME_THRESHOLD: u8 = 32;
 
 /// Type alias for unified searchers
 type MaterialSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
@@ -169,14 +214,47 @@ impl Engine {
         }
     }
 
+    /// Calculate material phase score (0-128)
+    fn material_phase_score(&self, pos: &Position) -> u8 {
+        let mut total = 0u16;
+
+        for &(ptype, weight) in &PHASE_WEIGHTS {
+            // count_piece_on_board already includes both normal and promoted pieces
+            let on_board = pos.count_piece_on_board(ptype);
+            let in_hand_black = pos.count_piece_in_hand(Color::Black, ptype);
+            let in_hand_white = pos.count_piece_in_hand(Color::White, ptype);
+            total += weight * (on_board + in_hand_black + in_hand_white);
+        }
+
+        // Debug assertion to catch calculation errors early
+        debug_assert!(
+            total <= INITIAL_PHASE_TOTAL,
+            "Phase total {total} exceeds initial phase total {INITIAL_PHASE_TOTAL}"
+        );
+
+        // Normalize to 0-128 scale
+        ((total as u32 * 128) / INITIAL_PHASE_TOTAL as u32) as u8
+    }
+
     /// Detect game phase based on position
     fn detect_game_phase(&self, position: &Position) -> GamePhase {
-        // Simple implementation based on move count
-        // TODO: Can be enhanced later with piece count analysis
-        // e.g., checking major piece count for more accurate endgame detection
-        match position.ply {
-            0..=OPENING_END_PLY => GamePhase::Opening,
-            ply if ply <= MIDDLEGAME_END_PLY => GamePhase::MiddleGame,
+        // Calculate material phase score first (優先的にフェーズスコアで判定)
+        let phase_score = self.material_phase_score(position);
+
+        // Use material phase score as primary criterion
+        match phase_score {
+            PHASE_OPENING_THRESHOLD..=128 => {
+                // High material score indicates opening phase
+                // But also check move count to handle repetition loops
+                if position.ply <= OPENING_END_PLY {
+                    GamePhase::Opening
+                } else {
+                    // High material but many moves - likely repetition or slow game
+                    // Keep as Opening to maintain full thread usage
+                    GamePhase::Opening
+                }
+            }
+            PHASE_ENDGAME_THRESHOLD..PHASE_OPENING_THRESHOLD => GamePhase::MiddleGame,
             _ => GamePhase::EndGame,
         }
     }
@@ -468,6 +546,7 @@ mod tests {
     // use std::sync::atomic::AtomicBool; // Commented out - used in test that's temporarily disabled
     // use std::sync::Arc; // Commented out - used in test that's temporarily disabled
     // use std::thread; // Commented out - used in test that's temporarily disabled
+    use crate::shogi::{Piece, Square};
     use std::time::Duration;
 
     #[test]
@@ -683,20 +762,69 @@ mod tests {
     */
 
     #[test]
+    fn test_material_phase_score() {
+        let engine = Engine::new(EngineType::Material);
+
+        // Starting position should have phase score of 128
+        let pos = Position::startpos();
+        assert_eq!(engine.material_phase_score(&pos), 128);
+
+        // Create a position with fewer pieces
+        let mut endgame_pos = Position::empty();
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('4', 'h').unwrap(),
+            Piece::new(PieceType::Gold, Color::Black),
+        );
+
+        // Should have low phase score
+        let score = engine.material_phase_score(&endgame_pos);
+        assert!(score < PHASE_ENDGAME_THRESHOLD);
+    }
+
+    #[test]
     fn test_game_phase_detection() {
         let engine = Engine::new(EngineType::Material);
 
-        // Opening phase
+        // Opening phase (by move count)
         let mut pos = Position::startpos();
         assert_eq!(engine.detect_game_phase(&pos), GamePhase::Opening);
 
-        // Middle game
+        // Still opening because of high material score
         pos.ply = 50;
-        assert_eq!(engine.detect_game_phase(&pos), GamePhase::MiddleGame);
+        assert_eq!(engine.detect_game_phase(&pos), GamePhase::Opening);
 
-        // End game
+        // Still opening because material score is high (full pieces)
         pos.ply = 150;
-        assert_eq!(engine.detect_game_phase(&pos), GamePhase::EndGame);
+        // Since this is still startpos, it has full material
+        // Material score (128) >= PHASE_OPENING_THRESHOLD (96)
+        assert_eq!(engine.detect_game_phase(&pos), GamePhase::Opening);
+
+        // Test with actual endgame position
+        let mut endgame_pos = Position::empty();
+        endgame_pos.ply = 150;
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        assert_eq!(engine.detect_game_phase(&endgame_pos), GamePhase::EndGame);
+
+        // Test repetition scenario: high ply but full material
+        let mut repetition_pos = Position::startpos();
+        repetition_pos.ply = 200; // Very high move count
+                                  // Should still be opening because all pieces remain
+        assert_eq!(engine.detect_game_phase(&repetition_pos), GamePhase::Opening);
     }
 
     #[test]
@@ -704,17 +832,35 @@ mod tests {
         let mut engine = Engine::new(EngineType::Material);
         engine.num_threads = 8;
 
-        // Opening - all threads
+        // Opening - all threads (by move count)
         let mut pos = Position::startpos();
         assert_eq!(engine.calculate_active_threads(&pos), 8);
 
-        // Middle game - all threads
+        // Middle game - all threads (material score overrides)
         pos.ply = 50;
         assert_eq!(engine.calculate_active_threads(&pos), 8);
 
-        // End game - half threads
+        // Still middle game because startpos has full material
         pos.ply = 150;
-        assert_eq!(engine.calculate_active_threads(&pos), 4);
+        assert_eq!(engine.calculate_active_threads(&pos), 8);
+
+        // Create actual endgame position with few pieces
+        let mut endgame_pos = Position::empty();
+        endgame_pos.ply = 150;
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('1', 'i').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+        // Endgame should use half threads
+        assert_eq!(engine.calculate_active_threads(&endgame_pos), 4);
     }
 
     #[test]
@@ -754,5 +900,106 @@ mod tests {
         // Try another load
         let result2 = engine.load_nnue_weights("nonexistent2.nnue");
         assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_material_phase_score_with_promoted_pieces() {
+        let engine = Engine::new(EngineType::Material);
+
+        // Test with promoted pieces
+        let mut pos = Position::empty();
+
+        // Add kings (required)
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+
+        // Add normal rook (weight 4)
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'h').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+
+        // Add promoted rook (should also count as weight 4)
+        pos.board.put_piece(
+            Square::from_usi_chars('8', 'b').unwrap(),
+            Piece::promoted(PieceType::Rook, Color::White),
+        );
+
+        // Total: 2 rooks * 4 = 8
+        // Normalized: (8 * 128) / 52 = 19.69... ≈ 19
+        let score = engine.material_phase_score(&pos);
+        assert_eq!(score, 19);
+
+        // Add more promoted pieces
+        pos.board.put_piece(
+            Square::from_usi_chars('7', 'c').unwrap(),
+            Piece::promoted(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('3', 'f').unwrap(),
+            Piece::promoted(PieceType::Pawn, Color::White),
+        );
+
+        // Total: 2 rooks * 4 + 1 silver * 2 + 1 pawn * 0 = 10
+        // Note: Pawn has weight 0, so promoted pawn doesn't affect score
+        // Normalized: (10 * 128) / 52 = 24.61... ≈ 24
+        let score = engine.material_phase_score(&pos);
+        assert_eq!(score, 24);
+    }
+
+    #[test]
+    fn test_game_phase_edge_cases() {
+        let engine = Engine::new(EngineType::Material);
+
+        // Test 1: Empty board except kings
+        let mut pos = Position::empty();
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        assert_eq!(engine.detect_game_phase(&pos), GamePhase::EndGame);
+
+        // Test 2: Only one side has pieces
+        pos.hands[Color::Black as usize][6] = 18; // 18 pawns in hand
+                                                  // Pawns have weight 0, so still endgame
+        assert_eq!(engine.detect_game_phase(&pos), GamePhase::EndGame);
+
+        // Add valuable pieces to hand
+        pos.hands[Color::Black as usize][0] = 2; // 2 rooks in hand (index 0)
+                                                 // 2 rooks * 4 = 8, normalized: (8 * 128) / 52 = 19
+                                                 // Still below PHASE_ENDGAME_THRESHOLD (32)
+        assert_eq!(engine.detect_game_phase(&pos), GamePhase::EndGame);
+
+        // Add more pieces to cross into middle game
+        pos.hands[Color::Black as usize][1] = 2; // 2 bishops
+        pos.hands[Color::Black as usize][2] = 4; // 4 golds
+                                                 // Total: 2*4 + 2*4 + 4*3 = 28, normalized: (28 * 128) / 52 = 68
+        assert_eq!(engine.detect_game_phase(&pos), GamePhase::MiddleGame);
+    }
+
+    #[test]
+    fn test_initial_phase_total_compile_time() {
+        // Verify the compile-time calculation is correct
+        assert_eq!(INITIAL_PHASE_TOTAL, 52);
+
+        // Manually verify the calculation
+        let manual_total = 2 * 4 +  // Rook: 2 pieces * weight 4
+            2 * 4 +  // Bishop: 2 pieces * weight 4
+            4 * 3 +  // Gold: 4 pieces * weight 3
+            4 * 2 +  // Silver: 4 pieces * weight 2
+            4 * 2 +  // Knight: 4 pieces * weight 2
+            4 * 2; // Lance: 4 pieces * weight 2
+        assert_eq!(manual_total, 52);
+        assert_eq!(manual_total, INITIAL_PHASE_TOTAL);
     }
 }
