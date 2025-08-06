@@ -11,6 +11,7 @@ use crate::{
     },
     shogi::{Move, Position},
 };
+use smallvec::SmallVec;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -23,9 +24,26 @@ use super::shared::SharedSearchState;
 /// Thread state for park control
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(u8)]
-enum ThreadState {
+pub enum ThreadState {
     Idle = 0,
     Searching = 1,
+}
+
+/// Calculate appropriate park duration based on search depth and time constraints
+fn calculate_park_duration(max_depth: u8, time_left_ms: Option<u64>) -> Duration {
+    // If very little time left, use minimal park duration
+    if let Some(time) = time_left_ms {
+        if time < 1000 {
+            return Duration::from_micros(200); // 0.2ms for bullet/blitz
+        }
+    }
+
+    // Otherwise, base duration on search depth
+    match max_depth {
+        0..=8 => Duration::from_micros(200),  // Shallow search: 0.2ms
+        9..=12 => Duration::from_micros(500), // Medium search: 0.5ms
+        _ => Duration::from_millis(2),        // Deep search: 2ms
+    }
 }
 
 /// Individual search thread with local state
@@ -46,8 +64,8 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
     /// Thread-local killer table
     pub local_killers: KillerTable,
 
-    /// Thread-local principal variation
-    pub thread_local_pv: Vec<Move>,
+    /// Thread-local principal variation (typically 4 moves or less)
+    pub thread_local_pv: SmallVec<[Move; 4]>,
 
     /// PV generation number for synchronization
     pub generation: u64,
@@ -88,7 +106,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             local_history: History::new(),
             local_counter_moves: CounterMoveHistory::new(),
             local_killers: KillerTable::new(),
-            thread_local_pv: Vec::new(),
+            thread_local_pv: SmallVec::new(),
             generation: 0,
             shared_state,
             last_nodes: 0,
@@ -174,38 +192,31 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         }
     }
 
-    /// Search iteration with park control for idle threads
+    /// Perform search iteration (pure search without state management)
     pub fn search_iteration(
         &mut self,
         position: &mut Position,
-        limits: SearchLimits,
+        limits: &SearchLimits,
         depth: u8,
-        max_depth: u8,
     ) -> SearchResult {
-        // Set state to searching
-        self.state.store(ThreadState::Searching as u8, Ordering::Release);
+        // Clone limits only when needed for internal searcher
+        self.search(position, limits.clone(), depth)
+    }
 
-        // Perform the search
-        let result = self.search(position, limits, depth);
+    /// Check if this thread should park based on depth
+    pub fn should_park(&self, depth: u8, max_depth: u8) -> bool {
+        depth >= max_depth.saturating_sub(1) && self.id > 0
+    }
 
-        // Check if this thread should park (deep searches completed, not main thread)
-        if depth >= max_depth.saturating_sub(1) && self.id > 0 {
-            // Check stop flag before parking (prevent lost wake-up)
-            if self.should_stop() {
-                return result;
-            }
+    /// Park thread with appropriate duration
+    pub fn park_with_timeout(&self, max_depth: u8, time_left_ms: Option<u64>) {
+        let duration = calculate_park_duration(max_depth, time_left_ms);
+        thread::park_timeout(duration);
+    }
 
-            // Set idle state
-            self.state.store(ThreadState::Idle as u8, Ordering::Release);
-
-            // Park with timeout for helper threads
-            thread::park_timeout(Duration::from_millis(2));
-
-            // Restore searching state after waking up
-            self.state.store(ThreadState::Searching as u8, Ordering::Release);
-        }
-
-        result
+    /// Set thread state
+    pub fn set_state(&self, state: ThreadState) {
+        self.state.store(state as u8, Ordering::Release);
     }
 
     /// Set thread handle for unpark operations
