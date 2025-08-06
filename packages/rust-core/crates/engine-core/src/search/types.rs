@@ -32,6 +32,8 @@ pub struct SearchStats {
     pub aspiration_hits: Option<u32>,
     /// Total re-searches performed
     pub re_searches: Option<u32>,
+    /// Duplication percentage for parallel search (0-100)
+    pub duplication_percentage: Option<f64>,
 }
 
 /// Search result
