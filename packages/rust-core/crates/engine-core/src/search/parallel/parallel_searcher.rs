@@ -137,6 +137,32 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.shared_state.reset();
         self.duplication_stats.reset();
 
+        // Create TimeManager if needed (similar to UnifiedSearcher)
+        use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
+
+        // Estimate game phase from position
+        let game_phase = if position.ply <= 40 {
+            GamePhase::Opening
+        } else if position.ply <= 120 {
+            GamePhase::MiddleGame
+        } else {
+            GamePhase::EndGame
+        };
+
+        // Create TimeManager for time-based searches
+        if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
+            let time_limits: TimeLimits = limits.clone().into();
+            let time_manager = Arc::new(TimeManager::new(
+                &time_limits,
+                position.side_to_move,
+                position.ply.into(),
+                game_phase,
+            ));
+            self.time_manager = Some(time_manager);
+        } else {
+            self.time_manager = None;
+        }
+
         // Start time management thread if we have time limits
         let time_handle = self
             .time_manager
@@ -247,13 +273,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Iterative deepening loop
         for iteration in 1.. {
+            // Check stop flag BEFORE starting new iteration
+            if self.shared_state.should_stop() {
+                break;
+            }
+
             // Signal all worker threads to start this iteration
             for sender in &self.start_signals {
                 let _ = sender.send(IterationSignal::StartIteration(iteration));
-            }
-
-            if self.shared_state.should_stop() {
-                break;
             }
 
             // Main thread searches at normal depth
@@ -309,7 +336,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         thread::spawn(move || {
             loop {
-                thread::sleep(Duration::from_millis(10)); // Check every 10ms
+                // Adaptive polling interval based on time control
+                let poll_interval = match time_manager.soft_limit_ms() {
+                    0..=50 => Duration::from_millis(2),     // 超高速用
+                    51..=100 => Duration::from_millis(5),   // 高速用
+                    101..=500 => Duration::from_millis(10), // 通常用
+                    _ => Duration::from_millis(20),         // 低速用
+                };
+                thread::sleep(poll_interval);
 
                 if shared_state.should_stop() {
                     break;
@@ -320,7 +354,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 if time_manager.should_stop(nodes) {
                     info!("Time limit reached, stopping search");
                     shared_state.set_stop();
-                    time_manager.force_stop();
+                    // time_manager.force_stop() is redundant - removed
                     break;
                 }
             }
