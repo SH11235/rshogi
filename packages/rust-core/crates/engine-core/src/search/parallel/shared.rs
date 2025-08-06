@@ -6,6 +6,7 @@ use crate::{
     shogi::{Move, PieceType, Square},
     Color,
 };
+use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -13,7 +14,8 @@ use std::sync::Arc;
 pub struct SharedHistory {
     /// History scores using atomic operations
     /// [color][piece_type][to_square]
-    table: Vec<AtomicU32>,
+    /// Each entry is cache-padded to prevent false sharing
+    table: Vec<CachePadded<AtomicU32>>,
 }
 
 impl Default for SharedHistory {
@@ -29,7 +31,7 @@ impl SharedHistory {
         let size = 2 * 15 * 81;
         let mut table = Vec::with_capacity(size);
         for _ in 0..size {
-            table.push(AtomicU32::new(0));
+            table.push(CachePadded::new(AtomicU32::new(0)));
         }
 
         Self { table }
