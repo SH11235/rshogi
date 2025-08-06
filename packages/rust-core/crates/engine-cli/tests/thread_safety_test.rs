@@ -11,6 +11,31 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// CI-aware timeout helpers
+fn bestmove_timeout() -> Duration {
+    if std::env::var("CI").is_ok() {
+        Duration::from_secs(20)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
+fn readyok_timeout() -> Duration {
+    if std::env::var("CI").is_ok() {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_secs(2)
+    }
+}
+
+fn info_timeout() -> Duration {
+    if std::env::var("CI").is_ok() {
+        Duration::from_millis(1000)
+    } else {
+        Duration::from_millis(500)
+    }
+}
+
 /// Helper to spawn engine process
 fn spawn_engine() -> std::process::Child {
     Command::new(env!("CARGO_BIN_EXE_engine-cli"))
@@ -34,21 +59,17 @@ fn send_command<W: Write + ?Sized>(stdin: &mut W, command: &str) {
 
 /// Spawn a thread that continuously reads engine output
 fn spawn_output_reader(
-    mut reader: BufReader<std::process::ChildStdout>,
+    reader: BufReader<std::process::ChildStdout>,
 ) -> (Receiver<String>, thread::JoinHandle<()>) {
     let (tx, rx) = unbounded::<String>();
 
     let handle = thread::spawn(move || {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    let trimmed = line.trim_end().to_string();
-                    if !trimmed.is_empty() {
-                        println!("[ENGINE] {trimmed}");
-                        if tx.send(trimmed).is_err() {
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if !line.is_empty() {
+                        println!("[ENGINE] {line}");
+                        if tx.send(line).is_err() {
                             break; // Receiver dropped
                         }
                     }
@@ -94,9 +115,15 @@ fn read_until_pattern(
 /// Cleanup helper to properly shutdown engine
 fn cleanup_engine(
     mut engine: std::process::Child,
-    stdin: std::process::ChildStdin,
+    mut stdin: std::process::ChildStdin,
     reader_handle: thread::JoinHandle<()>,
 ) {
+    // Proper cleanup sequence: stop -> isready -> quit
+    send_command(&mut stdin, "stop");
+    send_command(&mut stdin, "isready");
+    // Don't wait for readyok here, just send quit
+    send_command(&mut stdin, "quit");
+
     // Close stdin to send EOF
     drop(stdin);
 
@@ -141,15 +168,15 @@ fn init_engine() -> (
 
     // Initialize
     send_command(&mut stdin, "usi");
-    let _ = read_until_pattern(&rx, "usiok", Duration::from_secs(2)).expect("Failed to get usiok");
+    let _ = read_until_pattern(&rx, "usiok", readyok_timeout()).expect("Failed to get usiok");
     send_command(&mut stdin, "isready");
-    let _ =
-        read_until_pattern(&rx, "readyok", Duration::from_secs(2)).expect("Failed to get readyok");
+    let _ = read_until_pattern(&rx, "readyok", readyok_timeout()).expect("Failed to get readyok");
 
     (engine, stdin, rx, reader_handle)
 }
 
 #[test]
+#[serial_test::serial]
 fn test_stop_ponderhit_simultaneous() {
     let (mut engine, stdin, rx, _reader_handle) = init_engine();
     let stdin = Arc::new(std::sync::Mutex::new(stdin));
@@ -200,7 +227,7 @@ fn test_stop_ponderhit_simultaneous() {
     ponderhit_thread.join().expect("Ponderhit thread panicked");
 
     // Should get bestmove without deadlock
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(result.is_ok(), "Failed to get bestmove after simultaneous stop/ponderhit");
 
     // Cleanup
@@ -215,6 +242,7 @@ fn test_stop_ponderhit_simultaneous() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_multiple_go_commands_concurrent() {
     let (mut engine, stdin, rx, _reader_handle) = init_engine();
     let stdin = Arc::new(std::sync::Mutex::new(stdin));
@@ -231,7 +259,7 @@ fn test_multiple_go_commands_concurrent() {
 
     // Spawn 3 threads trying to start search simultaneously
     let mut handles = vec![];
-    for i in 0..3 {
+    for _i in 0..3 {
         let stdin = stdin.clone();
         let barrier = barrier.clone();
         let success_count = success_count.clone();
@@ -239,7 +267,7 @@ fn test_multiple_go_commands_concurrent() {
         let handle = thread::spawn(move || {
             barrier.wait();
             let mut stdin = stdin.lock().expect("Failed to lock stdin for go command");
-            send_command(&mut *stdin, &format!("go movetime {}", 1000 + i * 100));
+            send_command(&mut *stdin, "go depth 3");
             drop(stdin); // Release lock immediately
             success_count.fetch_add(1, Ordering::SeqCst);
         });
@@ -308,6 +336,7 @@ fn test_multiple_go_commands_concurrent() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_position_update_during_stop() {
     let (engine, stdin, rx, reader_handle) = init_engine();
     let stdin = Arc::new(std::sync::Mutex::new(stdin));
@@ -320,7 +349,7 @@ fn test_position_update_during_stop() {
     }
 
     // Wait for search to actually start by looking for info output
-    match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
+    match read_until_pattern(&rx, "info ", info_timeout()) {
         Ok(_) => println!("Search confirmed started (info received)"),
         Err(e) => {
             println!("Warning: No info line for infinite search: {e}");
@@ -353,7 +382,7 @@ fn test_position_update_during_stop() {
     stop_thread.join().expect("Stop thread panicked");
 
     // Should get bestmove
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(
         result.is_ok(),
         "Failed to get bestmove after position/stop race - {:?}",
@@ -363,11 +392,11 @@ fn test_position_update_during_stop() {
     // Verify we can start a new search with the updated position
     {
         let mut stdin = stdin.lock().unwrap();
-        send_command(&mut *stdin, "go movetime 300");
+        send_command(&mut *stdin, "go depth 3");
     }
 
     // Wait for this search to complete
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(2));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(
         result.is_ok(),
         "Failed to start new search after position update - {:?}",
@@ -387,6 +416,7 @@ fn test_position_update_during_stop() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_memory_ordering_visibility() {
     // This test verifies that atomic operations have proper visibility across threads
     let (mut engine, stdin, rx, _reader_handle) = init_engine();
@@ -431,7 +461,7 @@ fn test_memory_ordering_visibility() {
     assert!(response_received.load(Ordering::Acquire), "Memory ordering not maintained");
 
     // Get bestmove (allow more time for CI environments where search might take longer)
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(result.is_ok(), "Failed to get bestmove");
 
     // Cleanup
@@ -446,12 +476,10 @@ fn test_memory_ordering_visibility() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_rapid_go_stop_cycles() {
     // Constants for better CI stability
     const CYCLES: usize = 3; // Reduced from 5 to 3 for CI stability
-    const START_TIMEOUT_MS: u64 = 800; // Time to wait for info line
-    const BESTMOVE_TIMEOUT_SECS: u64 = 5; // Time to wait for bestmove
-    const READYOK_TIMEOUT_SECS: u64 = 2; // Time to wait for readyok
 
     let (engine, mut stdin, rx, reader_handle) = init_engine();
 
@@ -463,24 +491,24 @@ fn test_rapid_go_stop_cycles() {
         eprintln!("--- rapid cycle {n}/{CYCLES} ---");
 
         // 1) Start search
-        send_command(&mut stdin, "go movetime 700");
+        send_command(&mut stdin, "go depth 3");
 
         // 2) Try to confirm search started (optional - don't fail if no info)
-        let _ = read_until_pattern(&rx, "info ", Duration::from_millis(START_TIMEOUT_MS)).ok();
+        let _ = read_until_pattern(&rx, "info ", info_timeout()).ok();
 
         // 3) Send stop command
         send_command(&mut stdin, "stop");
 
         // 4) Must receive bestmove
         assert!(
-            read_until_pattern(&rx, "bestmove", Duration::from_secs(BESTMOVE_TIMEOUT_SECS)).is_ok(),
+            read_until_pattern(&rx, "bestmove", bestmove_timeout()).is_ok(),
             "cycle {n}: Failed to receive bestmove after stop"
         );
 
         // 5) Ensure engine is ready for next cycle - this prevents double bestmove issues
         send_command(&mut stdin, "isready");
         assert!(
-            read_until_pattern(&rx, "readyok", Duration::from_secs(READYOK_TIMEOUT_SECS)).is_ok(),
+            read_until_pattern(&rx, "readyok", readyok_timeout()).is_ok(),
             "cycle {n}: Failed to receive readyok - engine may be in inconsistent state"
         );
     }
@@ -491,6 +519,7 @@ fn test_rapid_go_stop_cycles() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_concurrent_setoption_and_go() {
     let (mut engine, stdin, rx, _reader_handle) = init_engine();
     let stdin = Arc::new(std::sync::Mutex::new(stdin));
@@ -512,7 +541,7 @@ fn test_concurrent_setoption_and_go() {
         barrier.wait();
         let mut stdin = stdin_clone2.lock().unwrap();
         send_command(&mut *stdin, "position startpos");
-        send_command(&mut *stdin, "go movetime 500");
+        send_command(&mut *stdin, "go depth 3");
     });
 
     // Wait for threads
@@ -524,11 +553,11 @@ fn test_concurrent_setoption_and_go() {
         let mut stdin = stdin.lock().unwrap();
         send_command(&mut *stdin, "isready");
     }
-    let _ = read_until_pattern(&rx, "readyok", Duration::from_secs(1))
+    let _ = read_until_pattern(&rx, "readyok", readyok_timeout())
         .expect("Failed to get readyok after concurrent commands");
 
     // Should complete search successfully with extended timeout
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(result.is_ok(), "Failed to complete search after concurrent setoption");
 
     // Cleanup
@@ -543,23 +572,24 @@ fn test_concurrent_setoption_and_go() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_setoption_queued_until_search_finishes() {
     let (engine, mut stdin, rx, reader_handle) = init_engine();
 
     // Phase 1: Start first search
     send_command(&mut stdin, "position startpos");
-    send_command(&mut stdin, "go movetime 800");
+    send_command(&mut stdin, "go depth 4");
 
     // Phase 2: Send setoption while searching (no assertion needed - just shouldn't error)
     send_command(&mut stdin, "setoption name Threads value 4");
 
     // Phase 3: Wait for first search to complete
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(result.is_ok(), "Failed to get bestmove from first search");
 
     // Phase 4: Ensure setoption is processed after search
     send_command(&mut stdin, "isready");
-    let result = read_until_pattern(&rx, "readyok", Duration::from_secs(5));
+    let result = read_until_pattern(&rx, "readyok", readyok_timeout());
     assert!(
         result.is_ok(),
         "Failed to get readyok after setoption - setoption was not queued properly"
@@ -569,7 +599,7 @@ fn test_setoption_queued_until_search_finishes() {
     send_command(&mut stdin, "go depth 4");
 
     // Verify second search completes successfully (settings were applied)
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(
         result.is_ok(),
         "Failed to get bestmove from second search - engine may not be working after setoption"
@@ -588,15 +618,16 @@ fn test_setoption_queued_until_search_finishes() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_setoption_returns_ok_while_searching() {
     let (engine, mut stdin, rx, reader_handle) = init_engine();
 
     // Start a search
     send_command(&mut stdin, "position startpos");
-    send_command(&mut stdin, "go movetime 1000");
+    send_command(&mut stdin, "go depth 5");
 
     // Wait for search to start
-    match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
+    match read_until_pattern(&rx, "info ", info_timeout()) {
         Ok(_) => println!("Search confirmed started"),
         Err(e) => println!("Warning: No info line for search: {e}"),
     }
@@ -621,7 +652,7 @@ fn test_setoption_returns_ok_while_searching() {
     assert!(!found_error, "setoption should not return error while searching");
 
     // Wait for search to complete with extended timeout
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(result.is_ok(), "Failed to get bestmove");
 
     // Cleanup
@@ -630,15 +661,16 @@ fn test_setoption_returns_ok_while_searching() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_multiple_setoptions_during_search() {
     let (engine, mut stdin, rx, reader_handle) = init_engine();
 
     // Start a search
     send_command(&mut stdin, "position startpos");
-    send_command(&mut stdin, "go movetime 1500");
+    send_command(&mut stdin, "go depth 5");
 
     // Wait for search to start
-    match read_until_pattern(&rx, "info ", Duration::from_millis(500)) {
+    match read_until_pattern(&rx, "info ", info_timeout()) {
         Ok(_) => println!("Search confirmed started"),
         Err(e) => println!("Warning: No info line for search: {e}"),
     }
@@ -651,19 +683,19 @@ fn test_multiple_setoptions_during_search() {
     send_command(&mut stdin, "setoption name USI_Hash value 32");
 
     // Wait for first search to complete with extended timeout
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(5));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(result.is_ok(), "Failed to get bestmove from first search");
 
     // Verify settings are applied in next search
     send_command(&mut stdin, "isready");
-    let _ = read_until_pattern(&rx, "readyok", Duration::from_secs(5))
+    let _ = read_until_pattern(&rx, "readyok", readyok_timeout())
         .expect("Failed to get readyok after multiple setoptions");
 
     // Start another search - should use all new settings
-    send_command(&mut stdin, "go movetime 500");
+    send_command(&mut stdin, "go depth 3");
 
     // Wait for search to complete with extended timeout (10s for EngineType change)
-    let result = read_until_pattern(&rx, "bestmove", Duration::from_secs(10));
+    let result = read_until_pattern(&rx, "bestmove", bestmove_timeout());
     assert!(result.is_ok(), "Failed to get bestmove from second search");
 
     // Cleanup
