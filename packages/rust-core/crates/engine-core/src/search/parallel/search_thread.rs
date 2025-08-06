@@ -102,8 +102,17 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         self.searcher.set_history(self.local_history.clone());
         self.searcher.set_counter_moves(self.local_counter_moves.clone());
 
+        // Note: The searcher already uses the shared TT from construction
+
+        // Create depth-limited search with shared stop flag
+        let depth_limits = SearchLimits {
+            depth: Some(depth),
+            stop_flag: Some(self.shared_state.stop_flag.clone()),
+            ..limits
+        };
+
         // Perform the search
-        let result = self.searcher.search(position, limits);
+        let result = self.searcher.search(position, depth_limits);
 
         // Update local tables from searcher
         self.local_history = self.searcher.get_history();

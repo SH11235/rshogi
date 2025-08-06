@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use crate::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     evaluation::nnue::NNUEEvaluatorWrapper,
+    search::parallel::ParallelSearcher,
     search::unified::UnifiedSearcher,
-    search::{SearchLimits, SearchResult},
+    search::{SearchLimits, SearchResult, TranspositionTable},
     Position,
 };
 
@@ -18,6 +19,10 @@ type MaterialSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
 type NnueBasicSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, false, 8>;
 type MaterialEnhancedSearcher = UnifiedSearcher<MaterialEvaluator, true, true, 16>;
 type NnueEnhancedSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, true, 16>;
+
+/// Type alias for parallel searchers
+type MaterialParallelSearcher = ParallelSearcher<MaterialEvaluator>;
+type NnueParallelSearcher = ParallelSearcher<NNUEEvaluatorProxy>;
 
 /// Engine type selection
 ///
@@ -83,6 +88,15 @@ pub struct Engine {
     nnue_basic_searcher: Arc<Mutex<Option<NnueBasicSearcher>>>,
     material_enhanced_searcher: Arc<Mutex<Option<MaterialEnhancedSearcher>>>,
     nnue_enhanced_searcher: Arc<Mutex<Option<NnueEnhancedSearcher>>>,
+    // Parallel searchers
+    material_parallel_searcher: Arc<Mutex<Option<MaterialParallelSearcher>>>,
+    nnue_parallel_searcher: Arc<Mutex<Option<NnueParallelSearcher>>>,
+    // Shared transposition table for parallel search
+    shared_tt: Arc<TranspositionTable>,
+    // Number of threads for parallel search
+    num_threads: usize,
+    // Whether to use parallel search
+    use_parallel: bool,
 }
 
 impl Engine {
@@ -128,6 +142,9 @@ impl Engine {
             Arc::new(Mutex::new(None))
         };
 
+        // Create shared TT for parallel search
+        let shared_tt = Arc::new(TranspositionTable::new(64)); // 64MB for shared TT
+
         Engine {
             engine_type,
             material_evaluator,
@@ -136,51 +153,136 @@ impl Engine {
             nnue_basic_searcher,
             material_enhanced_searcher,
             nnue_enhanced_searcher,
+            material_parallel_searcher: Arc::new(Mutex::new(None)),
+            nnue_parallel_searcher: Arc::new(Mutex::new(None)),
+            shared_tt,
+            num_threads: 1, // Default to single thread
+            use_parallel: false,
         }
     }
 
     /// Search for best move in position
     pub fn search(&self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
-        log::info!("Engine::search called with engine_type: {:?}", self.engine_type);
-        match self.engine_type {
-            EngineType::Material => {
-                let mut searcher_guard = self.material_searcher.lock().unwrap();
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.search(pos, limits)
-                } else {
-                    panic!("Material searcher not initialized");
+        log::info!(
+            "Engine::search called with engine_type: {:?}, parallel: {}",
+            self.engine_type,
+            self.use_parallel
+        );
+
+        // Use parallel search if enabled and supported
+        if self.use_parallel {
+            match self.engine_type {
+                EngineType::Material | EngineType::Enhanced => {
+                    self.search_parallel_material(pos, limits)
+                }
+                EngineType::Nnue | EngineType::EnhancedNnue => {
+                    self.search_parallel_nnue(pos, limits)
                 }
             }
-            EngineType::Nnue => {
-                log::info!("Starting NNUE search");
-                let mut searcher_guard = self.nnue_basic_searcher.lock().unwrap();
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    let result = searcher.search(pos, limits);
-                    log::info!("NNUE search completed");
-                    result
-                } else {
-                    panic!("NNUE searcher not initialized");
+        } else {
+            // Single-threaded search
+            match self.engine_type {
+                EngineType::Material => {
+                    let mut searcher_guard = self.material_searcher.lock().unwrap();
+                    if let Some(searcher) = searcher_guard.as_mut() {
+                        searcher.search(pos, limits)
+                    } else {
+                        panic!("Material searcher not initialized");
+                    }
                 }
-            }
-            EngineType::Enhanced => {
-                log::info!("Starting Enhanced search");
-                let mut searcher_guard = self.material_enhanced_searcher.lock().unwrap();
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.search(pos, limits)
-                } else {
-                    panic!("Enhanced searcher not initialized");
+                EngineType::Nnue => {
+                    log::info!("Starting NNUE search");
+                    let mut searcher_guard = self.nnue_basic_searcher.lock().unwrap();
+                    if let Some(searcher) = searcher_guard.as_mut() {
+                        let result = searcher.search(pos, limits);
+                        log::info!("NNUE search completed");
+                        result
+                    } else {
+                        panic!("NNUE searcher not initialized");
+                    }
                 }
-            }
-            EngineType::EnhancedNnue => {
-                log::info!("Starting Enhanced NNUE search");
-                let mut searcher_guard = self.nnue_enhanced_searcher.lock().unwrap();
-                if let Some(searcher) = searcher_guard.as_mut() {
-                    searcher.search(pos, limits)
-                } else {
-                    panic!("Enhanced NNUE searcher not initialized");
+                EngineType::Enhanced => {
+                    log::info!("Starting Enhanced search");
+                    let mut searcher_guard = self.material_enhanced_searcher.lock().unwrap();
+                    if let Some(searcher) = searcher_guard.as_mut() {
+                        searcher.search(pos, limits)
+                    } else {
+                        panic!("Enhanced searcher not initialized");
+                    }
+                }
+                EngineType::EnhancedNnue => {
+                    log::info!("Starting Enhanced NNUE search");
+                    let mut searcher_guard = self.nnue_enhanced_searcher.lock().unwrap();
+                    if let Some(searcher) = searcher_guard.as_mut() {
+                        searcher.search(pos, limits)
+                    } else {
+                        panic!("Enhanced NNUE searcher not initialized");
+                    }
                 }
             }
         }
+    }
+
+    /// Parallel search with material evaluator
+    fn search_parallel_material(&self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
+        log::info!("Starting parallel material search with {} threads", self.num_threads);
+
+        // Initialize parallel searcher if needed
+        let mut searcher_guard = self.material_parallel_searcher.lock().unwrap();
+        if searcher_guard.is_none() {
+            *searcher_guard = Some(MaterialParallelSearcher::new(
+                self.material_evaluator.clone(),
+                self.shared_tt.clone(),
+                self.num_threads,
+            ));
+        }
+
+        if let Some(searcher) = searcher_guard.as_mut() {
+            searcher.search(pos, limits)
+        } else {
+            panic!("Failed to initialize parallel material searcher");
+        }
+    }
+
+    /// Parallel search with NNUE evaluator
+    fn search_parallel_nnue(&self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
+        log::info!("Starting parallel NNUE search with {} threads", self.num_threads);
+
+        // Initialize parallel searcher if needed
+        let mut searcher_guard = self.nnue_parallel_searcher.lock().unwrap();
+        if searcher_guard.is_none() {
+            let nnue_proxy = NNUEEvaluatorProxy {
+                evaluator: self.nnue_evaluator.clone(),
+            };
+            *searcher_guard = Some(NnueParallelSearcher::new(
+                Arc::new(nnue_proxy),
+                self.shared_tt.clone(),
+                self.num_threads,
+            ));
+        }
+
+        if let Some(searcher) = searcher_guard.as_mut() {
+            searcher.search(pos, limits)
+        } else {
+            panic!("Failed to initialize parallel NNUE searcher");
+        }
+    }
+
+    /// Set number of threads for parallel search
+    pub fn set_threads(&mut self, threads: usize) {
+        self.num_threads = threads.max(1); // At least 1 thread
+        self.use_parallel = threads > 1;
+
+        // Clear existing parallel searchers so they'll be recreated with new thread count
+        *self.material_parallel_searcher.lock().unwrap() = None;
+        *self.nnue_parallel_searcher.lock().unwrap() = None;
+
+        log::info!("Set threads to {}, parallel search: {}", self.num_threads, self.use_parallel);
+    }
+
+    /// Get current number of threads
+    pub fn get_threads(&self) -> usize {
+        self.num_threads
     }
 
     /// Load NNUE weights from file
