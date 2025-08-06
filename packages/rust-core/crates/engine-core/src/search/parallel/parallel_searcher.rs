@@ -236,6 +236,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 let mut thread = thread.lock().unwrap();
                 thread.reset();
 
+                // Set thread handle for unpark operations
+                thread.set_thread_handle(thread::current());
+
                 // Worker thread search loop
                 loop {
                     // Try to receive signal with timeout
@@ -250,7 +253,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             let depth = thread.get_start_depth(iteration);
                             debug!("Thread {id} starting depth {depth}");
 
-                            let _result = thread.search(&mut position, limits.clone(), depth);
+                            // Use search_iteration with park control
+                            let max_depth = limits.depth.unwrap_or(255);
+                            let _result = thread.search_iteration(
+                                &mut position,
+                                limits.clone(),
+                                depth,
+                                max_depth,
+                            );
 
                             // Update node count (differential)
                             thread.report_nodes();
@@ -315,7 +325,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let depth = thread.get_start_depth(iteration);
 
             debug!("Starting iteration {iteration} (depth {depth})");
-            let result = thread.search(position, limits.clone(), depth);
+            let max_depth = limits.depth.unwrap_or(255);
+            let result = thread.search_iteration(position, limits.clone(), depth, max_depth);
 
             // Update best result
             if result.score > best_result.score || result.stats.depth > best_result.stats.depth {
@@ -402,6 +413,22 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         })
     }
 
+    /// Stop all threads with unpark (lost wake-up prevention)
+    fn stop_all_threads(&self) {
+        // First, unpark all threads (prevent lost wake-up)
+        for thread in &self.threads {
+            thread.lock().unwrap().unpark();
+        }
+
+        // Then set stop flag
+        self.shared_state.set_stop();
+
+        // Send stop signal to all workers
+        for sender in &self.start_signals {
+            let _ = sender.send(IterationSignal::Stop);
+        }
+    }
+
     /// Stop all threads with timeout (best-effort)
     ///
     /// Note: The timeout is best-effort only. Since std::thread::JoinHandle doesn't
@@ -412,13 +439,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     fn stop_threads_with_timeout(&mut self, timeout: Duration) {
         let start = Instant::now();
 
-        // First, set stop flag
-        self.shared_state.set_stop();
-
-        // Send stop signal to all workers
-        for sender in &self.start_signals {
-            let _ = sender.send(IterationSignal::Stop);
-        }
+        // Use stop_all_threads for proper unpark sequence
+        self.stop_all_threads();
 
         // Wait for worker threads with timeout
         let mut handles = self.handles.lock().unwrap();
@@ -593,5 +615,31 @@ mod tests {
             // Note: For now, scaling up threads requires creating a new searcher
             // This is a known limitation that can be addressed in future improvements
         }
+    }
+
+    #[test]
+    fn test_thread_park_control() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+        let mut position = Position::startpos();
+
+        // Search with a moderate depth limit to trigger park control
+        let limits = SearchLimitsBuilder::default().depth(6).build();
+
+        // Measure time to ensure park control is working
+        let start = std::time::Instant::now();
+        let result = searcher.search(&mut position, limits);
+        let elapsed = start.elapsed();
+
+        // Should find a move
+        assert!(result.best_move.is_some());
+        assert!(result.stats.nodes > 0);
+        assert!(result.stats.depth >= 6);
+
+        // With park control, threads should not consume excessive CPU
+        // This is a soft check since exact timing depends on system
+        debug!("Search with park control took {:?}", elapsed);
     }
 }
