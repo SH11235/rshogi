@@ -13,7 +13,7 @@
 ### NNUE関連ツール
 - `create_mock_nnue` - テスト用のモックNNUE重み作成
 - `nnue_benchmark` - NNUE評価関数のパフォーマンス測定
-- **`generate_training_data`** - NNUE学習用データの生成
+- **`generate_nnue_training_data`** - NNUE学習用データの生成（スキップ・レジューム機能付き）
 
 ### ベンチマークツール
 - `shogi_benchmark` - 将棋エンジン全般のベンチマーク
@@ -44,14 +44,21 @@ cargo build --release --bin <ツール名>
 
 ### NNUE学習データの生成
 ```bash
-# 24手目の30,000局面を処理（100局面ずつ）
-./target/release/generate_training_data crates/engine-cli/start_sfens_ply24.txt training_data_ply24.txt
+# 基本的な使用法（深さ2、バッチサイズ50）
+./target/release/generate_nnue_training_data input_positions.sfen output_training.txt
 
-# 32手目の30,000局面を処理（500局面ずつ、メモリ効率重視）
-./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 500
+# カスタム設定（深さ3、バッチサイズ100）
+./target/release/generate_nnue_training_data input_positions.sfen output_training.txt 3 100
 
-# 中断後の再開（同じコマンドで自動的に続きから）
-./target/release/generate_training_data crates/engine-cli/start_sfens_ply32.txt training_data_ply32.txt 500
+# レジューム機能（自動的に続きから処理）
+./target/release/generate_nnue_training_data input_positions.sfen output_training.txt 3 100
+
+# 明示的にレジューム位置を指定
+./target/release/generate_nnue_training_data input_positions.sfen output_training.txt 3 100 5000
+
+# スキップされた局面は自動的に別ファイルに保存される
+# output_training_skipped.txt - スキップされた局面
+# output_training.progress - 進捗追跡ファイル
 ```
 
 ### 定跡データの検証
