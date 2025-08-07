@@ -60,6 +60,8 @@ pub struct ParallelBenchmarkConfig {
     pub measure_stop_latency: bool,
     /// Minimum duration per position in milliseconds
     pub min_duration_ms: u64,
+    /// Fixed total time per position in milliseconds (overrides min_duration_ms)
+    pub fixed_total_ms: Option<u64>,
     /// Number of warmup runs before measurement
     pub warmup_runs: u32,
     /// Whether to collect raw measurement data
@@ -75,6 +77,7 @@ impl Default for ParallelBenchmarkConfig {
             positions: vec![Position::startpos()],
             measure_stop_latency: true,
             min_duration_ms: 500,
+            fixed_total_ms: None,
             warmup_runs: 1,
             collect_raw_data: false,
         }
@@ -100,6 +103,7 @@ pub fn run_parallel_benchmark<E: Evaluator + Send + Sync + 'static>(
         config.search_depth,
         config.time_limit_ms,
         config.min_duration_ms,
+        config.fixed_total_ms,
         config.warmup_runs,
         config.collect_raw_data,
     );
@@ -122,6 +126,7 @@ pub fn run_parallel_benchmark<E: Evaluator + Send + Sync + 'static>(
             config.search_depth,
             config.time_limit_ms,
             config.min_duration_ms,
+            config.fixed_total_ms,
             config.warmup_runs,
             config.collect_raw_data,
         );
@@ -150,9 +155,11 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
     search_depth: u8,
     time_limit_ms: Option<u64>,
     min_duration_ms: u64,
+    fixed_total_ms: Option<u64>,
     warmup_runs: u32,
     collect_raw_data: bool,
 ) -> ParallelBenchmarkResult {
+    // Create a fresh TT for each thread configuration to ensure fair comparison
     let tt = Arc::new(crate::search::TranspositionTable::new(128)); // 128MB TT
     let mut total_nodes = 0u64;
     let mut total_time = Duration::ZERO;
@@ -160,14 +167,15 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
     let total_positions = positions.len();
     let mut raw_measurements = Vec::new();
 
-    debug!("Starting benchmark for {} threads", thread_count);
+    debug!("Starting benchmark for {} threads with fresh TT", thread_count);
 
     // Store single-thread PVs for comparison
     let mut single_thread_pvs = Vec::new();
     if thread_count > 1 {
         debug!("Collecting single-thread PVs for comparison");
-        // Get single thread PVs first
-        let mut single_searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), 1);
+        // Get single thread PVs first - use a separate TT for single-thread test
+        let single_tt = Arc::new(crate::search::TranspositionTable::new(128));
+        let mut single_searcher = ParallelSearcher::new(evaluator.clone(), single_tt, 1);
         for pos in positions {
             let mut pos_clone = pos.clone();
             let limits = SearchLimitsBuilder::default().depth(search_depth).build();
@@ -179,14 +187,16 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
     // Create searcher with specified thread count
     let mut searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), thread_count);
 
-    // Warmup runs
+    // Warmup runs with separate TT to avoid affecting main measurements
     if warmup_runs > 0 {
-        info!("Running {} warmup iterations", warmup_runs);
+        info!("Running {} warmup iterations with separate TT", warmup_runs);
+        let warmup_tt = Arc::new(crate::search::TranspositionTable::new(128));
+        let mut warmup_searcher = ParallelSearcher::new(evaluator.clone(), warmup_tt, thread_count);
         for _ in 0..warmup_runs {
             for pos in positions.iter().take(1) {
                 let mut pos_clone = pos.clone();
                 let limits = SearchLimitsBuilder::default().depth(search_depth).build();
-                let _ = searcher.search(&mut pos_clone, limits);
+                let _ = warmup_searcher.search(&mut pos_clone, limits);
             }
         }
     }
@@ -200,9 +210,18 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
         let mut iterations = 0u32;
         let mut depth_reached = 0u8;
 
-        // Run until minimum duration is reached
+        // Determine target duration based on mode
+        let target_duration = if let Some(fixed_ms) = fixed_total_ms {
+            // Fixed total time mode - each position gets exactly this amount of time
+            Duration::from_millis(fixed_ms)
+        } else {
+            // Minimum duration mode - run at least this long
+            Duration::from_millis(min_duration_ms)
+        };
+
+        // Run until target duration is reached
         let position_start = Instant::now();
-        while position_start.elapsed() < Duration::from_millis(min_duration_ms) {
+        while position_start.elapsed() < target_duration {
             let mut pos_clone = pos.clone();
 
             let limits = if let Some(time_ms) = time_limit_ms {

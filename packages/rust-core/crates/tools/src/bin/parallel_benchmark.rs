@@ -57,6 +57,10 @@ struct Args {
     /// Minimum duration per position in milliseconds
     #[arg(long, default_value_t = 500)]
     min_duration_ms: u64,
+    
+    /// Fixed total time per position in milliseconds (overrides min_duration_ms)
+    #[arg(long)]
+    fixed_total_ms: Option<u64>,
 
     /// Dump raw measurement data to file
     #[arg(long)]
@@ -138,6 +142,11 @@ fn main() -> Result<()> {
     println!("Running parallel benchmark with {} positions", positions.len());
     println!("Thread configurations: {thread_counts:?}");
     println!("Search depth: {}", args.depth);
+    if let Some(fixed_ms) = args.fixed_total_ms {
+        println!("Fixed total time per position: {}ms", fixed_ms);
+    } else {
+        println!("Minimum duration per position: {}ms", args.min_duration_ms);
+    }
     println!();
 
     // Configure benchmark
@@ -148,6 +157,7 @@ fn main() -> Result<()> {
         positions,
         measure_stop_latency: !args.skip_stop_latency,
         min_duration_ms: args.min_duration_ms,
+        fixed_total_ms: args.fixed_total_ms,
         warmup_runs: args.warmup_runs,
         collect_raw_data: args.dump_raw.is_some(),
     };
