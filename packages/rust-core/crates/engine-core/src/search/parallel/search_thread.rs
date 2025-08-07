@@ -30,19 +30,39 @@ pub enum ThreadState {
     Searching = 1,
 }
 
-/// Local node counter configuration
-const NODE_FLUSH_THRESHOLD: u32 = 50_000; // Flush after 50k nodes
+/// Calculate flush threshold based on search depth
+/// Deeper searches use larger thresholds to reduce flush frequency
+#[inline]
+fn calculate_flush_threshold(depth: u8) -> u32 {
+    match depth {
+        0..=6 => 25_000,    // Shallow search: flush more frequently
+        7..=12 => 50_000,   // Medium search: current default
+        13..=20 => 100_000, // Deep search: flush less frequently
+        _ => 150_000,       // Very deep search: minimal flushing
+    }
+}
 
 /// Local node counter - simplified for minimal overhead
 /// Uses u32 for efficient operations on 32-bit architectures
 struct LocalNodeCounter {
     /// Non-atomic local counter (only accessed by owning thread)
     count: u32,
+    /// Current search depth for dynamic threshold calculation
+    current_depth: u8,
 }
 
 impl LocalNodeCounter {
     fn new() -> Self {
-        Self { count: 0 }
+        Self {
+            count: 0,
+            current_depth: 0,
+        }
+    }
+
+    /// Set the current search depth for dynamic threshold calculation
+    #[inline]
+    fn set_depth(&mut self, depth: u8) {
+        self.current_depth = depth;
     }
 
     /// Add nodes and flush if threshold reached
@@ -50,7 +70,8 @@ impl LocalNodeCounter {
     fn add(&mut self, nodes: u64, shared_state: &SharedSearchState) {
         // Saturating add to prevent overflow on u32
         self.count = self.count.saturating_add(nodes as u32);
-        if self.count >= NODE_FLUSH_THRESHOLD {
+        let threshold = calculate_flush_threshold(self.current_depth);
+        if self.count >= threshold {
             shared_state.add_nodes(self.count as u64);
             self.count = 0;
         }
@@ -187,6 +208,9 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         limits: SearchLimits,
         depth: u8,
     ) -> SearchResult {
+        // Set depth for dynamic threshold calculation
+        self.local_node_counter.set_depth(depth);
+
         // Update searcher's internal tables with thread-local versions
         self.searcher.set_history(self.local_history.clone());
         self.searcher.set_counter_moves(self.local_counter_moves.clone());
