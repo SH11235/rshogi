@@ -21,7 +21,10 @@ use crate::{
     shogi::{Move, Position},
 };
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::Ordering,
+        Arc, Mutex,
+    },
     time::Instant,
 };
 
@@ -563,7 +566,19 @@ where
     ) {
         if USE_TT {
             if let Some(ref tt) = self.tt {
-                tt.store(hash, best_move, score as i16, 0, depth, node_type);
+                // Store and check if this is a new entry
+                let is_new_entry = tt.store_and_check_new(hash, best_move, score as i16, 0, depth, node_type);
+                
+                // Update duplication statistics based on store result
+                if let Some(ref stats) = self.duplication_stats {
+                    // Always increment total nodes when storing
+                    stats.total_nodes.fetch_add(1, Ordering::Relaxed);
+                    
+                    // Only increment unique if this was a new entry
+                    if is_new_entry {
+                        stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
         }
     }

@@ -5,7 +5,6 @@ use crate::{
     search::{constants::SEARCH_INF, tt::NodeType, unified::UnifiedSearcher},
     shogi::{Move, Position},
 };
-use std::sync::atomic::Ordering;
 
 /// Search a single node in the tree
 pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
@@ -106,21 +105,8 @@ where
     let tt_move = if USE_TT {
         let tt_entry = searcher.probe_tt(hash);
 
-        // Update duplication statistics if available
-        // Fixed: Count both unique and duplicate nodes properly
-        if let Some(ref stats) = searcher.duplication_stats {
-            // Always increment total nodes
-            stats.total_nodes.fetch_add(1, Ordering::Relaxed);
-            
-            // If TT entry doesn't exist, this is a unique node
-            // If TT entry exists, this is a duplicate (already searched by another thread)
-            if tt_entry.is_none() {
-                // This node hasn't been searched before
-                stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
-            }
-            // Note: if tt_entry.is_some(), it means another thread already searched this node
-            // so we don't increment unique_nodes (it's a duplicate)
-        }
+        // Note: Duplication statistics are now updated during TT store, not probe.
+        // This ensures accurate counting of unique vs duplicate nodes.
 
         // ABDADA: Check if sibling node found exact cut
         if depth > 2 {
