@@ -429,6 +429,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             debug!("Starting iteration {iteration} (depth {depth})");
             let result = thread.search_iteration(position, &limits, depth);
 
+            // IMPORTANT: Report nodes after each iteration for 1-thread case
+            thread.report_nodes();
+            debug!("Main thread iteration {iteration} nodes: {}", thread.searcher.nodes());
+
             // Update best result
             if result.score > best_result.score || result.stats.depth > best_result.stats.depth {
                 best_result = result;
@@ -454,8 +458,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         // Report final nodes from main thread
-        let mut thread = main_thread.lock().unwrap();
-        thread.flush_nodes(); // Force flush all pending nodes
+        // IMPORTANT: This ensures nodes are counted even with 1 thread (workers_to_start = 0)
+        {
+            let mut thread = main_thread.lock().unwrap();
+            thread.flush_nodes(); // Force flush all pending nodes
+            debug!("Main thread final nodes flushed. Total nodes: {}", self.shared_state.get_nodes());
+        }
 
         // Get final best move from shared state
         if let Some(best_move) = self.shared_state.get_best_move() {

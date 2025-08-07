@@ -7,7 +7,7 @@ use crate::{
     search::{parallel::ParallelSearcher, SearchLimitsBuilder},
     shogi::Position,
 };
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -159,24 +159,22 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
     warmup_runs: u32,
     collect_raw_data: bool,
 ) -> ParallelBenchmarkResult {
-    // Create a fresh TT for each thread configuration to ensure fair comparison
-    let tt = Arc::new(crate::search::TranspositionTable::new(128)); // 128MB TT
     let mut total_nodes = 0u64;
     let mut total_time = Duration::ZERO;
     let mut pv_matches = 0;
     let total_positions = positions.len();
     let mut raw_measurements = Vec::new();
 
-    debug!("Starting benchmark for {} threads with fresh TT", thread_count);
+    debug!("Starting benchmark for {} threads", thread_count);
 
     // Store single-thread PVs for comparison
     let mut single_thread_pvs = Vec::new();
     if thread_count > 1 {
         debug!("Collecting single-thread PVs for comparison");
         // Get single thread PVs first - use a separate TT for single-thread test
-        let single_tt = Arc::new(crate::search::TranspositionTable::new(128));
-        let mut single_searcher = ParallelSearcher::new(evaluator.clone(), single_tt, 1);
         for pos in positions {
+            let single_tt = Arc::new(crate::search::TranspositionTable::new(128));
+            let mut single_searcher = ParallelSearcher::new(evaluator.clone(), single_tt, 1);
             let mut pos_clone = pos.clone();
             let limits = SearchLimitsBuilder::default().depth(search_depth).build();
             let result = single_searcher.search(&mut pos_clone, limits);
@@ -184,16 +182,14 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
         }
     }
 
-    // Create searcher with specified thread count
-    let mut searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), thread_count);
-
     // Warmup runs with separate TT to avoid affecting main measurements
     if warmup_runs > 0 {
         info!("Running {} warmup iterations with separate TT", warmup_runs);
-        let warmup_tt = Arc::new(crate::search::TranspositionTable::new(128));
-        let mut warmup_searcher = ParallelSearcher::new(evaluator.clone(), warmup_tt, thread_count);
         for _ in 0..warmup_runs {
             for pos in positions.iter().take(1) {
+                // Create fresh TT for each warmup to avoid contamination
+                let warmup_tt = Arc::new(crate::search::TranspositionTable::new(128));
+                let mut warmup_searcher = ParallelSearcher::new(evaluator.clone(), warmup_tt, thread_count);
                 let mut pos_clone = pos.clone();
                 let limits = SearchLimitsBuilder::default().depth(search_depth).build();
                 let _ = warmup_searcher.search(&mut pos_clone, limits);
@@ -204,6 +200,12 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
     // Run benchmark on all positions
     for (idx, pos) in positions.iter().enumerate() {
         trace!("Testing position {}/{}", idx + 1, total_positions);
+        
+        // IMPORTANT: Create fresh TT and searcher for each position to avoid TT contamination
+        // This ensures each position is measured independently without TT entries from previous positions
+        let tt = Arc::new(crate::search::TranspositionTable::new(128));
+        let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, thread_count);
+        debug!("Position {}: Created fresh TT and searcher", idx);
         
         let mut pos_nodes = 0u64;
         let mut pos_elapsed = Duration::ZERO;
@@ -219,21 +221,42 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
             Duration::from_millis(min_duration_ms)
         };
 
-        // Run until target duration is reached
+        // Run until target duration is reached (with safety limit)
         let position_start = Instant::now();
-        while position_start.elapsed() < target_duration {
+        // A-2: fixed_total_ms指定時は1回だけ実行、それ以外は複数回実行可能
+        const DEFAULT_MAX_ITERATIONS: u32 = 1; // デフォルトを1に変更
+        let max_iterations = if fixed_total_ms.is_some() { 
+            1  // 時間モードでは1回だけ実行
+        } else { 
+            DEFAULT_MAX_ITERATIONS  // 深さモードではデフォルト回数
+        };
+        
+        info!("Position {}: target_duration={:?}, max_iterations={}, fixed_total_ms={:?}", 
+              idx, target_duration, max_iterations, fixed_total_ms);
+        
+        while position_start.elapsed() < target_duration && iterations < max_iterations {
             let mut pos_clone = pos.clone();
 
-            let limits = if let Some(time_ms) = time_limit_ms {
+            // A-2: fixed_total_msを優先的に使用
+            let limits = if let Some(ms) = fixed_total_ms {
+                // 時間モード: fixed_total_msで指定された時間だけ探索
+                SearchLimitsBuilder::default().fixed_time_ms(ms).build()
+            } else if let Some(time_ms) = time_limit_ms {
+                // 既存のtime_limit_msモード
                 SearchLimitsBuilder::default().fixed_time_ms(time_ms).build()
             } else {
+                // 深さモード
                 SearchLimitsBuilder::default().depth(search_depth).build()
             };
 
             // Start timing after setup
             let iter_start = Instant::now();
             
+            debug!("Position {} iteration {}: calling searcher.search with depth {}", 
+                   idx, iterations + 1, search_depth);
             let result = searcher.search(&mut pos_clone, limits);
+            debug!("Position {} iteration {}: got {} nodes", 
+                   idx, iterations + 1, result.stats.nodes);
             
             let iter_elapsed = iter_start.elapsed();
 
@@ -251,7 +274,26 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
             }
 
             trace!("  Iteration {}: {} nodes in {:?}", iterations, result.stats.nodes, iter_elapsed);
+            
+            // デバッグ: ループ条件のチェック
+            info!("Position {} iter {}: elapsed={:?}, target={:?}, continue={}",
+                  idx, iterations, position_start.elapsed(), target_duration,
+                  position_start.elapsed() < target_duration && iterations < max_iterations);
         }
+        
+        if iterations >= max_iterations && max_iterations > 1 {
+            warn!("Position {} hit iteration limit of {}", idx, max_iterations);
+        }
+        
+        info!("Position {} complete: {} iterations, {} nodes in {:?}", 
+              idx, iterations, pos_nodes, pos_elapsed);
+
+        // Collect duplication stats from this position's searcher
+        let dup_pct = searcher.get_duplication_percentage();
+        debug!("Position {}: Duplication = {:.1}%", idx, dup_pct);
+        
+        // Note: Since we create fresh TT per position, duplication stats are per-position
+        // We don't aggregate them as they would lose meaning across different TTs
 
         total_nodes += pos_nodes;
         total_time += pos_elapsed;
@@ -286,7 +328,9 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
         0
     };
 
-    let duplication_rate = searcher.get_duplication_percentage();
+    // Since we reset TT per position, duplication rate is not meaningful across positions
+    // Set to 0 to indicate TT was reset between positions
+    let duplication_rate = 0.0;
 
     let pv_match_rate = if thread_count > 1 && total_positions > 0 {
         (pv_matches as f64 / total_positions as f64) * 100.0
