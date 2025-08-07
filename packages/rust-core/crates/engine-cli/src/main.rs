@@ -27,7 +27,7 @@ const CHANNEL_SIZE: usize = 1024;
 const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Specialized lock_or_recover for EngineAdapter with state reset
-fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<EngineAdapter> {
+fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<'_, EngineAdapter> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
