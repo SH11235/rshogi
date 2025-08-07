@@ -83,9 +83,13 @@ pub fn calculate_summary(results: &[ParallelBenchmarkResult]) -> BenchmarkSummar
     }
 
     // Calculate overall metrics
-    let best_result = results.iter().max_by_key(|r| r.nps).expect("No results");
+    let best_result = results.iter().max_by_key(|r| r.nps);
 
-    let avg_efficiency = results.iter().map(|r| r.efficiency).sum::<f64>() / results.len() as f64;
+    let avg_efficiency = if results.is_empty() {
+        0.0
+    } else {
+        results.iter().map(|r| r.efficiency).sum::<f64>() / results.len() as f64
+    };
 
     // Check performance targets
     let four_thread_result = results.iter().find(|r| r.thread_count == 4);
@@ -100,8 +104,8 @@ pub fn calculate_summary(results: &[ParallelBenchmarkResult]) -> BenchmarkSummar
     };
 
     let overall_metrics = OverallMetrics {
-        best_nps: best_result.nps,
-        best_thread_count: best_result.thread_count,
+        best_nps: best_result.map(|r| r.nps).unwrap_or(0),
+        best_thread_count: best_result.map(|r| r.thread_count).unwrap_or(1),
         avg_efficiency,
         targets_met,
     };
@@ -325,6 +329,24 @@ mod tests {
         assert_eq!(summary.overall_metrics.best_nps, 180000);
         assert_eq!(summary.overall_metrics.best_thread_count, 2);
         assert_eq!(summary.overall_metrics.avg_efficiency, 0.95);
+    }
+
+    #[test]
+    fn test_empty_results_handling() {
+        let results = vec![];
+
+        // Should not panic on empty results
+        let summary = calculate_summary(&results);
+
+        assert_eq!(summary.thread_results.len(), 0);
+        assert_eq!(summary.overall_metrics.best_nps, 0);
+        assert_eq!(summary.overall_metrics.best_thread_count, 1);
+        assert_eq!(summary.overall_metrics.avg_efficiency, 0.0);
+
+        // All targets should be met for empty results (all() returns true for empty iterator)
+        assert!(summary.overall_metrics.targets_met.duplication_target);
+        assert!(summary.overall_metrics.targets_met.pv_match_target);
+        assert!(summary.overall_metrics.targets_met.stop_latency_target);
     }
 
     #[test]
