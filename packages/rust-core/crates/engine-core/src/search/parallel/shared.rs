@@ -191,6 +191,7 @@ impl SharedSearchState {
         self.best_depth.store(0, Ordering::Relaxed);
         self.current_generation.fetch_add(1, Ordering::Relaxed);
         self.nodes_searched.store(0, Ordering::Relaxed);
+        self.stop_flag.store(false, Ordering::Release); // IMPORTANT: Reset stop flag for new search
         self.history.clear();
     }
 

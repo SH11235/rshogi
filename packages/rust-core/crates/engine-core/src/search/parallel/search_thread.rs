@@ -12,6 +12,7 @@ use crate::{
     shogi::{Move, Position},
 };
 use crossbeam_utils::CachePadded;
+use log::trace;
 use smallvec::SmallVec;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -266,6 +267,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             // Add to local counter and auto-flush if threshold reached
             self.local_node_counter.add(diff, &self.shared_state);
             self.last_nodes = current_nodes;
+            trace!("Thread {} reported {} nodes (total: {})", self.id, diff, current_nodes);
         }
     }
 

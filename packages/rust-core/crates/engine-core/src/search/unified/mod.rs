@@ -20,6 +20,7 @@ use crate::{
     },
     shogi::{Move, Position},
 };
+use log::debug;
 use std::{
     sync::{
         atomic::Ordering,
@@ -577,6 +578,14 @@ where
                     // Only increment unique if this was a new entry
                     if is_new_entry {
                         stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
+                    }
+                    
+                    // Debug logging for duplication stats
+                    let total = stats.total_nodes.load(Ordering::Relaxed);
+                    let unique = stats.unique_nodes.load(Ordering::Relaxed);
+                    if total % 1000 == 0 {
+                        debug!("DuplicationStats snapshot: unique={unique}, total={total}, dup%={:.1}", 
+                               ((total - unique) as f64 * 100.0 / total as f64));
                     }
                 }
             }
