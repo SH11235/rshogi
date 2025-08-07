@@ -300,7 +300,7 @@ impl MoveList {
 
     /// Iterator over moves
     #[inline]
-    pub fn iter(&self) -> std::slice::Iter<Move> {
+    pub fn iter(&self) -> std::slice::Iter<'_, Move> {
         self.moves.iter()
     }
 
