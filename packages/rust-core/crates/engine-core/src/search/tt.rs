@@ -2097,7 +2097,7 @@ impl TranspositionTable {
         };
         self.store_entry(params);
     }
-    
+
     /// Store entry and return whether it was a new entry
     pub fn store_and_check_new(
         &self,
@@ -2138,10 +2138,10 @@ impl TranspositionTable {
         } else {
             self.buckets[idx].probe(params.key)
         };
-        
+
         // Store the entry
         self.store_entry(params);
-        
+
         // Return true if this was a new entry (not found before)
         existing.is_none()
     }

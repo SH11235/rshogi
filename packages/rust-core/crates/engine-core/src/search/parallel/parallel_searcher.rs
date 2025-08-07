@@ -99,7 +99,7 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     duplication_stats: Arc<DuplicationStats>,
 
     /// Channels for sending signals to worker threads
-    start_signals: Vec<Sender<IterationSignal>>,
+    start_signals: Arc<Mutex<Vec<Sender<IterationSignal>>>>,
 
     /// Currently active thread count (may be less than num_threads)
     active_threads: usize,
@@ -136,7 +136,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             threads,
             handles: Mutex::new(Vec::new()),
             duplication_stats,
-            start_signals: Vec::new(),
+            start_signals: Arc::new(Mutex::new(Vec::new())),
             active_threads: num_threads,
         }
     }
@@ -210,7 +210,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         handles.clear();
 
         // Clear old channels and create new ones
-        self.start_signals.clear();
+        {
+            let mut signals = self.start_signals.lock().unwrap();
+            signals.clear();
+        }
 
         // Only start up to active_threads workers
         let workers_to_start = self.active_threads.saturating_sub(1); // -1 for main thread
@@ -237,7 +240,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Create channel for this worker
             let (sender, receiver) = crossbeam::channel::unbounded();
-            self.start_signals.push(sender);
+            {
+                let mut signals = self.start_signals.lock().unwrap();
+                signals.push(sender);
+            }
 
             let thread = thread.clone();
             let mut position = position.clone();
@@ -410,10 +416,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Signal all active worker threads to start this iteration
             // Note: start_signals only contains channels for active threads
-            for sender in &self.start_signals {
-                let _ = sender.send(IterationSignal::StartIteration(iteration));
-                // Note: We don't need to unpark here since the thread is actively
-                // waiting on the channel with recv_timeout. It will see the signal.
+            {
+                let signals = self.start_signals.lock().unwrap();
+                for sender in signals.iter() {
+                    let _ = sender.send(IterationSignal::StartIteration(iteration));
+                    // Note: We don't need to unpark here since the thread is actively
+                    // waiting on the channel with recv_timeout. It will see the signal.
+                }
             }
 
             // Main thread searches at normal depth
@@ -462,7 +471,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         {
             let mut thread = main_thread.lock().unwrap();
             thread.flush_nodes(); // Force flush all pending nodes
-            debug!("Main thread final nodes flushed. Total nodes: {}", self.shared_state.get_nodes());
+            debug!(
+                "Main thread final nodes flushed. Total nodes: {}",
+                self.shared_state.get_nodes()
+            );
         }
 
         // Get final best move from shared state
@@ -494,6 +506,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         time_manager: Arc<TimeManager>,
     ) -> thread::JoinHandle<()> {
         let shared_state = self.shared_state.clone();
+        let start_signals = self.start_signals.clone();
 
         thread::spawn(move || {
             loop {
@@ -514,9 +527,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 let nodes = shared_state.get_nodes();
                 if time_manager.should_stop(nodes) {
                     info!("Time limit reached, stopping search");
-                    // Note: We cannot unpark threads from here without access to thread handles
-                    // The main thread will handle unparking in stop_all_threads
+
+                    // ① Set stop flag
                     shared_state.set_stop();
+
+                    // ② Broadcast Stop signal to all workers
+                    {
+                        let signals = start_signals.lock().unwrap();
+                        for sender in signals.iter() {
+                            let _ = sender.send(IterationSignal::Stop);
+                        }
+                    }
+
                     break;
                 }
             }
@@ -529,8 +551,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.shared_state.set_stop();
 
         // Send stop signal to all workers
-        for sender in &self.start_signals {
-            let _ = sender.send(IterationSignal::Stop);
+        {
+            let signals = self.start_signals.lock().unwrap();
+            for sender in signals.iter() {
+                let _ = sender.send(IterationSignal::Stop);
+            }
         }
 
         // Best-effort unpark with try_lock to avoid deadlock

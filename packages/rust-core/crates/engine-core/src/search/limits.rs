@@ -295,11 +295,11 @@ impl From<SearchLimits> for crate::time_management::TimeLimits {
         // Unwrap Ponder to get the inner time control
         let time_control = match unified.time_control {
             crate::time_management::TimeControl::Ponder(inner) => {
-                log::info!("Converting Ponder({inner:?}) to inner time control for TimeManager");
+                log::debug!("Converting Ponder({inner:?}) to inner time control for TimeManager");
                 *inner
             }
             other => {
-                log::info!("Using time control as-is: {other:?}");
+                log::debug!("Using time control as-is: {other:?}");
                 other
             }
         };

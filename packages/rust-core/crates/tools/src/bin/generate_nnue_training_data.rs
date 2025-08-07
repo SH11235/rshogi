@@ -148,8 +148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(&progress_path)?;
         let progress: usize = content.trim().parse().unwrap_or(skip_count);
         if progress > skip_count {
-            println!("Progress file shows {} positions attempted (including skipped)", progress);
-            println!("Output file has {} successful results", skip_count);
+            println!("Progress file shows {progress} positions attempted (including skipped)");
+            println!("Output file has {skip_count} successful results");
             println!("Difference of {} positions were skipped/failed", progress - skip_count);
         }
         progress
@@ -159,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Skip based on actual progress, not just output lines
     let sfen_positions = if actual_progress > 0 {
-        println!("Skipping first {} positions (already attempted)", actual_progress);
+        println!("Skipping first {actual_progress} positions (already attempted)");
         sfen_positions.into_iter().skip(actual_progress).collect()
     } else {
         sfen_positions
@@ -254,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let success_rate = (newly_processed as f64
             / (newly_processed + total_errors + total_skipped) as f64)
             * 100.0;
-        println!("Success rate (this run): {:.1}%", success_rate);
+        println!("Success rate (this run): {success_rate:.1}%");
     }
 
     if total_skipped > 0 {
