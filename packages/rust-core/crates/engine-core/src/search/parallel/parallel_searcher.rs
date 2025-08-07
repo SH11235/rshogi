@@ -10,7 +10,7 @@ use crate::{
 };
 use crossbeam::channel::Sender;
 use crossbeam_utils::CachePadded;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -200,7 +200,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
     /// Start worker threads
     fn start_worker_threads(&mut self, position: Position, limits: SearchLimits) {
-        let mut handles = self.handles.lock().unwrap();
+        let mut handles = match self.handles.lock() {
+            Ok(h) => h,
+            Err(e) => {
+                error!("Failed to acquire handles lock: {e}");
+                return;
+            }
+        };
         handles.clear();
 
         // Clear old channels and create new ones
@@ -244,9 +250,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // Reset thread and set handle without holding lock
                 {
-                    let mut thread = thread.lock().unwrap();
-                    thread.reset();
-                    thread.set_thread_handle(thread::current());
+                    match thread.lock() {
+                        Ok(mut thread) => {
+                            thread.reset();
+                            thread.set_thread_handle(thread::current());
+                        }
+                        Err(e) => {
+                            error!("Worker thread {id} failed to acquire lock on startup: {e}");
+                            return;
+                        }
+                    }
                 } // Lock released here
 
                 // Worker thread search loop
@@ -257,13 +270,22 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // Check stop flag before starting
                             if shared_state.should_stop() {
                                 // Report nodes with lock
-                                let mut thread = thread.lock().unwrap();
-                                thread.report_nodes();
+                                if let Ok(mut thread) = thread.lock() {
+                                    thread.report_nodes();
+                                } else {
+                                    warn!("Thread {id} failed to acquire lock for reporting nodes");
+                                }
                                 break;
                             }
 
                             // Take lock only for the duration of the search
-                            let mut thread = thread.lock().unwrap();
+                            let mut thread = match thread.lock() {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    error!("Thread {id} failed to acquire lock for search: {e}");
+                                    continue;
+                                }
+                            };
 
                             // Set state to searching
                             thread.set_state(super::search_thread::ThreadState::Searching);
@@ -312,15 +334,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // Lock released here
                         }
                         Ok(IterationSignal::Stop) => {
-                            let mut thread = thread.lock().unwrap();
-                            thread.report_nodes();
+                            if let Ok(mut thread) = thread.lock() {
+                                thread.report_nodes();
+                            } else {
+                                warn!("Thread {id} failed to acquire lock for final report");
+                            }
                             break;
                         }
                         Err(_) => {
                             // Timeout - check stop flag
                             if shared_state.should_stop() {
-                                let mut thread = thread.lock().unwrap();
-                                thread.report_nodes();
+                                if let Ok(mut thread) = thread.lock() {
+                                    thread.report_nodes();
+                                } else {
+                                    warn!("Thread {id} failed to acquire lock on timeout stop");
+                                }
                                 break;
                             }
                             // Continue waiting
@@ -362,7 +390,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Reset main thread before starting
         {
-            let mut thread = main_thread.lock().unwrap();
+            let mut thread = match main_thread.lock() {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Main thread failed to acquire lock for reset: {e}");
+                    return SearchResult::new(None, i32::MIN, SearchStats::default());
+                }
+            };
             thread.reset();
         }
 
@@ -383,7 +417,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             // Main thread searches at normal depth
-            let mut thread = main_thread.lock().unwrap();
+            let mut thread = match main_thread.lock() {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Main thread failed to acquire lock for iteration {iteration}: {e}");
+                    break;
+                }
+            };
             let depth = thread.get_start_depth(iteration);
 
             debug!("Starting iteration {iteration} (depth {depth})");
@@ -508,7 +548,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.stop_all_threads();
 
         // Wait for worker threads with timeout
-        let mut handles = self.handles.lock().unwrap();
+        let mut handles = match self.handles.lock() {
+            Ok(h) => h,
+            Err(e) => {
+                error!("Failed to acquire handles lock for thread cleanup: {e}");
+                return;
+            }
+        };
         let total_threads = handles.len();
         let mut failed_joins = 0;
 
