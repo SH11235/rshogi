@@ -106,9 +106,9 @@ pub fn halfkp_index(king_sq: Square, piece: BonaPiece) -> usize {
 
 /// Feature transformer for HalfKP -> 256-dimensional features
 pub struct FeatureTransformer {
-    /// Weights for feature transformation [INPUT_DIM][256]
+    /// Weights for feature transformation \[INPUT_DIM\]\[256\]
     pub weights: Vec<i16>,
-    /// Biases for output features [256]
+    /// Biases for output features \[256\]
     pub biases: Vec<i32>,
 }
 

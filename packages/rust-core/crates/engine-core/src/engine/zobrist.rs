@@ -16,11 +16,11 @@ const MAX_HAND_COUNT: usize = 18;
 
 /// Zobrist hash tables
 pub struct ZobristTable {
-    /// Hash values for pieces on squares [color][piece_kind][square]
+    /// Hash values for pieces on squares \[color\]\[piece_kind\]\[square\]
     /// piece_kind includes promoted pieces (0-15)
     pub piece_square: [[[u64; BOARD_SQUARES]; MAX_PIECE_INDEX]; 2],
 
-    /// Hash values for pieces in hand [color][piece_type][count]
+    /// Hash values for pieces in hand \[color\]\[piece_type\]\[count\]
     /// piece_type is 0-6 (no King), count is 0-MAX_HAND_COUNT (max possible)
     pub hand: [[[u64; MAX_HAND_COUNT + 1]; 7]; 2],
 

@@ -14,9 +14,9 @@ use log::error;
 /// Accumulator for storing transformed features
 #[derive(Clone)]
 pub struct Accumulator {
-    /// Black perspective features [256]
+    /// Black perspective features \[256\]
     pub black: Vec<i16>,
-    /// White perspective features [256]
+    /// White perspective features \[256\]
     pub white: Vec<i16>,
     /// Whether black features are computed
     pub computed_black: bool,
