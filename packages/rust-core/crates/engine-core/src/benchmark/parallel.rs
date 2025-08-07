@@ -232,39 +232,40 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
             Duration::from_millis(config.min_duration_ms)
         };
 
-        // Run until target duration is reached (with safety limit)
+        // Run search once - let TimeManager handle duration
         let position_start = Instant::now();
-        // fixed_total_ms: 1回のみ実行、min_duration_ms: 時間到達まで無制限
-        let max_iterations = if config.fixed_total_ms.is_some() {
-            1 // 時間モードでは1回だけ実行
-        } else {
-            u32::MAX // min_duration_msモード：時間到達まで無制限に実行
-        };
+        // All modes complete in 1 search() call
+        let max_iterations = 1;
 
         debug!(
             "Position {idx}: target_duration={target_duration:?}, max_iterations={max_iterations}, fixed_total_ms={:?}", config.fixed_total_ms
         );
 
-        // Loop until target duration is reached (for min_duration_ms mode)
-        while iterations < max_iterations && pos_elapsed < target_duration {
+        // Single search execution (TimeManager handles time control)
+        while iterations < max_iterations {
             let mut pos_clone = pos.clone();
 
-            // A-2: fixed_total_msを優先的に使用
+            // Configure search limits based on mode
             let limits = if let Some(ms) = config.fixed_total_ms {
-                // 時間モード: fixed_total_msで指定された時間だけ探索
-                // IMPORTANT: Also set depth limit to prevent infinite depth search
+                // fixed_total_ms mode: exact time control
                 SearchLimitsBuilder::default()
                     .fixed_time_ms(ms)
-                    .depth(config.search_depth)  // Add depth limit even for time-based search
+                    .depth(config.search_depth)  // Safety depth limit
                     .build()
             } else if let Some(time_ms) = config.time_limit_ms {
-                // 既存のtime_limit_msモード
+                // time_limit_ms mode
                 SearchLimitsBuilder::default()
                     .fixed_time_ms(time_ms)
-                    .depth(config.search_depth)  // Add depth limit here too
+                    .depth(config.search_depth)
+                    .build()
+            } else if config.min_duration_ms > 0 {
+                // min_duration_ms mode: use time control instead of multiple iterations
+                SearchLimitsBuilder::default()
+                    .fixed_time_ms(config.min_duration_ms)
+                    .depth(config.search_depth)  // Safety depth limit
                     .build()
             } else {
-                // 深さモード
+                // Pure depth mode (no time control)
                 SearchLimitsBuilder::default().depth(config.search_depth).build()
             };
 
@@ -310,13 +311,7 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
                 iter_elapsed
             );
 
-            // Check if we've reached target duration (for min_duration_ms mode)
-            if config.fixed_total_ms.is_none() && pos_elapsed >= target_duration {
-                debug!(
-                    "Position {idx}: Reached target duration {target_duration:?} after {iterations} iterations"
-                );
-                break;
-            }
+            // No need to check duration - TimeManager handles it
         }
 
         // Log completion status
