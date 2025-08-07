@@ -205,7 +205,7 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
     for (idx, pos) in config.positions.iter().enumerate() {
         trace!("Testing position {}/{}", idx + 1, total_positions);
         info!("Thread config {thread_count}: Starting position {idx}/{total_positions}");
-        
+
         // Skip problematic positions temporarily
         if thread_count > 1 && idx >= 16 {
             info!("Thread config {thread_count}: Skipping position {idx} for multi-thread testing");
@@ -250,7 +250,7 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
                 // fixed_total_ms mode: exact time control
                 SearchLimitsBuilder::default()
                     .fixed_time_ms(ms)
-                    .depth(config.search_depth)  // Safety depth limit
+                    .depth(config.search_depth) // Safety depth limit
                     .build()
             } else if let Some(time_ms) = config.time_limit_ms {
                 // time_limit_ms mode
@@ -262,7 +262,7 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
                 // min_duration_ms mode: use time control instead of multiple iterations
                 SearchLimitsBuilder::default()
                     .fixed_time_ms(config.min_duration_ms)
-                    .depth(config.search_depth)  // Safety depth limit
+                    .depth(config.search_depth) // Safety depth limit
                     .build()
             } else {
                 // Pure depth mode (no time control)
