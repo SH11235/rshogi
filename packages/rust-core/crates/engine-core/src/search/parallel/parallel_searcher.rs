@@ -271,7 +271,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             if shared_state.should_stop() {
                                 // Report nodes with lock
                                 if let Ok(mut thread) = thread.lock() {
-                                    thread.report_nodes();
+                                    thread.flush_nodes(); // Force flush all pending nodes
                                 } else {
                                     warn!("Thread {id} failed to acquire lock for reporting nodes");
                                 }
@@ -327,7 +327,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                                 // Check again after park (handles spurious wakeups and stop during park)
                                 if shared_state.should_stop() {
-                                    thread.report_nodes();
+                                    thread.flush_nodes(); // Force flush all pending nodes
                                     break;
                                 }
                             }
@@ -335,7 +335,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         }
                         Ok(IterationSignal::Stop) => {
                             if let Ok(mut thread) = thread.lock() {
-                                thread.report_nodes();
+                                thread.flush_nodes(); // Force flush all pending nodes
                             } else {
                                 warn!("Thread {id} failed to acquire lock for final report");
                             }
@@ -345,7 +345,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // Timeout - check stop flag
                             if shared_state.should_stop() {
                                 if let Ok(mut thread) = thread.lock() {
-                                    thread.report_nodes();
+                                    thread.flush_nodes(); // Force flush all pending nodes
                                 } else {
                                     warn!("Thread {id} failed to acquire lock on timeout stop");
                                 }
@@ -455,7 +455,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Report final nodes from main thread
         let mut thread = main_thread.lock().unwrap();
-        thread.report_nodes();
+        thread.flush_nodes(); // Force flush all pending nodes
 
         // Get final best move from shared state
         if let Some(best_move) = self.shared_state.get_best_move() {
