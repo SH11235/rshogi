@@ -25,3 +25,8 @@ perf.data.old
 # Benchmark artifacts
 /target/criterion/
 target/criterion/
+
+# Benchmark result files (temporary)
+benchmark-result.json
+system-info.json
+complete-result.json
