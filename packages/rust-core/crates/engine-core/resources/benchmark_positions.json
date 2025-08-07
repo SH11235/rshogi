@@ -1,0 +1,104 @@
+{
+  "positions": [
+    {
+      "name": "startpos",
+      "sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+      "category": "opening"
+    },
+    {
+      "name": "opening_76fu",
+      "sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+      "category": "opening"
+    },
+    {
+      "name": "opening_84fu",
+      "sfen": "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3",
+      "category": "opening"
+    },
+    {
+      "name": "opening_68gin",
+      "sfen": "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P4P1/PP1PPPP1P/1B2S2R1/LNSGKG1NL w - 4",
+      "category": "opening"
+    },
+    {
+      "name": "midgame_complex",
+      "sfen": "ln1g1g1nl/1ks4r1/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL b - 17",
+      "category": "midgame"
+    },
+    {
+      "name": "midgame_active",
+      "sfen": "3g1ks2/5g3/2n1pp1p1/p3P1p2/1pP5P/P8/2N2PP2/6K2/L4G1NL b RSBPrslp 45",
+      "category": "midgame"
+    },
+    {
+      "name": "midgame_closed",
+      "sfen": "ln1gkg1nl/1r4sb1/p1pppp1pp/1p4p2/9/2P6/PPBPPPPPP/3R3S1/LN1GKG1NL b - 13",
+      "category": "midgame"
+    },
+    {
+      "name": "midgame_attacking",
+      "sfen": "l2g1g1nl/1ks3r2/1pppp2pp/p4ppb1/9/P1P1P4/1P1PSPPPP/1BK1G2R1/LN2SG1NL b - 21",
+      "category": "midgame"
+    },
+    {
+      "name": "endgame_simple",
+      "sfen": "1n5n1/2s3k2/3p1p1p1/2p3p2/9/2P3P2/3P1P1P1/2K6/1N5N1 b RBGSLPrbgs2l13p 80",
+      "category": "endgame"
+    },
+    {
+      "name": "endgame_rook",
+      "sfen": "4k4/9/4p4/4P4/9/9/9/9/4K3R b 2r2b2g4s4n4l17p 120",
+      "category": "endgame"
+    },
+    {
+      "name": "endgame_bishop",
+      "sfen": "4k4/9/4p4/9/4P4/9/9/9/B3K4 b r2b2g4s4n4l17p 125",
+      "category": "endgame"
+    },
+    {
+      "name": "endgame_gold",
+      "sfen": "4k4/9/4G4/9/9/9/9/9/4K4 b 2rb2g3s4n4l18p 130",
+      "category": "endgame"
+    },
+    {
+      "name": "tactical_fork",
+      "sfen": "l3k3l/3s1s3/3ppp3/3N1N3/9/9/9/9/4K4 b RBG2Srbg2n2l15p 50",
+      "category": "tactical"
+    },
+    {
+      "name": "tactical_pin",
+      "sfen": "ln1gkg1nl/1r4sb1/p1pppp1pp/1p4p2/9/2P6/PPBPPPPPP/7S1/LN1GKG1NL b R 15",
+      "category": "tactical"
+    },
+    {
+      "name": "tactical_sacrifice",
+      "sfen": "3gk4/5R3/4p4/9/9/9/9/9/4K4 b B2G4S4N4Lrbg4s4n4l17p 70",
+      "category": "tactical"
+    },
+    {
+      "name": "tactical_promotion",
+      "sfen": "4k4/9/4p4/9/9/4P4/9/4S4/4K4 b RBG3Srbg3s4n4l16p 75",
+      "category": "tactical"
+    },
+    {
+      "name": "complex_middlegame",
+      "sfen": "l2g1g1n1/1ks4rl/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL b n 25",
+      "category": "midgame"
+    },
+    {
+      "name": "complex_attack",
+      "sfen": "1n1g1g1nl/1ks4r1/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL w L 26",
+      "category": "midgame"
+    },
+    {
+      "name": "complex_defense",
+      "sfen": "ln1g1g1n1/1ks4r1/1pppp1bpp/p3spp1l/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL b - 27",
+      "category": "midgame"
+    },
+    {
+      "name": "mate_in_3",
+      "sfen": "3gk4/9/4G4/9/9/9/9/4+R4/4K4 b B2G3S4N4Lrbs4n4l18p 100",
+      "category": "tactical"
+    }
+  ]
+}

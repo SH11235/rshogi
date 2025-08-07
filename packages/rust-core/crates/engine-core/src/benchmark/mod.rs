@@ -1,5 +1,8 @@
 //! Benchmark for AI performance testing
 
+pub mod metrics;
+pub mod parallel;
+
 use crate::evaluate::{Evaluator, MaterialEvaluator};
 use crate::movegen::MoveGen;
 use crate::nnue::NNUEEvaluatorWrapper;
