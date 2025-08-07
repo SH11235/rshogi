@@ -252,7 +252,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let time_manager = self.time_manager.clone();
 
             let handle = thread::spawn(move || {
-                debug!("Worker thread {id} spawned");
+                debug!("Worker thread {id} started");
 
                 // Reset thread and set handle without holding lock
                 {
@@ -260,6 +260,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         Ok(mut thread) => {
                             thread.reset();
                             thread.set_thread_handle(thread::current());
+                            debug!("Worker thread {id} initialized successfully");
                         }
                         Err(e) => {
                             error!("Worker thread {id} failed to acquire lock on startup: {e}");
@@ -268,18 +269,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
                 } // Lock released here
 
+                debug!("Worker thread {id} entering search loop");
                 // Worker thread search loop
                 loop {
+                    // CRITICAL: Check stop flag at loop start
+                    if shared_state.should_stop() {
+                        if let Ok(mut thread) = thread.lock() {
+                            thread.flush_nodes();
+                        }
+                        break;
+                    }
+
                     // Try to receive signal with timeout (reduced from 10ms to 1ms for faster response)
                     match receiver.recv_timeout(Duration::from_millis(1)) {
                         Ok(IterationSignal::StartIteration(iteration)) => {
-                            // Check stop flag before starting
+                            // Double-check stop flag before starting
                             if shared_state.should_stop() {
-                                // Report nodes with lock
                                 if let Ok(mut thread) = thread.lock() {
-                                    thread.flush_nodes(); // Force flush all pending nodes
-                                } else {
-                                    warn!("Thread {id} failed to acquire lock for reporting nodes");
+                                    thread.flush_nodes();
                                 }
                                 break;
                             }
@@ -297,7 +304,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             thread.set_state(super::search_thread::ThreadState::Searching);
 
                             let depth = thread.get_start_depth(iteration);
-                            debug!("Thread {id} starting depth {depth}");
 
                             // Perform search (without state management)
                             let max_depth = limits.depth.unwrap_or(255);
@@ -315,6 +321,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // Update node count (differential)
                             thread.report_nodes();
 
+                            // Check stop flag after search
+                            if shared_state.should_stop() {
+                                thread.flush_nodes();
+                                break;
+                            }
+
                             // Check if should park after deep searches
                             if thread.should_park(depth, max_depth) {
                                 // Set idle state before any stop checks
@@ -329,15 +341,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                         info.hard_limit_ms.saturating_sub(info.elapsed_ms)
                                     });
 
-                                    debug!("Thread {id} parking at depth {depth}");
                                     thread.park_with_timeout(max_depth, time_left_ms);
-                                    debug!("Thread {id} woke up from park");
                                 }
 
                                 // CRITICAL: Always check stop flag after park
                                 // This handles both normal wakeups and unpark signals
                                 if shared_state.should_stop() {
-                                    debug!("Thread {id} stopping after park (stop flag set)");
                                     thread.flush_nodes(); // Force flush all pending nodes
                                     break;
                                 }
@@ -351,7 +360,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             } else {
                                 warn!("Thread {id} failed to acquire lock for final report");
                             }
-                            debug!("Thread {id} exiting");
                             break;
                         }
                         Err(_) => {
@@ -413,6 +421,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             thread.reset();
         }
 
+        // CRITICAL: Ensure stop flag is cleared at the start
+        self.shared_state.reset_stop_flag();
+
         // Start time management thread BEFORE iterations for time-based searches
         // This ensures time limits work even during the first iteration
         if let Some(tm) = &self.time_manager {
@@ -433,6 +444,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Check stop flag BEFORE starting new iteration (except first iteration)
             if iteration > 1 && self.shared_state.should_stop() {
                 debug!("Stopping iterations due to stop flag");
+                // Send stop signal to all workers before breaking
+                {
+                    let signals = self.start_signals.lock().unwrap();
+                    for sender in signals.iter() {
+                        let _ = sender.send(IterationSignal::Stop);
+                    }
+                }
                 break;
             }
 
@@ -520,15 +538,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 if depth >= max_depth {
                     info!("Reached maximum depth {max_depth} at iteration {iteration} (depth {depth})");
 
-                    // Send stop signal to all workers for clean shutdown
-                    // This is needed because we won't enter the next iteration
+                    // CRITICAL: Set stop flag FIRST before any other actions
+                    // This ensures workers checking the flag will see it immediately
                     self.shared_state.set_stop();
+
+                    // Then send explicit stop signals to all workers
                     {
                         let signals = self.start_signals.lock().unwrap();
                         for sender in signals.iter() {
                             let _ = sender.send(IterationSignal::Stop);
                         }
                     }
+
+                    // Unpark all threads to ensure they wake up and check the stop flag
+                    self.unpark_all_threads();
 
                     // Now we can safely break
                     break;
@@ -538,6 +561,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Update node count (differential)
             thread.report_nodes();
         }
+
+        // CRITICAL: Send stop signal to all workers when iterations complete
+        // This must be done BEFORE trying to get final results
+        debug!("Iterations complete, sending stop signal to all workers");
+        self.shared_state.set_stop();
+        {
+            let signals = self.start_signals.lock().unwrap();
+            for sender in signals.iter() {
+                let _ = sender.send(IterationSignal::Stop);
+            }
+        }
+        self.unpark_all_threads();
 
         // Report final nodes from main thread
         // IMPORTANT: This ensures nodes are counted even with 1 thread (workers_to_start = 0)
@@ -618,6 +653,19 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         })
     }
 
+    /// Unpark all threads (helper method)
+    fn unpark_all_threads(&self) {
+        // Unpark all threads directly via their thread handles
+        // No locking required - unpark is thread-safe
+        for thread_arc in &self.threads {
+            // We don't need to lock to unpark - just access the thread handle if available
+            if let Ok(thread) = thread_arc.try_lock() {
+                thread.unpark();
+            }
+            // If lock fails, thread is busy and will check stop flag soon anyway
+        }
+    }
+
     /// Stop all threads with unpark (lost wake-up prevention)
     fn stop_all_threads(&self) {
         // First, set stop flag
@@ -631,27 +679,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         }
 
-        // CRITICAL: Unpark ALL threads without lock to prevent deadlock
-        // This ensures parked threads wake up and check the stop flag
-        for thread_arc in &self.threads {
-            // Try to acquire lock briefly just to call unpark
-            // If lock fails, try again with a short retry
-            let mut unpacked = false;
-            for _retry in 0..3 {
-                if let Ok(thread) = thread_arc.try_lock() {
-                    thread.unpark();
-                    unpacked = true;
-                    break;
-                }
-                // Brief sleep before retry
-                thread::sleep(Duration::from_micros(100));
-            }
-
-            if !unpacked {
-                // Last resort: thread is likely busy and will check stop flag soon
-                debug!("Could not unpark thread after retries, it should check stop flag soon");
-            }
-        }
+        // Unpark all threads to ensure they wake up and check the stop flag
+        self.unpark_all_threads();
     }
 
     /// Stop all threads with timeout (best-effort)
@@ -667,7 +696,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Use stop_all_threads for proper unpark sequence
         self.stop_all_threads();
 
-        // Wait for worker threads with timeout
+        // Give threads a brief moment to process the stop signal
+        thread::sleep(Duration::from_millis(5));
+
+        // Wait for worker threads
         let mut handles = match self.handles.lock() {
             Ok(h) => h,
             Err(e) => {
@@ -675,23 +707,38 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 return;
             }
         };
+
         let total_threads = handles.len();
+        let mut joined = 0;
         let mut failed_joins = 0;
 
-        // TEMPORARY: Skip join to avoid hanging
-        // This will leak threads but allows the program to continue
-        warn!("Skipping thread joins to avoid hanging - threads will be leaked");
-        for handle in handles.drain(..) {
-            // Detach the thread by dropping the handle
-            // The thread will continue running in the background
-            // but won't block the main thread
-            drop(handle);
+        // Try to join threads with periodic timeout checks
+        for (idx, handle) in handles.drain(..).enumerate() {
+            // Note: std::thread::JoinHandle doesn't support timeout
+            // We rely on stop_all_threads to have properly signaled all threads
+            debug!("Waiting for thread {idx} to join...");
+
+            // Check if we've exceeded timeout
+            if start.elapsed() > timeout {
+                warn!("Timeout exceeded while joining thread {idx}, giving up on remaining {} threads", total_threads - joined);
+                break;
+            }
+
+            if let Err(e) = handle.join() {
+                warn!("Thread {idx} panicked: {e:?}");
+                failed_joins += 1;
+            } else {
+                joined += 1;
+                debug!("Thread {idx} joined successfully");
+            }
         }
 
         if failed_joins > 0 {
             warn!("{failed_joins} threads failed to join properly");
+        } else if joined == total_threads {
+            debug!("All {total_threads} threads stopped successfully in {:?}", start.elapsed());
         } else {
-            debug!("All threads stopped successfully in {:?}", start.elapsed());
+            warn!("Only {joined}/{total_threads} threads were joined before timeout");
         }
     }
 }

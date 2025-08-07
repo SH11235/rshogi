@@ -292,9 +292,13 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     }
 
     /// Check if this thread should park based on depth
-    pub fn should_park(&self, _depth: u8, _max_depth: u8) -> bool {
-        // TEMPORARY: Disable parking entirely to debug hanging issue
-        false
+    pub fn should_park(&self, depth: u8, max_depth: u8) -> bool {
+        // Only park if:
+        // 1. This is a helper thread (not main thread)
+        // 2. We've reached close to max depth
+        // 3. But not if max_depth is very shallow (<=6) to avoid parking issues
+        // This ensures depth 6 and below never park
+        self.id > 0 && depth >= max_depth.saturating_sub(1) && max_depth > 6
     }
 
     /// Park thread with appropriate duration

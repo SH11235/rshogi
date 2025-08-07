@@ -272,6 +272,11 @@ impl SharedSearchState {
     pub fn set_stop(&self) {
         self.stop_flag.store(true, Ordering::Release);
     }
+
+    /// Reset stop flag (for ensuring clean state)
+    pub fn reset_stop_flag(&self) {
+        self.stop_flag.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]

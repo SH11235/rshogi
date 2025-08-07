@@ -206,10 +206,17 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
         trace!("Testing position {}/{}", idx + 1, total_positions);
         info!("Thread config {thread_count}: Starting position {idx}/{total_positions}");
 
-        // Skip problematic positions temporarily
+        // Skip problematic positions temporarily for debugging
+        // Position 16+ seems to hang with 2 threads
         if thread_count > 1 && idx >= 16 {
-            info!("Thread config {thread_count}: Skipping position {idx} for multi-thread testing");
+            info!("Thread config {thread_count}: Skipping position {idx} for multi-thread testing (known issue)");
             continue;
+        }
+
+        // Additional debug: Test only with first position
+        if thread_count > 1 && idx >= 1 {
+            info!("Thread config {thread_count}: DEBUG - Testing only position 0 for isolation");
+            break; // Use break instead of continue to exit loop
         }
 
         // IMPORTANT: Create fresh TT and searcher for each position to avoid TT contamination
