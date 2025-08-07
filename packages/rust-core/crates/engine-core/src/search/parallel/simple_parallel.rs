@@ -1,0 +1,574 @@
+//! Simplified parallel search implementation
+//!
+//! This is a complete rewrite of the parallel search system with focus on:
+//! - Simplicity and reliability over complex optimizations
+//! - Single atomic stop flag as the only stop mechanism
+//! - No channels, no parking, no complex state management
+//! - Work-stealing queue for task distribution
+
+use crate::{
+    evaluation::evaluate::Evaluator,
+    search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
+    shogi::Position,
+    time_management::TimeManager,
+};
+use log::{debug, error, info, warn};
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use super::{SearchThread, SharedSearchState};
+
+/// Simple work item for threads to process
+#[derive(Clone, Debug)]
+struct WorkItem {
+    /// Iteration number
+    iteration: usize,
+    /// Depth to search at
+    depth: u8,
+    /// Position to search
+    position: Position,
+}
+
+/// Lock-free work queue using atomic indices
+struct WorkQueue {
+    /// Items to process
+    items: Vec<Mutex<Option<WorkItem>>>,
+    /// Next item to take
+    next_index: AtomicUsize,
+    /// Total items added
+    total_items: AtomicUsize,
+}
+
+impl WorkQueue {
+    fn new(capacity: usize) -> Self {
+        let mut items = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            items.push(Mutex::new(None));
+        }
+
+        Self {
+            items,
+            next_index: AtomicUsize::new(0),
+            total_items: AtomicUsize::new(0),
+        }
+    }
+
+    /// Add work item to queue
+    fn push(&self, item: WorkItem) -> bool {
+        let total = self.total_items.load(Ordering::Relaxed);
+        if total >= self.items.len() {
+            return false; // Queue full
+        }
+
+        let index = self.total_items.fetch_add(1, Ordering::Relaxed);
+        if index < self.items.len() {
+            if let Ok(mut slot) = self.items[index].lock() {
+                *slot = Some(item);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Try to get next work item
+    fn pop(&self) -> Option<WorkItem> {
+        loop {
+            let index = self.next_index.load(Ordering::Acquire);
+            let total = self.total_items.load(Ordering::Acquire);
+
+            if index >= total {
+                return None; // No more items
+            }
+
+            // Try to claim this index
+            if self
+                .next_index
+                .compare_exchange(index, index + 1, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                // We got the index, take the item
+                if let Ok(mut slot) = self.items[index].lock() {
+                    return slot.take();
+                }
+            }
+            // Another thread got it, retry
+        }
+    }
+
+    /// Clear the queue for reuse
+    fn clear(&self) {
+        self.next_index.store(0, Ordering::Release);
+        self.total_items.store(0, Ordering::Release);
+        for item in &self.items {
+            if let Ok(mut slot) = item.lock() {
+                *slot = None;
+            }
+        }
+    }
+}
+
+/// Simplified parallel searcher
+pub struct SimpleParallelSearcher<E: Evaluator + Send + Sync + 'static> {
+    /// Shared transposition table
+    tt: Arc<TranspositionTable>,
+
+    /// Shared evaluator
+    evaluator: Arc<E>,
+
+    /// Time manager
+    time_manager: Option<Arc<TimeManager>>,
+
+    /// Shared search state
+    shared_state: Arc<SharedSearchState>,
+
+    /// Number of threads
+    num_threads: usize,
+
+    /// Work queue
+    work_queue: Arc<WorkQueue>,
+
+    /// Node counter
+    total_nodes: Arc<AtomicU64>,
+}
+
+impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
+    /// Create new simple parallel searcher
+    pub fn new(evaluator: Arc<E>, tt: Arc<TranspositionTable>, num_threads: usize) -> Self {
+        assert!(num_threads > 0, "Need at least one thread");
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let shared_state = Arc::new(SharedSearchState::new(stop_flag));
+
+        // Create work queue with reasonable capacity
+        let work_queue = Arc::new(WorkQueue::new(num_threads * 10));
+
+        Self {
+            tt,
+            evaluator,
+            time_manager: None,
+            shared_state,
+            num_threads,
+            work_queue,
+            total_nodes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Main search entry point
+    pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
+        info!("Starting simple parallel search with {} threads", self.num_threads);
+
+        // Record start time for fail-safe
+        let search_start = Instant::now();
+
+        // Reset state
+        self.shared_state.reset();
+        self.work_queue.clear();
+        self.total_nodes.store(0, Ordering::Release);
+
+        // Create time manager if needed
+        use crate::time_management::{GamePhase, TimeControl, TimeLimits};
+
+        let game_phase = if position.ply <= 40 {
+            GamePhase::Opening
+        } else if position.ply <= 120 {
+            GamePhase::MiddleGame
+        } else {
+            GamePhase::EndGame
+        };
+
+        if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
+            let time_limits: TimeLimits = limits.clone().into();
+            let time_manager = Arc::new(TimeManager::new(
+                &time_limits,
+                position.side_to_move,
+                position.ply.into(),
+                game_phase,
+            ));
+            self.time_manager = Some(time_manager);
+        } else {
+            self.time_manager = None;
+        }
+
+        // Start worker threads
+        let mut handles = Vec::new();
+        for id in 1..self.num_threads {
+            handles.push(self.start_worker(id, position.clone(), limits.clone()));
+        }
+
+        // Start time management if needed
+        let time_handle = self.time_manager.as_ref().map(|tm| self.start_time_manager(tm.clone()));
+
+        // Start fail-safe guard thread
+        let fail_safe_handle = self.start_fail_safe_guard(search_start, limits.clone());
+
+        // Main thread does iterative deepening and generates work
+        let result = self.run_main_thread(position, limits);
+
+        // Stop all threads
+        info!("Search complete, stopping threads");
+        self.shared_state.set_stop();
+
+        // Wait for workers
+        for handle in handles {
+            let _ = handle.join();
+        }
+
+        // Stop time manager
+        if let Some(handle) = time_handle {
+            let _ = handle.join();
+        }
+
+        // Stop fail-safe guard
+        let _ = fail_safe_handle.join();
+
+        result
+    }
+
+    /// Start a worker thread
+    fn start_worker(
+        &self,
+        id: usize,
+        _position: Position,
+        limits: SearchLimits,
+    ) -> thread::JoinHandle<()> {
+        let evaluator = self.evaluator.clone();
+        let tt = self.tt.clone();
+        let shared_state = self.shared_state.clone();
+        let work_queue = self.work_queue.clone();
+        let total_nodes = self.total_nodes.clone();
+
+        thread::spawn(move || {
+            debug!("Worker {id} started");
+
+            // Create search thread
+            let mut search_thread = SearchThread::new(
+                id,
+                evaluator,
+                tt,
+                shared_state.clone(),
+                None, // No duplication stats for simplicity
+            );
+
+            let mut local_nodes = 0u64;
+            let mut last_report = 0u64;
+
+            // Simple work loop
+            while !shared_state.should_stop() {
+                // Try to get work
+                if let Some(work) = work_queue.pop() {
+                    debug!(
+                        "Worker {} processing iteration {} depth {}",
+                        id, work.iteration, work.depth
+                    );
+
+                    // Clone position for this search
+                    let mut pos = work.position;
+
+                    // Do the search
+                    let _result = search_thread.search_iteration(&mut pos, &limits, work.depth);
+
+                    // Update nodes
+                    let nodes = search_thread.searcher.nodes();
+                    local_nodes = nodes;
+
+                    // Report nodes periodically (every 100k nodes)
+                    if nodes - last_report >= 100_000 {
+                        total_nodes.fetch_add(nodes - last_report, Ordering::Relaxed);
+                        shared_state.add_nodes(nodes - last_report);
+                        last_report = nodes;
+                    }
+
+                    // Check stop every work item
+                    if shared_state.should_stop() {
+                        break;
+                    }
+                } else {
+                    // No work available, check stop flag with brief sleep
+                    thread::sleep(Duration::from_micros(100));
+                }
+            }
+
+            // Final node report
+            if local_nodes > last_report {
+                total_nodes.fetch_add(local_nodes - last_report, Ordering::Relaxed);
+                shared_state.add_nodes(local_nodes - last_report);
+            }
+
+            debug!("Worker {id} stopped with {local_nodes} nodes");
+        })
+    }
+
+    /// Run main thread with iterative deepening
+    fn run_main_thread(&self, position: &mut Position, limits: SearchLimits) -> SearchResult {
+        let mut best_result = SearchResult::new(None, i32::MIN, SearchStats::default());
+
+        // Create main search thread
+        let mut main_thread = SearchThread::new(
+            0,
+            self.evaluator.clone(),
+            self.tt.clone(),
+            self.shared_state.clone(),
+            None,
+        );
+
+        let max_depth = limits.depth.unwrap_or(255);
+
+        // Iterative deepening
+        for iteration in 1.. {
+            // Check stop before each iteration
+            if self.shared_state.should_stop() {
+                debug!("Main thread stopping at iteration {iteration}");
+                break;
+            }
+
+            // Calculate depths for this iteration
+            let main_depth = iteration.min(max_depth as usize) as u8;
+
+            if main_depth > max_depth {
+                debug!("Reached max depth {max_depth}");
+                self.shared_state.set_stop();
+                break;
+            }
+
+            debug!("Starting iteration {iteration} (depth {main_depth})");
+
+            // Add work items for helpers (with depth variations)
+            for helper_id in 1..self.num_threads {
+                // Vary depth slightly for diversity
+                let helper_depth = if helper_id % 2 == 0 {
+                    main_depth.saturating_add(1).min(max_depth)
+                } else {
+                    main_depth
+                };
+
+                let work = WorkItem {
+                    iteration,
+                    depth: helper_depth,
+                    position: position.clone(),
+                };
+
+                if !self.work_queue.push(work) {
+                    warn!("Work queue full at iteration {iteration}");
+                }
+            }
+
+            // Main thread searches
+            let result = main_thread.search_iteration(position, &limits, main_depth);
+
+            // Update best result
+            if result.score > best_result.score || result.stats.depth > best_result.stats.depth {
+                best_result = result;
+            }
+
+            // Report nodes
+            let nodes = main_thread.searcher.nodes();
+            self.total_nodes.store(nodes, Ordering::Relaxed);
+            self.shared_state.add_nodes(nodes);
+
+            // Check depth limit
+            if main_depth >= max_depth {
+                info!("Reached maximum depth {max_depth}");
+                self.shared_state.set_stop();
+                break;
+            }
+        }
+
+        // Get final best move from shared state
+        if let Some(best_move) = self.shared_state.get_best_move() {
+            best_result.best_move = Some(best_move);
+            best_result.score = self.shared_state.get_best_score();
+            best_result.stats.depth = self.shared_state.get_best_depth();
+        }
+
+        best_result.stats.nodes = self.total_nodes.load(Ordering::Relaxed);
+
+        best_result
+    }
+
+    /// Start fail-safe guard thread
+    /// This thread will abort the process if search exceeds hard timeout
+    fn start_fail_safe_guard(
+        &self,
+        search_start: Instant,
+        limits: SearchLimits,
+    ) -> thread::JoinHandle<()> {
+        let shared_state = self.shared_state.clone();
+
+        thread::spawn(move || {
+            // Calculate hard timeout
+            use crate::time_management::TimeControl;
+            let hard_timeout_ms = match limits.time_control {
+                TimeControl::FixedTime { ms_per_move } => ms_per_move * 3, // 3x safety margin
+                TimeControl::Fischer {
+                    white_ms,
+                    black_ms,
+                    increment_ms: _,
+                } => {
+                    // Use 90% of remaining time as absolute maximum
+                    let time_ms = white_ms.max(black_ms);
+                    (time_ms * 9) / 10
+                }
+                TimeControl::Byoyomi {
+                    main_time_ms,
+                    byoyomi_ms,
+                    periods: _,
+                } => {
+                    // Use main time + one byoyomi period
+                    main_time_ms + byoyomi_ms
+                }
+                TimeControl::FixedNodes { .. } => {
+                    // For node-limited search, use 1 hour as safety limit
+                    3_600_000
+                }
+                TimeControl::Infinite => {
+                    // For infinite search, use 1 hour as safety limit
+                    3_600_000
+                }
+                TimeControl::Ponder(inner) => {
+                    // For pondering, use the inner time control
+                    match inner.as_ref() {
+                        TimeControl::FixedTime { ms_per_move } => ms_per_move * 3,
+                        TimeControl::Fischer {
+                            white_ms, black_ms, ..
+                        } => {
+                            let time_ms = white_ms.max(black_ms);
+                            (time_ms * 9) / 10
+                        }
+                        _ => 3_600_000,
+                    }
+                }
+            };
+
+            // Add extra safety margin for depth-limited searches
+            let hard_timeout_ms = if limits.depth.is_some() {
+                hard_timeout_ms.max(60_000) // At least 60 seconds for depth searches
+            } else {
+                hard_timeout_ms
+            };
+
+            debug!("Fail-safe guard started with hard timeout: {hard_timeout_ms}ms");
+
+            // Check periodically
+            loop {
+                thread::sleep(Duration::from_millis(100));
+
+                // Check if search stopped normally
+                if shared_state.should_stop() {
+                    debug!("Fail-safe guard: Search stopped normally");
+                    break;
+                }
+
+                // Check if hard timeout exceeded
+                let elapsed = search_start.elapsed();
+                if elapsed.as_millis() > hard_timeout_ms as u128 {
+                    error!(
+                        "FAIL-SAFE: Search exceeded hard timeout of {}ms (elapsed: {}ms)",
+                        hard_timeout_ms,
+                        elapsed.as_millis()
+                    );
+
+                    // Try to stop gracefully first
+                    shared_state.set_stop();
+
+                    // Give 500ms for graceful shutdown
+                    thread::sleep(Duration::from_millis(500));
+
+                    // If still not stopped, abort
+                    if !shared_state.should_stop() {
+                        error!("FAIL-SAFE: Forced abort due to unresponsive search!");
+                        std::process::abort();
+                    }
+                }
+            }
+
+            debug!("Fail-safe guard stopped");
+        })
+    }
+
+    /// Start time management thread
+    fn start_time_manager(&self, time_manager: Arc<TimeManager>) -> thread::JoinHandle<()> {
+        let shared_state = self.shared_state.clone();
+        let total_nodes = self.total_nodes.clone();
+
+        thread::spawn(move || {
+            debug!("Time manager started");
+
+            loop {
+                // Poll interval based on time control
+                let poll_interval = match time_manager.soft_limit_ms() {
+                    0..=50 => Duration::from_millis(2),
+                    51..=100 => Duration::from_millis(5),
+                    101..=500 => Duration::from_millis(10),
+                    _ => Duration::from_millis(20),
+                };
+
+                thread::sleep(poll_interval);
+
+                if shared_state.should_stop() {
+                    break;
+                }
+
+                let nodes = total_nodes.load(Ordering::Relaxed);
+                if time_manager.should_stop(nodes) {
+                    info!("Time limit reached, stopping search");
+                    shared_state.set_stop();
+                    break;
+                }
+            }
+
+            debug!("Time manager stopped");
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{evaluation::evaluate::MaterialEvaluator, search::SearchLimitsBuilder};
+
+    #[test]
+    fn test_simple_parallel_search() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+
+        let mut searcher = SimpleParallelSearcher::new(evaluator, tt, 2);
+        let mut position = Position::startpos();
+
+        let limits = SearchLimitsBuilder::default().depth(2).build();
+        let result = searcher.search(&mut position, limits);
+
+        assert!(result.best_move.is_some());
+        assert!(result.stats.nodes > 0);
+    }
+
+    #[test]
+    fn test_work_queue() {
+        let queue = WorkQueue::new(10);
+        let pos = Position::startpos();
+
+        // Add items
+        for i in 0..5 {
+            let item = WorkItem {
+                iteration: i,
+                depth: i as u8,
+                position: pos.clone(),
+            };
+            assert!(queue.push(item));
+        }
+
+        // Take items
+        for i in 0..5 {
+            let item = queue.pop().expect("Should have item");
+            assert_eq!(item.iteration, i);
+        }
+
+        // Queue should be empty
+        assert!(queue.pop().is_none());
+    }
+}

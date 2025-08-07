@@ -6,8 +6,11 @@
 pub mod parallel_searcher;
 pub mod search_thread;
 pub mod shared;
+pub mod simple_parallel;
+pub mod stop_test;
 
 // Re-export main types
 pub use parallel_searcher::{DuplicationStats, ParallelSearcher};
 pub use search_thread::SearchThread;
 pub use shared::{SharedHistory, SharedSearchState};
+pub use simple_parallel::SimpleParallelSearcher;
