@@ -406,6 +406,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             thread.reset();
         }
 
+        // Start time management thread BEFORE iterations for time-based searches
+        // This ensures time limits work even during the first iteration
+        if let Some(tm) = &self.time_manager {
+            // Check if this is a time-based search (not just depth-limited)
+            use crate::time_management::TimeControl;
+            let is_time_based = !matches!(limits.time_control, TimeControl::Infinite)
+                || matches!(limits.time_control, TimeControl::FixedTime { .. });
+            
+            if is_time_based {
+                debug!("Starting time management thread before iterations");
+                time_handle = Some(self.start_time_management_thread(tm.clone()));
+            }
+        }
+
         // Iterative deepening loop
         for iteration in 1.. {
             // Check stop flag BEFORE starting new iteration (except first iteration)
@@ -447,9 +461,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 best_result = result;
             }
 
-            // Start time management thread after first iteration completes
+            // Time management thread is now started before iterations for time-based searches
+            // For depth-only searches, start after first iteration if not already started
             if iteration == 1 && time_handle.is_none() {
                 if let Some(tm) = &self.time_manager {
+                    debug!("Starting time management thread after first iteration (depth-only mode)");
                     time_handle = Some(self.start_time_management_thread(tm.clone()));
                 }
             }
