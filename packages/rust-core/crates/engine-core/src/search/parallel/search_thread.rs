@@ -11,6 +11,7 @@ use crate::{
     },
     shogi::{Move, Position},
 };
+use crossbeam_utils::CachePadded;
 use smallvec::SmallVec;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -27,6 +28,41 @@ use super::shared::SharedSearchState;
 pub enum ThreadState {
     Idle = 0,
     Searching = 1,
+}
+
+/// Local node counter configuration
+const NODE_FLUSH_THRESHOLD: u32 = 50_000; // Flush after 50k nodes
+
+/// Local node counter - simplified for minimal overhead
+/// Uses u32 for efficient operations on 32-bit architectures
+struct LocalNodeCounter {
+    /// Non-atomic local counter (only accessed by owning thread)
+    count: u32,
+}
+
+impl LocalNodeCounter {
+    fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    /// Add nodes and flush if threshold reached
+    #[inline(always)]
+    fn add(&mut self, nodes: u64, shared_state: &SharedSearchState) {
+        // Saturating add to prevent overflow on u32
+        self.count = self.count.saturating_add(nodes as u32);
+        if self.count >= NODE_FLUSH_THRESHOLD {
+            shared_state.add_nodes(self.count as u64);
+            self.count = 0;
+        }
+    }
+
+    /// Force flush all pending nodes
+    fn flush(&mut self, shared_state: &SharedSearchState) {
+        if self.count > 0 {
+            shared_state.add_nodes(self.count as u64);
+            self.count = 0;
+        }
+    }
 }
 
 /// Calculate appropriate park duration based on search depth and time constraints
@@ -76,6 +112,10 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
     /// Last reported node count (for differential updates)
     pub last_nodes: u64,
 
+    /// Local node counter for reduced contention (cache padded to avoid false sharing)
+    /// IMPORTANT: When adding new fields, ensure they don't share cache lines with this field
+    local_node_counter: CachePadded<LocalNodeCounter>,
+
     /// Thread state for park control
     pub state: Arc<AtomicU8>,
 
@@ -110,6 +150,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             generation: 0,
             shared_state,
             last_nodes: 0,
+            local_node_counter: CachePadded::new(LocalNodeCounter::new()),
             state: Arc::new(AtomicU8::new(ThreadState::Searching as u8)),
             thread_handle: None,
         }
@@ -134,6 +175,9 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         self.thread_local_pv.clear();
         self.generation = 0;
         self.last_nodes = 0;
+        // Force flush any pending nodes before reset
+        self.local_node_counter.flush(&self.shared_state);
+        self.local_node_counter = CachePadded::new(LocalNodeCounter::new());
     }
 
     /// Search from this thread
@@ -171,8 +215,9 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             self.generation,
         );
 
-        // Report node count to shared state
-        self.report_nodes();
+        // Force flush at end of search to ensure all nodes are counted
+        // Note: flush_nodes() internally calls report_nodes() first
+        self.flush_nodes();
 
         // TODO: Sync local_history with shared_state.history
         // Currently each thread maintains independent history tables.
@@ -194,9 +239,19 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         let current_nodes = self.searcher.nodes();
         let diff = current_nodes.saturating_sub(self.last_nodes);
         if diff > 0 {
-            self.shared_state.add_nodes(diff);
+            // Add to local counter and auto-flush if threshold reached
+            self.local_node_counter.add(diff, &self.shared_state);
             self.last_nodes = current_nodes;
         }
+    }
+
+    /// Force flush all pending nodes to shared state
+    pub fn flush_nodes(&mut self) {
+        // First update local counter with any unreported nodes
+        self.report_nodes();
+
+        // Then force flush to shared state
+        self.local_node_counter.flush(&self.shared_state);
     }
 
     /// Perform search iteration (pure search without state management)
