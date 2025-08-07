@@ -11,9 +11,40 @@ use crate::{
     },
     shogi::{Move, Position},
 };
-use std::sync::Arc;
+use smallvec::SmallVec;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Duration;
 
 use super::shared::SharedSearchState;
+
+/// Thread state for park control
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(u8)]
+pub enum ThreadState {
+    Idle = 0,
+    Searching = 1,
+}
+
+/// Calculate appropriate park duration based on search depth and time constraints
+fn calculate_park_duration(max_depth: u8, time_left_ms: Option<u64>) -> Duration {
+    // If very little time left, use minimal park duration
+    if let Some(time) = time_left_ms {
+        if time < 1000 {
+            return Duration::from_micros(200); // 0.2ms for bullet/blitz
+        }
+    }
+
+    // Otherwise, base duration on search depth
+    match max_depth {
+        0..=8 => Duration::from_micros(200),  // Shallow search: 0.2ms
+        9..=12 => Duration::from_micros(500), // Medium search: 0.5ms
+        _ => Duration::from_millis(2),        // Deep search: 2ms
+    }
+}
 
 /// Individual search thread with local state
 pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
@@ -33,8 +64,8 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
     /// Thread-local killer table
     pub local_killers: KillerTable,
 
-    /// Thread-local principal variation
-    pub thread_local_pv: Vec<Move>,
+    /// Thread-local principal variation (typically 4 moves or less)
+    pub thread_local_pv: SmallVec<[Move; 4]>,
 
     /// PV generation number for synchronization
     pub generation: u64,
@@ -44,6 +75,12 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
 
     /// Last reported node count (for differential updates)
     pub last_nodes: u64,
+
+    /// Thread state for park control
+    pub state: Arc<AtomicU8>,
+
+    /// Thread handle for unpark operations
+    pub thread_handle: Option<thread::Thread>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
@@ -69,10 +106,12 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             local_history: History::new(),
             local_counter_moves: CounterMoveHistory::new(),
             local_killers: KillerTable::new(),
-            thread_local_pv: Vec::new(),
+            thread_local_pv: SmallVec::new(),
             generation: 0,
             shared_state,
             last_nodes: 0,
+            state: Arc::new(AtomicU8::new(ThreadState::Searching as u8)),
+            thread_handle: None,
         }
     }
 
@@ -152,6 +191,50 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             self.last_nodes = current_nodes;
         }
     }
+
+    /// Perform search iteration (pure search without state management)
+    pub fn search_iteration(
+        &mut self,
+        position: &mut Position,
+        limits: &SearchLimits,
+        depth: u8,
+    ) -> SearchResult {
+        // Clone limits only when needed for internal searcher
+        self.search(position, limits.clone(), depth)
+    }
+
+    /// Check if this thread should park based on depth
+    pub fn should_park(&self, depth: u8, max_depth: u8) -> bool {
+        depth >= max_depth.saturating_sub(1) && self.id > 0
+    }
+
+    /// Park thread with appropriate duration
+    pub fn park_with_timeout(&self, max_depth: u8, time_left_ms: Option<u64>) {
+        let duration = calculate_park_duration(max_depth, time_left_ms);
+        thread::park_timeout(duration);
+    }
+
+    /// Set thread state
+    pub fn set_state(&self, state: ThreadState) {
+        self.state.store(state as u8, Ordering::Release);
+    }
+
+    /// Set thread handle for unpark operations
+    pub fn set_thread_handle(&mut self, handle: thread::Thread) {
+        self.thread_handle = Some(handle);
+    }
+
+    /// Unpark this thread if it's parked
+    pub fn unpark(&self) {
+        if let Some(ref handle) = self.thread_handle {
+            handle.unpark();
+        }
+    }
+
+    /// Check if thread is idle
+    pub fn is_idle(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ThreadState::Idle as u8
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +252,28 @@ mod tests {
 
         let thread = SearchThread::new(0, evaluator, tt, shared_state, None);
         assert_eq!(thread.id, 0);
+        assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
+    }
+
+    #[test]
+    fn test_thread_state_transitions() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let shared_state = Arc::new(SharedSearchState::new(stop_flag));
+
+        let thread = SearchThread::new(1, evaluator, tt, shared_state, None);
+
+        // Initially searching
+        assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
+
+        // Transition to idle
+        thread.state.store(ThreadState::Idle as u8, Ordering::Release);
+        assert!(thread.is_idle());
+
+        // Back to searching
+        thread.state.store(ThreadState::Searching as u8, Ordering::Release);
+        assert!(!thread.is_idle());
     }
 
     #[test]
