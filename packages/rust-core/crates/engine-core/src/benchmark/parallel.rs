@@ -43,7 +43,7 @@ pub struct PositionMeasurement {
     pub nodes: u64,
     pub elapsed_ms: f64,
     pub depth_reached: u8,
-    pub iterations: u32,  // Number of iterations to reach min_duration
+    pub iterations: u32, // Number of iterations to reach min_duration
 }
 
 /// Configuration for parallel benchmark
@@ -96,17 +96,16 @@ pub fn run_parallel_benchmark<E: Evaluator + Send + Sync + 'static>(
     info!("Warmup runs: {}", config.warmup_runs);
 
     // Get baseline (1 thread) performance first
-    let baseline_result = benchmark_thread_config(
-        evaluator.clone(),
-        1,
-        &config.positions,
-        config.search_depth,
-        config.time_limit_ms,
-        config.min_duration_ms,
-        config.fixed_total_ms,
-        config.warmup_runs,
-        config.collect_raw_data,
-    );
+    let thread_config = ThreadBenchmarkConfig {
+        positions: &config.positions,
+        search_depth: config.search_depth,
+        time_limit_ms: config.time_limit_ms,
+        min_duration_ms: config.min_duration_ms,
+        fixed_total_ms: config.fixed_total_ms,
+        warmup_runs: config.warmup_runs,
+        collect_raw_data: config.collect_raw_data,
+    };
+    let baseline_result = benchmark_thread_config(evaluator.clone(), 1, &thread_config);
 
     let baseline_nps = baseline_result.nps;
     results.push(baseline_result);
@@ -118,18 +117,9 @@ pub fn run_parallel_benchmark<E: Evaluator + Send + Sync + 'static>(
         }
 
         println!("\nBenchmarking with {thread_count} threads...");
+        info!("Starting benchmark for {thread_count} threads");
 
-        let mut result = benchmark_thread_config(
-            evaluator.clone(),
-            thread_count,
-            &config.positions,
-            config.search_depth,
-            config.time_limit_ms,
-            config.min_duration_ms,
-            config.fixed_total_ms,
-            config.warmup_runs,
-            config.collect_raw_data,
-        );
+        let mut result = benchmark_thread_config(evaluator.clone(), thread_count, &thread_config);
 
         // Calculate speedup and efficiency
         result.speedup = result.nps as f64 / baseline_nps as f64;
@@ -147,117 +137,151 @@ pub fn run_parallel_benchmark<E: Evaluator + Send + Sync + 'static>(
     results
 }
 
-/// Benchmark a specific thread configuration
-fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
-    evaluator: Arc<E>,
-    thread_count: usize,
-    positions: &[Position],
+/// Configuration for benchmarking a specific thread configuration
+struct ThreadBenchmarkConfig<'a> {
+    positions: &'a [Position],
     search_depth: u8,
     time_limit_ms: Option<u64>,
     min_duration_ms: u64,
     fixed_total_ms: Option<u64>,
     warmup_runs: u32,
     collect_raw_data: bool,
+}
+
+/// Benchmark a specific thread configuration
+fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
+    evaluator: Arc<E>,
+    thread_count: usize,
+    config: &ThreadBenchmarkConfig,
 ) -> ParallelBenchmarkResult {
     let mut total_nodes = 0u64;
     let mut total_time = Duration::ZERO;
     let mut pv_matches = 0;
-    let total_positions = positions.len();
+    let total_positions = config.positions.len();
     let mut raw_measurements = Vec::new();
 
-    debug!("Starting benchmark for {} threads", thread_count);
+    debug!("Starting benchmark for {thread_count} threads");
 
     // Store single-thread PVs for comparison
     let mut single_thread_pvs = Vec::new();
     if thread_count > 1 {
         debug!("Collecting single-thread PVs for comparison");
         // Get single thread PVs first - use a separate TT for single-thread test
-        for pos in positions {
+        for pos in config.positions {
             let single_tt = Arc::new(crate::search::TranspositionTable::new(128));
             let mut single_searcher = ParallelSearcher::new(evaluator.clone(), single_tt, 1);
             let mut pos_clone = pos.clone();
-            let limits = SearchLimitsBuilder::default().depth(search_depth).build();
+            let limits = SearchLimitsBuilder::default().depth(config.search_depth).build();
             let result = single_searcher.search(&mut pos_clone, limits);
             single_thread_pvs.push(result.best_move);
         }
     }
 
     // Warmup runs with separate TT to avoid affecting main measurements
-    if warmup_runs > 0 {
-        info!("Running {} warmup iterations with separate TT", warmup_runs);
-        for _ in 0..warmup_runs {
-            for pos in positions.iter().take(1) {
+    if config.warmup_runs > 0 {
+        info!("Running {} warmup iterations with separate TT", config.warmup_runs);
+        for _ in 0..config.warmup_runs {
+            for pos in config.positions.iter().take(1) {
                 // Create fresh TT for each warmup to avoid contamination
                 let warmup_tt = Arc::new(crate::search::TranspositionTable::new(128));
-                let mut warmup_searcher = ParallelSearcher::new(evaluator.clone(), warmup_tt, thread_count);
+                let mut warmup_searcher =
+                    ParallelSearcher::new(evaluator.clone(), warmup_tt, thread_count);
                 let mut pos_clone = pos.clone();
-                let limits = SearchLimitsBuilder::default().depth(search_depth).build();
+                // Use the same limits as the main benchmark (including time limits)
+                let limits = if let Some(ms) = config.fixed_total_ms {
+                    SearchLimitsBuilder::default()
+                        .fixed_time_ms(ms)
+                        .depth(config.search_depth)
+                        .build()
+                } else {
+                    SearchLimitsBuilder::default().depth(config.search_depth).build()
+                };
                 let _ = warmup_searcher.search(&mut pos_clone, limits);
             }
         }
     }
 
     // Run benchmark on all positions
-    for (idx, pos) in positions.iter().enumerate() {
+    for (idx, pos) in config.positions.iter().enumerate() {
         trace!("Testing position {}/{}", idx + 1, total_positions);
-        
+        info!("Thread config {thread_count}: Starting position {idx}/{total_positions}");
+
         // IMPORTANT: Create fresh TT and searcher for each position to avoid TT contamination
         // This ensures each position is measured independently without TT entries from previous positions
         let tt = Arc::new(crate::search::TranspositionTable::new(128));
         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, thread_count);
-        debug!("Position {}: Created fresh TT and searcher", idx);
-        
+        debug!("Position {idx}: Created fresh TT and searcher with {thread_count} threads");
+
         let mut pos_nodes = 0u64;
         let mut pos_elapsed = Duration::ZERO;
         let mut iterations = 0u32;
         let mut depth_reached = 0u8;
 
         // Determine target duration based on mode
-        let target_duration = if let Some(fixed_ms) = fixed_total_ms {
+        let target_duration = if let Some(fixed_ms) = config.fixed_total_ms {
             // Fixed total time mode - each position gets exactly this amount of time
             Duration::from_millis(fixed_ms)
         } else {
             // Minimum duration mode - run at least this long
-            Duration::from_millis(min_duration_ms)
+            Duration::from_millis(config.min_duration_ms)
         };
 
         // Run until target duration is reached (with safety limit)
-        let position_start = Instant::now();
+        let _position_start = Instant::now();
         // A-2: fixed_total_ms指定時は1回だけ実行、それ以外は複数回実行可能
         const DEFAULT_MAX_ITERATIONS: u32 = 1; // デフォルトを1に変更
-        let max_iterations = if fixed_total_ms.is_some() { 
-            1  // 時間モードでは1回だけ実行
-        } else { 
-            DEFAULT_MAX_ITERATIONS  // 深さモードではデフォルト回数
+        let max_iterations = if config.fixed_total_ms.is_some() {
+            1 // 時間モードでは1回だけ実行
+        } else {
+            DEFAULT_MAX_ITERATIONS // 深さモードではデフォルト回数
         };
-        
-        info!("Position {}: target_duration={:?}, max_iterations={}, fixed_total_ms={:?}", 
-              idx, target_duration, max_iterations, fixed_total_ms);
-        
-        while position_start.elapsed() < target_duration && iterations < max_iterations {
+
+        debug!(
+            "Position {idx}: target_duration={target_duration:?}, max_iterations={max_iterations}, fixed_total_ms={:?}", config.fixed_total_ms
+        );
+
+        // Only use iteration count for loop control (duration is handled by TimeManager)
+        while iterations < max_iterations {
             let mut pos_clone = pos.clone();
 
             // A-2: fixed_total_msを優先的に使用
-            let limits = if let Some(ms) = fixed_total_ms {
+            let limits = if let Some(ms) = config.fixed_total_ms {
                 // 時間モード: fixed_total_msで指定された時間だけ探索
-                SearchLimitsBuilder::default().fixed_time_ms(ms).build()
-            } else if let Some(time_ms) = time_limit_ms {
+                // IMPORTANT: Also set depth limit to prevent infinite depth search
+                SearchLimitsBuilder::default()
+                    .fixed_time_ms(ms)
+                    .depth(config.search_depth)  // Add depth limit even for time-based search
+                    .build()
+            } else if let Some(time_ms) = config.time_limit_ms {
                 // 既存のtime_limit_msモード
-                SearchLimitsBuilder::default().fixed_time_ms(time_ms).build()
+                SearchLimitsBuilder::default()
+                    .fixed_time_ms(time_ms)
+                    .depth(config.search_depth)  // Add depth limit here too
+                    .build()
             } else {
                 // 深さモード
-                SearchLimitsBuilder::default().depth(search_depth).build()
+                SearchLimitsBuilder::default().depth(config.search_depth).build()
             };
 
             // Start timing after setup
             let iter_start = Instant::now();
-            
-            debug!("Position {} iteration {}: calling searcher.search with depth {}", 
-                   idx, iterations + 1, search_depth);
+
+            debug!(
+                "Position {} iteration {}: calling searcher.search with depth {} and {} threads",
+                idx,
+                iterations + 1,
+                config.search_depth,
+                thread_count
+            );
             let result = searcher.search(&mut pos_clone, limits);
-            debug!("Position {} iteration {}: got {} nodes", 
-                   idx, iterations + 1, result.stats.nodes);
-            
+            debug!(
+                "Position {} iteration {}: search completed with {} nodes",
+                idx,
+                iterations + 1,
+                result.stats.nodes
+            );
+            info!("Thread config {thread_count}: Position {idx} iteration {iterations} complete");
+
             let iter_elapsed = iter_start.elapsed();
 
             pos_nodes += result.stats.nodes;
@@ -266,32 +290,34 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
             iterations += 1;
 
             // Check PV match for multi-threaded runs (only once per position)
-            if iterations == 1 && thread_count > 1
+            if iterations == 1
+                && thread_count > 1
                 && idx < single_thread_pvs.len()
                 && result.best_move == single_thread_pvs[idx]
             {
                 pv_matches += 1;
             }
 
-            trace!("  Iteration {}: {} nodes in {:?}", iterations, result.stats.nodes, iter_elapsed);
-            
-            // デバッグ: ループ条件のチェック
-            info!("Position {} iter {}: elapsed={:?}, target={:?}, continue={}",
-                  idx, iterations, position_start.elapsed(), target_duration,
-                  position_start.elapsed() < target_duration && iterations < max_iterations);
+            trace!(
+                "  Iteration {}: {} nodes in {:?}",
+                iterations,
+                result.stats.nodes,
+                iter_elapsed
+            );
         }
-        
+
         if iterations >= max_iterations && max_iterations > 1 {
-            warn!("Position {} hit iteration limit of {}", idx, max_iterations);
+            warn!("Position {idx} hit iteration limit of {max_iterations}");
         }
-        
-        info!("Position {} complete: {} iterations, {} nodes in {:?}", 
-              idx, iterations, pos_nodes, pos_elapsed);
+
+        debug!(
+            "Position {idx} complete: {iterations} iterations, {pos_nodes} nodes in {pos_elapsed:?}"
+        );
 
         // Collect duplication stats from this position's searcher
         let dup_pct = searcher.get_duplication_percentage();
-        debug!("Position {}: Duplication = {:.1}%", idx, dup_pct);
-        
+        debug!("Position {idx}: Duplication = {dup_pct:.1}%");
+
         // Note: Since we create fresh TT per position, duplication stats are per-position
         // We don't aggregate them as they would lose meaning across different TTs
 
@@ -299,7 +325,7 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
         total_time += pos_elapsed;
 
         // Record raw measurement if requested
-        if collect_raw_data {
+        if config.collect_raw_data {
             raw_measurements.push(PositionMeasurement {
                 position_index: idx,
                 nodes: pos_nodes,
@@ -309,22 +335,22 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
             });
         }
 
-        debug!("Position {}: {} nodes in {:?} ({} iterations)", 
-               idx, pos_nodes, pos_elapsed, iterations);
+        debug!("Position {idx}: {pos_nodes} nodes in {pos_elapsed:?} ({iterations} iterations)");
     }
 
     // Calculate NPS with safety checks
-    let nps = if total_time.as_secs_f64() > 0.001 {  // At least 1ms
+    let nps = if total_time.as_secs_f64() > 0.001 {
+        // At least 1ms
         let calculated_nps = (total_nodes as f64 / total_time.as_secs_f64()) as u64;
         // Sanity check: NPS shouldn't exceed 100M for any realistic hardware
         if calculated_nps > 100_000_000 {
-            info!("WARNING: Calculated NPS {} seems unrealistic, capping at 100M", calculated_nps);
+            info!("WARNING: Calculated NPS {calculated_nps} seems unrealistic, capping at 100M");
             100_000_000
         } else {
             calculated_nps
         }
     } else {
-        info!("WARNING: Total time too short ({:?}), cannot calculate accurate NPS", total_time);
+        info!("WARNING: Total time too short ({total_time:?}), cannot calculate accurate NPS");
         0
     };
 
@@ -338,8 +364,7 @@ fn benchmark_thread_config<E: Evaluator + Send + Sync + 'static>(
         100.0 // Single thread always matches itself
     };
 
-    info!("Thread config {}: {} nodes in {:?} = {} NPS", 
-          thread_count, total_nodes, total_time, nps);
+    info!("Thread config {thread_count}: {total_nodes} nodes in {total_time:?} = {nps} NPS");
 
     ParallelBenchmarkResult {
         thread_count,
@@ -365,7 +390,7 @@ fn measure_stop_latency<E: Evaluator + Send + Sync + 'static>(
     let mut latencies = Vec::new();
     let iterations = 10;
 
-    debug!("Measuring stop latency for {} threads ({} iterations)", thread_count, iterations);
+    debug!("Measuring stop latency for {thread_count} threads ({iterations} iterations)");
 
     for i in 0..iterations {
         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), thread_count);
@@ -389,8 +414,9 @@ fn measure_stop_latency<E: Evaluator + Send + Sync + 'static>(
         };
 
         latencies.push(latency);
-        trace!("  Iteration {}: target={}ms, actual={:.1}ms, latency={:.1}ms", 
-               i, target_ms, actual_ms, latency);
+        trace!(
+            "  Iteration {i}: target={target_ms}ms, actual={actual_ms:.1}ms, latency={latency:.1}ms"
+        );
     }
 
     // Calculate median latency (more robust than average)
@@ -401,10 +427,13 @@ fn measure_stop_latency<E: Evaluator + Send + Sync + 'static>(
         latencies[latencies.len() / 2]
     };
 
-    debug!("Stop latency for {} threads: median={:.1}ms, min={:.1}ms, max={:.1}ms",
-           thread_count, median_latency, 
-           latencies.first().unwrap_or(&0.0),
-           latencies.last().unwrap_or(&0.0));
+    debug!(
+        "Stop latency for {} threads: median={:.1}ms, min={:.1}ms, max={:.1}ms",
+        thread_count,
+        median_latency,
+        latencies.first().unwrap_or(&0.0),
+        latencies.last().unwrap_or(&0.0)
+    );
 
     median_latency
 }
@@ -446,6 +475,10 @@ mod tests {
             time_limit_ms: None, // Use depth-based search for predictable timing
             positions: vec![Position::startpos()],
             measure_stop_latency: false,
+            min_duration_ms: 10,
+            fixed_total_ms: None,
+            warmup_runs: 0,
+            collect_raw_data: false,
         };
 
         let results = run_parallel_benchmark(evaluator, config);

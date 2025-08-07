@@ -304,7 +304,22 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     /// Park thread with appropriate duration
     pub fn park_with_timeout(&self, max_depth: u8, time_left_ms: Option<u64>) {
         let duration = calculate_park_duration(max_depth, time_left_ms);
-        thread::park_timeout(duration);
+
+        // Poll every 100μs to check stop flag
+        let slice = Duration::from_micros(100);
+        let mut waited = Duration::ZERO;
+
+        while waited < duration {
+            // Check stop flag regularly
+            if self.shared_state.should_stop() {
+                break;
+            }
+
+            // Park for the remaining time or slice, whichever is smaller
+            let left = duration.saturating_sub(waited).min(slice);
+            thread::park_timeout(left);
+            waited += left;
+        }
     }
 
     /// Set thread state

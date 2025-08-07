@@ -22,10 +22,7 @@ use crate::{
 };
 use log::debug;
 use std::{
-    sync::{
-        atomic::Ordering,
-        Arc, Mutex,
-    },
+    sync::{atomic::Ordering, Arc, Mutex},
     time::Instant,
 };
 
@@ -266,11 +263,11 @@ where
 
         // --- 新しい分岐: Ponder用の特別処理 ---
         if matches!(limits.time_control, TimeControl::Ponder(_)) {
-            log::info!("Creating TimeManager for PONDER mode");
+            log::debug!("Creating TimeManager for PONDER mode");
 
             // ① SearchLimits -> TimeLimits へ（ここで inner に unwrap される）
             let pending_limits: TimeLimits = limits.clone().into();
-            log::info!(
+            log::debug!(
                 "After conversion for ponder, time_limits.time_control: {:?}",
                 pending_limits.time_control
             );
@@ -285,12 +282,12 @@ where
             self.time_manager = Some(time_manager);
         } else if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
             // 通常の時間制御またはdepth制限がある場合
-            log::info!("Creating TimeManager with time_control: {:?}", limits.time_control);
+            log::debug!("Creating TimeManager with time_control: {:?}", limits.time_control);
 
             // Convert SearchLimits to TimeLimits
             let time_limits: TimeLimits = limits.clone().into();
 
-            log::info!(
+            log::debug!(
                 "After conversion, time_limits.time_control: {:?}",
                 time_limits.time_control
             );
@@ -568,24 +565,27 @@ where
         if USE_TT {
             if let Some(ref tt) = self.tt {
                 // Store and check if this is a new entry
-                let is_new_entry = tt.store_and_check_new(hash, best_move, score as i16, 0, depth, node_type);
-                
+                let is_new_entry =
+                    tt.store_and_check_new(hash, best_move, score as i16, 0, depth, node_type);
+
                 // Update duplication statistics based on store result
                 if let Some(ref stats) = self.duplication_stats {
                     // Always increment total nodes when storing
                     stats.total_nodes.fetch_add(1, Ordering::Relaxed);
-                    
+
                     // Only increment unique if this was a new entry
                     if is_new_entry {
                         stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
                     }
-                    
+
                     // Debug logging for duplication stats
                     let total = stats.total_nodes.load(Ordering::Relaxed);
                     let unique = stats.unique_nodes.load(Ordering::Relaxed);
                     if total % 1000 == 0 {
-                        debug!("DuplicationStats snapshot: unique={unique}, total={total}, dup%={:.1}", 
-                               ((total - unique) as f64 * 100.0 / total as f64));
+                        debug!(
+                            "DuplicationStats snapshot: unique={unique}, total={total}, dup%={:.1}",
+                            ((total - unique) as f64 * 100.0 / total as f64)
+                        );
                     }
                 }
             }

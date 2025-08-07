@@ -57,7 +57,7 @@ struct Args {
     /// Minimum duration per position in milliseconds
     #[arg(long, default_value_t = 500)]
     min_duration_ms: u64,
-    
+
     /// Fixed total time per position in milliseconds (overrides min_duration_ms)
     #[arg(long)]
     fixed_total_ms: Option<u64>,
@@ -91,7 +91,7 @@ struct PositionEntry {
 /// Raw measurement data for debugging
 #[derive(Debug, Serialize, Deserialize)]
 struct RawMeasurementData {
-    timestamp: String,  // Use string for simplicity
+    timestamp: String, // Use string for simplicity
     thread_count: usize,
     position_index: usize,
     position_sfen: String,
@@ -110,13 +110,10 @@ struct RawDataCollection {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    
+
     // Initialize logger with specified level
-    let log_level = args.log_level.parse::<log::LevelFilter>()
-        .unwrap_or(log::LevelFilter::Info);
-    env_logger::Builder::from_default_env()
-        .filter_level(log_level)
-        .init();
+    let log_level = args.log_level.parse::<log::LevelFilter>().unwrap_or(log::LevelFilter::Info);
+    env_logger::Builder::from_default_env().filter_level(log_level).init();
 
     // Parse thread counts
     let thread_counts: Vec<usize> = args
@@ -143,7 +140,7 @@ fn main() -> Result<()> {
     println!("Thread configurations: {thread_counts:?}");
     println!("Search depth: {}", args.depth);
     if let Some(fixed_ms) = args.fixed_total_ms {
-        println!("Fixed total time per position: {}ms", fixed_ms);
+        println!("Fixed total time per position: {fixed_ms}ms");
     } else {
         println!("Minimum duration per position: {}ms", args.min_duration_ms);
     }
@@ -175,10 +172,13 @@ fn main() -> Result<()> {
         for result in &results {
             for measurement in &result.raw_measurements {
                 all_measurements.push(RawMeasurementData {
-                    timestamp: format!("{}", std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()),
+                    timestamp: format!(
+                        "{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                    ),
                     thread_count: result.thread_count,
                     position_index: measurement.position_index,
                     position_sfen: format!("Position {}", measurement.position_index),
@@ -193,14 +193,16 @@ fn main() -> Result<()> {
                 });
             }
         }
-        
+
         let raw_collection = RawDataCollection {
             measurements: all_measurements,
-            summary: format!("Benchmark with {} positions, {} thread configs", 
-                           if using_custom { "custom" } else { "default" },
-                           results.len()),
+            summary: format!(
+                "Benchmark with {} positions, {} thread configs",
+                if using_custom { "custom" } else { "default" },
+                results.len()
+            ),
         };
-        
+
         let json = serde_json::to_string_pretty(&raw_collection)?;
         fs::write(&raw_file, json)?;
         println!("\nRaw data saved to: {}", raw_file.display());
