@@ -30,6 +30,7 @@ smallvec = "1.15"
 parking_lot = "0.12"
 crossbeam = "0.8"
 crossbeam-utils = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
 
 # Loom is only available for non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -73,4 +74,8 @@ harness = false
 
 [[bench]]
 name = "false_sharing_bench"
+harness = false
+
+[[bench]]
+name = "parallel_search_benchmarks"
 harness = false

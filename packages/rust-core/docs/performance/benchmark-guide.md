@@ -202,8 +202,28 @@ Search Comparison:
 
 注: デバッグビルドでは約20倍遅くなります（NNUE評価関数: 約10,000 評価/秒）
 
+### 5. 並列探索ベンチマーク
+
+#### parallel_benchmark
+並列探索の性能を包括的に測定します。
+
+```bash
+cargo run --release --bin parallel_benchmark
+```
+
+**測定内容**:
+- 各スレッド数でのNPS（Nodes Per Second）
+- スピードアップ（シングルスレッド比）
+- 並列効率
+- ノード重複率
+- 停止レイテンシ
+- PV（主要変化）の一貫性
+
+**詳細**: [並列探索ベンチマークガイド](parallel-benchmark-guide.md)を参照
+
 ## 関連ドキュメント
 
+- [並列探索ベンチマークガイド](parallel-benchmark-guide.md)
 - [PVテーブルのパフォーマンス分析](analysis/pv-table-performance.md)
 - [NNUE評価関数のパフォーマンス分析](analysis/nnue-performance.md)
 - [SEEのパフォーマンス分析](analysis/see-performance.md)
