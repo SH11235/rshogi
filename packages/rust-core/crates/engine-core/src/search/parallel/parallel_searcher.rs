@@ -409,14 +409,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Start time management thread BEFORE iterations for time-based searches
         // This ensures time limits work even during the first iteration
         if let Some(tm) = &self.time_manager {
-            // Check if this is a time-based search (not just depth-limited)
+            // Check if this is a time-based search
             use crate::time_management::TimeControl;
-            let is_time_based = !matches!(limits.time_control, TimeControl::Infinite)
-                || matches!(limits.time_control, TimeControl::FixedTime { .. });
+            let is_time_based = !matches!(limits.time_control, TimeControl::Infinite);
             
             if is_time_based {
-                debug!("Starting time management thread before iterations");
+                debug!("Starting time management thread before iterations (time-based search)");
                 time_handle = Some(self.start_time_management_thread(tm.clone()));
+            } else {
+                debug!("Not starting time management thread (depth-only search)");
             }
         }
 
@@ -426,6 +427,41 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             if iteration > 1 && self.shared_state.should_stop() {
                 debug!("Stopping iterations due to stop flag");
                 break;
+            }
+
+            // Calculate the depth for this iteration BEFORE signaling workers
+            let depth = {
+                let thread = match main_thread.lock() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        error!("Main thread failed to acquire lock for depth check: {e}");
+                        break;
+                    }
+                };
+                thread.get_start_depth(iteration)
+            };
+
+            // Check depth limit BEFORE starting any threads for this iteration
+            // This prevents helper threads from starting iterations beyond max depth
+            if let Some(max_depth) = limits.depth {
+                if depth > max_depth {
+                    debug!("Reached max depth {max_depth} at iteration {iteration}; sending STOP to all workers");
+                    
+                    // CRITICAL: Set stop flag and notify all workers to terminate
+                    // This ensures helper threads don't wait forever for the next iteration
+                    self.shared_state.set_stop();
+                    
+                    // Send Stop signal to all worker threads
+                    {
+                        let signals = self.start_signals.lock().unwrap();
+                        for sender in signals.iter() {
+                            let _ = sender.send(IterationSignal::Stop);
+                        }
+                    }
+                    
+                    // Exit without starting any search for this iteration
+                    break;
+                }
             }
 
             // Signal all active worker threads to start this iteration
@@ -447,7 +483,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     break;
                 }
             };
-            let depth = thread.get_start_depth(iteration);
 
             debug!("Starting iteration {iteration} (depth {depth})");
             let result = thread.search_iteration(position, &limits, depth);
@@ -470,10 +505,23 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             }
 
-            // Check depth limit
+            // Check if we've reached the maximum depth after this iteration
+            // If so, we need to signal workers to stop before the next iteration
             if let Some(max_depth) = limits.depth {
                 if depth >= max_depth {
                     info!("Reached maximum depth {max_depth} at iteration {iteration} (depth {depth})");
+                    
+                    // Send stop signal to all workers for clean shutdown
+                    // This is needed because we won't enter the next iteration
+                    self.shared_state.set_stop();
+                    {
+                        let signals = self.start_signals.lock().unwrap();
+                        for sender in signals.iter() {
+                            let _ = sender.send(IterationSignal::Stop);
+                        }
+                    }
+                    
+                    // Now we can safely break
                     break;
                 }
             }
