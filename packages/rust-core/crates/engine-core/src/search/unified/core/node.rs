@@ -107,11 +107,19 @@ where
         let tt_entry = searcher.probe_tt(hash);
 
         // Update duplication statistics if available
+        // Fixed: Count both unique and duplicate nodes properly
         if let Some(ref stats) = searcher.duplication_stats {
+            // Always increment total nodes
             stats.total_nodes.fetch_add(1, Ordering::Relaxed);
+            
+            // If TT entry doesn't exist, this is a unique node
+            // If TT entry exists, this is a duplicate (already searched by another thread)
             if tt_entry.is_none() {
+                // This node hasn't been searched before
                 stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
             }
+            // Note: if tt_entry.is_some(), it means another thread already searched this node
+            // so we don't increment unique_nodes (it's a duplicate)
         }
 
         // ABDADA: Check if sibling node found exact cut
