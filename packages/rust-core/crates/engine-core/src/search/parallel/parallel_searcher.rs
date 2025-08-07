@@ -316,6 +316,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
     }
 
+    /// Get duplication percentage from statistics
+    pub fn get_duplication_percentage(&self) -> f64 {
+        self.duplication_stats.get_duplication_percentage()
+    }
+
     /// Coordinate search from main thread
     fn coordinate_search(&self, position: &mut Position, limits: SearchLimits) -> SearchResult {
         let mut best_result = SearchResult::new(None, i32::MIN, SearchStats::default());
