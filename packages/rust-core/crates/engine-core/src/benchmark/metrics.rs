@@ -118,6 +118,7 @@ pub fn calculate_summary(results: &[ParallelBenchmarkResult]) -> BenchmarkSummar
 fn get_git_commit() -> Option<String> {
     std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
+        .env_clear() // Clear environment variables for security
         .output()
         .ok()
         .and_then(|output| {
