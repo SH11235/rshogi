@@ -171,8 +171,15 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             self.generation,
         );
 
-        // TODO: Sync with SharedHistory if needed
-        // This requires History -> SharedHistory conversion logic
+        // Report node count to shared state
+        self.report_nodes();
+
+        // TODO: Sync local_history with shared_state.history
+        // Currently each thread maintains independent history tables.
+        // Sharing history information between threads could improve move ordering
+        // and overall search efficiency. This requires:
+        // 1. Periodic sync from local History to SharedHistory
+        // 2. Reading from SharedHistory at the start of each iteration
 
         result
     }
