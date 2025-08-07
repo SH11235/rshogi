@@ -19,21 +19,87 @@ case "$COMMAND" in
         echo "Running benchmark..."
         cargo build --release --bin parallel_benchmark
         
-        # システム情報を記録
-        cat > system-info.json <<EOF
+        # システム情報を自動取得
+        echo "Collecting system information..."
+        
+        # CPU情報の取得（lscpuが無い場合の代替手段も含む）
+        if command -v lscpu &> /dev/null; then
+            CPU_MODEL=$(lscpu | grep 'Model name' | cut -d':' -f2 | xargs || echo "Unknown")
+        elif [ -f /proc/cpuinfo ]; then
+            CPU_MODEL=$(grep 'model name' /proc/cpuinfo | head -1 | cut -d':' -f2 | xargs || echo "Unknown")
+        else
+            CPU_MODEL="Unknown"
+        fi
+        
+        # メモリ情報の取得
+        if command -v free &> /dev/null; then
+            MEMORY=$(free -h | grep Mem | awk '{print $2}' || echo "Unknown")
+        elif [ -f /proc/meminfo ]; then
+            MEMORY=$(awk '/MemTotal/ {print $2/1024/1024 "G"}' /proc/meminfo || echo "Unknown")
+        else
+            MEMORY="Unknown"
+        fi
+        
+        # アーキテクチャ情報
+        ARCH=$(uname -m || echo "Unknown")
+        
+        # Rust情報の取得
+        RUST_VERSION=$(rustc --version || echo "Unknown")
+        
+        # Git情報の取得（リポジトリ外でも動作するように）
+        if git rev-parse --git-dir > /dev/null 2>&1; then
+            GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "none")
+            GIT_BRANCH=$(git branch --show-current 2>/dev/null || echo "none")
+        else
+            GIT_COMMIT="none"
+            GIT_BRANCH="none"
+        fi
+        
+        # JSONの作成（jqを使用して安全に作成）
+        if command -v jq &> /dev/null; then
+            jq -n \
+                --arg hostname "$(hostname)" \
+                --arg cpu "$CPU_MODEL" \
+                --arg cores "$(nproc)" \
+                --arg memory "$MEMORY" \
+                --arg os "$(uname -s)" \
+                --arg kernel "$(uname -r)" \
+                --arg arch "$ARCH" \
+                --arg rust_version "$RUST_VERSION" \
+                --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --arg git_commit "$GIT_COMMIT" \
+                --arg git_branch "$GIT_BRANCH" \
+                '{
+                    hostname: $hostname,
+                    cpu: $cpu,
+                    cores: ($cores | tonumber),
+                    memory: $memory,
+                    os: $os,
+                    kernel: $kernel,
+                    arch: $arch,
+                    rust_version: $rust_version,
+                    timestamp: $timestamp,
+                    git_commit: $git_commit,
+                    git_branch: $git_branch
+                }' > system-info.json
+        else
+            # jqがない場合は従来の方法で作成（エスケープに注意）
+            cat > system-info.json <<EOF
 {
     "hostname": "$(hostname)",
-    "cpu": "$(lscpu | grep 'Model name' | cut -d':' -f2 | xargs)",
+    "cpu": "$CPU_MODEL",
     "cores": $(nproc),
-    "memory": "$(free -h | grep Mem | awk '{print $2}')",
+    "memory": "$MEMORY",
     "os": "$(uname -s)",
     "kernel": "$(uname -r)",
-    "rust_version": "$(rustc --version)",
+    "arch": "$ARCH",
+    "rust_version": "$RUST_VERSION",
     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "git_commit": "$(git rev-parse HEAD)",
-    "git_branch": "$(git branch --show-current)"
+    "git_commit": "$GIT_COMMIT",
+    "git_branch": "$GIT_BRANCH"
 }
 EOF
+        fi
         
         # ベンチマーク実行
         # クイックモードの判定
