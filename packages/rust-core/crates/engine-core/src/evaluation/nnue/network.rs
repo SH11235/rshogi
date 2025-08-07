@@ -8,13 +8,13 @@ use crate::nnue::simd::SimdDispatcher;
 pub struct Network {
     /// Hidden layer 1 weights [512][32]
     pub hidden1_weights: Vec<i8>,
-    /// Hidden layer 1 biases [32]
+    /// Hidden layer 1 biases \[32\]
     pub hidden1_biases: Vec<i32>,
-    /// Hidden layer 2 weights [32][32]
+    /// Hidden layer 2 weights \[32\]\[32\]
     pub hidden2_weights: Vec<i8>,
-    /// Hidden layer 2 biases [32]
+    /// Hidden layer 2 biases \[32\]
     pub hidden2_biases: Vec<i32>,
-    /// Output layer weights [32]
+    /// Output layer weights \[32\]
     pub output_weights: Vec<i8>,
     /// Output layer bias
     pub output_bias: i32,
