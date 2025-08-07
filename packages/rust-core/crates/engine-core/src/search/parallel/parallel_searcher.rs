@@ -210,6 +210,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let workers_to_start = self.active_threads.saturating_sub(1); // -1 for main thread
         let mut started_workers = 0;
 
+        debug!(
+            "Starting {} worker threads (active_threads={}, num_threads={})",
+            workers_to_start, self.active_threads, self.num_threads
+        );
+
         for (id, thread) in self.threads.iter().enumerate() {
             if id == 0 {
                 continue; // Main thread is handled separately
@@ -235,11 +240,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let time_manager = self.time_manager.clone();
 
             let handle = thread::spawn(move || {
-                let mut thread = thread.lock().unwrap();
-                thread.reset();
+                debug!("Worker thread {id} spawned");
 
-                // Set thread handle for unpark operations
-                thread.set_thread_handle(thread::current());
+                // Reset thread and set handle without holding lock
+                {
+                    let mut thread = thread.lock().unwrap();
+                    thread.reset();
+                    thread.set_thread_handle(thread::current());
+                } // Lock released here
 
                 // Worker thread search loop
                 loop {
@@ -248,9 +256,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         Ok(IterationSignal::StartIteration(iteration)) => {
                             // Check stop flag before starting
                             if shared_state.should_stop() {
+                                // Report nodes with lock
+                                let mut thread = thread.lock().unwrap();
                                 thread.report_nodes();
                                 break;
                             }
+
+                            // Take lock only for the duration of the search
+                            let mut thread = thread.lock().unwrap();
 
                             // Set state to searching
                             thread.set_state(super::search_thread::ThreadState::Searching);
@@ -260,6 +273,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                             // Perform search (without state management)
                             let max_depth = limits.depth.unwrap_or(255);
+
+                            // Skip if depth exceeds limit
+                            if depth > max_depth {
+                                debug!(
+                                    "Thread {id} skipping depth {depth} (exceeds max {max_depth})"
+                                );
+                                continue;
+                            }
+
                             let _result = thread.search_iteration(&mut position, &limits, depth);
 
                             // Update node count (differential)
@@ -267,31 +289,37 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                             // Check if should park after deep searches
                             if thread.should_park(depth, max_depth) {
-                                // Check stop flag before parking (prevent lost wake-up)
+                                // Set idle state before any stop checks
+                                thread.set_state(super::search_thread::ThreadState::Idle);
+
+                                // Double-check stop flag to prevent race condition
+                                // This ensures we don't park after a stop signal
+                                if !shared_state.should_stop() {
+                                    // Get actual time left from TimeManager if available
+                                    let time_left_ms = time_manager.as_ref().map(|tm| {
+                                        let info = tm.get_time_info();
+                                        info.hard_limit_ms.saturating_sub(info.elapsed_ms)
+                                    });
+                                    thread.park_with_timeout(max_depth, time_left_ms);
+                                }
+
+                                // Check again after park (handles spurious wakeups and stop during park)
                                 if shared_state.should_stop() {
                                     thread.report_nodes();
                                     break;
                                 }
-
-                                // Set idle state
-                                thread.set_state(super::search_thread::ThreadState::Idle);
-
-                                // Park with appropriate duration
-                                // Get actual time left from TimeManager if available
-                                let time_left_ms = time_manager.as_ref().map(|tm| {
-                                    let info = tm.get_time_info();
-                                    info.hard_limit_ms.saturating_sub(info.elapsed_ms)
-                                });
-                                thread.park_with_timeout(max_depth, time_left_ms);
                             }
+                            // Lock released here
                         }
                         Ok(IterationSignal::Stop) => {
+                            let mut thread = thread.lock().unwrap();
                             thread.report_nodes();
                             break;
                         }
                         Err(_) => {
                             // Timeout - check stop flag
                             if shared_state.should_stop() {
+                                let mut thread = thread.lock().unwrap();
                                 thread.report_nodes();
                                 break;
                             }
@@ -332,22 +360,26 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let main_thread = self.threads[0].clone();
         let mut time_handle: Option<thread::JoinHandle<()>> = None;
 
+        // Reset main thread before starting
+        {
+            let mut thread = main_thread.lock().unwrap();
+            thread.reset();
+        }
+
         // Iterative deepening loop
         for iteration in 1.. {
             // Check stop flag BEFORE starting new iteration (except first iteration)
             if iteration > 1 && self.shared_state.should_stop() {
+                debug!("Stopping iterations due to stop flag");
                 break;
             }
 
             // Signal all active worker threads to start this iteration
             // Note: start_signals only contains channels for active threads
-            for (i, sender) in self.start_signals.iter().enumerate() {
+            for sender in &self.start_signals {
                 let _ = sender.send(IterationSignal::StartIteration(iteration));
-                // Unpark the thread in case it's parked (prevent lost wake-up)
-                if let Some(thread) = self.threads.get(i + 1) {
-                    // +1 because thread 0 is main
-                    thread.lock().unwrap().unpark();
-                }
+                // Note: We don't need to unpark here since the thread is actively
+                // waiting on the channel with recv_timeout. It will see the signal.
             }
 
             // Main thread searches at normal depth
@@ -372,7 +404,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Check depth limit
             if let Some(max_depth) = limits.depth {
                 if depth >= max_depth {
-                    info!("Reached maximum depth {max_depth}");
+                    info!("Reached maximum depth {max_depth} at iteration {iteration} (depth {depth})");
                     break;
                 }
             }
@@ -445,17 +477,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
     /// Stop all threads with unpark (lost wake-up prevention)
     fn stop_all_threads(&self) {
-        // First, unpark all threads (prevent lost wake-up)
-        for thread in &self.threads {
-            thread.lock().unwrap().unpark();
-        }
-
-        // Then set stop flag
+        // First, set stop flag
         self.shared_state.set_stop();
 
         // Send stop signal to all workers
         for sender in &self.start_signals {
             let _ = sender.send(IterationSignal::Stop);
+        }
+
+        // Best-effort unpark with try_lock to avoid deadlock
+        for thread in &self.threads {
+            if let Ok(thread) = thread.try_lock() {
+                thread.unpark();
+            }
+            // If lock fails, thread is busy and will check stop flag soon
         }
     }
 
