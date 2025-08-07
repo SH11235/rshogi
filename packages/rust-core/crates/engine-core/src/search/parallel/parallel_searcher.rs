@@ -232,6 +232,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             let mut position = position.clone();
             let limits = limits.clone();
             let shared_state = self.shared_state.clone();
+            let time_manager = self.time_manager.clone();
 
             let handle = thread::spawn(move || {
                 let mut thread = thread.lock().unwrap();
@@ -276,8 +277,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 thread.set_state(super::search_thread::ThreadState::Idle);
 
                                 // Park with appropriate duration
-                                // TODO: Get actual time left from TimeManager if available
-                                thread.park_with_timeout(max_depth, None);
+                                // Get actual time left from TimeManager if available
+                                let time_left_ms = time_manager.as_ref().map(|tm| {
+                                    let info = tm.get_time_info();
+                                    info.hard_limit_ms.saturating_sub(info.elapsed_ms)
+                                });
+                                thread.park_with_timeout(max_depth, time_left_ms);
                             }
                         }
                         Ok(IterationSignal::Stop) => {
@@ -629,5 +634,31 @@ mod tests {
         // Should find a move
         assert!(result.best_move.is_some());
         assert!(result.stats.nodes > 0);
+    }
+
+    #[test]
+    fn test_time_manager_park_duration() {
+        use crate::time_management::TimeControl;
+
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(TranspositionTable::new(16));
+
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
+        let mut position = Position::startpos();
+
+        // Search with time limit
+        let limits = SearchLimitsBuilder::default()
+            .time_control(TimeControl::FixedTime { ms_per_move: 1000 })
+            .depth(1)
+            .build();
+
+        let result = searcher.search(&mut position, limits);
+
+        // Should find a move
+        assert!(result.best_move.is_some());
+        assert!(result.stats.nodes > 0);
+
+        // TimeManager should have been created
+        assert!(searcher.time_manager.is_some());
     }
 }
