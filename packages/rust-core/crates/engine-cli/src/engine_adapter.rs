@@ -121,6 +121,8 @@ pub struct EngineAdapter {
     pending_engine_type: Option<EngineType>,
     /// Pending evaluation file to apply when engine is returned
     pending_eval_file: Option<String>,
+    /// Current stop flag for ongoing search (shared with search worker)
+    current_stop_flag: Option<Arc<AtomicBool>>,
 }
 
 /// State for managing ponder (think on opponent's time) functionality
@@ -205,6 +207,9 @@ impl EngineAdapter {
         // Clear all ponder state
         self.clear_ponder_state();
 
+        // Clear current stop flag
+        self.current_stop_flag = None;
+
         // Clear position - safer to require re-initialization
         log::warn!("Clearing position in force_reset_state");
         self.position = None;
@@ -254,6 +259,7 @@ impl EngineAdapter {
             active_ponder_hit_flag: None,
             pending_engine_type: None,
             pending_eval_file: None,
+            current_stop_flag: None,
         };
 
         // Initialize options
@@ -479,6 +485,12 @@ impl EngineAdapter {
             // Clear ponder state since we're transitioning to normal search
             self.ponder_state.is_pondering = false;
 
+            // Stop current search immediately
+            if let Some(ref stop) = self.current_stop_flag {
+                log::info!("Ponder hit: Setting stop flag to terminate ponder search");
+                stop.store(true, Ordering::Release);
+            }
+
             log::info!("Ponder hit: Converting ponder search to normal search");
             Ok(())
         } else {
@@ -547,7 +559,10 @@ impl EngineAdapter {
         let mut builder = SearchLimits::builder();
 
         // Set stop flag
-        builder = builder.stop_flag(stop_flag);
+        builder = builder.stop_flag(stop_flag.clone());
+
+        // Store stop flag for ponder hit handling
+        self.current_stop_flag = Some(stop_flag);
 
         // Set ponder hit flag if available
         if let Some(ref flag) = ponder_hit_flag {
@@ -840,6 +855,9 @@ impl EngineAdapter {
                 self.ponder_state.is_pondering = false;
             }
         }
+
+        // Clear current stop flag
+        self.current_stop_flag = None;
     }
 
     /// Validate engine state before attempting emergency move generation

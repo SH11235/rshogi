@@ -41,33 +41,23 @@ fn test_parallel_search_no_data_races() {
             // Run search
             let depth = thread.get_start_depth(1);
             let _result = thread.search(&mut position, limits, depth);
-
-            // Simulate some work
-            for _ in 0..100 {
-                if thread.should_stop() {
-                    break;
-                }
-                // Add some nodes
-                thread.shared_state.add_nodes(1);
-            }
         });
 
         handles.push(handle);
     }
 
-    // Let threads run for a bit
-    thread::sleep(std::time::Duration::from_millis(50));
-
-    // Stop all threads
-    stop_flag.store(true, std::sync::atomic::Ordering::Release);
-
     // Wait for all threads to complete
+    // Note: threads will run until the time limit (10ms) expires
     for handle in handles {
         handle.join().unwrap();
     }
 
     // Verify some basic properties
-    assert!(shared_state.get_nodes() > 0);
+    assert!(
+        shared_state.get_nodes() > 0,
+        "Expected nodes > 0, got {}",
+        shared_state.get_nodes()
+    );
 }
 
 #[test]
