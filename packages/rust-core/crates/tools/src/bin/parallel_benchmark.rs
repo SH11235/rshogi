@@ -76,9 +76,8 @@ fn main() -> Result<()> {
     let thread_counts: Vec<usize> = args
         .threads
         .split(',')
-        .map(|s| s.trim().parse())
-        .collect::<Result<Vec<_>, _>>()
-        .context("Invalid thread count")?;
+        .map(|s| s.trim().parse().with_context(|| format!("Invalid thread count: '{s}'")))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Load positions
     let positions = if let Some(pos_file) = args.positions {

@@ -215,7 +215,12 @@ fn measure_stop_latency<E: Evaluator + Send + Sync + 'static>(
         // Calculate overshoot in milliseconds
         let expected_ms = 100.0;
         let actual_ms = actual_time.as_secs_f64() * 1000.0;
-        let latency = (actual_ms - expected_ms).max(0.0);
+        // Use saturating subtraction to avoid potential issues with floating point precision
+        let latency = if actual_ms > expected_ms {
+            actual_ms - expected_ms
+        } else {
+            0.0
+        };
 
         total_latency += latency;
     }
