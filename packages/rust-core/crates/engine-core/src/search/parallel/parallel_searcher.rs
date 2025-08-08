@@ -192,7 +192,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Shogi typically has 30-50 legal moves in the opening
         let min_capacity = num_threads * 64; // Base capacity
         let max_moves_estimate = 50; // Maximum expected moves in opening
-        let depth_factor = 3; // Multiple depths may be queued
+                                     // Dynamic depth factor: assume max depth of 20, divided by 2, with minimum of 3
+                                     // This ensures enough capacity even for deep searches with many moves (400+ moves)
+        let depth_factor = (20 / 2) as usize; // = 10, enough for deep iterations
         let dynamic_capacity = (max_moves_estimate * num_threads * depth_factor).max(min_capacity);
         debug!("Creating WorkQueue with capacity: {dynamic_capacity}");
         let work_queue = Arc::new(WorkQueue::new(dynamic_capacity));
@@ -244,12 +246,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 
     /// Calculate helper thread depth with variation for diversity
-    fn calculate_helper_depth(&self, main_depth: u8, helper_id: usize, max_depth: u8) -> u8 {
+    fn calculate_helper_depth(
+        &self,
+        main_depth: u8,
+        helper_id: usize,
+        iteration: usize,
+        max_depth: u8,
+    ) -> u8 {
         // Base offset to reduce depth for some helpers (YBWC-like variation)
-        let base_offset = (helper_id / 2) as u8;
+        // Also vary by iteration to prevent all threads from searching the same depth
+        let base_offset = ((helper_id / 2) + (iteration % 3)) as u8;
 
-        // Small random-like variation based on helper_id
-        let random_offset = if helper_id % 4 == 0 { 1 } else { 0 };
+        // Small random-like variation based on helper_id and iteration
+        // This creates more diversity in search depths across iterations
+        let random_offset = if (helper_id + iteration) % 4 == 0 {
+            1
+        } else {
+            0
+        };
 
         // Calculate final depth with bounds checking
         main_depth
@@ -573,7 +587,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 );
                 for helper_id in 1..self.num_threads {
                     let helper_depth =
-                        self.calculate_helper_depth(main_depth, helper_id, max_depth);
+                        self.calculate_helper_depth(main_depth, helper_id, iteration, max_depth);
 
                     let work = WorkItem::FullPosition {
                         iteration,

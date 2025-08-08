@@ -177,6 +177,12 @@ where
         // Undo move
         pos.undo_move(mv, undo_info);
 
+        // Check stop flag immediately after alpha-beta search
+        if searcher.context.should_stop() {
+            // Skip TT storage when stopping - adds overhead
+            break;
+        }
+
         // Process events (including ponder hit) every move at root
         searcher.context.process_events(&searcher.time_manager);
 
@@ -481,6 +487,11 @@ where
 
     // Search captures
     for &mv in ordered_captures.iter() {
+        // Check stop flag at the beginning of each capture move
+        if searcher.context.should_stop() {
+            return alpha; // Return current alpha value
+        }
+
         // Delta pruning - skip captures that can't improve position enough
         if USE_PRUNING && delta_margin > 0 {
             // Estimate material gain from capture
