@@ -3,11 +3,10 @@
 //! Lock-free data structures shared between search threads
 
 use crate::{
-    shogi::{Move, PieceType, Position, Square},
+    shogi::{Move, PieceType, Square},
     Color,
 };
 use crossbeam_utils::CachePadded;
-use parking_lot::RwLock;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
