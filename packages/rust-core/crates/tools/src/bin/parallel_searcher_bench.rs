@@ -1,4 +1,4 @@
-//! Simple benchmark for SimpleParallelSearcher
+//! Simple benchmark for ParallelSearcher
 //!
 //! This tool measures the performance of the new parallel search implementation
 //! with a focus on reproducibility and simplicity.
@@ -11,8 +11,8 @@ use engine_core::{
     shogi::Position,
     time_management::TimeControl,
 };
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,13 +20,13 @@ struct BenchResult {
     threads: usize,
     position_index: usize,
     nodes: u64,
-    time_ms: u64,  // Store as milliseconds for JSON serialization
+    time_ms: u64, // Store as milliseconds for JSON serialization
     nps: u64,
     depth_reached: u8,
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Benchmark SimpleParallelSearcher", long_about = None)]
+#[command(author, version, about = "Benchmark ParallelSearcher", long_about = None)]
 struct Args {
     /// Thread counts to test (comma-separated)
     #[arg(short, long, value_delimiter = ',', default_value = "1,2,4,8")]
@@ -80,8 +80,7 @@ fn get_test_positions() -> Vec<(String, Position)> {
         ),
         (
             "tactical1".to_string(),
-            Position::from_sfen("9/9/9/9/9/9/2k6/1N7/1K7 b G2r2b2g2s2n2l17p 1")
-                .unwrap(),
+            Position::from_sfen("9/9/9/9/9/9/2k6/1N7/1K7 b G2r2b2g2s2n2l17p 1").unwrap(),
         ),
     ]
 }
@@ -130,10 +129,10 @@ fn run_benchmark(args: &Args) -> Vec<BenchResult> {
     let positions = get_test_positions();
     let mut all_results = Vec::new();
 
-    println!("=== SimpleParallelSearcher Benchmark ===");
+    println!("=== ParallelSearcher Benchmark ===");
     println!("Depth: {}", args.depth);
     if let Some(ms) = args.fixed_ms {
-        println!("Fixed time: {}ms", ms);
+        println!("Fixed time: {ms}ms");
     }
     println!("Positions: {}", positions.len());
     println!("Warmup runs: {}", args.warmup_runs);
@@ -142,11 +141,11 @@ fn run_benchmark(args: &Args) -> Vec<BenchResult> {
     println!();
 
     for &threads in &args.threads {
-        println!("Testing with {} threads...", threads);
+        println!("Testing with {threads} threads...");
 
         for (pos_idx, (pos_name, position)) in positions.iter().enumerate() {
             if args.skip_positions.contains(&pos_idx) {
-                println!("  Skipping position {} ({})", pos_idx, pos_name);
+                println!("  Skipping position {pos_idx} ({pos_name})");
                 continue;
             }
 
@@ -196,19 +195,15 @@ fn run_benchmark(args: &Args) -> Vec<BenchResult> {
 
             // Calculate average for this position
             if !position_results.is_empty() {
-                let avg_nodes: u64 =
-                    position_results.iter().map(|r| r.nodes).sum::<u64>() / position_results.len() as u64;
-                let avg_time_ms: u64 = position_results
-                    .iter()
-                    .map(|r| r.time_ms)
-                    .sum::<u64>()
+                let avg_nodes: u64 = position_results.iter().map(|r| r.nodes).sum::<u64>()
                     / position_results.len() as u64;
-                let avg_nps: u64 =
-                    position_results.iter().map(|r| r.nps).sum::<u64>() / position_results.len() as u64;
+                let avg_time_ms: u64 = position_results.iter().map(|r| r.time_ms).sum::<u64>()
+                    / position_results.len() as u64;
+                let avg_nps: u64 = position_results.iter().map(|r| r.nps).sum::<u64>()
+                    / position_results.len() as u64;
 
                 println!(
-                    "  {} average: {} nodes in {}ms = {} NPS",
-                    pos_name, avg_nodes, avg_time_ms, avg_nps
+                    "  {pos_name} average: {avg_nodes} nodes in {avg_time_ms}ms = {avg_nps} NPS"
                 );
             }
 
@@ -225,7 +220,7 @@ fn print_summary_table(results: &[BenchResult], args: &Args) {
     println!();
 
     // Group results by thread count
-    let mut thread_summaries: Vec<(usize, u64, u64, u64)> = Vec::new();  // threads, nodes, time_ms, nps
+    let mut thread_summaries: Vec<(usize, u64, u64, u64)> = Vec::new(); // threads, nodes, time_ms, nps
 
     for &threads in &args.threads {
         let thread_results: Vec<&BenchResult> =
@@ -279,7 +274,7 @@ fn print_summary_table(results: &[BenchResult], args: &Args) {
 
 fn print_json(results: &[BenchResult]) {
     let json = serde_json::to_string_pretty(&results).unwrap();
-    println!("{}", json);
+    println!("{json}");
 }
 
 fn print_csv(results: &[BenchResult]) {
@@ -287,12 +282,7 @@ fn print_csv(results: &[BenchResult]) {
     for r in results {
         println!(
             "{},{},{},{},{},{}",
-            r.threads,
-            r.position_index,
-            r.nodes,
-            r.time_ms,
-            r.nps,
-            r.depth_reached
+            r.threads, r.position_index, r.nodes, r.time_ms, r.nps, r.depth_reached
         );
     }
 }
