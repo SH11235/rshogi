@@ -381,7 +381,6 @@ where
     best_score
 }
 
-// Note: Helper functions removed - now using functions from pruning module directly
 
 #[cfg(test)]
 mod tests {
