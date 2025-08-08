@@ -13,7 +13,7 @@ use crate::{
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
         history::{CounterMoveHistory, History},
-        // parallel::DuplicationStats,  // Temporarily disabled for parallel searcher refactoring
+        parallel::shared::DuplicationStats,
         tt::{NodeType, TranspositionTable},
         types::SearchStack,
         SearchLimits,
@@ -94,8 +94,9 @@ pub struct UnifiedSearcher<
 
     /// Adaptive prefetcher for TT (conditionally compiled)
     pub(crate) adaptive_prefetcher: Option<AdaptivePrefetcher>,
-    // /// Duplication statistics for parallel search (optional)
-    // duplication_stats: Option<Arc<DuplicationStats>>,  // Temporarily disabled
+    
+    /// Duplication statistics for parallel search (optional)
+    duplication_stats: Option<Arc<DuplicationStats>>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -135,7 +136,7 @@ where
             } else {
                 None
             },
-            // duplication_stats: None,  // Temporarily disabled
+            duplication_stats: None,
         }
     }
 
@@ -170,7 +171,7 @@ where
             } else {
                 None
             },
-            // duplication_stats: None,  // Temporarily disabled
+            duplication_stats: None,
         }
     }
 
@@ -201,7 +202,7 @@ where
             } else {
                 None
             },
-            // duplication_stats: None,  // Temporarily disabled
+            duplication_stats: None,
         }
     }
 
@@ -210,10 +211,15 @@ where
         self.disable_prefetch = disable;
     }
 
-    // /// Set duplication statistics for parallel search
-    // pub fn set_duplication_stats(&mut self, stats: Arc<DuplicationStats>) {
-    //     self.duplication_stats = Some(stats);
-    // }  // Temporarily disabled
+    /// Set duplication statistics for parallel search
+    pub fn set_duplication_stats(&mut self, stats: Arc<DuplicationStats>) {
+        self.duplication_stats = Some(stats);
+    }
+
+    /// Evaluate the current position
+    pub fn evaluate(&self, pos: &Position) -> i32 {
+        self.evaluator.evaluate(pos)
+    }
 
     /// Get TT statistics (for benchmarking)
     pub fn get_tt_stats(&self) -> Option<(f32, u64, u64)> {

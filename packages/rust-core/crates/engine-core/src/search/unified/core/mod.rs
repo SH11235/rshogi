@@ -309,6 +309,13 @@ where
     let hash = pos.zobrist_hash;
     if USE_TT {
         if let Some(tt_entry) = searcher.probe_tt(hash) {
+            // Track duplication stats
+            if let Some(ref stats) = searcher.duplication_stats {
+                // For now, we consider a TT hit as potential duplication
+                // More sophisticated tracking could distinguish between first probe and duplicate
+                stats.add_node(true, true);  // is_tt_hit=true, is_duplicate=true
+            }
+            
             if tt_entry.depth() >= depth {
                 let tt_score = tt_entry.score();
                 match tt_entry.node_type() {
@@ -325,6 +332,11 @@ where
                         }
                     }
                 }
+            }
+        } else {
+            // No TT hit - this is a unique node
+            if let Some(ref stats) = searcher.duplication_stats {
+                stats.add_node(false, false);
             }
         }
     }
