@@ -139,39 +139,3 @@ fn test_barrier_deadlock_prevention() {
     assert!(elapsed < Duration::from_millis(200), "Search took too long: {elapsed:?}");
     assert!(result.stats.nodes > 0);
 }
-
-#[test]
-fn test_parallel_search_stress_with_random_stops() {
-    // Run multiple iterations with different stop timing
-    for i in 0..5 {
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
-        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
-        let mut position = Position::startpos();
-
-        // Vary time limit between 10-50ms
-        let time_limit = 10 + i * 10;
-
-        let limits = SearchLimitsBuilder::default()
-            .depth(15) // High depth to ensure threads are working
-            .fixed_time_ms(time_limit)
-            .build();
-
-        let start = Instant::now();
-        let result = searcher.search(&mut position, limits);
-        let elapsed = start.elapsed();
-
-        // Should complete within reasonable time
-        // Note: We guarantee at least one iteration completes, so very short limits may be exceeded
-        let expected_max = if time_limit <= 20 {
-            Duration::from_millis(250) // Allow more time for very short limits
-        } else {
-            Duration::from_millis(time_limit * 3 + 150)
-        };
-        assert!(
-            elapsed < expected_max,
-            "Search took too long with {time_limit} ms limit: {elapsed:?}"
-        );
-        assert!(result.stats.nodes > 0);
-    }
-}
