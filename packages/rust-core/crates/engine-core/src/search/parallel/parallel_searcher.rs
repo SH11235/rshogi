@@ -178,10 +178,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
     }
 
-    /// Get duplication percentage (compatibility method)
-    /// Note: The new implementation doesn't track duplication, returns 0
+    /// Get duplication percentage
     pub fn get_duplication_percentage(&self) -> f64 {
-        0.0 // Duplication tracking removed in simplified implementation
+        self.shared_state.duplication_stats.duplication_percentage()
     }
 
     /// Main search entry point
