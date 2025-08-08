@@ -183,6 +183,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.shared_state.duplication_stats.duplication_percentage()
     }
 
+    /// Get TT hit rate
+    pub fn get_tt_hit_rate(&self) -> f64 {
+        self.shared_state.duplication_stats.tt_hit_rate()
+    }
+
+    /// Get effective nodes (unique nodes explored)
+    pub fn get_effective_nodes(&self) -> u64 {
+        self.shared_state.duplication_stats.effective_nodes()
+    }
+
     /// Main search entry point
     pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
         info!("Starting simple parallel search with {} threads", self.num_threads);
