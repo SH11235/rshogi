@@ -58,12 +58,12 @@ fn main() -> Result<()> {
     let mut single_thread_nps = 0u64;
 
     for &num_threads in &args.threads {
-        println!("Testing with {} thread(s):", num_threads);
+        println!("Testing with {num_threads} thread(s):");
 
         let mut total_nps = 0u64;
 
         for (name, position) in &positions {
-            println!("  Position: {}", name);
+            println!("  Position: {name}");
 
             let evaluator = MaterialEvaluator;
             let mut searcher = LazySmpSearcher::new(evaluator, num_threads, args.tt_size);
@@ -77,12 +77,12 @@ fn main() -> Result<()> {
                 SearchLimitsBuilder::default().depth(args.depth).build()
             };
 
-            let result = searcher.search(&position, limits);
+            let result = searcher.search(position, limits);
             // Use stats.elapsed for consistent measurement
             let elapsed_ms = result.stats.elapsed.as_millis() as u64;
 
             let nps = if elapsed_ms > 0 {
-                (result.stats.nodes as u64 * 1000) / elapsed_ms
+                (result.stats.nodes * 1000) / elapsed_ms
             } else {
                 0
             };
@@ -109,9 +109,9 @@ fn main() -> Result<()> {
 
         let efficiency = speedup / num_threads as f64 * 100.0;
 
-        println!("  Average NPS: {}", avg_nps);
-        println!("  Speedup: {:.2}x", speedup);
-        println!("  Efficiency: {:.1}%", efficiency);
+        println!("  Average NPS: {avg_nps}");
+        println!("  Speedup: {speedup:.2}x");
+        println!("  Efficiency: {efficiency:.1}%");
 
         // Performance target check
         if num_threads == 2 {
