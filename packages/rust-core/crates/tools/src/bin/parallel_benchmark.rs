@@ -66,7 +66,7 @@ struct Args {
     /// Use material evaluator
     #[arg(long)]
     material: bool,
-    
+
     /// Use sharded TT for better cache locality
     #[arg(long)]
     sharded_tt: bool,
