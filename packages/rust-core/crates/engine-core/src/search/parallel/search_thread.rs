@@ -150,7 +150,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     pub fn new(
         id: usize,
         evaluator: Arc<E>,
-        tt: Arc<crate::search::TranspositionTable>,
+        tt: Arc<crate::search::ShardedTranspositionTable>,
         shared_state: Arc<SharedSearchState>,
     ) -> Self {
         // Create searcher with shared TT

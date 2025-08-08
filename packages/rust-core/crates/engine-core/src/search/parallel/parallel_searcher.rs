@@ -2,7 +2,7 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
-    search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
+    search::{SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
     shogi::{Move, Position},
     time_management::TimeManager,
 };
@@ -107,19 +107,19 @@ fn get_job(
 ) -> Option<WorkItem> {
     // Thread-local steal failure counter for exponential backoff
     thread_local! {
-        static CONSECUTIVE_STEAL_FAILS: std::cell::Cell<u32> = std::cell::Cell::new(0);
+        static CONSECUTIVE_STEAL_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
-    
+
     // 1. Try local worker queue first (LIFO for DFS)
     if let Some(item) = my_worker.pop() {
         // Reset failure counter on success
         CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
         return Some(item);
     }
-    
+
     // Track if we found work via stealing
-    let mut found_work = false;
-    
+    let found_work = false;
+
     // 2. Then try stealing from other workers (round-robin)
     let start = (thread_id + 1) % queues.stealers.len();
     for i in 0..queues.stealers.len() - 1 {
@@ -131,13 +131,13 @@ fn get_job(
                     CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
                     steal_success.fetch_add(1, Ordering::Relaxed);
                     return Some(item);
-                },
+                }
                 crossbeam_deque::Steal::Empty => break,
                 crossbeam_deque::Steal::Retry => continue,
             }
         }
     }
-    
+
     // 3. Finally try the global injector with batch stealing
     loop {
         match queues.injector.steal_batch_and_pop(my_worker) {
@@ -146,47 +146,47 @@ fn get_job(
                 CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
                 steal_success.fetch_add(1, Ordering::Relaxed);
                 return Some(item);
-            },
+            }
             crossbeam_deque::Steal::Empty => break,
             crossbeam_deque::Steal::Retry => continue,
         }
     }
-    
+
     // Record failure
     steal_failure.fetch_add(1, Ordering::Relaxed);
-    
+
     // Apply exponential backoff based on consecutive failures
     CONSECUTIVE_STEAL_FAILS.with(|f| {
         let fails = f.get() + 1;
         f.set(fails);
-        
+
         // Exponential backoff strategy
         match fails {
             1..=5 => {
                 // Spin for first few attempts (hot loop)
-            },
+            }
             6..=15 => {
                 // Yield to OS scheduler for medium failures
                 std::thread::yield_now();
-            },
+            }
             16..=25 => {
                 // Brief sleep for many failures
                 std::thread::sleep(Duration::from_micros(10));
-            },
+            }
             _ => {
                 // Longer sleep for persistent failures
                 std::thread::sleep(Duration::from_micros(100));
-            },
+            }
         }
     });
-    
+
     None
 }
 
 /// Simplified parallel searcher
 pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Shared transposition table
-    tt: Arc<TranspositionTable>,
+    tt: Arc<ShardedTranspositionTable>,
 
     /// Shared evaluator
     evaluator: Arc<E>,
@@ -208,17 +208,17 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 
     /// Active worker count for proper synchronization
     active_workers: Arc<AtomicUsize>,
-    
+
     /// Metrics: successful steal operations
     steal_success: Arc<AtomicU64>,
-    
+
     /// Metrics: failed steal operations
     steal_failure: Arc<AtomicU64>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     /// Create new parallel searcher
-    pub fn new(evaluator: Arc<E>, tt: Arc<TranspositionTable>, num_threads: usize) -> Self {
+    pub fn new(evaluator: Arc<E>, tt: Arc<ShardedTranspositionTable>, num_threads: usize) -> Self {
         assert!(num_threads > 0, "Need at least one thread");
 
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -355,20 +355,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let injector = Arc::new(Injector::new());
         let mut workers = Vec::with_capacity(self.num_threads);
         let mut stealers = Vec::with_capacity(self.num_threads);
-        
+
         for _ in 0..self.num_threads {
             let worker = DequeWorker::new_lifo();
             stealers.push(worker.stealer());
             workers.push(worker);
         }
-        
+
         // Create immutable Queues structure (no locks needed)
         let stealers: Arc<[Stealer<WorkItem>]> = Arc::from(stealers);
         let queues = Arc::new(Queues {
             injector: injector.clone(),
             stealers: stealers.clone(),
         });
-        
+
         // Replace the placeholder queues
         self.queues = queues.clone();
 
@@ -487,10 +487,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             }
 
                             // Process all moves in the batch
-                            for (_i, move_to_search) in moves.iter().enumerate() {
+                            for move_to_search in moves.iter() {
                                 // Clone position for each move
                                 let mut pos = position.clone();
-                                
+
                                 // Search the specific root move
                                 let _result = search_thread.search_root_move(
                                     &mut pos,
@@ -498,7 +498,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                     depth,
                                     *move_to_search,
                                 );
-                                
+
                                 // Check stop flag between moves
                                 if shared_state.should_stop() {
                                     break;
@@ -637,7 +637,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     let current_nodes = self.total_nodes.load(Ordering::Relaxed);
                     if tm.should_stop(current_nodes) {
                         if log::log_enabled!(log::Level::Debug) {
-                            debug!("Main thread stopping at iteration {iteration} due to time limit");
+                            debug!(
+                                "Main thread stopping at iteration {iteration} due to time limit"
+                            );
                         }
                         break;
                     }
@@ -678,11 +680,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                     // Use RootBatch for better efficiency (8-16 moves per batch)
                     let batch_size = if moves.len() > 100 {
-                        16  // Large batches for many moves
+                        16 // Large batches for many moves
                     } else if moves.len() > 40 {
-                        12  // Medium batches
+                        12 // Medium batches
                     } else {
-                        8   // Smaller batches for fewer moves
+                        8 // Smaller batches for fewer moves
                     };
 
                     // Create batches of root moves manually
@@ -691,7 +693,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     while i < moves.len() {
                         let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
                         let start_index = i;
-                        
+
                         // Collect up to batch_size moves
                         for _ in 0..batch_size {
                             if i >= moves.len() {
@@ -700,11 +702,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             batch_moves.push(moves[i]);
                             i += 1;
                         }
-                        
+
                         if !batch_moves.is_empty() {
                             // For root moves, use slightly shallower depth to avoid long-running tasks
                             let helper_depth = main_depth.saturating_sub(1).max(1);
-                            
+
                             // Create batch work item
                             let work = WorkItem::RootBatch {
                                 iteration,
@@ -713,7 +715,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 moves: batch_moves,
                                 start_index,
                             };
-                            
+
                             // Push to global injector (lock-free)
                             self.queues.injector.push(work);
                             batch_idx += 1;

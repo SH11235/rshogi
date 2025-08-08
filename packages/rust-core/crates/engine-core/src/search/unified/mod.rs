@@ -14,7 +14,8 @@ use crate::{
         adaptive_prefetcher::AdaptivePrefetcher,
         history::{CounterMoveHistory, History},
         parallel::shared::DuplicationStats,
-        tt::{NodeType, TranspositionTable},
+        tt::NodeType,
+        ShardedTranspositionTable,
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
     },
@@ -58,7 +59,7 @@ pub struct UnifiedSearcher<
 
     /// Transposition table (conditionally compiled)
     /// Wrapped in Arc for sharing between parallel searchers
-    tt: Option<Arc<TranspositionTable>>,
+    tt: Option<Arc<ShardedTranspositionTable>>,
 
     /// Move ordering history (shared with move ordering)
     history: Arc<Mutex<History>>,
@@ -115,7 +116,7 @@ where
         Self {
             evaluator: Arc::new(evaluator),
             tt: if USE_TT {
-                Some(Arc::new(TranspositionTable::new(TT_SIZE_MB)))
+                Some(Arc::new(ShardedTranspositionTable::new(TT_SIZE_MB)))
             } else {
                 None
             },
@@ -150,7 +151,7 @@ where
         Self {
             evaluator,
             tt: if USE_TT {
-                Some(Arc::new(TranspositionTable::new(TT_SIZE_MB)))
+                Some(Arc::new(ShardedTranspositionTable::new(TT_SIZE_MB)))
             } else {
                 None
             },
@@ -174,7 +175,7 @@ where
     }
 
     /// Create a new unified searcher with shared transposition table
-    pub fn with_shared_tt(evaluator: Arc<E>, tt: Arc<TranspositionTable>) -> Self {
+    pub fn with_shared_tt(evaluator: Arc<E>, tt: Arc<ShardedTranspositionTable>) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
         // Pre-allocate search stack for maximum search depth
         let mut search_stack = Vec::with_capacity(crate::search::constants::MAX_PLY + 1);
@@ -670,7 +671,7 @@ mod tests {
     fn test_shared_tt_creation() {
         // Test that we can create a searcher with a shared TT
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(crate::search::TranspositionTable::new(16));
+        let tt = Arc::new(crate::search::ShardedTranspositionTable::new(16));
 
         // Create two searchers with the same TT
         let searcher1 =
