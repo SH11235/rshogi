@@ -10,7 +10,7 @@ use crate::{
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::parallel::ParallelSearcher,
     search::unified::UnifiedSearcher,
-    search::{SearchLimits, SearchResult, TranspositionTable},
+    search::{SearchLimits, SearchResult, ShardedTranspositionTable},
     shogi::{Color, PieceType},
     time_management::GamePhase,
     Position,
@@ -142,7 +142,7 @@ pub struct Engine {
     material_parallel_searcher: Arc<Mutex<Option<MaterialParallelSearcher>>>,
     nnue_parallel_searcher: Arc<Mutex<Option<NnueParallelSearcher>>>,
     // Shared transposition table for parallel search
-    shared_tt: Arc<TranspositionTable>,
+    shared_tt: Arc<ShardedTranspositionTable>,
     // Number of threads for parallel search
     num_threads: usize,
     // Whether to use parallel search
@@ -195,7 +195,7 @@ impl Engine {
         };
 
         // Create shared TT for parallel search
-        let shared_tt = Arc::new(TranspositionTable::new(64)); // 64MB for shared TT
+        let shared_tt = Arc::new(ShardedTranspositionTable::new(64)); // 64MB for shared TT
 
         Engine {
             engine_type,
