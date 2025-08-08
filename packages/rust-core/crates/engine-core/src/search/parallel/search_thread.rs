@@ -7,7 +7,7 @@ use crate::{
     search::{
         history::{CounterMoveHistory, History},
         unified::{ordering::KillerTable, UnifiedSearcher},
-        SearchLimits, SearchResult,
+        SearchLimits, SearchResult, SearchStats,
     },
     shogi::{Move, Position},
 };
@@ -152,15 +152,12 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         evaluator: Arc<E>,
         tt: Arc<crate::search::TranspositionTable>,
         shared_state: Arc<SharedSearchState>,
-        // duplication_stats: Option<Arc<super::DuplicationStats>>,  // Temporarily disabled
     ) -> Self {
         // Create searcher with shared TT
-        let searcher = UnifiedSearcher::with_shared_tt(evaluator, tt);
+        let mut searcher = UnifiedSearcher::with_shared_tt(evaluator, tt);
 
-        // // Set duplication stats if provided
-        // if let Some(stats) = duplication_stats {
-        //     searcher.set_duplication_stats(stats);
-        // }  // Temporarily disabled
+        // Set duplication stats from shared state
+        searcher.set_duplication_stats(shared_state.duplication_stats.clone());
 
         Self {
             id,
@@ -289,6 +286,86 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     ) -> SearchResult {
         // Clone limits only when needed for internal searcher
         self.search(position, limits.clone(), depth)
+    }
+
+    /// Search a specific root move
+    pub fn search_root_move(
+        &mut self,
+        position: &mut Position,
+        limits: &SearchLimits,
+        depth: u8,
+        root_move: Move,
+    ) -> SearchResult {
+        // Set depth for dynamic threshold calculation
+        self.local_node_counter.set_depth(depth);
+
+        // Update searcher's internal tables with thread-local versions
+        self.searcher.set_history(self.local_history.clone());
+        self.searcher.set_counter_moves(self.local_counter_moves.clone());
+
+        // Create depth-limited search with shared stop flag
+        let depth_limits = SearchLimits {
+            depth: Some(depth),
+            stop_flag: Some(self.shared_state.stop_flag.clone()),
+            ..limits.clone()
+        };
+
+        // Apply the root move
+        let undo_info = position.do_move(root_move);
+        
+        // Search from the resulting position
+        let result = if depth > 1 {
+            // Search with reduced depth
+            let search_result = self.searcher.search(position, depth_limits);
+            
+            // Negate score (we searched from opponent's perspective)
+            SearchResult {
+                score: -search_result.score,
+                stats: search_result.stats,
+                best_move: Some(root_move),
+            }
+        } else {
+            // At depth 1, just evaluate the position
+            let score = -self.searcher.evaluate(position);
+            SearchResult {
+                score,
+                stats: SearchStats {
+                    depth: 1,
+                    nodes: 1,
+                    elapsed: Duration::from_millis(0),
+                    pv: vec![root_move],
+                    seldepth: None,
+                    aspiration_failures: None,
+                    tt_hits: None,
+                    null_cuts: None,
+                    lmr_count: None,
+                    aspiration_hits: None,
+                    re_searches: None,
+                    duplication_percentage: None,
+                },
+                best_move: Some(root_move),
+            }
+        };
+        
+        // Unmake the move
+        position.undo_move(root_move, undo_info);
+        
+        // Update local tables from searcher
+        self.local_history = self.searcher.get_history();
+        self.local_counter_moves = self.searcher.get_counter_moves();
+
+        // Update shared state if this is a better result
+        self.shared_state.maybe_update_best(
+            result.score,
+            Some(root_move),
+            depth,
+            self.generation,
+        );
+
+        // Force flush at end of search to ensure all nodes are counted
+        self.flush_nodes();
+
+        result
     }
 
     /// Check if this thread should park based on depth

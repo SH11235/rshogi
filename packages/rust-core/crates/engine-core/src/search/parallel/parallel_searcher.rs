@@ -9,7 +9,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
-    shogi::Position,
+    shogi::{Move, Position},
     time_management::TimeManager,
 };
 use log::{debug, error, info, warn};
@@ -24,15 +24,31 @@ use std::{
 
 use super::{SearchThread, SharedSearchState};
 
-/// Simple work item for threads to process
+/// Work item for threads to process
 #[derive(Clone, Debug)]
-struct WorkItem {
-    /// Iteration number
-    iteration: usize,
-    /// Depth to search at
-    depth: u8,
-    /// Position to search
-    position: Position,
+enum WorkItem {
+    /// Search a specific root move
+    RootMove {
+        /// Iteration number
+        iteration: usize,
+        /// Depth to search at
+        depth: u8,
+        /// Position to search from
+        position: Position,
+        /// Specific move to search first
+        move_to_search: Move,
+        /// Index of the move (for debugging)
+        move_index: usize,
+    },
+    /// Search full position (traditional mode)
+    FullPosition {
+        /// Iteration number
+        iteration: usize,
+        /// Depth to search at
+        depth: u8,
+        /// Position to search
+        position: Position,
+    },
 }
 
 /// Lock-free work queue using atomic indices
@@ -193,6 +209,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.shared_state.duplication_stats.effective_nodes()
     }
 
+    /// Calculate helper thread depth with variation for diversity
+    fn calculate_helper_depth(&self, main_depth: u8, helper_id: usize, max_depth: u8) -> u8 {
+        // Base offset to reduce depth for some helpers (YBWC-like variation)
+        let base_offset = (helper_id / 2) as u8;
+        
+        // Small random-like variation based on helper_id
+        let random_offset = if helper_id % 4 == 0 { 1 } else { 0 };
+        
+        // Calculate final depth with bounds checking
+        main_depth
+            .saturating_sub(base_offset)
+            .saturating_add(random_offset)
+            .min(max_depth)
+    }
+
     /// Main search entry point
     pub fn search(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
         info!("Starting simple parallel search with {} threads", self.num_threads);
@@ -300,20 +331,55 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             while !shared_state.should_stop() {
                 // Try to get work
                 if let Some(work) = work_queue.pop() {
-                    debug!(
-                        "Worker {} processing iteration {} depth {}",
-                        id, work.iteration, work.depth
-                    );
+                    let nodes = match work {
+                        WorkItem::RootMove {
+                            iteration,
+                            depth,
+                            position,
+                            move_to_search,
+                            move_index,
+                        } => {
+                            debug!(
+                                "Worker {id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
+                            );
 
-                    // Clone position for this search
-                    let mut pos = work.position;
+                            // Clone position for this search
+                            let mut pos = position;
 
-                    // Do the search
-                    let _result = search_thread.search_iteration(&mut pos, &limits, work.depth);
+                            // Search the specific root move
+                            let _result = search_thread.search_root_move(
+                                &mut pos,
+                                &limits,
+                                depth,
+                                move_to_search,
+                            );
 
-                    // Update nodes
-                    let nodes = search_thread.searcher.nodes();
-                    local_nodes = nodes;
+                            // Update nodes
+                            let nodes = search_thread.searcher.nodes();
+                            local_nodes = nodes;
+                            nodes
+                        }
+                        WorkItem::FullPosition {
+                            iteration,
+                            depth,
+                            position,
+                        } => {
+                            debug!(
+                                "Worker {id} processing FullPosition (iteration {iteration}, depth {depth})"
+                            );
+
+                            // Clone position for this search
+                            let mut pos = position;
+
+                            // Do the search
+                            let _result = search_thread.search_iteration(&mut pos, &limits, depth);
+
+                            // Update nodes
+                            let nodes = search_thread.searcher.nodes();
+                            local_nodes = nodes;
+                            nodes
+                        }
+                    };
 
                     // Report nodes periodically (every 100k nodes)
                     if nodes - last_report >= 100_000 {
@@ -375,23 +441,62 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             debug!("Starting iteration {iteration} (depth {main_depth})");
 
-            // Add work items for helpers (with depth variations)
-            for helper_id in 1..self.num_threads {
-                // Vary depth slightly for diversity
-                let helper_depth = if helper_id % 2 == 0 {
-                    main_depth.saturating_add(1).min(max_depth)
-                } else {
-                    main_depth
-                };
+            // Generate root moves for the first few iterations to distribute work
+            if iteration <= 3 && self.num_threads > 1 {
+                // Generate all legal moves at root
+                let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
+                let moves = move_gen.generate_all();
+                
+                if !moves.is_empty() {
+                    // Distribute root moves among helper threads
+                    let moves_per_thread = moves.len() / (self.num_threads - 1);
+                    let mut move_index = 0;
+                    
+                    for helper_id in 1..self.num_threads {
+                        // Calculate depth variation for diversity
+                        let helper_depth = self.calculate_helper_depth(main_depth, helper_id, max_depth);
+                        
+                        // Assign moves to this helper thread
+                        let start_idx = move_index;
+                        let end_idx = if helper_id == self.num_threads - 1 {
+                            moves.len()  // Last thread gets all remaining moves
+                        } else {
+                            (start_idx + moves_per_thread).min(moves.len())
+                        };
+                        
+                        // Create work items for assigned moves
+                        for idx in start_idx..end_idx {
+                            let work = WorkItem::RootMove {
+                                iteration,
+                                depth: helper_depth,
+                                position: position.clone(),
+                                move_to_search: moves[idx],
+                                move_index: idx,
+                            };
+                            
+                            if !self.work_queue.push(work) {
+                                warn!("Work queue full at iteration {iteration}, move {idx}");
+                                break;
+                            }
+                        }
+                        
+                        move_index = end_idx;
+                    }
+                }
+            } else {
+                // Fall back to traditional full position search for deeper iterations
+                for helper_id in 1..self.num_threads {
+                    let helper_depth = self.calculate_helper_depth(main_depth, helper_id, max_depth);
 
-                let work = WorkItem {
-                    iteration,
-                    depth: helper_depth,
-                    position: position.clone(),
-                };
+                    let work = WorkItem::FullPosition {
+                        iteration,
+                        depth: helper_depth,
+                        position: position.clone(),
+                    };
 
-                if !self.work_queue.push(work) {
-                    warn!("Work queue full at iteration {iteration}");
+                    if !self.work_queue.push(work) {
+                        warn!("Work queue full at iteration {iteration}");
+                    }
                 }
             }
 
