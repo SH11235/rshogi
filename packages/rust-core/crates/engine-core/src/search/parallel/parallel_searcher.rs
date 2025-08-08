@@ -6,11 +6,12 @@ use crate::{
     shogi::{Move, Position},
     time_management::TimeManager,
 };
+use crossbeam_deque::{Injector, Stealer};
 use log::{debug, error, info, trace, warn};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -68,88 +69,67 @@ enum WorkItem {
     },
 }
 
-/// Lock-free work queue using atomic indices
-struct WorkQueue {
-    /// Items to process
-    items: Vec<Mutex<Option<WorkItem>>>,
-    /// Next item to take
-    next_index: AtomicUsize,
-    /// Total items added
-    total_items: AtomicUsize,
+/// Lock-free work queue using crossbeam-deque
+struct LockFreeWorkQueue {
+    /// Global queue for work items
+    injector: Injector<WorkItem>,
+    /// Stealers for work stealing
+    stealers: Vec<Stealer<WorkItem>>,
 }
 
-impl WorkQueue {
-    fn new(capacity: usize) -> Self {
-        let mut items = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            items.push(Mutex::new(None));
-        }
+impl LockFreeWorkQueue {
+    /// Create new lock-free work queue
+    fn new(_num_threads: usize) -> Self {
+        let injector = Injector::new();
+        let stealers = Vec::new(); // Will be populated by workers
 
-        Self {
-            items,
-            next_index: AtomicUsize::new(0),
-            total_items: AtomicUsize::new(0),
-        }
+        Self { injector, stealers }
     }
 
-    /// Add work item to queue
+    /// Push work item to global queue (lock-free, no capacity limit)
     fn push(&self, item: WorkItem) -> bool {
-        let total = self.total_items.load(Ordering::Relaxed);
-        if total >= self.items.len() {
-            return false; // Queue full
-        }
-
-        let index = self.total_items.fetch_add(1, Ordering::Relaxed);
-        if index < self.items.len() {
-            if let Ok(mut slot) = self.items[index].lock() {
-                *slot = Some(item);
-                return true;
-            }
-        }
-        false
+        self.injector.push(item);
+        true // Always succeeds with lock-free queue
     }
 
-    /// Try to get next work item
-    fn pop(&self) -> Option<WorkItem> {
+    /// Pop work item (simplified version without local workers)
+    fn pop(&self, _thread_id: usize) -> Option<WorkItem> {
+        // Try stealing from global injector
         loop {
-            let index = self.next_index.load(Ordering::Acquire);
-            let total = self.total_items.load(Ordering::Acquire);
-
-            if index >= total {
-                return None; // No more items
+            match self.injector.steal() {
+                crossbeam_deque::Steal::Success(item) => return Some(item),
+                crossbeam_deque::Steal::Empty => break,
+                crossbeam_deque::Steal::Retry => continue,
             }
+        }
 
-            // Try to claim this index
-            if self
-                .next_index
-                .compare_exchange(index, index + 1, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                // We got the index, take the item
-                if let Ok(mut slot) = self.items[index].lock() {
-                    return slot.take();
+        // Try stealing from other workers
+        for stealer in &self.stealers {
+            loop {
+                match stealer.steal() {
+                    crossbeam_deque::Steal::Success(item) => return Some(item),
+                    crossbeam_deque::Steal::Empty => break,
+                    crossbeam_deque::Steal::Retry => continue,
                 }
             }
-            // Another thread got it, retry
         }
+
+        None
     }
 
-    /// Clear the queue for reuse
+    /// Clear the queue (best effort - may not clear all items in concurrent environment)
     fn clear(&self) {
-        self.next_index.store(0, Ordering::Release);
-        self.total_items.store(0, Ordering::Release);
-        for item in &self.items {
-            if let Ok(mut slot) = item.lock() {
-                *slot = None;
-            }
+        // Clear global injector
+        while !self.injector.is_empty() {
+            let _ = self.injector.steal();
         }
+
+        // Note: Cannot clear stealers' local queues from here as we don't have access to Workers
     }
 
-    /// Get the number of pending work items
+    /// Get approximate pending count (not exact in concurrent environment)
     fn pending_count(&self) -> usize {
-        let total = self.total_items.load(Ordering::Acquire);
-        let next = self.next_index.load(Ordering::Acquire);
-        total.saturating_sub(next)
+        self.injector.len()
     }
 }
 
@@ -170,8 +150,8 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Number of threads
     num_threads: usize,
 
-    /// Work queue
-    work_queue: Arc<WorkQueue>,
+    /// Work queue (lock-free implementation)
+    work_queue: Arc<LockFreeWorkQueue>,
 
     /// Node counter
     total_nodes: Arc<AtomicU64>,
@@ -188,16 +168,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        // Create work queue with dynamic capacity based on expected workload
-        // Shogi typically has 30-50 legal moves in the opening
-        let min_capacity = num_threads * 64; // Base capacity
-        let max_moves_estimate = 50; // Maximum expected moves in opening
-                                     // Dynamic depth factor: assume max depth of 20, divided by 2, with minimum of 3
-                                     // This ensures enough capacity even for deep searches with many moves (400+ moves)
-        let depth_factor = (20 / 2) as usize; // = 10, enough for deep iterations
-        let dynamic_capacity = (max_moves_estimate * num_threads * depth_factor).max(min_capacity);
-        debug!("Creating WorkQueue with capacity: {dynamic_capacity}");
-        let work_queue = Arc::new(WorkQueue::new(dynamic_capacity));
+        // Create lock-free work queue (no capacity limit!)
+        debug!("Creating LockFreeWorkQueue for {num_threads} threads");
+        let work_queue = Arc::new(LockFreeWorkQueue::new(num_threads));
 
         Self {
             tt,
@@ -383,8 +356,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Simple work loop
             while !shared_state.should_stop() {
-                // Try to get work
-                if let Some(work) = work_queue.pop() {
+                // Try to get work (with thread_id for work stealing)
+                if let Some(work) = work_queue.pop(id) {
                     // Create guard which atomically increments the counter
                     let _guard = WorkerGuard::new(active_workers.clone());
 
@@ -573,7 +546,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 };
 
                                 if !self.work_queue.push(work) {
-                                    warn!("Work queue full at iteration {iteration}, move {idx}");
+                                    // Lock-free queue should never fail, but if it does, stop immediately
+                                    self.shared_state.set_stop();
                                     break;
                                 }
                             }
@@ -596,7 +570,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     };
 
                     if !self.work_queue.push(work) {
-                        warn!("Work queue full at iteration {iteration}");
+                        // Lock-free queue should never fail, but if it does, stop immediately
+                        self.shared_state.set_stop();
                     }
                 }
             }
