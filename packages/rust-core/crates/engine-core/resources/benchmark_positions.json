@@ -81,11 +81,6 @@
       "category": "tactical"
     },
     {
-      "name": "complex_middlegame",
-      "sfen": "l2g1g1n1/1ks4rl/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL b n 25",
-      "category": "midgame"
-    },
-    {
       "name": "complex_attack",
       "sfen": "1n1g1g1nl/1ks4r1/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL w L 26",
       "category": "midgame"
