@@ -5,7 +5,6 @@
 
 pub mod search_thread;
 pub mod shared;
-pub mod stop_test;
 
 mod parallel_searcher;
 
