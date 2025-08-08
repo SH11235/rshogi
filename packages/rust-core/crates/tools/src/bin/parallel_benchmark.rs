@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use engine_core::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
-    search::{parallel::ParallelSearcher, SearchLimitsBuilder, ShardedTranspositionTable, TranspositionTable},
+    search::{parallel::ParallelSearcher, SearchLimitsBuilder, ShardedTranspositionTable},
     shogi::Position,
     time_management::TimeControl,
 };
@@ -132,7 +132,7 @@ fn load_positions(path: &str) -> Result<Vec<PositionEntry>> {
 fn run_single_search<E: Evaluator + Send + Sync + 'static>(
     position: &mut Position,
     evaluator: Arc<E>,
-    tt: Arc<TranspositionTable>,
+    tt: Arc<ShardedTranspositionTable>,
     threads: usize,
     depth: u8,
     fixed_ms: Option<u64>,
@@ -197,8 +197,9 @@ fn main() -> Result<()> {
     let evaluator = Arc::new(MaterialEvaluator);
     info!("Using material evaluator");
 
-    // Create TT
-    let tt = Arc::new(TranspositionTable::new(args.tt_size));
+    // Create sharded TT for better parallel performance
+    info!("Using sharded transposition table with 16 shards");
+    let tt = Arc::new(ShardedTranspositionTable::new(args.tt_size));
 
     let mut thread_results = Vec::new();
     let baseline_nps = Arc::new(std::sync::Mutex::new(None));
