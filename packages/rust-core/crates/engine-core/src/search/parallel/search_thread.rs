@@ -312,12 +312,12 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
 
         // Apply the root move
         let undo_info = position.do_move(root_move);
-        
+
         // Search from the resulting position
         let result = if depth > 1 {
             // Search with reduced depth
             let search_result = self.searcher.search(position, depth_limits);
-            
+
             // Negate score (we searched from opponent's perspective)
             SearchResult {
                 score: -search_result.score,
@@ -346,21 +346,17 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                 best_move: Some(root_move),
             }
         };
-        
+
         // Unmake the move
         position.undo_move(root_move, undo_info);
-        
+
         // Update local tables from searcher
         self.local_history = self.searcher.get_history();
         self.local_counter_moves = self.searcher.get_counter_moves();
 
         // Update shared state if this is a better result
-        self.shared_state.maybe_update_best(
-            result.score,
-            Some(root_move),
-            depth,
-            self.generation,
-        );
+        self.shared_state
+            .maybe_update_best(result.score, Some(root_move), depth, self.generation);
 
         // Force flush at end of search to ensure all nodes are counted
         self.flush_nodes();

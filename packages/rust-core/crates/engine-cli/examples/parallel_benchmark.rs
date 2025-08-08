@@ -166,7 +166,7 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
     let tt_hit_rate = searcher.get_tt_hit_rate();
     let effective_nodes = searcher.get_effective_nodes();
 
-    let best_move = result.best_move.map_or("none".to_string(), |m| format!("{}", m));
+    let best_move = result.best_move.map_or("none".to_string(), |m| format!("{m}"));
     let score = result.score;
 
     (nodes, time_ms, duplication, tt_hit_rate, effective_nodes, best_move, score)
@@ -206,7 +206,7 @@ fn main() -> Result<()> {
 
     // Run benchmarks for each thread count
     for &thread_count in &args.threads {
-        info!("\n=== Testing with {} thread(s) ===", thread_count);
+        info!("\n=== Testing with {thread_count} thread(s) ===");
 
         let mut total_nodes = 0u64;
         let mut total_time_ms = 0u64;
@@ -248,8 +248,7 @@ fn main() -> Result<()> {
                 };
 
                 info!(
-                    "    Thread {}: {} nodes in {}ms = {} nps, dup: {:.1}%, move: {}, score: {}",
-                    thread_count, nodes, time_ms, nps, duplication, best_move, score
+                    "    Thread {thread_count}: {nodes} nodes in {time_ms}ms = {nps} nps, dup: {duplication:.1}%, move: {best_move}, score: {score}"
                 );
 
                 total_nodes += nodes;
@@ -261,7 +260,7 @@ fn main() -> Result<()> {
         }
 
         if count == 0 {
-            warn!("No valid positions tested for {} threads", thread_count);
+            warn!("No valid positions tested for {thread_count} threads");
             continue;
         }
 
@@ -294,11 +293,11 @@ fn main() -> Result<()> {
 
         let avg_efficiency = avg_speedup / thread_count as f64;
 
-        info!("\nSummary for {} thread(s):", thread_count);
-        info!("  Average NPS: {:.0}", avg_nps);
-        info!("  Speedup: {:.2}x", avg_speedup);
+        info!("\nSummary for {thread_count} thread(s):");
+        info!("  Average NPS: {avg_nps:.0}");
+        info!("  Speedup: {avg_speedup:.2}x");
         info!("  Efficiency: {:.1}%", avg_efficiency * 100.0);
-        info!("  Duplication: {:.1}%", avg_duplication);
+        info!("  Duplication: {avg_duplication:.1}%");
 
         thread_results.push(ThreadResult {
             thread_count,

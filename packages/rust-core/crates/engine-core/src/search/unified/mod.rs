@@ -16,9 +16,7 @@ use crate::{
         parallel::shared::DuplicationStats,
         tt::{NodeType, TranspositionTable},
         types::SearchStack,
-        SearchLimits,
-        SearchResult,
-        SearchStats,
+        SearchLimits, SearchResult, SearchStats,
     },
     shogi::{Move, Position},
 };
@@ -94,7 +92,7 @@ pub struct UnifiedSearcher<
 
     /// Adaptive prefetcher for TT (conditionally compiled)
     pub(crate) adaptive_prefetcher: Option<AdaptivePrefetcher>,
-    
+
     /// Duplication statistics for parallel search (optional)
     duplication_stats: Option<Arc<DuplicationStats>>,
 }
