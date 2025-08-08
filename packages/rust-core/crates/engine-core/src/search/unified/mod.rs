@@ -15,9 +15,8 @@ use crate::{
         history::{CounterMoveHistory, History},
         parallel::shared::DuplicationStats,
         tt::NodeType,
-        ShardedTranspositionTable,
         types::SearchStack,
-        SearchLimits, SearchResult, SearchStats,
+        SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable,
     },
     shogi::{Move, Position},
 };
