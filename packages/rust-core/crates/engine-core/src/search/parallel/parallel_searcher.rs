@@ -6,12 +6,12 @@ use crate::{
     shogi::{Move, Position},
     time_management::TimeManager,
 };
-use crossbeam_deque::{Injector, Stealer};
+use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
 use log::{debug, error, info, trace, warn};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -69,11 +69,11 @@ enum WorkItem {
     },
 }
 
-/// Lock-free work queue using crossbeam-deque
+/// Lock-free work queue using crossbeam-deque with proper work stealing
 struct LockFreeWorkQueue {
     /// Global queue for work items
     injector: Injector<WorkItem>,
-    /// Stealers for work stealing
+    /// Stealers for work stealing (Workers are created per-thread)
     stealers: Vec<Stealer<WorkItem>>,
 }
 
@@ -81,20 +81,28 @@ impl LockFreeWorkQueue {
     /// Create new lock-free work queue
     fn new(_num_threads: usize) -> Self {
         let injector = Injector::new();
-        let stealers = Vec::new(); // Will be populated by workers
-
-        Self { injector, stealers }
+        let stealers = Vec::new(); // Will be populated when workers are created
+        
+        Self {
+            injector,
+            stealers,
+        }
+    }
+    
+    /// Add a stealer from a worker thread
+    fn add_stealer(&mut self, stealer: Stealer<WorkItem>) {
+        self.stealers.push(stealer);
     }
 
-    /// Push work item to global queue (lock-free, no capacity limit)
+    /// Push work item to global queue (for main thread)
     fn push(&self, item: WorkItem) -> bool {
         self.injector.push(item);
         true // Always succeeds with lock-free queue
     }
-
-    /// Pop work item (simplified version without local workers)
-    fn pop(&self, _thread_id: usize) -> Option<WorkItem> {
-        // Try stealing from global injector
+    
+    /// Pop work item from global queue (simplified for now)
+    fn pop(&self) -> Option<WorkItem> {
+        // Try the global injector
         loop {
             match self.injector.steal() {
                 crossbeam_deque::Steal::Success(item) => return Some(item),
@@ -102,7 +110,7 @@ impl LockFreeWorkQueue {
                 crossbeam_deque::Steal::Retry => continue,
             }
         }
-
+        
         // Try stealing from other workers
         for stealer in &self.stealers {
             loop {
@@ -113,7 +121,39 @@ impl LockFreeWorkQueue {
                 }
             }
         }
-
+        
+        None
+    }
+    
+    /// Pop work item with work stealing (called by worker threads with their local worker)
+    fn pop_with_worker(&self, worker: &DequeWorker<WorkItem>, thread_id: usize) -> Option<WorkItem> {
+        // 1. First try local worker queue (fastest, best cache locality)
+        if let Some(item) = worker.pop() {
+            return Some(item);
+        }
+        
+        // 2. Then try stealing from other workers
+        for (i, stealer) in self.stealers.iter().enumerate() {
+            if i != thread_id {
+                loop {
+                    match stealer.steal() {
+                        crossbeam_deque::Steal::Success(item) => return Some(item),
+                        crossbeam_deque::Steal::Empty => break,
+                        crossbeam_deque::Steal::Retry => continue,
+                    }
+                }
+            }
+        }
+        
+        // 3. Finally try the global injector
+        loop {
+            match self.injector.steal() {
+                crossbeam_deque::Steal::Success(item) => return Some(item),
+                crossbeam_deque::Steal::Empty => break,
+                crossbeam_deque::Steal::Retry => continue,
+            }
+        }
+        
         None
     }
 
@@ -124,7 +164,7 @@ impl LockFreeWorkQueue {
             let _ = self.injector.steal();
         }
 
-        // Note: Cannot clear stealers' local queues from here as we don't have access to Workers
+        // Note: Cannot clear worker queues as they are owned by threads
     }
 
     /// Get approximate pending count (not exact in concurrent environment)
@@ -150,8 +190,8 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Number of threads
     num_threads: usize,
 
-    /// Work queue (lock-free implementation)
-    work_queue: Arc<LockFreeWorkQueue>,
+    /// Work queue (lock-free implementation with mutex for setup)
+    work_queue: Arc<Mutex<LockFreeWorkQueue>>,
 
     /// Node counter
     total_nodes: Arc<AtomicU64>,
@@ -170,7 +210,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Create lock-free work queue (no capacity limit!)
         debug!("Creating LockFreeWorkQueue for {num_threads} threads");
-        let work_queue = Arc::new(LockFreeWorkQueue::new(num_threads));
+        let work_queue = Arc::new(Mutex::new(LockFreeWorkQueue::new(num_threads)));
 
         Self {
             tt,
@@ -254,7 +294,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Reset state
         self.shared_state.reset();
-        self.work_queue.clear();
+        if let Ok(mut queue) = self.work_queue.lock() {
+            queue.clear();
+        }
         self.total_nodes.store(0, Ordering::Release);
 
         // Create time manager if needed
@@ -347,6 +389,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         thread::spawn(move || {
             debug!("Worker {id} started");
+            
+            // Create local worker for this thread (LIFO for DFS)
+            let local_worker = DequeWorker::new_lifo();
+            let stealer = local_worker.stealer();
+            
+            // Add stealer to the global queue
+            if let Ok(mut queue) = work_queue.lock() {
+                queue.add_stealer(stealer);
+            }
 
             // Create search thread
             let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
@@ -356,8 +407,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Simple work loop
             while !shared_state.should_stop() {
-                // Try to get work (with thread_id for work stealing)
-                if let Some(work) = work_queue.pop(id) {
+                // Try to get work using proper work stealing
+                let work = if let Ok(queue) = work_queue.lock() {
+                    queue.pop_with_worker(&local_worker, id)
+                } else {
+                    None
+                };
+                
+                if let Some(work) = work {
                     // Create guard which atomically increments the counter
                     let _guard = WorkerGuard::new(active_workers.clone());
 
@@ -545,9 +602,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                     move_index: idx,
                                 };
 
-                                if !self.work_queue.push(work) {
-                                    // Lock-free queue should never fail, but if it does, stop immediately
-                                    self.shared_state.set_stop();
+                                if let Ok(queue) = self.work_queue.lock() {
+                                    if !queue.push(work) {
+                                        // Lock-free queue should never fail, but if it does, stop immediately
+                                        self.shared_state.set_stop();
+                                        break;
+                                    }
+                                } else {
                                     break;
                                 }
                             }
@@ -569,9 +630,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         position: position.clone(),
                     };
 
-                    if !self.work_queue.push(work) {
-                        // Lock-free queue should never fail, but if it does, stop immediately
-                        self.shared_state.set_stop();
+                    if let Ok(queue) = self.work_queue.lock() {
+                        if !queue.push(work) {
+                            // Lock-free queue should never fail, but if it does, stop immediately
+                            self.shared_state.set_stop();
+                        }
                     }
                 }
             }
@@ -619,7 +682,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 let mut wait_time = 0;
                 loop {
-                    let pending = self.work_queue.pending_count();
+                    let pending = if let Ok(queue) = self.work_queue.lock() {
+                        queue.pending_count()
+                    } else {
+                        0
+                    };
                     let active = self.active_workers.load(Ordering::Acquire);
 
                     // Check TimeManager should_stop first
