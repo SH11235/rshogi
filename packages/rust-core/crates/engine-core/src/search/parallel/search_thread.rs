@@ -21,7 +21,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::shared::SharedSearchState;
+use super::shared::{SharedSearchState, SplitPoint};
 
 /// Thread state for park control
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -418,6 +418,97 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     /// Check if thread is idle
     pub fn is_idle(&self) -> bool {
         self.state.load(Ordering::Acquire) == ThreadState::Idle as u8
+    }
+
+    /// Process work from a split point (YBWC)
+    pub fn process_split_point(&mut self, split_point: &Arc<SplitPoint>) {
+        // Increment active thread count for this split point
+        split_point.add_thread();
+        self.shared_state.increment_active_threads();
+
+        // Process moves from the split point until no more work
+        while !self.should_stop() {
+            // Try to get next move from split point
+            let Some(mv) = split_point.get_next_move() else {
+                break;
+            };
+
+            // Clone position for this thread's search
+            let mut pos = split_point.position.clone();
+
+            // Apply the move
+            let undo_info = pos.do_move(mv);
+
+            // Search from the resulting position
+            let limits = SearchLimits {
+                depth: Some(split_point.depth.saturating_sub(1)),
+                stop_flag: Some(self.shared_state.stop_flag.clone()),
+                ..Default::default()
+            };
+
+            let result = self.searcher.search(&mut pos, limits);
+
+            // Negate score (searched from opponent's perspective)
+            let score = -result.score;
+
+            // Undo the move
+            pos.undo_move(mv, undo_info);
+
+            // Update split point's best score if this is better
+            if split_point.update_best(score, mv) {
+                // Beta cutoff found - stop searching
+                break;
+            }
+
+            // Report nodes periodically
+            self.report_nodes();
+        }
+
+        // Clean up when done
+        split_point.remove_thread();
+        self.shared_state.decrement_active_threads();
+        self.flush_nodes();
+    }
+
+    /// Search the PV move at a split point (YBWC)
+    pub fn search_pv_at_split_point(
+        &mut self,
+        split_point: &Arc<SplitPoint>,
+        pv_move: Move,
+    ) -> i32 {
+        self.shared_state.increment_active_threads();
+
+        // Clone position for PV search
+        let mut pos = split_point.position.clone();
+
+        // Apply the PV move
+        let undo_info = pos.do_move(pv_move);
+
+        // Search from the resulting position
+        let limits = SearchLimits {
+            depth: Some(split_point.depth.saturating_sub(1)),
+            stop_flag: Some(self.shared_state.stop_flag.clone()),
+            ..Default::default()
+        };
+
+        let result = self.searcher.search(&mut pos, limits);
+
+        // Negate score (searched from opponent's perspective)
+        let score = -result.score;
+
+        // Undo the move
+        pos.undo_move(pv_move, undo_info);
+
+        // Update split point's best score
+        split_point.update_best(score, pv_move);
+
+        // Mark PV as searched (signals other threads can start)
+        split_point.mark_pv_searched();
+
+        self.shared_state.decrement_active_threads();
+        self.flush_nodes();
+
+        score
     }
 }
 

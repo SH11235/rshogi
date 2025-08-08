@@ -3,11 +3,14 @@
 //! Lock-free data structures shared between search threads
 
 use crate::{
-    shogi::{Move, PieceType, Square},
+    shogi::{Move, PieceType, Position, Square},
     Color,
 };
 use crossbeam_utils::CachePadded;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use parking_lot::RwLock;
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::Arc;
 
 /// Statistics for tracking work duplication in parallel search
@@ -142,6 +145,209 @@ impl Align128<AtomicU32> {
     }
 }
 
+/// Split point for YBWC (Young Brothers Wait Concept)
+/// Represents a position where search can be split among threads
+#[derive(Debug)]
+pub struct SplitPoint {
+    /// Position being searched
+    pub position: Position,
+    /// Depth remaining in the search
+    pub depth: u8,
+    /// Alpha bound
+    pub alpha: i32,
+    /// Beta bound
+    pub beta: i32,
+    /// Moves to search (siblings after PV move)
+    pub moves: Vec<Move>,
+    /// Index of the first move that hasn't been searched yet
+    pub next_move_index: AtomicUsize,
+    /// Number of threads working on this split point
+    pub active_threads: AtomicUsize,
+    /// Flag indicating if a beta cutoff has been found
+    pub cutoff_found: AtomicBool,
+    /// Best score found so far at this split point
+    pub best_score: AtomicI32,
+    /// Best move found at this split point
+    pub best_move: AtomicU32,
+    /// PV move has been searched (for YBWC)
+    pub pv_searched: AtomicBool,
+}
+
+impl SplitPoint {
+    /// Create a new split point
+    pub fn new(position: Position, depth: u8, alpha: i32, beta: i32, moves: Vec<Move>) -> Self {
+        Self {
+            position,
+            depth,
+            alpha,
+            beta,
+            moves,
+            next_move_index: AtomicUsize::new(0),
+            active_threads: AtomicUsize::new(0),
+            cutoff_found: AtomicBool::new(false),
+            best_score: AtomicI32::new(alpha),
+            best_move: AtomicU32::new(0),
+            pv_searched: AtomicBool::new(false),
+        }
+    }
+
+    /// Get the next move to search
+    pub fn get_next_move(&self) -> Option<Move> {
+        // If cutoff found, no more moves to search
+        if self.cutoff_found.load(Ordering::Acquire) {
+            return None;
+        }
+
+        // Atomically get and increment the move index
+        let index = self.next_move_index.fetch_add(1, Ordering::AcqRel);
+
+        if index < self.moves.len() {
+            Some(self.moves[index])
+        } else {
+            None
+        }
+    }
+
+    /// Mark that PV move has been searched
+    pub fn mark_pv_searched(&self) {
+        self.pv_searched.store(true, Ordering::Release);
+    }
+
+    /// Check if PV move has been searched (for YBWC)
+    pub fn is_pv_searched(&self) -> bool {
+        self.pv_searched.load(Ordering::Acquire)
+    }
+
+    /// Update best score and move if better
+    pub fn update_best(&self, score: i32, mv: Move) -> bool {
+        let mut current_best = self.best_score.load(Ordering::Acquire);
+
+        while score > current_best {
+            match self.best_score.compare_exchange_weak(
+                current_best,
+                score,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.best_move.store(mv.to_u16() as u32, Ordering::Release);
+
+                    // Check for beta cutoff
+                    if score >= self.beta {
+                        self.cutoff_found.store(true, Ordering::Release);
+                        return true;
+                    }
+                    return false;
+                }
+                Err(x) => current_best = x,
+            }
+        }
+        false
+    }
+
+    /// Add a thread working on this split point
+    pub fn add_thread(&self) {
+        self.active_threads.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Remove a thread from this split point
+    pub fn remove_thread(&self) {
+        self.active_threads.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Get number of active threads
+    pub fn active_thread_count(&self) -> usize {
+        self.active_threads.load(Ordering::Acquire)
+    }
+}
+
+/// Manager for split points in YBWC
+pub struct SplitPointManager {
+    /// Active split points
+    split_points: RwLock<Vec<Arc<SplitPoint>>>,
+    /// Maximum depth difference for creating split points
+    max_split_depth_diff: u8,
+}
+
+impl SplitPointManager {
+    /// Create a new split point manager
+    pub fn new() -> Self {
+        Self {
+            split_points: RwLock::new(Vec::new()),
+            max_split_depth_diff: 3,
+        }
+    }
+
+    /// Add a new split point
+    pub fn add_split_point(&self, split_point: SplitPoint) -> Arc<SplitPoint> {
+        let arc_split = Arc::new(split_point);
+        self.split_points.write().push(arc_split.clone());
+        arc_split
+    }
+
+    /// Get an available split point for a thread to work on
+    pub fn get_available_split_point(&self) -> Option<Arc<SplitPoint>> {
+        let split_points = self.split_points.read();
+
+        // Find a split point with work available
+        for sp in split_points.iter() {
+            // YBWC: Only join if PV has been searched
+            if !sp.is_pv_searched() {
+                continue;
+            }
+
+            // Check if there's work available
+            if !sp.cutoff_found.load(Ordering::Acquire)
+                && sp.next_move_index.load(Ordering::Acquire) < sp.moves.len()
+            {
+                return Some(sp.clone());
+            }
+        }
+
+        None
+    }
+
+    /// Remove completed split points
+    pub fn cleanup_completed(&self) {
+        let mut split_points = self.split_points.write();
+        split_points
+            .retain(|sp| !sp.cutoff_found.load(Ordering::Acquire) || sp.active_thread_count() > 0);
+    }
+
+    /// Clear all split points
+    pub fn clear(&self) {
+        self.split_points.write().clear();
+    }
+
+    /// Check if we should create a split point
+    pub fn should_split(&self, depth: u8, move_count: usize, thread_utilization: f64) -> bool {
+        // More relaxed conditions for split point creation
+
+        // Allow splitting at depth 3 or deeper (was 4)
+        if depth < 3 {
+            return false;
+        }
+
+        // Allow splitting with fewer moves (was 8)
+        if move_count < 4 {
+            return false;
+        }
+
+        // Only prevent splitting if threads are very well utilized (was 0.7)
+        if thread_utilization > 0.9 {
+            return false;
+        }
+
+        true
+    }
+}
+
+impl Default for SplitPointManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Lock-free shared history table
 ///
 /// 【実装の要点】
@@ -250,11 +456,25 @@ pub struct SharedSearchState {
 
     /// Duplication statistics
     pub duplication_stats: Arc<DuplicationStats>,
+
+    /// Split point manager for YBWC
+    pub split_point_manager: Arc<SplitPointManager>,
+
+    /// Number of active threads (for utilization calculation)
+    pub active_threads: AtomicUsize,
+
+    /// Total number of threads
+    pub total_threads: usize,
 }
 
 impl SharedSearchState {
     /// Create new shared search state
     pub fn new(stop_flag: Arc<AtomicBool>) -> Self {
+        Self::with_threads(stop_flag, 1)
+    }
+
+    /// Create new shared search state with specified number of threads
+    pub fn with_threads(stop_flag: Arc<AtomicBool>, num_threads: usize) -> Self {
         Self {
             best_move: AtomicU32::new(0),
             best_score: AtomicI32::new(i32::MIN),
@@ -264,6 +484,9 @@ impl SharedSearchState {
             stop_flag,
             history: Arc::new(SharedHistory::new()),
             duplication_stats: Arc::new(DuplicationStats::new()),
+            split_point_manager: Arc::new(SplitPointManager::new()),
+            active_threads: AtomicUsize::new(0),
+            total_threads: num_threads,
         }
     }
 
@@ -277,6 +500,8 @@ impl SharedSearchState {
         self.stop_flag.store(false, Ordering::Release); // IMPORTANT: Reset stop flag for new search
         self.history.clear();
         self.duplication_stats.reset();
+        self.split_point_manager.clear();
+        self.active_threads.store(0, Ordering::Relaxed);
     }
 
     /// Try to update best move/score if better (lock-free)
@@ -360,6 +585,33 @@ impl SharedSearchState {
     /// Reset stop flag (for ensuring clean state)
     pub fn reset_stop_flag(&self) {
         self.stop_flag.store(false, Ordering::Release);
+    }
+
+    /// Increment active thread count
+    pub fn increment_active_threads(&self) {
+        self.active_threads.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Decrement active thread count
+    pub fn decrement_active_threads(&self) {
+        self.active_threads.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Get thread utilization (0.0 to 1.0)
+    pub fn get_thread_utilization(&self) -> f64 {
+        let active = self.active_threads.load(Ordering::Acquire) as f64;
+        let total = self.total_threads as f64;
+        if total > 0.0 {
+            active / total
+        } else {
+            0.0
+        }
+    }
+
+    /// Check if split point should be created based on current conditions
+    pub fn should_create_split_point(&self, depth: u8, move_count: usize) -> bool {
+        let utilization = self.get_thread_utilization();
+        self.split_point_manager.should_split(depth, move_count, utilization)
     }
 }
 

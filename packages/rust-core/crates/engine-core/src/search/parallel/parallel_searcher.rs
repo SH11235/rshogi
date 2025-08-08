@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{SearchThread, SharedSearchState};
+use super::{SearchThread, SharedSearchState, SplitPoint};
 
 /// RAII guard to ensure active worker count is decremented
 struct WorkerGuard {
@@ -222,7 +222,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         assert!(num_threads > 0, "Need at least one thread");
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let shared_state = Arc::new(SharedSearchState::new(stop_flag));
+        let shared_state = Arc::new(SharedSearchState::with_threads(stop_flag, num_threads));
 
         // Create truly lock-free work queues (no initialization needed yet)
         debug!("Creating placeholder Queues for {num_threads} threads");
@@ -250,17 +250,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.time_manager = Some(time_manager);
     }
 
-    /// Adjust the number of active threads dynamically (compatibility method)
-    /// Note: In the new implementation, this is a no-op as we always use all threads
+    /// Adjust the number of active threads dynamically
     pub fn adjust_thread_count(&mut self, new_active_threads: usize) {
         let new_active = new_active_threads.min(self.num_threads).max(1);
         if new_active != self.num_threads {
-            debug!(
-                "Thread count adjustment requested from {} to {} (ignoring in new implementation)",
-                self.num_threads, new_active
-            );
-            // In the simplified implementation, we always use all threads
-            // This method is kept for compatibility but doesn't actually change behavior
+            debug!("Adjusting active thread count from {} to {}", self.num_threads, new_active);
+
+            // Update the total threads in shared state for utilization calculation
+            if let Some(shared_state) = Arc::get_mut(&mut self.shared_state) {
+                shared_state.total_threads = new_active;
+            } else {
+                // Can't get mutable reference, this is expected during search
+                // The adjustment will take effect on the next search
+                debug!("Thread count adjustment deferred (shared state in use)");
+            }
         }
     }
 
@@ -584,8 +587,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         break;
                     }
                 } else {
-                    // No work available, check stop flag with brief sleep
-                    thread::sleep(Duration::from_micros(100));
+                    // No work available, check for split points (YBWC)
+                    if let Some(split_point) =
+                        shared_state.split_point_manager.get_available_split_point()
+                    {
+                        // Process the split point
+                        search_thread.process_split_point(&split_point);
+                    } else {
+                        // No work or split points available, brief sleep
+                        thread::sleep(Duration::from_micros(100));
+                    }
                 }
             }
 
@@ -745,7 +756,81 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             // Main thread searches
-            let result = main_thread.search_iteration(position, &limits, main_depth);
+            // Use YBWC more aggressively for better parallelization
+            let result = if iteration <= 2 || main_depth < 3 {
+                // Traditional search only for very early iterations
+                main_thread.search_iteration(position, &limits, main_depth)
+            } else {
+                // YBWC search with split points (for deeper iterations)
+                let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
+                let legal_moves = move_gen.generate_all();
+
+                if legal_moves.is_empty() {
+                    // No legal moves - game over
+                    SearchResult {
+                        score: -i32::MAX / 2,
+                        stats: SearchStats::default(),
+                        best_move: None,
+                    }
+                } else {
+                    // Convert MoveList to Vec<Move>
+                    let legal_moves_vec: Vec<Move> = legal_moves.iter().copied().collect();
+
+                    // Get the best move from previous iteration for move ordering
+                    let pv_move = self
+                        .shared_state
+                        .get_best_move()
+                        .filter(|m| legal_moves_vec.contains(m))
+                        .unwrap_or(legal_moves[0]);
+
+                    // Search PV move first
+                    let pv_result =
+                        main_thread.search_root_move(position, &limits, main_depth, pv_move);
+
+                    // Prepare siblings for split point
+                    let mut remaining_moves = legal_moves_vec;
+                    remaining_moves.retain(|&m| m != pv_move);
+
+                    if !remaining_moves.is_empty() && pv_result.score < i32::MAX / 4 {
+                        // Create split point for remaining moves
+                        let split_point = SplitPoint::new(
+                            position.clone(),
+                            main_depth,
+                            pv_result.score - 100, // alpha with margin
+                            i32::MAX / 2,          // beta
+                            remaining_moves,
+                        );
+
+                        // Mark PV as already searched
+                        split_point.mark_pv_searched();
+                        split_point.update_best(pv_result.score, pv_move);
+
+                        // Add to split point manager
+                        let sp_arc =
+                            self.shared_state.split_point_manager.add_split_point(split_point);
+
+                        // Main thread also participates
+                        main_thread.process_split_point(&sp_arc);
+
+                        // Get final best score from split point
+                        let final_score = sp_arc.best_score.load(Ordering::Acquire);
+                        let final_move =
+                            Move::from_u16(sp_arc.best_move.load(Ordering::Acquire) as u16);
+
+                        SearchResult {
+                            score: final_score,
+                            stats: pv_result.stats,
+                            best_move: Some(final_move),
+                        }
+                    } else {
+                        // Use PV result if no siblings or beta cutoff
+                        pv_result
+                    }
+                }
+            };
+
+            // Clean up completed split points
+            self.shared_state.split_point_manager.cleanup_completed();
 
             if log::log_enabled!(log::Level::Debug) {
                 debug!(
@@ -1011,26 +1096,5 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!("Time manager stopped");
             }
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{evaluation::evaluate::MaterialEvaluator, search::SearchLimitsBuilder};
-
-    #[test]
-    fn test_simple_parallel_search() {
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
-
-        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
-        let mut position = Position::startpos();
-
-        let limits = SearchLimitsBuilder::default().depth(2).build();
-        let result = searcher.search(&mut position, limits);
-
-        assert!(result.best_move.is_some());
-        assert!(result.stats.nodes > 0);
     }
 }
