@@ -194,9 +194,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        // Create work queue with larger capacity to avoid overflow
-        // (64 slots per thread handles deep search with many root moves)
-        let work_queue = Arc::new(WorkQueue::new(num_threads * 64));
+        // Create work queue with dynamic capacity based on expected workload
+        // Shogi typically has 30-50 legal moves in the opening
+        let min_capacity = num_threads * 64;  // Base capacity
+        let max_moves_estimate = 50;  // Maximum expected moves in opening
+        let depth_factor = 3;  // Multiple depths may be queued
+        let dynamic_capacity = (max_moves_estimate * num_threads * depth_factor).max(min_capacity);
+        debug!("Creating WorkQueue with capacity: {dynamic_capacity}");
+        let work_queue = Arc::new(WorkQueue::new(dynamic_capacity));
 
         Self {
             tt,
@@ -305,13 +310,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             handles.push(self.start_worker(id, position.clone(), limits.clone()));
         }
 
-        // Start time management if needed (but not for very short searches)
+        // Start time management if needed
         let time_handle = if let Some(ref tm) = self.time_manager {
-            // Only start time manager if we have reasonable time
-            if tm.soft_limit_ms() > 10 {
+            // Start time manager if we have any time limit
+            // Even for short searches, we need time control to work properly
+            if tm.soft_limit_ms() > 0 {
                 Some(self.start_time_manager(tm.clone()))
             } else {
-                debug!("Skipping time manager for very short search ({}ms)", tm.soft_limit_ms());
+                debug!("Skipping time manager (soft_limit: 0ms)");
                 None
             }
         } else {
@@ -514,10 +520,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     debug!("Distributing {} root moves to {} helper threads (iteration {})", 
                            moves.len(), self.num_threads - 1, iteration);
                     
-                    // Distribute root moves in small chunks to avoid overloading single helper
-                    // Each round, give 2 moves to each helper thread
-                    let chunk_size = 2;
+                    // Distribute root moves in chunks - dynamic size based on move count
+                    // Smaller chunks for many moves, larger chunks for few moves
                     let num_helpers = self.num_threads - 1;
+                    let chunk_size = if moves.len() > 20 {
+                        // Many moves: distribute more evenly with larger chunks
+                        (moves.len() / (num_helpers * 4)).max(2).min(8)
+                    } else {
+                        // Few moves: keep small chunks to avoid starvation
+                        2
+                    };
                     
                     // Process moves in rounds, distributing chunk_size moves to each helper per round
                     for chunk_start in (0..moves.len()).step_by(chunk_size * num_helpers) {
@@ -615,6 +627,16 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 loop {
                     let pending = self.work_queue.pending_count();
                     let active = self.active_workers.load(Ordering::Acquire);
+                    
+                    // Check TimeManager should_stop first
+                    if let Some(ref tm) = self.time_manager {
+                        let nodes = self.total_nodes.load(Ordering::Relaxed);
+                        if tm.should_stop(nodes) {
+                            debug!("TimeManager triggered stop during wait (pending: {}, active: {})", pending, active);
+                            self.shared_state.set_stop();
+                            break;
+                        }
+                    }
                     
                     if pending == 0 && active == 0 {
                         debug!("All work completed (0 pending, 0 active)");
@@ -734,7 +756,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Add extra safety margin for depth-limited searches
             // But keep it reasonable when time control is also specified
             let hard_timeout_ms = if limits.depth.is_some() && matches!(limits.time_control, TimeControl::Infinite) {
-                hard_timeout_ms.max(60_000) // 60 seconds for depth-only searches
+                hard_timeout_ms.max(10_000) // 10 seconds for depth-only searches (reduced from 60s)
             } else {
                 hard_timeout_ms.max(1000)   // At least 1 second for time-controlled searches
             };
