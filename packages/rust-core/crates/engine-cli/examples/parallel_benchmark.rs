@@ -21,11 +21,6 @@ struct PositionEntry {
     sfen: String,
 }
 
-#[derive(Debug)]
-struct BenchmarkPositions {
-    positions: Vec<PositionEntry>,
-}
-
 #[derive(Debug, Clone)]
 struct ThreadResult {
     thread_count: usize,

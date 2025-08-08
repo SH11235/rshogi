@@ -20,13 +20,18 @@ where
 {
     // Check stop flag periodically to minimize overhead
     // Use more frequent checking if stop_flag is present
-    let check_interval = if searcher.context.limits().stop_flag.is_some() {
-        0x3F // Check every 64 nodes when stop_flag is present
+    // If already stopped, check every node for immediate response
+    let check_interval = if searcher.context.should_stop() {
+        0x0 // Check every node if already stopped
+    } else if searcher.context.limits().stop_flag.is_some() {
+        0x7 // Check every 8 nodes when stop_flag is present (more responsive)
     } else {
-        0x3FF // Check every 1024 nodes for normal operation
+        0xFF // Check every 256 nodes for normal operation (reduced from 1024)
     };
 
-    if searcher.stats.nodes & check_interval == 0 && searcher.context.should_stop() {
+    if (check_interval == 0 || searcher.stats.nodes & check_interval == 0)
+        && searcher.context.should_stop()
+    {
         return alpha;
     }
 
@@ -155,6 +160,11 @@ where
 
     // Search moves
     for &mv in ordered_moves.iter() {
+        // Check stop flag at the beginning of each move
+        if searcher.context.should_stop() {
+            break; // Exit move loop immediately
+        }
+
         // Futility pruning for quiet moves
         if USE_PRUNING
             && can_do_futility
@@ -232,6 +242,11 @@ where
 
         // Undo move
         pos.undo_move(mv, undo_info);
+
+        // Check stop flag after alpha-beta recursion
+        if searcher.context.should_stop() {
+            return best_score.max(alpha); // Return current best value
+        }
 
         moves_searched += 1;
 
@@ -380,7 +395,6 @@ where
 
     best_score
 }
-
 
 #[cfg(test)]
 mod tests {
