@@ -10,6 +10,85 @@ use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
+/// Statistics for tracking work duplication in parallel search
+#[derive(Debug)]
+pub struct DuplicationStats {
+    /// Total nodes searched by all threads
+    pub total_nodes: AtomicU64,
+    /// Unique nodes (positions not previously searched)
+    pub unique_nodes: AtomicU64,
+    /// Transposition table hits
+    pub tt_hits: AtomicU64,
+    /// Duplicated positions (searched by multiple threads)
+    pub duplicated_positions: AtomicU64,
+}
+
+impl DuplicationStats {
+    /// Create new duplication statistics tracker
+    pub fn new() -> Self {
+        Self {
+            total_nodes: AtomicU64::new(0),
+            unique_nodes: AtomicU64::new(0),
+            tt_hits: AtomicU64::new(0),
+            duplicated_positions: AtomicU64::new(0),
+        }
+    }
+
+    /// Reset all statistics
+    pub fn reset(&self) {
+        self.total_nodes.store(0, Ordering::Relaxed);
+        self.unique_nodes.store(0, Ordering::Relaxed);
+        self.tt_hits.store(0, Ordering::Relaxed);
+        self.duplicated_positions.store(0, Ordering::Relaxed);
+    }
+
+    /// Calculate duplication percentage
+    pub fn duplication_percentage(&self) -> f64 {
+        let total = self.total_nodes.load(Ordering::Relaxed);
+        let unique = self.unique_nodes.load(Ordering::Relaxed);
+        if total > 0 {
+            ((total - unique) as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Get effective nodes (unique nodes explored)
+    pub fn effective_nodes(&self) -> u64 {
+        self.unique_nodes.load(Ordering::Relaxed)
+    }
+
+    /// Get TT hit rate
+    pub fn tt_hit_rate(&self) -> f64 {
+        let total = self.total_nodes.load(Ordering::Relaxed);
+        let hits = self.tt_hits.load(Ordering::Relaxed);
+        if total > 0 {
+            (hits as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Add node to statistics
+    pub fn add_node(&self, is_tt_hit: bool, is_duplicate: bool) {
+        self.total_nodes.fetch_add(1, Ordering::Relaxed);
+        if is_tt_hit {
+            self.tt_hits.fetch_add(1, Ordering::Relaxed);
+        }
+        if is_duplicate {
+            self.duplicated_positions.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.unique_nodes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Default for DuplicationStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Architecture-specific cache line alignment for optimal performance
 #[repr(align(128))]
 #[cfg(target_arch = "aarch64")]
@@ -168,6 +247,9 @@ pub struct SharedSearchState {
 
     /// Shared history table
     pub history: Arc<SharedHistory>,
+
+    /// Duplication statistics
+    pub duplication_stats: Arc<DuplicationStats>,
 }
 
 impl SharedSearchState {
@@ -181,6 +263,7 @@ impl SharedSearchState {
             nodes_searched: AtomicU64::new(0),
             stop_flag,
             history: Arc::new(SharedHistory::new()),
+            duplication_stats: Arc::new(DuplicationStats::new()),
         }
     }
 
@@ -193,6 +276,7 @@ impl SharedSearchState {
         self.nodes_searched.store(0, Ordering::Relaxed);
         self.stop_flag.store(false, Ordering::Release); // IMPORTANT: Reset stop flag for new search
         self.history.clear();
+        self.duplication_stats.reset();
     }
 
     /// Try to update best move/score if better (lock-free)
