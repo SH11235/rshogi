@@ -62,22 +62,24 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                 let position = position.clone();
                 let limits = limits.clone();
                 let evaluator = self.evaluator.clone();
+                let tt = self.tt.clone();  // Clone the shared TT
                 let should_stop = should_stop.clone();
                 let total_nodes = total_nodes.clone();
                 
                 let handle = s.spawn(move |_| {
                     debug!("Thread {} starting", thread_id);
                     
-                    // Create thread-local searcher (each with its own TT for now)
-                    // TODO: Implement shared TT support in UnifiedSearcher
-                    let mut searcher = UnifiedSearcher::<E, true, true, 16>::new(
-                        (*evaluator).clone(),
+                    // Create thread-local searcher with shared TT
+                    let mut searcher = UnifiedSearcher::<E, true, true, 16>::with_shared_tt(
+                        Arc::new((*evaluator).clone()),
+                        tt,  // Use the shared TT
                     );
                     
                     // Set different parameters for each thread
                     let depth_offset = thread_id % 2; // Alternate between depths
                     let mut thread_result = SearchResult::new(None, 0, SearchStats::default());
                     let mut local_position = position.clone();
+                    let mut last_nodes = 0u64;  // Track last node count for differential
                     
                     // Iterative deepening
                     for depth in 1..=limits.depth.unwrap_or(64) {
@@ -92,20 +94,27 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                             depth.saturating_add(depth_offset as u8)
                         };
                         
-                        // Do the search with depth limit
-                        let search_limits = SearchLimitsBuilder::default()
+                        // Do the search with depth limit and stop flag
+                        let mut search_limits = SearchLimitsBuilder::default()
                             .depth(search_depth)
                             .build();
+                        search_limits.stop_flag = Some(should_stop.clone());
+                        
                         let result = searcher.search(&mut local_position, search_limits);
                         
                         if let Some(best_move) = result.best_move {
                             thread_result.best_move = Some(best_move);
                             thread_result.score = result.score;
+                            thread_result.stats.depth = result.stats.depth;
                         }
                         
-                        // Update node count
-                        let nodes = searcher.nodes();
-                        total_nodes.fetch_add(nodes, Ordering::Relaxed);
+                        // Update node count (differential to avoid double counting)
+                        let cur_nodes = searcher.nodes();
+                        let diff = cur_nodes.saturating_sub(last_nodes);
+                        if diff > 0 {
+                            total_nodes.fetch_add(diff, Ordering::Relaxed);
+                        }
+                        last_nodes = cur_nodes;
                         
                         // Check time limit (only main thread)
                         if thread_id == 0 {
@@ -121,7 +130,7 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                         }
                     }
                     
-                    debug!("Thread {} finished with {} nodes", thread_id, searcher.nodes());
+                    debug!("Thread {} finished with {} nodes", thread_id, last_nodes);
                     thread_result
                 });
                 
@@ -135,24 +144,33 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                 .collect();
             
             // Select best result (from main thread or highest scoring)
-            results
+            let mut best = results
                 .into_iter()
                 .max_by_key(|r| (r.best_move.is_some() as i32, r.score))
-                .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()))
+                .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()));
+            
+            // Update final stats with total nodes and elapsed time
+            let total = total_nodes.load(Ordering::Relaxed);
+            let elapsed = start_time.elapsed();
+            
+            best.stats.nodes = total;  // Set the actual total nodes
+            best.stats.elapsed = elapsed;  // Set the elapsed time
+            
+            best
         }).unwrap();
         
-        let elapsed = start_time.elapsed();
-        let total_nodes = total_nodes.load(Ordering::Relaxed);
-        let nps = if elapsed.as_millis() > 0 {
-            (total_nodes as u128 * 1000 / elapsed.as_millis()) as u64
+        let final_nodes = result.stats.nodes;
+        let final_elapsed = result.stats.elapsed;
+        let nps = if final_elapsed.as_millis() > 0 {
+            (final_nodes as u128 * 1000 / final_elapsed.as_millis()) as u64
         } else {
             0
         };
         
         info!(
             "Lazy SMP search complete: {} nodes in {}ms = {} nps",
-            total_nodes,
-            elapsed.as_millis(),
+            final_nodes,
+            final_elapsed.as_millis(),
             nps
         );
         
