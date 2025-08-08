@@ -1,10 +1,4 @@
-//! Simplified parallel search implementation
-//!
-//! This is a complete rewrite of the parallel search system with focus on:
-//! - Simplicity and reliability over complex optimizations
-//! - Single atomic stop flag as the only stop mechanism
-//! - No channels, no parking, no complex state management
-//! - Work-stealing queue for task distribution
+//! Parallel search implementation
 
 use crate::{
     evaluation::evaluate::Evaluator,
