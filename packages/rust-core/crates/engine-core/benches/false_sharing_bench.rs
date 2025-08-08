@@ -6,11 +6,11 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::{
-    search::parallel::SharedHistory,  // DuplicationStats temporarily removed
+    search::parallel::SharedHistory, // DuplicationStats temporarily removed
     shogi::{Color, PieceType, Square},
 };
 use std::hint::black_box;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -70,7 +70,7 @@ fn bench_shared_history_concurrent(c: &mut Criterion) {
 //     let mut group = c.benchmark_group("duplication_stats_concurrent");
 //     group.measurement_time(Duration::from_secs(5));
 //     group.sample_size(20);
-// 
+//
 //     for num_threads in [2, 4, 8].iter() {
 //         group.bench_with_input(
 //             BenchmarkId::from_parameter(num_threads),
@@ -79,7 +79,7 @@ fn bench_shared_history_concurrent(c: &mut Criterion) {
 //                 b.iter(|| {
 //                     let stats = Arc::new(DuplicationStats::default());
 //                     let mut handles = vec![];
-// 
+//
 //                     for thread_id in 0..num_threads {
 //                         let stats = stats.clone();
 //                         let handle = thread::spawn(move || {
@@ -90,7 +90,7 @@ fn bench_shared_history_concurrent(c: &mut Criterion) {
 //                                 } else {
 //                                     stats.total_nodes.fetch_add(1, Ordering::Relaxed);
 //                                 }
-// 
+//
 //                                 // Occasionally read both values to stress cache
 //                                 if thread_id % 100 == 0 {
 //                                     let _dup = stats.get_duplication_percentage();
@@ -99,7 +99,7 @@ fn bench_shared_history_concurrent(c: &mut Criterion) {
 //                         });
 //                         handles.push(handle);
 //                     }
-// 
+//
 //                     for handle in handles {
 //                         handle.join().unwrap();
 //                     }
@@ -107,7 +107,7 @@ fn bench_shared_history_concurrent(c: &mut Criterion) {
 //             },
 //         );
 //     }
-// 
+//
 //     group.finish();
 // }  // Temporarily disabled during parallel searcher refactoring
 

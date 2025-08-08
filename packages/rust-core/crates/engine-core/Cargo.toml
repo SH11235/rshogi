@@ -77,9 +77,5 @@ name = "false_sharing_bench"
 harness = false
 
 [[bench]]
-name = "parallel_search_benchmarks"
-harness = false
-
-[[bench]]
-name = "simple_parallel_benchmarks"
+name = "parallel_searcher_benchmarks"
 harness = false

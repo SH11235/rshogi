@@ -7,10 +7,8 @@ pub mod search_thread;
 pub mod shared;
 pub mod stop_test;
 
-// New implementation
-mod simple_parallel;
+mod parallel_searcher;
 
-// Re-export with the old name for compatibility
-pub use simple_parallel::SimpleParallelSearcher as ParallelSearcher;
+pub use parallel_searcher::ParallelSearcher;
 pub use search_thread::SearchThread;
 pub use shared::{SharedHistory, SharedSearchState};

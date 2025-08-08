@@ -396,12 +396,8 @@ mod tests {
 
         // Test each thread ID separately to avoid stack overflow in release builds
         for thread_id in 0..5 {
-            let thread = SearchThread::new(
-                thread_id,
-                evaluator.clone(),
-                tt.clone(),
-                shared_state.clone(),
-            );
+            let thread =
+                SearchThread::new(thread_id, evaluator.clone(), tt.clone(), shared_state.clone());
 
             // Calculate expected skip based on thread ID
             let skip = if thread_id == 0 {

@@ -114,7 +114,7 @@ impl WorkQueue {
 }
 
 /// Simplified parallel searcher
-pub struct SimpleParallelSearcher<E: Evaluator + Send + Sync + 'static> {
+pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Shared transposition table
     tt: Arc<TranspositionTable>,
 
@@ -137,7 +137,7 @@ pub struct SimpleParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     total_nodes: Arc<AtomicU64>,
 }
 
-impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
+impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     /// Create new parallel searcher
     pub fn new(evaluator: Arc<E>, tt: Arc<TranspositionTable>, num_threads: usize) -> Self {
         assert!(num_threads > 0, "Need at least one thread");
@@ -158,24 +158,26 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
             total_nodes: Arc::new(AtomicU64::new(0)),
         }
     }
-    
+
     /// Set time manager for the search (compatibility method)
     pub fn set_time_manager(&mut self, time_manager: Arc<TimeManager>) {
         self.time_manager = Some(time_manager);
     }
-    
+
     /// Adjust the number of active threads dynamically (compatibility method)
     /// Note: In the new implementation, this is a no-op as we always use all threads
     pub fn adjust_thread_count(&mut self, new_active_threads: usize) {
         let new_active = new_active_threads.min(self.num_threads).max(1);
         if new_active != self.num_threads {
-            debug!("Thread count adjustment requested from {} to {} (ignoring in new implementation)", 
-                   self.num_threads, new_active);
+            debug!(
+                "Thread count adjustment requested from {} to {} (ignoring in new implementation)",
+                self.num_threads, new_active
+            );
             // In the simplified implementation, we always use all threads
             // This method is kept for compatibility but doesn't actually change behavior
         }
     }
-    
+
     /// Get duplication percentage (compatibility method)
     /// Note: The new implementation doesn't track duplication, returns 0
     pub fn get_duplication_percentage(&self) -> f64 {
@@ -280,12 +282,7 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
             debug!("Worker {id} started");
 
             // Create search thread
-            let mut search_thread = SearchThread::new(
-                id,
-                evaluator,
-                tt,
-                shared_state.clone(),
-            );
+            let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
 
             let mut local_nodes = 0u64;
             let mut last_report = 0u64;
@@ -393,9 +390,11 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
             let result = main_thread.search_iteration(position, &limits, main_depth);
 
             // Update best result (always update if we don't have a move yet)
-            if best_result.best_move.is_none() 
-                || result.score > best_result.score 
-                || (result.score == best_result.score && result.stats.depth > best_result.stats.depth) {
+            if best_result.best_move.is_none()
+                || result.score > best_result.score
+                || (result.score == best_result.score
+                    && result.stats.depth > best_result.stats.depth)
+            {
                 best_result = result;
             }
 
@@ -416,11 +415,12 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
         if let Some(shared_move) = self.shared_state.get_best_move() {
             let shared_score = self.shared_state.get_best_score();
             let shared_depth = self.shared_state.get_best_depth();
-            
+
             // Use shared result if it's better or we don't have a move
-            if best_result.best_move.is_none() 
-                || shared_score > best_result.score 
-                || (shared_score == best_result.score && shared_depth > best_result.stats.depth) {
+            if best_result.best_move.is_none()
+                || shared_score > best_result.score
+                || (shared_score == best_result.score && shared_depth > best_result.stats.depth)
+            {
                 best_result.best_move = Some(shared_move);
                 best_result.score = shared_score;
                 best_result.stats.depth = shared_depth;
@@ -428,10 +428,13 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
         }
 
         best_result.stats.nodes = self.total_nodes.load(Ordering::Relaxed);
-        
+
         // Ensure we always have a move (fallback to first legal move if needed)
         if best_result.best_move.is_none() && best_result.stats.nodes > 0 {
-            warn!("No best move found despite searching {} nodes, using fallback", best_result.stats.nodes);
+            warn!(
+                "No best move found despite searching {} nodes, using fallback",
+                best_result.stats.nodes
+            );
             // SearchThread should have found at least one move
             // This is a safety fallback that shouldn't normally happen
         }
@@ -565,7 +568,7 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
                 let nodes = total_nodes.load(Ordering::Relaxed);
                 // Don't stop if we haven't done any real work yet
                 if nodes > 100 && time_manager.should_stop(nodes) {
-                    info!("Time limit reached after {} nodes, stopping search", nodes);
+                    info!("Time limit reached after {nodes} nodes, stopping search");
                     shared_state.set_stop();
                     break;
                 }
@@ -586,7 +589,7 @@ mod tests {
         let evaluator = Arc::new(MaterialEvaluator);
         let tt = Arc::new(TranspositionTable::new(16));
 
-        let mut searcher = SimpleParallelSearcher::new(evaluator, tt, 2);
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
         let mut position = Position::startpos();
 
         let limits = SearchLimitsBuilder::default().depth(2).build();
