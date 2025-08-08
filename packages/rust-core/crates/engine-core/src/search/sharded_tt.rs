@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_sharded_tt_basic() {
-        let mut tt = ShardedTranspositionTable::new(16);
+        let tt = ShardedTranspositionTable::new(16);
 
         // Test store and probe
         let hash = 0x123456789ABCDEF0;

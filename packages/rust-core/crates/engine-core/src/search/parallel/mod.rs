@@ -10,4 +10,4 @@ mod parallel_searcher;
 
 pub use parallel_searcher::ParallelSearcher;
 pub use search_thread::SearchThread;
-pub use shared::{SharedHistory, SharedSearchState};
+pub use shared::{SharedHistory, SharedSearchState, SplitPoint, SplitPointManager};
