@@ -152,15 +152,15 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         evaluator: Arc<E>,
         tt: Arc<crate::search::TranspositionTable>,
         shared_state: Arc<SharedSearchState>,
-        duplication_stats: Option<Arc<super::DuplicationStats>>,
+        // duplication_stats: Option<Arc<super::DuplicationStats>>,  // Temporarily disabled
     ) -> Self {
         // Create searcher with shared TT
-        let mut searcher = UnifiedSearcher::with_shared_tt(evaluator, tt);
+        let searcher = UnifiedSearcher::with_shared_tt(evaluator, tt);
 
-        // Set duplication stats if provided
-        if let Some(stats) = duplication_stats {
-            searcher.set_duplication_stats(stats);
-        }
+        // // Set duplication stats if provided
+        // if let Some(stats) = duplication_stats {
+        //     searcher.set_duplication_stats(stats);
+        // }  // Temporarily disabled
 
         Self {
             id,
@@ -361,7 +361,7 @@ mod tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        let thread = SearchThread::new(0, evaluator, tt, shared_state, None);
+        let thread = SearchThread::new(0, evaluator, tt, shared_state);
         assert_eq!(thread.id, 0);
         assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
     }
@@ -373,7 +373,7 @@ mod tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        let thread = SearchThread::new(1, evaluator, tt, shared_state, None);
+        let thread = SearchThread::new(1, evaluator, tt, shared_state);
 
         // Initially searching
         assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
@@ -401,7 +401,6 @@ mod tests {
                 evaluator.clone(),
                 tt.clone(),
                 shared_state.clone(),
-                None,
             );
 
             // Calculate expected skip based on thread ID

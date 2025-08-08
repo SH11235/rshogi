@@ -14,6 +14,3 @@ mod simple_parallel;
 pub use simple_parallel::SimpleParallelSearcher as ParallelSearcher;
 pub use search_thread::SearchThread;
 pub use shared::{SharedHistory, SharedSearchState};
-
-// Keep DuplicationStats for compatibility (even though new implementation doesn't use it)
-pub use parallel_searcher_old::DuplicationStats;

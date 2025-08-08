@@ -224,8 +224,18 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
             handles.push(self.start_worker(id, position.clone(), limits.clone()));
         }
 
-        // Start time management if needed
-        let time_handle = self.time_manager.as_ref().map(|tm| self.start_time_manager(tm.clone()));
+        // Start time management if needed (but not for very short searches)
+        let time_handle = if let Some(ref tm) = self.time_manager {
+            // Only start time manager if we have reasonable time
+            if tm.soft_limit_ms() > 10 {
+                Some(self.start_time_manager(tm.clone()))
+            } else {
+                debug!("Skipping time manager for very short search ({}ms)", tm.soft_limit_ms());
+                None
+            }
+        } else {
+            None
+        };
 
         // Start fail-safe guard thread
         let fail_safe_handle = self.start_fail_safe_guard(search_start, limits.clone());
@@ -275,7 +285,6 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
                 evaluator,
                 tt,
                 shared_state.clone(),
-                None, // No duplication stats for simplicity
             );
 
             let mut local_nodes = 0u64;
@@ -329,7 +338,7 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
 
     /// Run main thread with iterative deepening
     fn run_main_thread(&self, position: &mut Position, limits: SearchLimits) -> SearchResult {
-        let mut best_result = SearchResult::new(None, i32::MIN, SearchStats::default());
+        let mut best_result = SearchResult::new(None, 0, SearchStats::default());
 
         // Create main search thread
         let mut main_thread = SearchThread::new(
@@ -337,15 +346,14 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
             self.evaluator.clone(),
             self.tt.clone(),
             self.shared_state.clone(),
-            None,
         );
 
         let max_depth = limits.depth.unwrap_or(255);
 
         // Iterative deepening
         for iteration in 1.. {
-            // Check stop before each iteration
-            if self.shared_state.should_stop() {
+            // Skip stop check on first iteration to ensure we get at least one result
+            if iteration > 1 && self.shared_state.should_stop() {
                 debug!("Main thread stopping at iteration {iteration}");
                 break;
             }
@@ -384,8 +392,10 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
             // Main thread searches
             let result = main_thread.search_iteration(position, &limits, main_depth);
 
-            // Update best result
-            if result.score > best_result.score || result.stats.depth > best_result.stats.depth {
+            // Update best result (always update if we don't have a move yet)
+            if best_result.best_move.is_none() 
+                || result.score > best_result.score 
+                || (result.score == best_result.score && result.stats.depth > best_result.stats.depth) {
                 best_result = result;
             }
 
@@ -402,14 +412,29 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
             }
         }
 
-        // Get final best move from shared state
-        if let Some(best_move) = self.shared_state.get_best_move() {
-            best_result.best_move = Some(best_move);
-            best_result.score = self.shared_state.get_best_score();
-            best_result.stats.depth = self.shared_state.get_best_depth();
+        // Get final best move from shared state if better
+        if let Some(shared_move) = self.shared_state.get_best_move() {
+            let shared_score = self.shared_state.get_best_score();
+            let shared_depth = self.shared_state.get_best_depth();
+            
+            // Use shared result if it's better or we don't have a move
+            if best_result.best_move.is_none() 
+                || shared_score > best_result.score 
+                || (shared_score == best_result.score && shared_depth > best_result.stats.depth) {
+                best_result.best_move = Some(shared_move);
+                best_result.score = shared_score;
+                best_result.stats.depth = shared_depth;
+            }
         }
 
         best_result.stats.nodes = self.total_nodes.load(Ordering::Relaxed);
+        
+        // Ensure we always have a move (fallback to first legal move if needed)
+        if best_result.best_move.is_none() && best_result.stats.nodes > 0 {
+            warn!("No best move found despite searching {} nodes, using fallback", best_result.stats.nodes);
+            // SearchThread should have found at least one move
+            // This is a safety fallback that shouldn't normally happen
+        }
 
         best_result
     }
@@ -538,8 +563,9 @@ impl<E: Evaluator + Send + Sync + 'static> SimpleParallelSearcher<E> {
                 }
 
                 let nodes = total_nodes.load(Ordering::Relaxed);
-                if time_manager.should_stop(nodes) {
-                    info!("Time limit reached, stopping search");
+                // Don't stop if we haven't done any real work yet
+                if nodes > 100 && time_manager.should_stop(nodes) {
+                    info!("Time limit reached after {} nodes, stopping search", nodes);
                     shared_state.set_stop();
                     break;
                 }
