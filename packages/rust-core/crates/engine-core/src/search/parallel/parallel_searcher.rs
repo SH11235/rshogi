@@ -507,7 +507,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                             // Clone position only once per batch (not per move)
                             let mut pos = (*position).clone();
-                            
+
                             // Process all moves in the batch
                             for move_to_search in moves.iter() {
                                 // Search the specific root move (reusing the same position)
