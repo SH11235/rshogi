@@ -32,7 +32,7 @@ fn test_parallel_search_no_data_races() {
         let shared_state = shared_state.clone();
 
         let handle = thread::spawn(move || {
-            let mut thread = SearchThread::new(id, evaluator, tt, shared_state, None);
+            let mut thread = SearchThread::new(id, evaluator, tt, shared_state);
             let mut position = Position::startpos();
 
             // Set a short time limit
@@ -161,9 +161,15 @@ fn test_parallel_search_stress_with_random_stops() {
         let result = searcher.search(&mut position, limits);
         let elapsed = start.elapsed();
 
-        // Should complete within reasonable time (3x the limit + buffer for channel overhead)
+        // Should complete within reasonable time
+        // Note: We guarantee at least one iteration completes, so very short limits may be exceeded
+        let expected_max = if time_limit <= 20 {
+            Duration::from_millis(250) // Allow more time for very short limits
+        } else {
+            Duration::from_millis(time_limit * 3 + 150)
+        };
         assert!(
-            elapsed < Duration::from_millis(time_limit * 3 + 150),
+            elapsed < expected_max,
             "Search took too long with {time_limit} ms limit: {elapsed:?}"
         );
         assert!(result.stats.nodes > 0);

@@ -1,7 +1,7 @@
 //! Benchmark for AI performance testing
 
-pub mod metrics;
-pub mod parallel;
+// pub mod metrics;  // Temporarily disabled (depends on parallel module)
+// pub mod parallel;  // Temporarily removed during parallel searcher refactoring
 
 use crate::evaluate::{Evaluator, MaterialEvaluator};
 use crate::movegen::MoveGen;

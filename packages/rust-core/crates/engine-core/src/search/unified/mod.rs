@@ -13,16 +13,15 @@ use crate::{
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
         history::{CounterMoveHistory, History},
-        parallel::DuplicationStats,
+        // parallel::DuplicationStats,  // Temporarily disabled for parallel searcher refactoring
         tt::{NodeType, TranspositionTable},
         types::SearchStack,
         SearchLimits, SearchResult, SearchStats,
     },
     shogi::{Move, Position},
 };
-use log::debug;
 use std::{
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -94,8 +93,8 @@ pub struct UnifiedSearcher<
     /// Adaptive prefetcher for TT (conditionally compiled)
     pub(crate) adaptive_prefetcher: Option<AdaptivePrefetcher>,
 
-    /// Duplication statistics for parallel search (optional)
-    duplication_stats: Option<Arc<DuplicationStats>>,
+    // /// Duplication statistics for parallel search (optional)
+    // duplication_stats: Option<Arc<DuplicationStats>>,  // Temporarily disabled
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
@@ -135,7 +134,7 @@ where
             } else {
                 None
             },
-            duplication_stats: None,
+            // duplication_stats: None,  // Temporarily disabled
         }
     }
 
@@ -170,7 +169,7 @@ where
             } else {
                 None
             },
-            duplication_stats: None,
+            // duplication_stats: None,  // Temporarily disabled
         }
     }
 
@@ -201,7 +200,7 @@ where
             } else {
                 None
             },
-            duplication_stats: None,
+            // duplication_stats: None,  // Temporarily disabled
         }
     }
 
@@ -210,10 +209,10 @@ where
         self.disable_prefetch = disable;
     }
 
-    /// Set duplication statistics for parallel search
-    pub fn set_duplication_stats(&mut self, stats: Arc<DuplicationStats>) {
-        self.duplication_stats = Some(stats);
-    }
+    // /// Set duplication statistics for parallel search
+    // pub fn set_duplication_stats(&mut self, stats: Arc<DuplicationStats>) {
+    //     self.duplication_stats = Some(stats);
+    // }  // Temporarily disabled
 
     /// Get TT statistics (for benchmarking)
     pub fn get_tt_stats(&self) -> Option<(f32, u64, u64)> {
@@ -564,30 +563,29 @@ where
     ) {
         if USE_TT {
             if let Some(ref tt) = self.tt {
-                // Store and check if this is a new entry
-                let is_new_entry =
-                    tt.store_and_check_new(hash, best_move, score as i16, 0, depth, node_type);
+                // Store entry (duplication tracking temporarily disabled)
+                tt.store(hash, best_move, score as i16, 0, depth, node_type);
 
-                // Update duplication statistics based on store result
-                if let Some(ref stats) = self.duplication_stats {
-                    // Always increment total nodes when storing
-                    stats.total_nodes.fetch_add(1, Ordering::Relaxed);
+                // // Update duplication statistics based on store result
+                // if let Some(ref stats) = self.duplication_stats {
+                //     // Always increment total nodes when storing
+                //     stats.total_nodes.fetch_add(1, Ordering::Relaxed);
 
-                    // Only increment unique if this was a new entry
-                    if is_new_entry {
-                        stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
-                    }
+                //     // Only increment unique if this was a new entry
+                //     if is_new_entry {
+                //         stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
+                //     }
 
-                    // Debug logging for duplication stats
-                    let total = stats.total_nodes.load(Ordering::Relaxed);
-                    let unique = stats.unique_nodes.load(Ordering::Relaxed);
-                    if total % 1000 == 0 {
-                        debug!(
-                            "DuplicationStats snapshot: unique={unique}, total={total}, dup%={:.1}",
-                            ((total - unique) as f64 * 100.0 / total as f64)
-                        );
-                    }
-                }
+                //     // Debug logging for duplication stats
+                //     let total = stats.total_nodes.load(Ordering::Relaxed);
+                //     let unique = stats.unique_nodes.load(Ordering::Relaxed);
+                //     if total % 1000 == 0 {
+                //         debug!(
+                //             "DuplicationStats snapshot: unique={unique}, total={total}, dup%={:.1}",
+                //             ((total - unique) as f64 * 100.0 / total as f64)
+                //         );
+                //     }
+                // }  // Temporarily disabled
             }
         }
     }
