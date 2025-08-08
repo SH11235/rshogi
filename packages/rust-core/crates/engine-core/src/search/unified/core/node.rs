@@ -124,7 +124,10 @@ where
                             return entry.score() as i32;
                         }
                     }
-                    // If no score available or depth insufficient, continue searching
+                    // Even without a good score, stop searching this node
+                    // to avoid duplication with sibling threads
+                    // Return a neutral evaluation to avoid misleading the search
+                    return searcher.evaluator.evaluate(pos);
                 }
             }
         }
