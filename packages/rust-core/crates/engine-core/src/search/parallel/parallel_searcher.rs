@@ -24,6 +24,18 @@ use std::{
 
 use super::{SearchThread, SharedSearchState};
 
+/// RAII guard to ensure active worker count is decremented
+struct WorkerGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+        debug!("WorkerGuard: active worker count decremented");
+    }
+}
+
 /// Work item for threads to process
 #[derive(Clone, Debug)]
 enum WorkItem {
@@ -127,6 +139,13 @@ impl WorkQueue {
             }
         }
     }
+    
+    /// Get the number of pending work items
+    fn pending_count(&self) -> usize {
+        let total = self.total_items.load(Ordering::Acquire);
+        let next = self.next_index.load(Ordering::Acquire);
+        total.saturating_sub(next)
+    }
 }
 
 /// Simplified parallel searcher
@@ -151,6 +170,9 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 
     /// Node counter
     total_nodes: Arc<AtomicU64>,
+    
+    /// Active worker count for proper synchronization
+    active_workers: Arc<AtomicUsize>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
@@ -161,8 +183,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        // Create work queue with reasonable capacity
-        let work_queue = Arc::new(WorkQueue::new(num_threads * 10));
+        // Create work queue with larger capacity to avoid overflow
+        // (64 slots per thread handles deep search with many root moves)
+        let work_queue = Arc::new(WorkQueue::new(num_threads * 64));
 
         Self {
             tt,
@@ -172,6 +195,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             num_threads,
             work_queue,
             total_nodes: Arc::new(AtomicU64::new(0)),
+            active_workers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -247,7 +271,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             GamePhase::EndGame
         };
 
-        if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
+        // Create TimeManager if time control is specified (works with or without depth limit)
+        if !matches!(limits.time_control, TimeControl::Infinite) {
             let time_limits: TimeLimits = limits.clone().into();
             let time_manager = Arc::new(TimeManager::new(
                 &time_limits,
@@ -255,9 +280,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 position.ply.into(),
                 game_phase,
             ));
+            let soft_limit = time_manager.soft_limit_ms();
             self.time_manager = Some(time_manager);
+            debug!("TimeManager created with soft limit: {soft_limit}ms");
         } else {
             self.time_manager = None;
+            debug!("TimeManager disabled (infinite time control)");
         }
 
         // Start worker threads
@@ -317,6 +345,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let shared_state = self.shared_state.clone();
         let work_queue = self.work_queue.clone();
         let total_nodes = self.total_nodes.clone();
+        let active_workers = self.active_workers.clone();
 
         thread::spawn(move || {
             debug!("Worker {id} started");
@@ -331,6 +360,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             while !shared_state.should_stop() {
                 // Try to get work
                 if let Some(work) = work_queue.pop() {
+                    // Mark this worker as active and create guard for automatic cleanup
+                    active_workers.fetch_add(1, Ordering::AcqRel);
+                    let _guard = WorkerGuard { counter: active_workers.clone() };
+                    
+                    let active_count = active_workers.load(Ordering::Acquire);
+                    debug!("Worker {id} becoming active (active count: {active_count})");
+                    
+                    let prev_nodes = local_nodes;  // Track previous node count
                     let nodes = match work {
                         WorkItem::RootMove {
                             iteration,
@@ -354,9 +391,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 move_to_search,
                             );
 
-                            // Update nodes
+                            // Update nodes (accumulate the difference)
                             let nodes = search_thread.searcher.nodes();
-                            local_nodes = nodes;
+                            local_nodes += nodes.saturating_sub(prev_nodes);
                             nodes
                         }
                         WorkItem::FullPosition {
@@ -374,13 +411,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // Do the search
                             let _result = search_thread.search_iteration(&mut pos, &limits, depth);
 
-                            // Update nodes
+                            // Update nodes (accumulate the difference)
                             let nodes = search_thread.searcher.nodes();
-                            local_nodes = nodes;
+                            local_nodes += nodes.saturating_sub(prev_nodes);
                             nodes
                         }
                     };
-
+                    
+                    debug!("Worker {id} work completed");
+                    
+                    // Note: WorkerGuard will automatically decrement active_workers when dropped
+                    
                     // Report nodes periodically (every 100k nodes)
                     if nodes - last_report >= 100_000 {
                         total_nodes.fetch_add(nodes - last_report, Ordering::Relaxed);
@@ -421,6 +462,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         );
 
         let max_depth = limits.depth.unwrap_or(255);
+        let mut last_reported_nodes = 0u64;  // Track last reported node count
 
         // Iterative deepening
         for iteration in 1.. {
@@ -428,6 +470,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             if iteration > 1 && self.shared_state.should_stop() {
                 debug!("Main thread stopping at iteration {iteration}");
                 break;
+            }
+            
+            // Also check time manager on iterations after the first
+            if iteration > 1 {
+                if let Some(ref tm) = self.time_manager {
+                    let current_nodes = self.total_nodes.load(Ordering::Relaxed);
+                    if tm.should_stop(current_nodes) {
+                        debug!("Main thread stopping at iteration {iteration} due to time limit");
+                        break;
+                    }
+                }
             }
 
             // Calculate depths for this iteration
@@ -439,52 +492,67 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 break;
             }
 
+            let iter_start = Instant::now();
             debug!("Starting iteration {iteration} (depth {main_depth})");
 
-            // Generate root moves for the first few iterations to distribute work
-            if iteration <= 3 && self.num_threads > 1 {
+            // Generate root moves for the first half of iterations to distribute work
+            // (at least 3 iterations, but up to half of max_depth)
+            let root_move_limit = (max_depth as usize / 2).max(3);
+            if iteration <= root_move_limit && self.num_threads > 1 {
                 // Generate all legal moves at root
                 let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
                 let moves = move_gen.generate_all();
                 
                 if !moves.is_empty() {
-                    // Distribute root moves among helper threads
-                    let moves_per_thread = moves.len() / (self.num_threads - 1);
-                    let mut move_index = 0;
+                    debug!("Distributing {} root moves to {} helper threads (iteration {})", 
+                           moves.len(), self.num_threads - 1, iteration);
                     
-                    for helper_id in 1..self.num_threads {
-                        // Calculate depth variation for diversity
-                        let helper_depth = self.calculate_helper_depth(main_depth, helper_id, max_depth);
-                        
-                        // Assign moves to this helper thread
-                        let start_idx = move_index;
-                        let end_idx = if helper_id == self.num_threads - 1 {
-                            moves.len()  // Last thread gets all remaining moves
-                        } else {
-                            (start_idx + moves_per_thread).min(moves.len())
-                        };
-                        
-                        // Create work items for assigned moves
-                        for idx in start_idx..end_idx {
-                            let work = WorkItem::RootMove {
-                                iteration,
-                                depth: helper_depth,
-                                position: position.clone(),
-                                move_to_search: moves[idx],
-                                move_index: idx,
-                            };
+                    // Distribute root moves in small chunks to avoid overloading single helper
+                    // Each round, give 2 moves to each helper thread
+                    let chunk_size = 2;
+                    let num_helpers = self.num_threads - 1;
+                    
+                    // Process moves in rounds, distributing chunk_size moves to each helper per round
+                    for chunk_start in (0..moves.len()).step_by(chunk_size * num_helpers) {
+                        for helper_offset in 0..num_helpers {
+                            // Calculate the starting index for this helper in this round
+                            let base_idx = chunk_start + helper_offset * chunk_size;
                             
-                            if !self.work_queue.push(work) {
-                                warn!("Work queue full at iteration {iteration}, move {idx}");
-                                break;
+                            // Distribute chunk_size moves to this helper
+                            for offset in 0..chunk_size {
+                                let idx = base_idx + offset;
+                                if idx >= moves.len() {
+                                    break;
+                                }
+                                
+                                let mv = moves[idx];
+                                let _helper_id = 1 + helper_offset;
+                                
+                                // For root moves, use slightly shallower depth to avoid long-running tasks
+                                // but not too shallow to avoid underutilization
+                                let helper_depth = main_depth.saturating_sub(1).max(1);
+                                
+                                // Create work item for this move
+                                let work = WorkItem::RootMove {
+                                    iteration,
+                                    depth: helper_depth,
+                                    position: position.clone(),
+                                    move_to_search: mv,
+                                    move_index: idx,
+                                };
+                                
+                                if !self.work_queue.push(work) {
+                                    warn!("Work queue full at iteration {iteration}, move {idx}");
+                                    break;
+                                }
                             }
                         }
-                        
-                        move_index = end_idx;
                     }
                 }
             } else {
                 // Fall back to traditional full position search for deeper iterations
+                debug!("Using FullPosition mode for iteration {} (beyond limit {})", 
+                       iteration, root_move_limit);
                 for helper_id in 1..self.num_threads {
                     let helper_depth = self.calculate_helper_depth(main_depth, helper_id, max_depth);
 
@@ -502,6 +570,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Main thread searches
             let result = main_thread.search_iteration(position, &limits, main_depth);
+            
+            debug!("Iteration {} completed in {:?} with score {} (depth {}, {} nodes)", 
+                   iteration, iter_start.elapsed(), result.score, 
+                   result.stats.depth, result.stats.nodes);
 
             // Update best result (always update if we don't have a move yet)
             if best_result.best_move.is_none()
@@ -512,14 +584,56 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 best_result = result;
             }
 
-            // Report nodes
+            // Report nodes (calculate difference from last report)
             let nodes = main_thread.searcher.nodes();
-            self.total_nodes.store(nodes, Ordering::Relaxed);
-            self.shared_state.add_nodes(nodes);
+            let nodes_diff = nodes.saturating_sub(last_reported_nodes);
+            self.total_nodes.fetch_add(nodes_diff, Ordering::Relaxed);
+            self.shared_state.add_nodes(nodes_diff);
+            last_reported_nodes = nodes;
 
             // Check depth limit
             if main_depth >= max_depth {
-                info!("Reached maximum depth {max_depth}");
+                info!("Main thread reached maximum depth {max_depth}, waiting for workers to complete...");
+                
+                // Wait for workers to complete their work
+                // Check both pending queue items AND active workers
+                // Use shorter timeout if time manager is active
+                let max_wait_ms = if self.time_manager.is_some() {
+                    100  // Short wait when time-limited
+                } else {
+                    2000 // Longer wait for depth-only searches
+                };
+                
+                let mut wait_time = 0;
+                loop {
+                    let pending = self.work_queue.pending_count();
+                    let active = self.active_workers.load(Ordering::Acquire);
+                    
+                    if pending == 0 && active == 0 {
+                        debug!("All work completed (0 pending, 0 active)");
+                        break;
+                    }
+                    
+                    thread::sleep(Duration::from_millis(10));
+                    wait_time += 10;
+                    
+                    if wait_time % 100 == 0 {
+                        debug!("Waiting for work to complete: {} pending items, {} active workers", 
+                               pending, active);
+                    }
+                    
+                    // Safety: don't wait forever
+                    if wait_time > max_wait_ms {
+                        debug!("Timeout after {wait_time}ms waiting for workers: {} items pending, {} workers active", 
+                              pending, active);
+                        break;
+                    }
+                }
+                
+                // Give workers a bit more time to update shared state
+                thread::sleep(Duration::from_millis(50));
+                
+                info!("All workers completed, stopping search");
                 self.shared_state.set_stop();
                 break;
             }
@@ -595,7 +709,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     // For infinite search, use 1 hour as safety limit
                     3_600_000
                 }
-                TimeControl::Ponder(inner) => {
+                TimeControl::Ponder(ref inner) => {
                     // For pondering, use the inner time control
                     match inner.as_ref() {
                         TimeControl::FixedTime { ms_per_move } => ms_per_move * 3,
@@ -611,10 +725,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             };
 
             // Add extra safety margin for depth-limited searches
-            let hard_timeout_ms = if limits.depth.is_some() {
-                hard_timeout_ms.max(60_000) // At least 60 seconds for depth searches
+            // But keep it reasonable when time control is also specified
+            let hard_timeout_ms = if limits.depth.is_some() && matches!(limits.time_control, TimeControl::Infinite) {
+                hard_timeout_ms.max(60_000) // 60 seconds for depth-only searches
             } else {
-                hard_timeout_ms
+                hard_timeout_ms.max(1000)   // At least 1 second for time-controlled searches
             };
 
             debug!("Fail-safe guard started with hard timeout: {hard_timeout_ms}ms");
@@ -718,9 +833,9 @@ mod tests {
         let queue = WorkQueue::new(10);
         let pos = Position::startpos();
 
-        // Add items
+        // Add items (using FullPosition variant)
         for i in 0..5 {
-            let item = WorkItem {
+            let item = WorkItem::FullPosition {
                 iteration: i,
                 depth: i as u8,
                 position: pos.clone(),
@@ -731,7 +846,12 @@ mod tests {
         // Take items
         for i in 0..5 {
             let item = queue.pop().expect("Should have item");
-            assert_eq!(item.iteration, i);
+            match item {
+                WorkItem::FullPosition { iteration, .. } => {
+                    assert_eq!(iteration, i);
+                }
+                _ => panic!("Expected FullPosition variant"),
+            }
         }
 
         // Queue should be empty
