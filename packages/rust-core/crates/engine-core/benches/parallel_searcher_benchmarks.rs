@@ -5,7 +5,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
-    search::{parallel::ParallelSearcher, SearchLimitsBuilder, TranspositionTable},
+    search::{parallel::ParallelSearcher, SearchLimitsBuilder, ShardedTranspositionTable},
     shogi::Position,
     time_management::TimeControl,
 };
@@ -70,7 +70,7 @@ fn bench_depth_search(c: &mut Criterion) {
                 |b, &threads| {
                     b.iter(|| {
                         // Fresh TT for each iteration to ensure consistency
-                        let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
+                        let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 
@@ -110,7 +110,7 @@ fn bench_nps_throughput(c: &mut Criterion) {
                     let mut _total_nodes = 0u64;
 
                     for _ in 0..iters {
-                        let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
+                        let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 
@@ -159,7 +159,7 @@ fn bench_stop_latency(c: &mut Criterion) {
                     let mut total_overshoot = Duration::ZERO;
 
                     for _ in 0..iters {
-                        let tt = Arc::new(TranspositionTable::new(64)); // Smaller TT for latency test
+                        let tt = Arc::new(ShardedTranspositionTable::new(64)); // Smaller TT for latency test
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 
@@ -200,7 +200,7 @@ fn bench_speedup_efficiency(c: &mut Criterion) {
     let position = Position::startpos();
 
     // First, get baseline with 1 thread
-    let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
+    let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
     let mut baseline_searcher = ParallelSearcher::new(evaluator.clone(), tt, 1);
     let mut pos_clone = position.clone();
 
@@ -224,7 +224,7 @@ fn bench_speedup_efficiency(c: &mut Criterion) {
             &thread_count,
             |b, &threads| {
                 b.iter(|| {
-                    let tt = Arc::new(TranspositionTable::new(config.tt_size_mb));
+                    let tt = Arc::new(ShardedTranspositionTable::new(config.tt_size_mb));
                     let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                     let mut pos_clone = position.clone();
 
@@ -262,7 +262,7 @@ fn bench_pv_consistency(c: &mut Criterion) {
                 &thread_count,
                 |b, &threads| {
                     // Get reference PV with single thread
-                    let tt = Arc::new(TranspositionTable::new(128));
+                    let tt = Arc::new(ShardedTranspositionTable::new(128));
                     let mut ref_searcher = ParallelSearcher::new(evaluator.clone(), tt, 1);
                     let mut ref_pos = position.clone();
 
@@ -271,7 +271,7 @@ fn bench_pv_consistency(c: &mut Criterion) {
                     let ref_move = ref_result.best_move;
 
                     b.iter(|| {
-                        let tt = Arc::new(TranspositionTable::new(128));
+                        let tt = Arc::new(ShardedTranspositionTable::new(128));
                         let mut searcher = ParallelSearcher::new(evaluator.clone(), tt, threads);
                         let mut pos_clone = position.clone();
 

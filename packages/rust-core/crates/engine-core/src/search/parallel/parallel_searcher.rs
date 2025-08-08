@@ -52,6 +52,7 @@ impl Drop for WorkerGuard {
 
 /// Work item for threads to process
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum WorkItem {
     /// Batch of root moves to search (8-16 moves)
     RootBatch {
@@ -103,7 +104,7 @@ struct Queues {
 fn get_job(
     my_worker: &DequeWorker<WorkItem>,
     queues: &Queues,
-    thread_id: usize,
+    _thread_id: usize,
     steal_success: &AtomicU64,
     steal_failure: &AtomicU64,
 ) -> Option<WorkItem> {
@@ -119,19 +120,16 @@ fn get_job(
         return Some(item);
     }
 
-    // Track if we found work via stealing
-    let found_work = false;
-
     // 2. Then try stealing from other workers (random selection for better scalability)
     // Instead of scanning all workers (O(T^2)), randomly select a few workers
     if !queues.stealers.is_empty() {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Try a few random steals (min of 3 or half the workers)
         let steal_attempts = 3.min(queues.stealers.len());
         for _ in 0..steal_attempts {
-            let idx = rng.gen_range(0..queues.stealers.len());
+            let idx = rng.random_range(0..queues.stealers.len());
 
             // Try to steal from selected worker
             match queues.stealers[idx].steal() {
@@ -641,7 +639,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         &self,
         position: &mut Position,
         limits: SearchLimits,
-        main_worker: DequeWorker<WorkItem>,
+        _main_worker: DequeWorker<WorkItem>,
     ) -> SearchResult {
         let mut best_result = SearchResult::new(None, 0, SearchStats::default());
 
@@ -723,7 +721,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     };
 
                     // Create batches of root moves manually
-                    let mut batch_idx = 0;
                     let mut i = 0;
                     while i < moves.len() {
                         let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
@@ -753,7 +750,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                             // Push to global injector (lock-free)
                             self.queues.injector.push(work);
-                            batch_idx += 1;
                         }
                     }
                 }
