@@ -104,7 +104,8 @@ fn calculate_fischer_time(
 fn calculate_fixed_time(ms_per_move: u64, params: &TimeParameters) -> (u64, u64) {
     // Use integer arithmetic: 90% = 9/10
     let soft = (ms_per_move * 9) / 10;
-    let overhead = params.overhead_ms;
+    // Use minimal overhead for FixedTime to ensure responsiveness
+    let overhead = 10u64.min(params.overhead_ms); // Max 10ms overhead for fixed time
     (soft.saturating_sub(overhead), ms_per_move.saturating_sub(overhead))
 }
 
@@ -205,8 +206,10 @@ mod tests {
             &params,
         );
 
-        assert_eq!(soft, 900 - params.overhead_ms); // 90% - overhead
-        assert_eq!(hard, 1000 - params.overhead_ms);
+        // FixedTime uses minimal overhead (10ms max)
+        let expected_overhead = 10u64.min(params.overhead_ms);
+        assert_eq!(soft, 900 - expected_overhead); // 90% - minimal overhead
+        assert_eq!(hard, 1000 - expected_overhead);
     }
 
     #[test]

@@ -31,6 +31,11 @@ where
 {
     use crate::time_management::TimeControl;
 
+    // If already stopped, check every node for immediate exit
+    if searcher.context.should_stop() {
+        return 0x0; // Check every node for immediate response
+    }
+
     // If stop_flag is present, use more frequent polling for responsiveness
     if searcher.context.limits().stop_flag.is_some() {
         return 0x1F; // Check every 32 nodes for responsive stop handling
@@ -229,8 +234,8 @@ where
     // Get adaptive polling interval based on time control
     let event_interval = get_event_poll_interval(searcher);
 
-    // Process events based on adaptive interval
-    if (searcher.stats.nodes & event_interval) == 0 {
+    // Process events based on adaptive interval (handle interval=0 for immediate check)
+    if event_interval == 0 || (searcher.stats.nodes & event_interval) == 0 {
         // Add debug logging for ponder mode
         if matches!(
             &searcher.context.limits().time_control,
@@ -313,9 +318,9 @@ where
             if let Some(ref stats) = searcher.duplication_stats {
                 // For now, we consider a TT hit as potential duplication
                 // More sophisticated tracking could distinguish between first probe and duplicate
-                stats.add_node(true, true);  // is_tt_hit=true, is_duplicate=true
+                stats.add_node(true, true); // is_tt_hit=true, is_duplicate=true
             }
-            
+
             if tt_entry.depth() >= depth {
                 let tt_score = tt_entry.score();
                 match tt_entry.node_type() {
@@ -394,7 +399,7 @@ where
 
     // Check time limits in quiescence search (especially important for FixedNodes)
     let event_interval = get_event_poll_interval(searcher);
-    if (searcher.stats.nodes & event_interval) == 0 {
+    if event_interval == 0 || (searcher.stats.nodes & event_interval) == 0 {
         // Check both context stop flag and time manager
         if searcher.context.should_stop() {
             return alpha;
