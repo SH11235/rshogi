@@ -79,3 +79,7 @@ harness = false
 [[bench]]
 name = "parallel_search_benchmarks"
 harness = false
+
+[[bench]]
+name = "simple_parallel_benchmarks"
+harness = false
