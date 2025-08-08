@@ -523,7 +523,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     let num_helpers = self.num_threads - 1;
                     let chunk_size = if moves.len() > 20 {
                         // Many moves: distribute more evenly with larger chunks
-                        (moves.len() / (num_helpers * 4)).max(2).min(8)
+                        (moves.len() / (num_helpers * 4)).clamp(2, 8)
                     } else {
                         // Few moves: keep small chunks to avoid starvation
                         2
