@@ -30,6 +30,7 @@ smallvec = "1.15"
 parking_lot = "0.12"
 crossbeam = "0.8"
 crossbeam-utils = "0.8"
+crossbeam-deque = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Loom is only available for non-WASM targets
