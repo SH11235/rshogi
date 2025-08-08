@@ -21,7 +21,9 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::shared::{SharedSearchState, SplitPoint};
+use super::shared::SharedSearchState;
+#[cfg(feature = "ybwc")]
+use super::shared::SplitPoint;
 
 /// Thread state for park control
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -421,6 +423,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     }
 
     /// Process work from a split point (YBWC)
+    #[cfg(feature = "ybwc")]
     pub fn process_split_point(&mut self, split_point: &Arc<SplitPoint>) {
         // Increment active thread count for this split point
         split_point.add_thread();
@@ -471,6 +474,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     }
 
     /// Search the PV move at a split point (YBWC)
+    #[cfg(feature = "ybwc")]
     pub fn search_pv_at_split_point(
         &mut self,
         split_point: &Arc<SplitPoint>,
