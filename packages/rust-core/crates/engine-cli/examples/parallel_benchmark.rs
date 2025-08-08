@@ -156,20 +156,15 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
     let elapsed = start.elapsed();
 
     let nodes = result.stats.nodes;
-    let time_ms = elapsed.as_millis() as u64;
-    let _nps = if time_ms > 0 {
-        nodes * 1000 / time_ms
-    } else {
-        0
-    };
+    // Use floating point seconds to avoid zero time issues
+    let time_secs = elapsed.as_secs_f64();
+    let time_ms = ((time_secs * 1000.0) as u64).max(1); // Ensure at least 1ms
+    let _nps = nodes * 1000 / time_ms;
 
     // Get duplication stats through public interface
     let duplication = searcher.get_duplication_percentage();
-
-    // For now, we can't access tt_hit_rate and effective_nodes directly
-    // We'll need to expose these through public methods
-    let tt_hit_rate = 0.0; // TODO: expose this
-    let effective_nodes = nodes; // TODO: get actual effective nodes
+    let tt_hit_rate = searcher.get_tt_hit_rate();
+    let effective_nodes = searcher.get_effective_nodes();
 
     let best_move = result.best_move.map_or("none".to_string(), |m| format!("{}", m));
     let score = result.score;
