@@ -28,8 +28,6 @@ struct ThreadResult {
     avg_speedup: f64,
     avg_efficiency: f64,
     avg_duplication_rate: f64,
-    avg_tt_hit_rate: f64,
-    positions_tested: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -136,7 +134,7 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
     threads: usize,
     depth: u8,
     fixed_ms: Option<u64>,
-) -> (u64, u64, f64, f64, u64, String, i32) {
+) -> (u64, u64, f64, u64, String, i32) {
     let mut searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), threads);
 
     let limits = if let Some(ms) = fixed_ms {
@@ -162,13 +160,12 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
 
     // Get duplication stats through public interface
     let duplication = searcher.get_duplication_percentage();
-    let tt_hit_rate = searcher.get_tt_hit_rate();
     let effective_nodes = searcher.get_effective_nodes();
 
     let best_move = result.best_move.map_or("none".to_string(), |m| format!("{m}"));
     let score = result.score;
 
-    (nodes, time_ms, duplication, tt_hit_rate, effective_nodes, best_move, score)
+    (nodes, time_ms, duplication, effective_nodes, best_move, score)
 }
 
 fn main() -> Result<()> {
@@ -211,7 +208,6 @@ fn main() -> Result<()> {
         let mut total_nodes = 0u64;
         let mut total_time_ms = 0u64;
         let mut total_duplication = 0.0;
-        let mut total_tt_hit_rate = 0.0;
         let mut count = 0;
 
         for (pos_idx, position_entry) in &positions_to_test {
@@ -231,7 +227,7 @@ fn main() -> Result<()> {
 
                 // Note: We can't clear TT due to Arc, but that's okay for benchmark
 
-                let (nodes, time_ms, duplication, tt_hit_rate, _effective_nodes, best_move, score) =
+                let (nodes, time_ms, duplication, _effective_nodes, best_move, score) =
                     run_single_search(
                         &mut position,
                         evaluator.clone(),
@@ -254,7 +250,6 @@ fn main() -> Result<()> {
                 total_nodes += nodes;
                 total_time_ms += time_ms;
                 total_duplication += duplication;
-                total_tt_hit_rate += tt_hit_rate;
                 count += 1;
             }
         }
@@ -272,7 +267,6 @@ fn main() -> Result<()> {
         };
 
         let avg_duplication = total_duplication / count as f64;
-        let avg_tt_hit_rate = total_tt_hit_rate / count as f64;
 
         // Calculate speedup relative to baseline (1 thread)
         let avg_speedup = {
@@ -305,8 +299,6 @@ fn main() -> Result<()> {
             avg_speedup,
             avg_efficiency,
             avg_duplication_rate: avg_duplication,
-            avg_tt_hit_rate,
-            positions_tested: positions_to_test.len(),
         });
     }
 
