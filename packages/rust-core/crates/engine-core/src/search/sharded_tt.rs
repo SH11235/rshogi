@@ -26,7 +26,8 @@ impl ShardedTranspositionTable {
     pub fn new(total_size_mb: usize) -> Self {
         let num_shards = NUM_SHARDS;
         // Use ceiling division to avoid losing space due to truncation
-        let shard_size_mb = total_size_mb.div_ceil(num_shards);
+        // Ensure at least 1 MB per shard to avoid zero-sized allocations
+        let shard_size_mb = total_size_mb.div_ceil(num_shards).max(1);
 
         // Create independent TT shards
         let shards: Vec<TranspositionTable> =
