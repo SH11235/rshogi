@@ -12,7 +12,7 @@ use crate::{
     shogi::{Move, Position},
     time_management::TimeManager,
 };
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -29,10 +29,21 @@ struct WorkerGuard {
     counter: Arc<AtomicUsize>,
 }
 
+impl WorkerGuard {
+    /// Create a new guard and atomically increment the counter
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        let count = counter.load(Ordering::Acquire);
+        debug!("Worker becoming active (active count: {count})");
+        Self { counter }
+    }
+}
+
 impl Drop for WorkerGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
-        debug!("WorkerGuard: active worker count decremented");
+        // Use trace level to reduce noise during benchmarks
+        trace!("WorkerGuard: active worker count decremented");
     }
 }
 
@@ -360,12 +371,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             while !shared_state.should_stop() {
                 // Try to get work
                 if let Some(work) = work_queue.pop() {
-                    // Mark this worker as active and create guard for automatic cleanup
-                    active_workers.fetch_add(1, Ordering::AcqRel);
-                    let _guard = WorkerGuard { counter: active_workers.clone() };
-                    
-                    let active_count = active_workers.load(Ordering::Acquire);
-                    debug!("Worker {id} becoming active (active count: {active_count})");
+                    // Create guard which atomically increments the counter
+                    let _guard = WorkerGuard::new(active_workers.clone());
                     
                     let prev_nodes = local_nodes;  // Track previous node count
                     let nodes = match work {
