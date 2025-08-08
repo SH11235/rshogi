@@ -147,6 +147,7 @@ impl Align128<AtomicU32> {
 
 /// Split point for YBWC (Young Brothers Wait Concept)
 /// Represents a position where search can be split among threads
+#[cfg(feature = "ybwc")]
 #[derive(Debug)]
 pub struct SplitPoint {
     /// Position being searched
@@ -173,6 +174,7 @@ pub struct SplitPoint {
     pub pv_searched: AtomicBool,
 }
 
+#[cfg(feature = "ybwc")]
 impl SplitPoint {
     /// Create a new split point
     pub fn new(position: Position, depth: u8, alpha: i32, beta: i32, moves: Vec<Move>) -> Self {
@@ -262,6 +264,7 @@ impl SplitPoint {
 }
 
 /// Manager for split points in YBWC
+#[cfg(feature = "ybwc")]
 pub struct SplitPointManager {
     /// Active split points
     split_points: RwLock<Vec<Arc<SplitPoint>>>,
@@ -269,6 +272,7 @@ pub struct SplitPointManager {
     max_split_depth_diff: u8,
 }
 
+#[cfg(feature = "ybwc")]
 impl SplitPointManager {
     /// Create a new split point manager
     pub fn new() -> Self {
@@ -342,6 +346,7 @@ impl SplitPointManager {
     }
 }
 
+#[cfg(feature = "ybwc")]
 impl Default for SplitPointManager {
     fn default() -> Self {
         Self::new()
@@ -458,6 +463,7 @@ pub struct SharedSearchState {
     pub duplication_stats: Arc<DuplicationStats>,
 
     /// Split point manager for YBWC
+    #[cfg(feature = "ybwc")]
     pub split_point_manager: Arc<SplitPointManager>,
 
     /// Number of active threads (for utilization calculation)
@@ -484,6 +490,7 @@ impl SharedSearchState {
             stop_flag,
             history: Arc::new(SharedHistory::new()),
             duplication_stats: Arc::new(DuplicationStats::new()),
+            #[cfg(feature = "ybwc")]
             split_point_manager: Arc::new(SplitPointManager::new()),
             active_threads: AtomicUsize::new(0),
             total_threads: num_threads,
@@ -500,6 +507,7 @@ impl SharedSearchState {
         self.stop_flag.store(false, Ordering::Release); // IMPORTANT: Reset stop flag for new search
         self.history.clear();
         self.duplication_stats.reset();
+        #[cfg(feature = "ybwc")]
         self.split_point_manager.clear();
         self.active_threads.store(0, Ordering::Relaxed);
     }
@@ -609,6 +617,7 @@ impl SharedSearchState {
     }
 
     /// Check if split point should be created based on current conditions
+    #[cfg(feature = "ybwc")]
     pub fn should_create_split_point(&self, depth: u8, move_count: usize) -> bool {
         let utilization = self.get_thread_utilization();
         self.split_point_manager.should_split(depth, move_count, utilization)

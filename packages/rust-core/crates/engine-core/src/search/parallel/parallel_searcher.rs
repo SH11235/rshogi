@@ -18,7 +18,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{SearchThread, SharedSearchState, SplitPoint};
+#[cfg(feature = "ybwc")]
+use super::SplitPoint;
+use super::{SearchThread, SharedSearchState};
 
 /// RAII guard to ensure active worker count is decremented
 struct WorkerGuard {
@@ -57,8 +59,8 @@ enum WorkItem {
         iteration: usize,
         /// Depth to search at
         depth: u8,
-        /// Position to search from
-        position: Position,
+        /// Position to search from (shared via Arc to avoid cloning)
+        position: Arc<Position>,
         /// Batch of moves to search
         moves: SmallVec<[Move; 16]>,
         /// Starting index of the batch (for debugging)
@@ -70,8 +72,8 @@ enum WorkItem {
         iteration: usize,
         /// Depth to search at
         depth: u8,
-        /// Position to search from
-        position: Position,
+        /// Position to search from (shared via Arc to avoid cloning)
+        position: Arc<Position>,
         /// Specific move to search first
         move_to_search: Move,
         /// Index of the move (for debugging)
@@ -83,8 +85,8 @@ enum WorkItem {
         iteration: usize,
         /// Depth to search at
         depth: u8,
-        /// Position to search
-        position: Position,
+        /// Position to search (shared via Arc to avoid cloning)
+        position: Arc<Position>,
     },
 }
 
@@ -120,11 +122,18 @@ fn get_job(
     // Track if we found work via stealing
     let found_work = false;
 
-    // 2. Then try stealing from other workers (round-robin)
-    let start = (thread_id + 1) % queues.stealers.len();
-    for i in 0..queues.stealers.len() - 1 {
-        let idx = (start + i) % queues.stealers.len();
-        loop {
+    // 2. Then try stealing from other workers (random selection for better scalability)
+    // Instead of scanning all workers (O(T^2)), randomly select a few workers
+    if !queues.stealers.is_empty() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        // Try a few random steals (min of 3 or half the workers)
+        let steal_attempts = 3.min(queues.stealers.len());
+        for _ in 0..steal_attempts {
+            let idx = rng.gen_range(0..queues.stealers.len());
+
+            // Try to steal from selected worker
             match queues.stealers[idx].steal() {
                 crossbeam_deque::Steal::Success(item) => {
                     // Reset failure counter on success
@@ -132,8 +141,15 @@ fn get_job(
                     steal_success.fetch_add(1, Ordering::Relaxed);
                     return Some(item);
                 }
-                crossbeam_deque::Steal::Empty => break,
-                crossbeam_deque::Steal::Retry => continue,
+                crossbeam_deque::Steal::Empty => continue,
+                crossbeam_deque::Steal::Retry => {
+                    // Try once more on retry
+                    if let crossbeam_deque::Steal::Success(item) = queues.stealers[idx].steal() {
+                        CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
+                        steal_success.fetch_add(1, Ordering::Relaxed);
+                        return Some(item);
+                    }
+                }
             }
         }
     }
@@ -489,12 +505,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 );
                             }
 
+                            // Clone position only once per batch (not per move)
+                            let mut pos = (*position).clone();
+                            
                             // Process all moves in the batch
                             for move_to_search in moves.iter() {
-                                // Clone position for each move
-                                let mut pos = position.clone();
-
-                                // Search the specific root move
+                                // Search the specific root move (reusing the same position)
                                 let _result = search_thread.search_root_move(
                                     &mut pos,
                                     &limits,
@@ -527,8 +543,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 );
                             }
 
-                            // Clone position for this search
-                            let mut pos = position;
+                            // Clone position from Arc for this search
+                            let mut pos = (*position).clone();
 
                             // Search the specific root move
                             let _result = search_thread.search_root_move(
@@ -555,8 +571,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 );
                             }
 
-                            // Clone position for this search
-                            let mut pos = position;
+                            // Clone position from Arc for this search
+                            let mut pos = (*position).clone();
 
                             // Do the search
                             let _result = search_thread.search_iteration(&mut pos, &limits, depth);
@@ -588,13 +604,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
                 } else {
                     // No work available, check for split points (YBWC)
-                    if let Some(split_point) =
-                        shared_state.split_point_manager.get_available_split_point()
+                    #[cfg(feature = "ybwc")]
                     {
-                        // Process the split point
-                        search_thread.process_split_point(&split_point);
-                    } else {
-                        // No work or split points available, brief sleep
+                        if let Some(split_point) =
+                            shared_state.split_point_manager.get_available_split_point()
+                        {
+                            // Process the split point
+                            search_thread.process_split_point(&split_point);
+                        } else {
+                            // No work or split points available, brief sleep
+                            thread::sleep(Duration::from_micros(50));
+                        }
+                    }
+                    #[cfg(not(feature = "ybwc"))]
+                    {
+                        // No work available, brief sleep
                         thread::sleep(Duration::from_micros(100));
                     }
                 }
@@ -718,11 +742,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // For root moves, use slightly shallower depth to avoid long-running tasks
                             let helper_depth = main_depth.saturating_sub(1).max(1);
 
-                            // Create batch work item
+                            // Create batch work item (wrap position in Arc for efficient sharing)
                             let work = WorkItem::RootBatch {
                                 iteration,
                                 depth: helper_depth,
-                                position: position.clone(),
+                                position: Arc::new(position.clone()),
                                 moves: batch_moves,
                                 start_index,
                             };
@@ -747,7 +771,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     let work = WorkItem::FullPosition {
                         iteration,
                         depth: helper_depth,
-                        position: position.clone(),
+                        position: Arc::new(position.clone()),
                     };
 
                     // Push to global injector (lock-free)
@@ -756,80 +780,90 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             // Main thread searches
-            // Use YBWC more aggressively for better parallelization
-            let result = if iteration <= 2 || main_depth < 3 {
-                // Traditional search only for very early iterations
-                main_thread.search_iteration(position, &limits, main_depth)
-            } else {
-                // YBWC search with split points (for deeper iterations)
-                let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
-                let legal_moves = move_gen.generate_all();
-
-                if legal_moves.is_empty() {
-                    // No legal moves - game over
-                    SearchResult {
-                        score: -i32::MAX / 2,
-                        stats: SearchStats::default(),
-                        best_move: None,
-                    }
+            #[cfg(feature = "ybwc")]
+            let result = {
+                // Use YBWC more aggressively for better parallelization
+                if iteration <= 2 || main_depth < 3 {
+                    // Traditional search only for very early iterations
+                    main_thread.search_iteration(position, &limits, main_depth)
                 } else {
-                    // Convert MoveList to Vec<Move>
-                    let legal_moves_vec: Vec<Move> = legal_moves.iter().copied().collect();
+                    // YBWC search with split points (for deeper iterations)
+                    let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
+                    let legal_moves = move_gen.generate_all();
 
-                    // Get the best move from previous iteration for move ordering
-                    let pv_move = self
-                        .shared_state
-                        .get_best_move()
-                        .filter(|m| legal_moves_vec.contains(m))
-                        .unwrap_or(legal_moves[0]);
-
-                    // Search PV move first
-                    let pv_result =
-                        main_thread.search_root_move(position, &limits, main_depth, pv_move);
-
-                    // Prepare siblings for split point
-                    let mut remaining_moves = legal_moves_vec;
-                    remaining_moves.retain(|&m| m != pv_move);
-
-                    if !remaining_moves.is_empty() && pv_result.score < i32::MAX / 4 {
-                        // Create split point for remaining moves
-                        let split_point = SplitPoint::new(
-                            position.clone(),
-                            main_depth,
-                            pv_result.score - 100, // alpha with margin
-                            i32::MAX / 2,          // beta
-                            remaining_moves,
-                        );
-
-                        // Mark PV as already searched
-                        split_point.mark_pv_searched();
-                        split_point.update_best(pv_result.score, pv_move);
-
-                        // Add to split point manager
-                        let sp_arc =
-                            self.shared_state.split_point_manager.add_split_point(split_point);
-
-                        // Main thread also participates
-                        main_thread.process_split_point(&sp_arc);
-
-                        // Get final best score from split point
-                        let final_score = sp_arc.best_score.load(Ordering::Acquire);
-                        let final_move =
-                            Move::from_u16(sp_arc.best_move.load(Ordering::Acquire) as u16);
-
+                    if legal_moves.is_empty() {
+                        // No legal moves - game over
                         SearchResult {
-                            score: final_score,
-                            stats: pv_result.stats,
-                            best_move: Some(final_move),
+                            score: -i32::MAX / 2,
+                            stats: SearchStats::default(),
+                            best_move: None,
                         }
                     } else {
-                        // Use PV result if no siblings or beta cutoff
-                        pv_result
+                        // Convert MoveList to Vec<Move>
+                        let legal_moves_vec: Vec<Move> = legal_moves.iter().copied().collect();
+
+                        // Get the best move from previous iteration for move ordering
+                        let pv_move = self
+                            .shared_state
+                            .get_best_move()
+                            .filter(|m| legal_moves_vec.contains(m))
+                            .unwrap_or(legal_moves[0]);
+
+                        // Search PV move first
+                        let pv_result =
+                            main_thread.search_root_move(position, &limits, main_depth, pv_move);
+
+                        // Prepare siblings for split point
+                        let mut remaining_moves = legal_moves_vec;
+                        remaining_moves.retain(|&m| m != pv_move);
+
+                        if !remaining_moves.is_empty() && pv_result.score < i32::MAX / 4 {
+                            // Create split point for remaining moves
+                            let split_point = SplitPoint::new(
+                                position.clone(),
+                                main_depth,
+                                pv_result.score - 100, // alpha with margin
+                                i32::MAX / 2,          // beta
+                                remaining_moves,
+                            );
+
+                            // Mark PV as already searched
+                            split_point.mark_pv_searched();
+                            split_point.update_best(pv_result.score, pv_move);
+
+                            // Add to split point manager
+                            let sp_arc =
+                                self.shared_state.split_point_manager.add_split_point(split_point);
+
+                            // Main thread also participates
+                            main_thread.process_split_point(&sp_arc);
+
+                            // Get final best score from split point
+                            let final_score = sp_arc.best_score.load(Ordering::Acquire);
+                            let final_move =
+                                Move::from_u16(sp_arc.best_move.load(Ordering::Acquire) as u16);
+
+                            SearchResult {
+                                score: final_score,
+                                stats: pv_result.stats,
+                                best_move: Some(final_move),
+                            }
+                        } else {
+                            // Use PV result if no siblings or beta cutoff
+                            pv_result
+                        }
                     }
                 }
             };
 
+            #[cfg(not(feature = "ybwc"))]
+            let result = {
+                // Simple traditional search without YBWC
+                main_thread.search_iteration(position, &limits, main_depth)
+            };
+
             // Clean up completed split points
+            #[cfg(feature = "ybwc")]
             self.shared_state.split_point_manager.cleanup_completed();
 
             if log::log_enabled!(log::Level::Debug) {
