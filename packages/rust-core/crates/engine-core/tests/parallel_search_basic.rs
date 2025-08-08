@@ -6,7 +6,7 @@ use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
     search::{
         parallel::{ParallelSearcher, SearchThread, SharedSearchState},
-        SearchLimitsBuilder, TranspositionTable,
+        SearchLimitsBuilder, ShardedTranspositionTable,
     },
     shogi::Position,
 };
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 fn test_parallel_search_no_data_races() {
     // Create shared resources
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(TranspositionTable::new(16));
+    let tt = Arc::new(ShardedTranspositionTable::new(16));
     let stop_flag = Arc::new(AtomicBool::new(false));
     let shared_state = Arc::new(SharedSearchState::new(stop_flag.clone()));
 
@@ -104,7 +104,7 @@ fn test_shared_history_concurrent_access() {
 #[test]
 fn test_parallel_searcher_integration() {
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(TranspositionTable::new(16));
+    let tt = Arc::new(ShardedTranspositionTable::new(16));
 
     let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
     let mut position = Position::startpos();
@@ -124,7 +124,7 @@ fn test_parallel_searcher_integration() {
 fn test_barrier_deadlock_prevention() {
     // Test that early stop doesn't cause deadlock
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(TranspositionTable::new(16));
+    let tt = Arc::new(ShardedTranspositionTable::new(16));
     let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
     let mut position = Position::startpos();
 

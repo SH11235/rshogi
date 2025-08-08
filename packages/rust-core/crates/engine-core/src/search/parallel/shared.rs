@@ -2,6 +2,8 @@
 //!
 //! Lock-free data structures shared between search threads
 
+#[cfg(feature = "ybwc")]
+use crate::shogi::Position;
 use crate::{
     shogi::{Move, PieceType, Square},
     Color,
@@ -11,6 +13,8 @@ use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
 use std::sync::Arc;
+#[cfg(feature = "ybwc")]
+use std::sync::RwLock;
 
 /// Statistics for tracking work duplication in parallel search
 #[derive(Debug)]
@@ -268,7 +272,7 @@ pub struct SplitPointManager {
     /// Active split points
     split_points: RwLock<Vec<Arc<SplitPoint>>>,
     /// Maximum depth difference for creating split points
-    max_split_depth_diff: u8,
+    _max_split_depth_diff: u8,
 }
 
 #[cfg(feature = "ybwc")]
@@ -277,20 +281,20 @@ impl SplitPointManager {
     pub fn new() -> Self {
         Self {
             split_points: RwLock::new(Vec::new()),
-            max_split_depth_diff: 3,
+            _max_split_depth_diff: 3,
         }
     }
 
     /// Add a new split point
     pub fn add_split_point(&self, split_point: SplitPoint) -> Arc<SplitPoint> {
         let arc_split = Arc::new(split_point);
-        self.split_points.write().push(arc_split.clone());
+        self.split_points.write().unwrap().push(arc_split.clone());
         arc_split
     }
 
     /// Get an available split point for a thread to work on
     pub fn get_available_split_point(&self) -> Option<Arc<SplitPoint>> {
-        let split_points = self.split_points.read();
+        let split_points = self.split_points.read().unwrap();
 
         // Find a split point with work available
         for sp in split_points.iter() {
@@ -312,14 +316,14 @@ impl SplitPointManager {
 
     /// Remove completed split points
     pub fn cleanup_completed(&self) {
-        let mut split_points = self.split_points.write();
+        let mut split_points = self.split_points.write().unwrap();
         split_points
             .retain(|sp| !sp.cutoff_found.load(Ordering::Acquire) || sp.active_thread_count() > 0);
     }
 
     /// Clear all split points
     pub fn clear(&self) {
-        self.split_points.write().clear();
+        self.split_points.write().unwrap().clear();
     }
 
     /// Check if we should create a split point

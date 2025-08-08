@@ -519,13 +519,13 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{evaluation::evaluate::MaterialEvaluator, search::TranspositionTable};
+    use crate::{evaluation::evaluate::MaterialEvaluator, search::ShardedTranspositionTable};
     use std::sync::{atomic::AtomicBool, Arc};
 
     #[test]
     fn test_search_thread_creation() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn test_thread_state_transitions() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn test_start_depth_calculation() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
