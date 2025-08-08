@@ -8,10 +8,11 @@ use crate::{
 };
 use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
 use log::{debug, error, info, trace, warn};
+use smallvec::SmallVec;
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -29,7 +30,10 @@ impl WorkerGuard {
     fn new(counter: Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::AcqRel);
         let count = counter.load(Ordering::Acquire);
-        debug!("Worker becoming active (active count: {count})");
+        // Only log in debug builds or when debug logging is explicitly enabled
+        if log::log_enabled!(log::Level::Debug) {
+            debug!("Worker becoming active (active count: {count})");
+        }
         Self { counter }
     }
 }
@@ -38,14 +42,29 @@ impl Drop for WorkerGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
         // Use trace level to reduce noise during benchmarks
-        trace!("WorkerGuard: active worker count decremented");
+        if log::log_enabled!(log::Level::Trace) {
+            trace!("WorkerGuard: active worker count decremented");
+        }
     }
 }
 
 /// Work item for threads to process
 #[derive(Clone, Debug)]
 enum WorkItem {
-    /// Search a specific root move
+    /// Batch of root moves to search (8-16 moves)
+    RootBatch {
+        /// Iteration number
+        iteration: usize,
+        /// Depth to search at
+        depth: u8,
+        /// Position to search from
+        position: Position,
+        /// Batch of moves to search
+        moves: SmallVec<[Move; 16]>,
+        /// Starting index of the batch (for debugging)
+        start_index: usize,
+    },
+    /// Search a specific root move (legacy, for single moves)
     RootMove {
         /// Iteration number
         iteration: usize,
@@ -69,108 +88,99 @@ enum WorkItem {
     },
 }
 
-/// Lock-free work queue using crossbeam-deque with proper work stealing
-struct LockFreeWorkQueue {
-    /// Global queue for work items
-    injector: Injector<WorkItem>,
-    /// Stealers for work stealing (Workers are created per-thread)
-    stealers: Vec<Stealer<WorkItem>>,
+/// Truly lock-free work queue structure
+#[derive(Clone)]
+struct Queues {
+    /// Global injector (Arc for sharing)
+    injector: Arc<Injector<WorkItem>>,
+    /// Stealers for work stealing (immutable after creation)
+    stealers: Arc<[Stealer<WorkItem>]>,
 }
 
-impl LockFreeWorkQueue {
-    /// Create new lock-free work queue
-    fn new(_num_threads: usize) -> Self {
-        let injector = Injector::new();
-        let stealers = Vec::new(); // Will be populated when workers are created
-        
-        Self {
-            injector,
-            stealers,
-        }
+/// Get work with 3-layer priority (truly lock-free with exponential backoff)
+fn get_job(
+    my_worker: &DequeWorker<WorkItem>,
+    queues: &Queues,
+    thread_id: usize,
+    steal_success: &AtomicU64,
+    steal_failure: &AtomicU64,
+) -> Option<WorkItem> {
+    // Thread-local steal failure counter for exponential backoff
+    thread_local! {
+        static CONSECUTIVE_STEAL_FAILS: std::cell::Cell<u32> = std::cell::Cell::new(0);
     }
     
-    /// Add a stealer from a worker thread
-    fn add_stealer(&mut self, stealer: Stealer<WorkItem>) {
-        self.stealers.push(stealer);
-    }
-
-    /// Push work item to global queue (for main thread)
-    fn push(&self, item: WorkItem) -> bool {
-        self.injector.push(item);
-        true // Always succeeds with lock-free queue
+    // 1. Try local worker queue first (LIFO for DFS)
+    if let Some(item) = my_worker.pop() {
+        // Reset failure counter on success
+        CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
+        return Some(item);
     }
     
-    /// Pop work item from global queue (simplified for now)
-    fn pop(&self) -> Option<WorkItem> {
-        // Try the global injector
+    // Track if we found work via stealing
+    let mut found_work = false;
+    
+    // 2. Then try stealing from other workers (round-robin)
+    let start = (thread_id + 1) % queues.stealers.len();
+    for i in 0..queues.stealers.len() - 1 {
+        let idx = (start + i) % queues.stealers.len();
         loop {
-            match self.injector.steal() {
-                crossbeam_deque::Steal::Success(item) => return Some(item),
+            match queues.stealers[idx].steal() {
+                crossbeam_deque::Steal::Success(item) => {
+                    // Reset failure counter on success
+                    CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
+                    steal_success.fetch_add(1, Ordering::Relaxed);
+                    return Some(item);
+                },
                 crossbeam_deque::Steal::Empty => break,
                 crossbeam_deque::Steal::Retry => continue,
             }
         }
-        
-        // Try stealing from other workers
-        for stealer in &self.stealers {
-            loop {
-                match stealer.steal() {
-                    crossbeam_deque::Steal::Success(item) => return Some(item),
-                    crossbeam_deque::Steal::Empty => break,
-                    crossbeam_deque::Steal::Retry => continue,
-                }
-            }
-        }
-        
-        None
     }
     
-    /// Pop work item with work stealing (called by worker threads with their local worker)
-    fn pop_with_worker(&self, worker: &DequeWorker<WorkItem>, thread_id: usize) -> Option<WorkItem> {
-        // 1. First try local worker queue (fastest, best cache locality)
-        if let Some(item) = worker.pop() {
-            return Some(item);
+    // 3. Finally try the global injector with batch stealing
+    loop {
+        match queues.injector.steal_batch_and_pop(my_worker) {
+            crossbeam_deque::Steal::Success(item) => {
+                // Reset failure counter on success
+                CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
+                steal_success.fetch_add(1, Ordering::Relaxed);
+                return Some(item);
+            },
+            crossbeam_deque::Steal::Empty => break,
+            crossbeam_deque::Steal::Retry => continue,
         }
-        
-        // 2. Then try stealing from other workers
-        for (i, stealer) in self.stealers.iter().enumerate() {
-            if i != thread_id {
-                loop {
-                    match stealer.steal() {
-                        crossbeam_deque::Steal::Success(item) => return Some(item),
-                        crossbeam_deque::Steal::Empty => break,
-                        crossbeam_deque::Steal::Retry => continue,
-                    }
-                }
-            }
-        }
-        
-        // 3. Finally try the global injector
-        loop {
-            match self.injector.steal() {
-                crossbeam_deque::Steal::Success(item) => return Some(item),
-                crossbeam_deque::Steal::Empty => break,
-                crossbeam_deque::Steal::Retry => continue,
-            }
-        }
-        
-        None
     }
-
-    /// Clear the queue (best effort - may not clear all items in concurrent environment)
-    fn clear(&self) {
-        // Clear global injector
-        while !self.injector.is_empty() {
-            let _ = self.injector.steal();
+    
+    // Record failure
+    steal_failure.fetch_add(1, Ordering::Relaxed);
+    
+    // Apply exponential backoff based on consecutive failures
+    CONSECUTIVE_STEAL_FAILS.with(|f| {
+        let fails = f.get() + 1;
+        f.set(fails);
+        
+        // Exponential backoff strategy
+        match fails {
+            1..=5 => {
+                // Spin for first few attempts (hot loop)
+            },
+            6..=15 => {
+                // Yield to OS scheduler for medium failures
+                std::thread::yield_now();
+            },
+            16..=25 => {
+                // Brief sleep for many failures
+                std::thread::sleep(Duration::from_micros(10));
+            },
+            _ => {
+                // Longer sleep for persistent failures
+                std::thread::sleep(Duration::from_micros(100));
+            },
         }
-
-        // Note: Cannot clear worker queues as they are owned by threads
-    }
-
-    /// Get approximate pending count (not exact in concurrent environment)
-    fn pending_count(&self) -> usize {
-        self.injector.len()
-    }
+    });
+    
+    None
 }
 
 /// Simplified parallel searcher
@@ -190,14 +200,20 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Number of threads
     num_threads: usize,
 
-    /// Work queue (lock-free implementation with mutex for setup)
-    work_queue: Arc<Mutex<LockFreeWorkQueue>>,
+    /// Work queues (truly lock-free, no locks at all)
+    queues: Arc<Queues>,
 
     /// Node counter
     total_nodes: Arc<AtomicU64>,
 
     /// Active worker count for proper synchronization
     active_workers: Arc<AtomicUsize>,
+    
+    /// Metrics: successful steal operations
+    steal_success: Arc<AtomicU64>,
+    
+    /// Metrics: failed steal operations
+    steal_failure: Arc<AtomicU64>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
@@ -208,9 +224,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        // Create lock-free work queue (no capacity limit!)
-        debug!("Creating LockFreeWorkQueue for {num_threads} threads");
-        let work_queue = Arc::new(Mutex::new(LockFreeWorkQueue::new(num_threads)));
+        // Create truly lock-free work queues (no initialization needed yet)
+        debug!("Creating placeholder Queues for {num_threads} threads");
+        // This will be replaced in search() with the actual queues
+        let injector = Arc::new(Injector::new());
+        let stealers: Arc<[Stealer<WorkItem>]> = Arc::from([]);
+        let queues = Arc::new(Queues { injector, stealers });
 
         Self {
             tt,
@@ -218,9 +237,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             time_manager: None,
             shared_state,
             num_threads,
-            work_queue,
+            queues,
             total_nodes: Arc::new(AtomicU64::new(0)),
             active_workers: Arc::new(AtomicUsize::new(0)),
+            steal_success: Arc::new(AtomicU64::new(0)),
+            steal_failure: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -294,10 +315,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Reset state
         self.shared_state.reset();
-        if let Ok(mut queue) = self.work_queue.lock() {
-            queue.clear();
+        // Clear the injector (best effort)
+        while !self.queues.injector.is_empty() {
+            let _ = self.queues.injector.steal();
         }
         self.total_nodes.store(0, Ordering::Release);
+        self.steal_success.store(0, Ordering::Release);
+        self.steal_failure.store(0, Ordering::Release);
 
         // Create time manager if needed
         use crate::time_management::{GamePhase, TimeControl, TimeLimits};
@@ -327,11 +351,36 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             debug!("TimeManager disabled (infinite time control)");
         }
 
+        // Create all workers and collect stealers at startup (once-only initialization)
+        let injector = Arc::new(Injector::new());
+        let mut workers = Vec::with_capacity(self.num_threads);
+        let mut stealers = Vec::with_capacity(self.num_threads);
+        
+        for _ in 0..self.num_threads {
+            let worker = DequeWorker::new_lifo();
+            stealers.push(worker.stealer());
+            workers.push(worker);
+        }
+        
+        // Create immutable Queues structure (no locks needed)
+        let stealers: Arc<[Stealer<WorkItem>]> = Arc::from(stealers);
+        let queues = Arc::new(Queues {
+            injector: injector.clone(),
+            stealers: stealers.clone(),
+        });
+        
+        // Replace the placeholder queues
+        self.queues = queues.clone();
+
         // Start worker threads
         let mut handles = Vec::new();
         for id in 1..self.num_threads {
-            handles.push(self.start_worker(id, position.clone(), limits.clone()));
+            let worker = workers.pop().unwrap();
+            handles.push(self.start_worker_with(id, worker, limits.clone()));
         }
+
+        // Keep the main thread's worker
+        let main_worker = workers.pop().unwrap();
 
         // Start time management if needed
         let time_handle = if let Some(ref tm) = self.time_manager {
@@ -351,7 +400,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let fail_safe_handle = self.start_fail_safe_guard(search_start, limits.clone());
 
         // Main thread does iterative deepening and generates work
-        let result = self.run_main_thread(position, limits);
+        let result = self.run_main_thread(position, limits, main_worker);
 
         // Stop all threads
         info!("Search complete, stopping threads");
@@ -370,33 +419,39 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Stop fail-safe guard
         let _ = fail_safe_handle.join();
 
+        // Log steal metrics
+        let steal_success_count = self.steal_success.load(Ordering::Relaxed);
+        let steal_failure_count = self.steal_failure.load(Ordering::Relaxed);
+        let total_steals = steal_success_count + steal_failure_count;
+        if total_steals > 0 {
+            let success_rate = (steal_success_count as f64 / total_steals as f64) * 100.0;
+            info!(
+                "Steal metrics: success={steal_success_count}, failure={steal_failure_count}, rate={success_rate:.1}%"
+            );
+        }
+
         result
     }
 
-    /// Start a worker thread
-    fn start_worker(
+    /// Start a worker thread with a pre-created worker
+    fn start_worker_with(
         &self,
         id: usize,
-        _position: Position,
+        worker: DequeWorker<WorkItem>,
         limits: SearchLimits,
     ) -> thread::JoinHandle<()> {
         let evaluator = self.evaluator.clone();
         let tt = self.tt.clone();
         let shared_state = self.shared_state.clone();
-        let work_queue = self.work_queue.clone();
+        let queues = self.queues.clone();
         let total_nodes = self.total_nodes.clone();
         let active_workers = self.active_workers.clone();
+        let steal_success = self.steal_success.clone();
+        let steal_failure = self.steal_failure.clone();
 
         thread::spawn(move || {
-            debug!("Worker {id} started");
-            
-            // Create local worker for this thread (LIFO for DFS)
-            let local_worker = DequeWorker::new_lifo();
-            let stealer = local_worker.stealer();
-            
-            // Add stealer to the global queue
-            if let Ok(mut queue) = work_queue.lock() {
-                queue.add_stealer(stealer);
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("Worker {id} started");
             }
 
             // Create search thread
@@ -407,19 +462,54 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Simple work loop
             while !shared_state.should_stop() {
-                // Try to get work using proper work stealing
-                let work = if let Ok(queue) = work_queue.lock() {
-                    queue.pop_with_worker(&local_worker, id)
-                } else {
-                    None
-                };
-                
+                // Try to get work using truly lock-free work stealing
+                let work = get_job(&worker, &queues, id, &steal_success, &steal_failure);
+
                 if let Some(work) = work {
                     // Create guard which atomically increments the counter
                     let _guard = WorkerGuard::new(active_workers.clone());
 
                     let prev_nodes = local_nodes; // Track previous node count
                     let nodes = match work {
+                        WorkItem::RootBatch {
+                            iteration,
+                            depth,
+                            position,
+                            moves,
+                            start_index,
+                        } => {
+                            // Skip debug logging in hot path unless explicitly enabled
+                            if log::log_enabled!(log::Level::Debug) {
+                                debug!(
+                                    "Worker {id} processing RootBatch with {} moves starting at #{start_index} (iteration {iteration}, depth {depth})",
+                                    moves.len()
+                                );
+                            }
+
+                            // Process all moves in the batch
+                            for (_i, move_to_search) in moves.iter().enumerate() {
+                                // Clone position for each move
+                                let mut pos = position.clone();
+                                
+                                // Search the specific root move
+                                let _result = search_thread.search_root_move(
+                                    &mut pos,
+                                    &limits,
+                                    depth,
+                                    *move_to_search,
+                                );
+                                
+                                // Check stop flag between moves
+                                if shared_state.should_stop() {
+                                    break;
+                                }
+                            }
+
+                            // Update nodes (accumulate the difference)
+                            let nodes = search_thread.searcher.nodes();
+                            local_nodes += nodes.saturating_sub(prev_nodes);
+                            nodes
+                        }
                         WorkItem::RootMove {
                             iteration,
                             depth,
@@ -427,9 +517,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             move_to_search,
                             move_index,
                         } => {
-                            debug!(
-                                "Worker {id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
-                            );
+                            // Skip debug logging in hot path unless explicitly enabled
+                            if log::log_enabled!(log::Level::Debug) {
+                                debug!(
+                                    "Worker {id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
+                                );
+                            }
 
                             // Clone position for this search
                             let mut pos = position;
@@ -452,9 +545,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             depth,
                             position,
                         } => {
-                            debug!(
-                                "Worker {id} processing FullPosition (iteration {iteration}, depth {depth})"
-                            );
+                            // Skip debug logging in hot path unless explicitly enabled
+                            if log::log_enabled!(log::Level::Debug) {
+                                debug!(
+                                    "Worker {id} processing FullPosition (iteration {iteration}, depth {depth})"
+                                );
+                            }
 
                             // Clone position for this search
                             let mut pos = position;
@@ -469,7 +565,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         }
                     };
 
-                    debug!("Worker {id} work completed");
+                    // Skip debug logging in hot path unless explicitly enabled
+                    if log::log_enabled!(log::Level::Debug) {
+                        debug!("Worker {id} work completed");
+                    }
 
                     // Note: WorkerGuard will automatically decrement active_workers when dropped
 
@@ -496,12 +595,19 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 shared_state.add_nodes(local_nodes - last_report);
             }
 
-            debug!("Worker {id} stopped with {local_nodes} nodes");
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("Worker {id} stopped with {local_nodes} nodes");
+            }
         })
     }
 
     /// Run main thread with iterative deepening
-    fn run_main_thread(&self, position: &mut Position, limits: SearchLimits) -> SearchResult {
+    fn run_main_thread(
+        &self,
+        position: &mut Position,
+        limits: SearchLimits,
+        main_worker: DequeWorker<WorkItem>,
+    ) -> SearchResult {
         let mut best_result = SearchResult::new(None, 0, SearchStats::default());
 
         // Create main search thread
@@ -519,7 +625,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         for iteration in 1.. {
             // Skip stop check on first iteration to ensure we get at least one result
             if iteration > 1 && self.shared_state.should_stop() {
-                debug!("Main thread stopping at iteration {iteration}");
+                if log::log_enabled!(log::Level::Debug) {
+                    debug!("Main thread stopping at iteration {iteration}");
+                }
                 break;
             }
 
@@ -528,7 +636,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 if let Some(ref tm) = self.time_manager {
                     let current_nodes = self.total_nodes.load(Ordering::Relaxed);
                     if tm.should_stop(current_nodes) {
-                        debug!("Main thread stopping at iteration {iteration} due to time limit");
+                        if log::log_enabled!(log::Level::Debug) {
+                            debug!("Main thread stopping at iteration {iteration} due to time limit");
+                        }
                         break;
                     }
                 }
@@ -544,7 +654,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             let iter_start = Instant::now();
-            debug!("Starting iteration {iteration} (depth {main_depth})");
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("Starting iteration {iteration} (depth {main_depth})");
+            }
 
             // Generate root moves for the first half of iterations to distribute work
             // (at least 3 iterations, but up to half of max_depth)
@@ -555,71 +667,66 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 let moves = move_gen.generate_all();
 
                 if !moves.is_empty() {
-                    debug!(
-                        "Distributing {} root moves to {} helper threads (iteration {})",
-                        moves.len(),
-                        self.num_threads - 1,
-                        iteration
-                    );
+                    if log::log_enabled!(log::Level::Debug) {
+                        debug!(
+                            "Distributing {} root moves to {} helper threads (iteration {})",
+                            moves.len(),
+                            self.num_threads - 1,
+                            iteration
+                        );
+                    }
 
-                    // Distribute root moves in chunks - dynamic size based on move count
-                    // Smaller chunks for many moves, larger chunks for few moves
-                    let num_helpers = self.num_threads - 1;
-                    let chunk_size = if moves.len() > 20 {
-                        // Many moves: distribute more evenly with larger chunks
-                        (moves.len() / (num_helpers * 4)).clamp(2, 8)
+                    // Use RootBatch for better efficiency (8-16 moves per batch)
+                    let batch_size = if moves.len() > 100 {
+                        16  // Large batches for many moves
+                    } else if moves.len() > 40 {
+                        12  // Medium batches
                     } else {
-                        // Few moves: keep small chunks to avoid starvation
-                        2
+                        8   // Smaller batches for fewer moves
                     };
 
-                    // Process moves in rounds, distributing chunk_size moves to each helper per round
-                    for chunk_start in (0..moves.len()).step_by(chunk_size * num_helpers) {
-                        for helper_offset in 0..num_helpers {
-                            // Calculate the starting index for this helper in this round
-                            let base_idx = chunk_start + helper_offset * chunk_size;
-
-                            // Distribute chunk_size moves to this helper
-                            for offset in 0..chunk_size {
-                                let idx = base_idx + offset;
-                                if idx >= moves.len() {
-                                    break;
-                                }
-
-                                let mv = moves[idx];
-                                let _helper_id = 1 + helper_offset;
-
-                                // For root moves, use slightly shallower depth to avoid long-running tasks
-                                // but not too shallow to avoid underutilization
-                                let helper_depth = main_depth.saturating_sub(1).max(1);
-
-                                // Create work item for this move
-                                let work = WorkItem::RootMove {
-                                    iteration,
-                                    depth: helper_depth,
-                                    position: position.clone(),
-                                    move_to_search: mv,
-                                    move_index: idx,
-                                };
-
-                                if let Ok(queue) = self.work_queue.lock() {
-                                    if !queue.push(work) {
-                                        // Lock-free queue should never fail, but if it does, stop immediately
-                                        self.shared_state.set_stop();
-                                        break;
-                                    }
-                                } else {
-                                    break;
-                                }
+                    // Create batches of root moves manually
+                    let mut batch_idx = 0;
+                    let mut i = 0;
+                    while i < moves.len() {
+                        let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
+                        let start_index = i;
+                        
+                        // Collect up to batch_size moves
+                        for _ in 0..batch_size {
+                            if i >= moves.len() {
+                                break;
                             }
+                            batch_moves.push(moves[i]);
+                            i += 1;
+                        }
+                        
+                        if !batch_moves.is_empty() {
+                            // For root moves, use slightly shallower depth to avoid long-running tasks
+                            let helper_depth = main_depth.saturating_sub(1).max(1);
+                            
+                            // Create batch work item
+                            let work = WorkItem::RootBatch {
+                                iteration,
+                                depth: helper_depth,
+                                position: position.clone(),
+                                moves: batch_moves,
+                                start_index,
+                            };
+                            
+                            // Push to global injector (lock-free)
+                            self.queues.injector.push(work);
+                            batch_idx += 1;
                         }
                     }
                 }
             } else {
                 // Fall back to traditional full position search for deeper iterations
-                debug!(
-                    "Using FullPosition mode for iteration {iteration} (beyond limit {root_move_limit})"
-                );
+                if log::log_enabled!(log::Level::Debug) {
+                    debug!(
+                        "Using FullPosition mode for iteration {iteration} (beyond limit {root_move_limit})"
+                    );
+                }
                 for helper_id in 1..self.num_threads {
                     let helper_depth =
                         self.calculate_helper_depth(main_depth, helper_id, iteration, max_depth);
@@ -630,26 +737,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         position: position.clone(),
                     };
 
-                    if let Ok(queue) = self.work_queue.lock() {
-                        if !queue.push(work) {
-                            // Lock-free queue should never fail, but if it does, stop immediately
-                            self.shared_state.set_stop();
-                        }
-                    }
+                    // Push to global injector (lock-free)
+                    self.queues.injector.push(work);
                 }
             }
 
             // Main thread searches
             let result = main_thread.search_iteration(position, &limits, main_depth);
 
-            debug!(
-                "Iteration {} completed in {:?} with score {} (depth {}, {} nodes)",
-                iteration,
-                iter_start.elapsed(),
-                result.score,
-                result.stats.depth,
-                result.stats.nodes
-            );
+            if log::log_enabled!(log::Level::Debug) {
+                debug!(
+                    "Iteration {} completed in {:?} with score {} (depth {}, {} nodes)",
+                    iteration,
+                    iter_start.elapsed(),
+                    result.score,
+                    result.stats.depth,
+                    result.stats.nodes
+                );
+            }
 
             // Update best result (always update if we don't have a move yet)
             if best_result.best_move.is_none()
@@ -682,11 +787,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 let mut wait_time = 0;
                 loop {
-                    let pending = if let Ok(queue) = self.work_queue.lock() {
-                        queue.pending_count()
-                    } else {
-                        0
-                    };
+                    let pending = self.queues.injector.len();
                     let active = self.active_workers.load(Ordering::Acquire);
 
                     // Check TimeManager should_stop first
@@ -825,7 +926,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     hard_timeout_ms.max(1000) // At least 1 second for time-controlled searches
                 };
 
-            debug!("Fail-safe guard started with hard timeout: {hard_timeout_ms}ms");
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("Fail-safe guard started with hard timeout: {hard_timeout_ms}ms");
+            }
 
             // Check periodically
             loop {
@@ -833,7 +936,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // Check if search stopped normally
                 if shared_state.should_stop() {
-                    debug!("Fail-safe guard: Search stopped normally");
+                    if log::log_enabled!(log::Level::Debug) {
+                        debug!("Fail-safe guard: Search stopped normally");
+                    }
                     break;
                 }
 
@@ -860,7 +965,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             }
 
-            debug!("Fail-safe guard stopped");
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("Fail-safe guard stopped");
+            }
         })
     }
 
@@ -870,7 +977,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let total_nodes = self.total_nodes.clone();
 
         thread::spawn(move || {
-            debug!("Time manager started");
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("Time manager started");
+            }
 
             loop {
                 // Poll interval based on time control
@@ -896,7 +1005,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             }
 
-            debug!("Time manager stopped");
+            if log::log_enabled!(log::Level::Debug) {
+                debug!("Time manager stopped");
+            }
         })
     }
 }
@@ -919,35 +1030,5 @@ mod tests {
 
         assert!(result.best_move.is_some());
         assert!(result.stats.nodes > 0);
-    }
-
-    #[test]
-    fn test_work_queue() {
-        let queue = WorkQueue::new(10);
-        let pos = Position::startpos();
-
-        // Add items (using FullPosition variant)
-        for i in 0..5 {
-            let item = WorkItem::FullPosition {
-                iteration: i,
-                depth: i as u8,
-                position: pos.clone(),
-            };
-            assert!(queue.push(item));
-        }
-
-        // Take items
-        for i in 0..5 {
-            let item = queue.pop().expect("Should have item");
-            match item {
-                WorkItem::FullPosition { iteration, .. } => {
-                    assert_eq!(iteration, i);
-                }
-                _ => panic!("Expected FullPosition variant"),
-            }
-        }
-
-        // Queue should be empty
-        assert!(queue.pop().is_none());
     }
 }

@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use engine_core::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
-    search::{parallel::ParallelSearcher, SearchLimitsBuilder, TranspositionTable},
+    search::{parallel::ParallelSearcher, SearchLimitsBuilder, ShardedTranspositionTable, TranspositionTable},
     shogi::Position,
     time_management::TimeControl,
 };
@@ -66,6 +66,10 @@ struct Args {
     /// Use material evaluator
     #[arg(long)]
     material: bool,
+    
+    /// Use sharded TT for better cache locality
+    #[arg(long)]
+    sharded_tt: bool,
 
     /// Position file (JSON format)
     #[arg(
