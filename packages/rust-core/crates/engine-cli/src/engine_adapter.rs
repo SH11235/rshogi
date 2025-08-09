@@ -1117,9 +1117,10 @@ fn apply_byoyomi_mode(
     byoyomi_periods: u32,
 ) -> SearchLimitsBuilder {
     let byoyomi = params.byoyomi.unwrap_or(0);
+    // When btime/wtime is not specified, it means main_time = 0 (pure byoyomi)
     let main_time = match position.side_to_move {
-        engine_core::shogi::Color::Black => params.btime.unwrap_or(byoyomi),
-        engine_core::shogi::Color::White => params.wtime.unwrap_or(byoyomi),
+        engine_core::shogi::Color::Black => params.btime.unwrap_or(0),
+        engine_core::shogi::Color::White => params.wtime.unwrap_or(0),
     };
     builder.byoyomi(main_time, byoyomi, byoyomi_periods)
 }
