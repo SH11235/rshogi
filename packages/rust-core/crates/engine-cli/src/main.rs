@@ -9,7 +9,7 @@ use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::{EngineAdapter, EngineError};
 use engine_core::engine::controller::Engine;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -279,7 +279,6 @@ struct CommandContext<'a> {
     worker_handle: &'a mut Option<JoinHandle<()>>,
     search_state: &'a mut SearchState,
     bestmove_sent: &'a mut bool,
-    stdout: &'a mut dyn Write,
     current_search_timeout: &'a mut Duration,
     search_id_counter: &'a mut u64,
     current_search_id: &'a mut u64,
@@ -328,7 +327,6 @@ fn wait_for_worker_with_timeout(
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
     search_state: &mut SearchState,
-    _stdout: &mut dyn Write,
     timeout: Duration,
 ) -> Result<()> {
     let deadline = Instant::now() + timeout.max(MIN_JOIN_TIMEOUT);
@@ -437,12 +435,10 @@ fn wait_for_worker_with_timeout(
 /// Wait for any ongoing search to complete
 fn wait_for_search_completion(
     search_state: &mut SearchState,
-    _bestmove_sent: &mut bool,
     stop_flag: &Arc<AtomicBool>,
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
     engine: &Arc<Mutex<EngineAdapter>>,
-    stdout: &mut dyn Write,
 ) -> Result<()> {
     if search_state.is_searching() {
         *search_state = SearchState::StopRequested;
@@ -452,7 +448,6 @@ fn wait_for_search_completion(
             worker_rx,
             engine,
             search_state,
-            stdout,
             MIN_JOIN_TIMEOUT,
         )?;
     }
@@ -588,10 +583,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut search_id_counter = 0u64;
     let mut current_search_id = 0u64;
 
-    // Get stdout handle
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-
     // Main event loop
     let mut should_quit = false;
     loop {
@@ -616,7 +607,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 worker_handle: &mut worker_handle,
                 search_state: &mut search_state,
                 bestmove_sent: &mut bestmove_sent,
-                stdout: &mut stdout,
                 current_search_timeout: &mut current_search_timeout,
                 search_id_counter: &mut search_id_counter,
                 current_search_id: &mut current_search_id,
@@ -731,7 +721,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
             &worker_rx,
             &engine,
             &mut search_state,
-            &mut stdout,
             MIN_JOIN_TIMEOUT,
         )?;
     }
@@ -789,12 +778,10 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             // Wait for any ongoing search to complete before updating position
             wait_for_search_completion(
                 ctx.search_state,
-                ctx.bestmove_sent,
                 ctx.stop_flag,
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
-                ctx.stdout,
             )?;
 
             let mut engine = lock_or_recover_adapter(ctx.engine);
@@ -808,12 +795,10 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             // Stop any ongoing search and ensure engine is available
             wait_for_search_completion(
                 ctx.search_state,
-                ctx.bestmove_sent,
                 ctx.stop_flag,
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
-                ctx.stdout,
             )?;
 
             // Add a small delay to ensure clean state transition
@@ -884,6 +869,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
         UsiCommand::Stop => {
             log::info!("Received stop command, search_state = {:?}", *ctx.search_state);
+            log::debug!("Stop command received, entering stop handler");
             // Signal stop to worker thread
             if ctx.search_state.is_searching() {
                 *ctx.search_state = SearchState::StopRequested;
@@ -899,6 +885,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     if start.elapsed() > timeout {
                         // Timeout - use fallback strategy
                         log::warn!("Timeout waiting for bestmove after stop command");
+                        log::debug!("Stop timeout reached, sending fallback bestmove");
 
                         // Log timeout error
                         log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
@@ -909,10 +896,12 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             ctx.allow_null_move,
                         ) {
                             Ok(move_str) => {
+                                log::debug!("Sending fallback bestmove: {move_str}");
                                 send_response(UsiResponse::BestMove {
-                                    best_move: move_str,
+                                    best_move: move_str.clone(),
                                     ponder: None,
                                 })?;
+                                log::debug!("Fallback bestmove sent successfully: {move_str}");
                                 *ctx.bestmove_sent = true;
                                 *ctx.search_state = SearchState::FallbackSent;
                             }
@@ -1058,12 +1047,10 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             // Stop any ongoing search
             wait_for_search_completion(
                 ctx.search_state,
-                ctx.bestmove_sent,
                 ctx.stop_flag,
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
-                ctx.stdout,
             )?;
 
             // Reset engine state for new game
@@ -1397,11 +1384,11 @@ mod tests {
                 if msg_id == current_search_id && search_state != SearchState::Idle {
                     finished_count += 1;
                     search_state = SearchState::Idle;
-                    println!(
+                    log::debug!(
                         "Processed Finished message {finished_count} (from_guard: {from_guard})"
                     );
                 } else {
-                    println!("Ignored duplicate Finished message (from_guard: {from_guard})");
+                    log::debug!("Ignored duplicate Finished message (from_guard: {from_guard})");
                 }
             }
         }

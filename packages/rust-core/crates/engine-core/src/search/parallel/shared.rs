@@ -722,7 +722,7 @@ mod tests {
         assert!(size_of::<PaddedAtomicU32>() >= size_of::<AtomicU32>());
         assert!(align_of::<PaddedAtomicU32>() >= align_of::<AtomicU32>());
 
-        println!(
+        log::debug!(
             "PaddedAtomicU32: size={}, align={}",
             size_of::<PaddedAtomicU32>(),
             align_of::<PaddedAtomicU32>()
