@@ -84,7 +84,7 @@ pub fn run_parallel_benchmark<E: Evaluator + Send + Sync + 'static>(
             continue; // Already tested
         }
 
-        println!("\nBenchmarking with {thread_count} threads...");
+        log::info!("\nBenchmarking with {thread_count} threads...");
 
         let mut result = benchmark_thread_config(
             evaluator.clone(),
@@ -230,13 +230,13 @@ fn measure_stop_latency<E: Evaluator + Send + Sync + 'static>(
 
 /// Print benchmark results in a formatted table
 pub fn print_benchmark_results(results: &[ParallelBenchmarkResult]) {
-    println!("\n=== Parallel Search Benchmark Results ===");
-    println!();
-    println!("Threads |      NPS | Speedup | Efficiency | Dup% | Stop Latency | PV Match%");
-    println!("--------|----------|---------|------------|------|--------------|----------");
+    log::info!("\n=== Parallel Search Benchmark Results ===");
+    log::info!("");
+    log::info!("Threads |      NPS | Speedup | Efficiency | Dup% | Stop Latency | PV Match%");
+    log::info!("--------|----------|---------|------------|------|--------------|----------");
 
     for result in results {
-        println!(
+        log::info!(
             "{:7} | {:8} | {:7.2}x | {:9.1}% | {:4.1} | {:10.1}ms | {:8.1}%",
             result.thread_count,
             result.nps,
@@ -248,7 +248,7 @@ pub fn print_benchmark_results(results: &[ParallelBenchmarkResult]) {
         );
     }
 
-    println!();
+    log::info!("");
 }
 
 #[cfg(test)]
