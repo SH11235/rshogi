@@ -51,16 +51,6 @@
       "category": "endgame"
     },
     {
-      "name": "endgame_bishop",
-      "sfen": "4k4/9/4p4/9/4P4/9/9/9/B3K4 b r2b2g4s4n4l17p 125",
-      "category": "endgame"
-    },
-    {
-      "name": "endgame_gold",
-      "sfen": "4k4/9/4G4/9/9/9/9/9/4K4 b 2rb2g3s4n4l18p 130",
-      "category": "endgame"
-    },
-    {
       "name": "tactical_fork",
       "sfen": "l3k3l/3s1s3/3ppp3/3N1N3/9/9/9/9/4K4 b RBG2Srbg2n2l15p 50",
       "category": "tactical"
@@ -79,11 +69,6 @@
       "name": "tactical_promotion",
       "sfen": "4k4/9/4p4/9/9/4P4/9/4S4/4K4 b RBG3Srbg3s4n4l16p 75",
       "category": "tactical"
-    },
-    {
-      "name": "complex_middlegame",
-      "sfen": "l2g1g1n1/1ks4rl/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL b n 25",
-      "category": "midgame"
     },
     {
       "name": "complex_attack",
