@@ -104,11 +104,23 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
 
                         // Single search call - UnifiedSearcher handles iterative deepening internally
                         thread_result = searcher.search(&mut pos, search_limits);
+                        
+                        // Safety check: ensure we got valid node count in time mode
+                        debug_assert!(
+                            thread_result.stats.nodes > 0,
+                            "unexpected zero nodes in time mode for thread {thread_id}"
+                        );
                     } else {
                         // DEPTH MODE: Manual iterative deepening with fresh position each iteration
                         debug!("Thread {thread_id} in depth mode");
 
-                        let depth_offset = thread_id % 2; // Alternate between depths for diversity
+                        // Improved diversity: vary depth offset based on thread ID
+                        let depth_offset = match thread_id {
+                            0 => 0, // Main thread: exact depth
+                            1 => 1, // +1 depth
+                            2 => 0, // Same depth but different move ordering due to thread timing
+                            _ => 2, // +2 depth for additional threads
+                        };
                         let max_depth = limits.depth.unwrap_or(64);
                         let mut thread_nodes: u64 = 0; // Accumulate nodes for this thread
 
@@ -118,11 +130,12 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                                 break;
                             }
 
-                            // Apply depth variation for diversity
+                            // Apply depth variation for diversity (with upper bound clipping)
                             let search_depth = if thread_id == 0 {
                                 depth // Main thread searches exact depth
                             } else {
-                                depth.saturating_add(depth_offset as u8)
+                                // Ensure we don't exceed max_depth to avoid inflated efficiency
+                                depth.saturating_add(depth_offset as u8).min(max_depth)
                             };
 
                             // IMPORTANT: Fresh position clone for each iteration to avoid corruption
@@ -173,11 +186,13 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                 .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()));
 
             // Update final stats with total nodes and elapsed time
+            // NOTE: stats.nodes/elapsed are "session-wide aggregated" metrics,
+            // not individual thread or best_move's local statistics
             let total = total_nodes.load(Ordering::Relaxed);
             let elapsed = search_start.elapsed();
 
-            best.stats.nodes = total; // Set the actual total nodes
-            best.stats.elapsed = elapsed; // Set the elapsed time
+            best.stats.nodes = total; // Set the total nodes from all threads
+            best.stats.elapsed = elapsed; // Set the wall-clock elapsed time
 
             best
         })
