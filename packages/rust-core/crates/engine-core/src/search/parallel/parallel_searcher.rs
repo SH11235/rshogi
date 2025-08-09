@@ -2,9 +2,9 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
-    search::{GamePhase, SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
+    search::{SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
     shogi::{Move, Position},
-    time_management::TimeManager,
+    time_management::{GamePhase, TimeManager},
 };
 use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
 use log::{debug, error, info, trace, warn};
@@ -228,6 +228,9 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 
     /// Metrics: failed steal operations
     steal_failure: Arc<AtomicU64>,
+
+    /// Handle for a TimeManager spawned after ponderhit (joined in search)
+    post_ponder_tm_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
@@ -256,6 +259,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             active_workers: Arc::new(AtomicUsize::new(0)),
             steal_success: Arc::new(AtomicU64::new(0)),
             steal_failure: Arc::new(AtomicU64::new(0)),
+            post_ponder_tm_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -269,6 +273,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let new_active = new_active_threads.min(self.num_threads).max(1);
         if new_active != self.num_threads {
             debug!("Adjusting active thread count from {} to {}", self.num_threads, new_active);
+            self.num_threads = new_active;
 
             // Update the total threads in shared state for utilization calculation
             if let Some(shared_state) = Arc::get_mut(&mut self.shared_state) {
@@ -445,6 +450,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Stop fail-safe guard
         let _ = fail_safe_handle.join();
 
+        // If we spawned a TimeManager after ponderhit, join it too
+        {
+            let mut h = self.post_ponder_tm_handle.lock().unwrap();
+            if let Some(handle) = h.take() {
+                let _ = handle.join();
+            }
+        }
+
         // Log steal metrics
         let steal_success_count = self.steal_success.load(Ordering::Relaxed);
         let steal_failure_count = self.steal_failure.load(Ordering::Relaxed);
@@ -488,9 +501,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             // Create search thread
             let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
 
-            let mut local_nodes = 0u64;
             let mut last_report = 0u64;
-            let mut last_seen_nodes = 0u64; // Track the last node count seen from searcher
+            let mut last_seen_nodes = 0u64; // Track the last absolute node count seen from searcher
 
             // Simple work loop
             while !shared_state.should_stop() {
@@ -598,9 +610,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                     // Note: WorkerGuard will automatically decrement active_workers when dropped
 
-                    // Calculate node difference and update local counter
-                    let node_diff = nodes.saturating_sub(last_seen_nodes);
-                    local_nodes += node_diff;
+                    // Track last absolute node count (for periodic reporting and final flush)
                     last_seen_nodes = nodes;
 
                     // Report nodes periodically (every 100k nodes)
@@ -636,14 +646,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             }
 
-            // Final node report
-            if local_nodes > last_report {
-                total_nodes.fetch_add(local_nodes - last_report, Ordering::Relaxed);
-                shared_state.add_nodes(local_nodes - last_report);
+            // Final node report (flush remaining absolute - reported)
+            if last_seen_nodes > last_report {
+                let rem = last_seen_nodes - last_report;
+                total_nodes.fetch_add(rem, Ordering::Relaxed);
+                shared_state.add_nodes(rem);
             }
 
             if log::log_enabled!(log::Level::Debug) {
-                debug!("Worker {id} stopped with {local_nodes} nodes");
+                debug!("Worker {id} stopped with {last_seen_nodes} nodes");
             }
         })
     }
@@ -721,8 +732,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             let soft_limit = tm.soft_limit_ms();
                             debug!("TimeManager created on ponderhit (soft limit: {soft_limit}ms)");
 
-                            // Start time manager thread
-                            let _tm_handle = self.start_time_manager(tm.clone());
+                            // Start time manager thread and remember its handle to join later
+                            let tm_handle = self.start_time_manager(tm.clone());
+                            {
+                                let mut h = self.post_ponder_tm_handle.lock().unwrap();
+                                // If somehow already set, overwrite (shouldn't happen with is_none() guard)
+                                *h = Some(tm_handle);
+                            }
 
                             *tm_guard = Some(tm);
                         }
@@ -740,8 +756,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Also check time manager on iterations after the first
             if iteration > 1 {
-                let tm_guard = self.time_manager.lock().unwrap();
-                if let Some(ref tm) = *tm_guard {
+                // Narrow lock scope by cloning Arc
+                let tm_opt = { self.time_manager.lock().unwrap().clone() };
+                if let Some(ref tm) = tm_opt {
                     let current_nodes = self.total_nodes.load(Ordering::Relaxed);
                     if tm.should_stop(current_nodes) {
                         if log::log_enabled!(log::Level::Debug) {
@@ -1039,8 +1056,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // Check both pending queue items AND active workers
                 // Calculate dynamic timeout based on remaining soft limit
                 let max_wait_ms = {
-                    let tm_guard = self.time_manager.lock().unwrap();
-                    if let Some(ref tm) = *tm_guard {
+                    let tm_opt = { self.time_manager.lock().unwrap().clone() };
+                    if let Some(ref tm) = tm_opt {
                         let elapsed_ms = search_start.elapsed().as_millis() as u64;
                         let soft_limit = tm.soft_limit_ms();
                         if soft_limit > elapsed_ms {
@@ -1062,8 +1079,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                     // Check TimeManager should_stop first
                     {
-                        let tm_guard = self.time_manager.lock().unwrap();
-                        if let Some(ref tm) = *tm_guard {
+                        let tm_opt = { self.time_manager.lock().unwrap().clone() };
+                        if let Some(ref tm) = tm_opt {
                             let nodes = self.total_nodes.load(Ordering::Relaxed);
                             if tm.should_stop(nodes) {
                                 debug!(
