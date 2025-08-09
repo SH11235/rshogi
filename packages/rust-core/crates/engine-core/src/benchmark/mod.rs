@@ -52,11 +52,11 @@ pub struct ComparisonResult {
 
 /// Run performance benchmark
 pub fn run_benchmark() -> BenchmarkResult {
-    println!("Running Shogi AI Benchmark...");
+    log::info!("Running Shogi AI Benchmark...");
 
     // Test move generation speed
     let movegen_result = benchmark_movegen();
-    println!("Move generation: {movegen_result} moves/sec");
+    log::info!("Move generation: {movegen_result} moves/sec");
 
     // Test search performance
     let search_result = benchmark_search();
@@ -100,7 +100,7 @@ fn benchmark_search() -> (u64, u64, Duration) {
     let mut total_time = Duration::ZERO;
 
     for (i, pos) in test_positions.iter().enumerate() {
-        println!("Testing position {}...", i + 1);
+        log::info!("Testing position {}...", i + 1);
 
         let limits = SearchLimits::builder().depth(8).fixed_time_ms(5000).build();
 
@@ -112,9 +112,12 @@ fn benchmark_search() -> (u64, u64, Duration) {
         total_nodes += result.stats.nodes;
         total_time += result.stats.elapsed;
 
-        println!(
+        log::info!(
             "  Best move: {:?}, Score: {}, Nodes: {}, Time: {:?}",
-            result.best_move, result.score, result.stats.nodes, result.stats.elapsed
+            result.best_move,
+            result.score,
+            result.stats.nodes,
+            result.stats.elapsed
         );
     }
 
@@ -125,7 +128,7 @@ fn benchmark_search() -> (u64, u64, Duration) {
 
 /// Benchmark evaluation function performance
 pub fn benchmark_evaluation() -> ComparisonResult {
-    println!("\nRunning Evaluation Function Benchmark...");
+    log::info!("\nRunning Evaluation Function Benchmark...");
 
     // Create test positions
     let test_positions = create_test_positions();
@@ -153,7 +156,7 @@ fn benchmark_evaluator<E: Evaluator>(
     evaluator: &E,
     positions: &[Position],
 ) -> EvaluationBenchmarkResult {
-    println!("  Benchmarking {name} evaluator...");
+    log::info!("  Benchmarking {name} evaluator...");
 
     let iterations_per_position = 10_000;
     let total_iterations = positions.len() * iterations_per_position;
@@ -172,8 +175,8 @@ fn benchmark_evaluator<E: Evaluator>(
     let evals_per_sec = (total_iterations as f64 / elapsed.as_secs_f64()) as u64;
     let avg_eval_time_ns = elapsed.as_nanos() as u64 / total_iterations as u64;
 
-    println!("    Evaluations per second: {evals_per_sec}");
-    println!("    Average time per eval: {avg_eval_time_ns} ns");
+    log::info!("    Evaluations per second: {evals_per_sec}");
+    log::info!("    Average time per eval: {avg_eval_time_ns} ns");
 
     EvaluationBenchmarkResult {
         name: name.to_string(),
@@ -312,30 +315,30 @@ mod tests {
 pub fn main() {
     let result = run_benchmark();
 
-    println!("\n=== Benchmark Results ===");
-    println!("Move Generation: {} moves/sec", result.movegen_speed);
-    println!("Search NPS: {} nodes/sec", result.nps);
-    println!("Total Nodes: {}", result.nodes);
-    println!("Total Time: {:?}", result.elapsed);
+    log::info!("\n=== Benchmark Results ===");
+    log::info!("Move Generation: {} moves/sec", result.movegen_speed);
+    log::info!("Search NPS: {} nodes/sec", result.nps);
+    log::info!("Total Nodes: {}", result.nodes);
+    log::info!("Total Time: {:?}", result.elapsed);
 
     // Run evaluation comparison
     let eval_comparison = benchmark_evaluation();
 
-    println!("\n=== Evaluation Function Comparison ===");
-    println!("Material Evaluator:");
-    println!("  - Evaluations/sec: {}", eval_comparison.material.evals_per_sec);
-    println!("  - Avg time: {} ns", eval_comparison.material.avg_eval_time_ns);
+    log::info!("\n=== Evaluation Function Comparison ===");
+    log::info!("Material Evaluator:");
+    log::info!("  - Evaluations/sec: {}", eval_comparison.material.evals_per_sec);
+    log::info!("  - Avg time: {} ns", eval_comparison.material.avg_eval_time_ns);
 
-    println!("\nNNUE Evaluator:");
-    println!("  - Evaluations/sec: {}", eval_comparison.nnue.evals_per_sec);
-    println!("  - Avg time: {} ns", eval_comparison.nnue.avg_eval_time_ns);
+    log::info!("\nNNUE Evaluator:");
+    log::info!("  - Evaluations/sec: {}", eval_comparison.nnue.evals_per_sec);
+    log::info!("  - Avg time: {} ns", eval_comparison.nnue.avg_eval_time_ns);
 
-    println!("\nPerformance Comparison:");
-    println!(
+    log::info!("\nPerformance Comparison:");
+    log::info!(
         "  - NNUE is {:.1}x slower than Material evaluator",
         eval_comparison.nnue_slowdown_factor
     );
-    println!(
+    log::info!(
         "  - NNUE overhead: {:.1}%",
         (eval_comparison.nnue_slowdown_factor - 1.0) * 100.0
     );

@@ -1869,7 +1869,7 @@ mod tests {
             }
         }
 
-        println!("OK: No king capture moves generated");
+        log::debug!("OK: No king capture moves generated");
     }
 
     #[test]
