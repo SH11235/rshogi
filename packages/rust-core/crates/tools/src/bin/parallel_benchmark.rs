@@ -11,9 +11,11 @@ use engine_core::{
     time_management::TimeControl,
 };
 use log::{debug, info, warn};
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::process::Command;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 struct PositionEntry {
@@ -21,13 +23,71 @@ struct PositionEntry {
     sfen: String,
 }
 
-#[derive(Debug, Clone)]
-struct ThreadResult {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BenchmarkResult {
     thread_count: usize,
-    avg_nps: f64,
+    mean_nps: f64,
+    std_dev: f64,
+    outlier_ratio: f64,
     avg_speedup: f64,
     avg_efficiency: f64,
-    avg_duplication_rate: f64,
+    duplication_percentage: f64,
+    effective_speedup: f64,
+    tt_hit_rate: f64,
+    pv_consistency: f64,
+}
+
+impl BenchmarkResult {
+    fn print_summary(&self) {
+        println!("Performance Summary for {} thread(s):", self.thread_count);
+        println!("  NPS: {:.0} ± {:.0}", self.mean_nps, self.std_dev);
+        println!("  Duplication: {:.1}%", self.duplication_percentage);
+        println!("  Effective Speedup: {:.2}x", self.effective_speedup);
+        println!("  TT Hit Rate: {:.1}%", self.tt_hit_rate * 100.0);
+        if self.pv_consistency > 0.0 {
+            println!("  PV Consistency: {:.1}%", self.pv_consistency * 100.0);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnvironmentMetadata {
+    version: String,
+    commit_hash: String,
+    cpu_info: CpuInfo,
+    build_info: BuildInfo,
+    timestamp: u64,
+    config: BenchmarkConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CpuInfo {
+    model: String,
+    cores: usize,
+    threads: usize,
+    cache_l3: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BuildInfo {
+    profile: String,
+    features: Vec<String>,
+    rustc_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BenchmarkConfig {
+    tt_size_mb: usize,
+    num_threads: Vec<usize>,
+    depth_limit: u8,
+    iterations: usize,
+    positions_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FullBenchmarkReport {
+    metadata: EnvironmentMetadata,
+    results: Vec<BenchmarkResult>,
 }
 
 #[derive(Parser, Debug)]
@@ -80,6 +140,143 @@ struct Args {
     /// Log level (debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Dump results to JSON file
+    #[arg(long)]
+    dump_json: Option<String>,
+
+    /// Baseline JSON file for regression detection
+    #[arg(long)]
+    baseline: Option<String>,
+
+    /// Exit with error code on regression
+    #[arg(long)]
+    strict: bool,
+}
+
+fn calculate_std_dev(values: &[f64], mean: f64) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let variance = values
+        .iter()
+        .map(|v| {
+            let diff = v - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    variance.sqrt()
+}
+
+fn calculate_outlier_ratio(values: &[f64], mean: f64, std_dev: f64) -> f64 {
+    if values.is_empty() || std_dev == 0.0 {
+        return 0.0;
+    }
+    let outliers = values.iter().filter(|v| (**v - mean).abs() > 2.0 * std_dev).count();
+    outliers as f64 / values.len() as f64
+}
+
+fn get_environment_metadata(args: &Args, positions_count: usize) -> EnvironmentMetadata {
+    // Get git commit hash
+    let commit_hash = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .unwrap_or_else(|| "unknown".to_string())
+        .trim()
+        .to_string();
+
+    // Get CPU info (Linux-specific)
+    let cpu_info = get_cpu_info();
+
+    // Get rustc version
+    let rustc_version = Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .unwrap_or_else(|| "unknown".to_string())
+        .trim()
+        .to_string();
+
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+    EnvironmentMetadata {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        commit_hash,
+        cpu_info,
+        build_info: BuildInfo {
+            profile: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+            .to_string(),
+            features: vec!["parallel".to_string()],
+            rustc_version,
+        },
+        timestamp,
+        config: BenchmarkConfig {
+            tt_size_mb: args.tt_size,
+            num_threads: args.threads.clone(),
+            depth_limit: args.depth,
+            iterations: args.iterations,
+            positions_count,
+        },
+    }
+}
+
+fn get_cpu_info() -> CpuInfo {
+    // Try to read from /proc/cpuinfo (Linux)
+    let cpu_info_str = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+
+    let mut model = "unknown".to_string();
+    let mut cores = 0;
+    let mut threads = 0;
+
+    for line in cpu_info_str.lines() {
+        if line.starts_with("model name") {
+            model = line.split(':').nth(1).unwrap_or("unknown").trim().to_string();
+        } else if line.starts_with("cpu cores") {
+            cores = line.split(':').nth(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        } else if line.starts_with("siblings") {
+            threads = line.split(':').nth(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        }
+    }
+
+    // If not Linux or parsing failed, use basic info
+    if cores == 0 {
+        cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        threads = cores;
+    }
+
+    CpuInfo {
+        model,
+        cores,
+        threads,
+        cache_l3: "unknown".to_string(), // Would need more complex parsing
+    }
+}
+
+fn check_regression(current: &BenchmarkResult, baseline: &BenchmarkResult) -> bool {
+    let speedup_regression = current.effective_speedup < baseline.effective_speedup * 0.95;
+    let dup_regression = current.duplication_percentage > baseline.duplication_percentage * 1.1;
+
+    if speedup_regression || dup_regression {
+        eprintln!("Performance regression detected for {} threads!", current.thread_count);
+        eprintln!(
+            "  Speedup: {:.2}x -> {:.2}x",
+            baseline.effective_speedup, current.effective_speedup
+        );
+        eprintln!(
+            "  Duplication: {:.1}% -> {:.1}%",
+            baseline.duplication_percentage, current.duplication_percentage
+        );
+        return true;
+    }
+    false
 }
 
 fn load_positions(path: &str) -> Result<Vec<PositionEntry>> {
@@ -198,17 +395,22 @@ fn main() -> Result<()> {
     info!("Using sharded transposition table with 16 shards");
     let tt = Arc::new(ShardedTranspositionTable::new(args.tt_size));
 
-    let mut thread_results = Vec::new();
+    let mut benchmark_results = Vec::new();
     let baseline_nps = Arc::new(std::sync::Mutex::new(None));
+    let baseline_effective_nodes = Arc::new(std::sync::Mutex::new(None));
 
     // Run benchmarks for each thread count
     for &thread_count in &args.threads {
         info!("\n=== Testing with {thread_count} thread(s) ===");
 
-        let mut total_nodes = 0u64;
-        let mut total_time_ms = 0u64;
-        let mut total_duplication = 0.0;
-        let mut count = 0;
+        let mut all_nps_values = Vec::new();
+        let mut all_duplication_values = Vec::new();
+        let mut all_tt_hit_rates = Vec::new();
+        let mut _total_nodes = 0u64;
+        let mut total_effective_nodes = 0u64;
+        let mut _total_time_ms = 0u64;
+        let pv_matches = 0;
+        let mut pv_total = 0;
 
         for (pos_idx, position_entry) in &positions_to_test {
             info!("Position {}: {}", pos_idx, position_entry.name);
@@ -227,7 +429,7 @@ fn main() -> Result<()> {
 
                 // Note: We can't clear TT due to Arc, but that's okay for benchmark
 
-                let (nodes, time_ms, duplication, _effective_nodes, best_move, score) =
+                let (nodes, time_ms, duplication, effective_nodes, best_move, score) =
                     run_single_search(
                         &mut position,
                         evaluator.clone(),
@@ -247,36 +449,69 @@ fn main() -> Result<()> {
                     "    Thread {thread_count}: {nodes} nodes in {time_ms}ms = {nps} nps, dup: {duplication:.1}%, move: {best_move}, score: {score}"
                 );
 
-                total_nodes += nodes;
-                total_time_ms += time_ms;
-                total_duplication += duplication;
-                count += 1;
+                if nps > 0 {
+                    all_nps_values.push(nps as f64);
+                }
+                all_duplication_values.push(duplication);
+                // TODO: Get actual TT hit rate from searcher
+                all_tt_hit_rates.push(0.0);
+
+                _total_nodes += nodes;
+                total_effective_nodes += effective_nodes;
+                _total_time_ms += time_ms;
+                pv_total += 1;
+                // TODO: Track PV consistency
             }
         }
 
-        if count == 0 {
+        if all_nps_values.is_empty() {
             warn!("No valid positions tested for {thread_count} threads");
             continue;
         }
 
-        // Calculate averages
-        let avg_nps = if total_time_ms > 0 {
-            (total_nodes * 1000) as f64 / total_time_ms as f64
+        // Calculate statistics
+        let mean_nps = all_nps_values.iter().sum::<f64>() / all_nps_values.len() as f64;
+        let std_dev = calculate_std_dev(&all_nps_values, mean_nps);
+        let outlier_ratio = calculate_outlier_ratio(&all_nps_values, mean_nps, std_dev);
+
+        let duplication_percentage = if !all_duplication_values.is_empty() {
+            all_duplication_values.iter().sum::<f64>() / all_duplication_values.len() as f64
         } else {
             0.0
         };
 
-        let avg_duplication = total_duplication / count as f64;
+        let tt_hit_rate = if !all_tt_hit_rates.is_empty() {
+            all_tt_hit_rates.iter().sum::<f64>() / all_tt_hit_rates.len() as f64
+        } else {
+            0.0
+        };
 
         // Calculate speedup relative to baseline (1 thread)
         let avg_speedup = {
             let mut baseline = baseline_nps.lock().unwrap();
             if baseline.is_none() && thread_count == 1 {
-                *baseline = Some(avg_nps);
+                *baseline = Some(mean_nps);
             }
             if let Some(base) = *baseline {
                 if base > 0.0 {
-                    avg_nps / base
+                    mean_nps / base
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            }
+        };
+
+        // Calculate effective speedup based on unique nodes
+        let effective_speedup = {
+            let mut baseline = baseline_effective_nodes.lock().unwrap();
+            if baseline.is_none() && thread_count == 1 {
+                *baseline = Some(total_effective_nodes as f64);
+            }
+            if let Some(base) = *baseline {
+                if base > 0.0 {
+                    total_effective_nodes as f64 / base
                 } else {
                     1.0
                 }
@@ -287,41 +522,52 @@ fn main() -> Result<()> {
 
         let avg_efficiency = avg_speedup / thread_count as f64;
 
-        info!("\nSummary for {thread_count} thread(s):");
-        info!("  Average NPS: {avg_nps:.0}");
-        info!("  Speedup: {avg_speedup:.2}x");
-        info!("  Efficiency: {:.1}%", avg_efficiency * 100.0);
-        info!("  Duplication: {avg_duplication:.1}%");
+        let pv_consistency = if pv_total > 0 {
+            pv_matches as f64 / pv_total as f64
+        } else {
+            0.0
+        };
 
-        thread_results.push(ThreadResult {
+        let result = BenchmarkResult {
             thread_count,
-            avg_nps,
+            mean_nps,
+            std_dev,
+            outlier_ratio,
             avg_speedup,
             avg_efficiency,
-            avg_duplication_rate: avg_duplication,
-        });
+            duplication_percentage,
+            effective_speedup,
+            tt_hit_rate,
+            pv_consistency,
+        };
+
+        info!("\nSummary for {thread_count} thread(s):");
+        result.print_summary();
+
+        benchmark_results.push(result);
     }
 
     // Print final summary
     println!("\n=== BENCHMARK SUMMARY ===");
-    println!("Threads | NPS      | Speedup | Efficiency | Duplication");
-    println!("--------|----------|---------|------------|------------");
-    for result in &thread_results {
+    println!("Threads | NPS      | Speedup | Efficiency | Duplication | Effective");
+    println!("--------|----------|---------|------------|-------------|----------");
+    for result in &benchmark_results {
         println!(
-            "{:7} | {:8.0} | {:7.2}x | {:9.1}% | {:10.1}%",
+            "{:7} | {:8.0} | {:7.2}x | {:9.1}% | {:11.1}% | {:8.2}x",
             result.thread_count,
-            result.avg_nps,
+            result.mean_nps,
             result.avg_speedup,
             result.avg_efficiency * 100.0,
-            result.avg_duplication_rate,
+            result.duplication_percentage,
+            result.effective_speedup,
         );
     }
 
     // Check targets (from parallel-search-improvement.md)
     println!("\n=== TARGET STATUS ===");
 
-    let two_thread = thread_results.iter().find(|r| r.thread_count == 2);
-    let four_thread = thread_results.iter().find(|r| r.thread_count == 4);
+    let two_thread = benchmark_results.iter().find(|r| r.thread_count == 2);
+    let four_thread = benchmark_results.iter().find(|r| r.thread_count == 4);
 
     if let Some(result) = two_thread {
         let target_met = result.avg_speedup >= 1.25;
@@ -341,13 +587,52 @@ fn main() -> Result<()> {
         );
     }
 
-    let dup_target_met = thread_results.iter().all(|r| r.avg_duplication_rate < 50.0);
+    let dup_target_met = benchmark_results.iter().all(|r| r.duplication_percentage < 50.0);
     println!("Duplication (<50%): {}", if dup_target_met { "✓" } else { "✗" });
 
-    if thread_results.iter().any(|r| r.avg_duplication_rate > 60.0) {
+    if benchmark_results.iter().any(|r| r.duplication_percentage > 60.0) {
         println!("\n⚠️  WARNING: High duplication rate detected (>60%)");
         println!("   This indicates significant redundant work between threads.");
         println!("   Consider implementing root move splitting or depth variation.");
+    }
+
+    // Save JSON report if requested
+    if let Some(json_path) = &args.dump_json {
+        let metadata = get_environment_metadata(&args, positions_to_test.len());
+        let report = FullBenchmarkReport {
+            metadata,
+            results: benchmark_results.clone(),
+        };
+
+        let json = serde_json::to_string_pretty(&report)?;
+        fs::write(json_path, json)?;
+        info!("\nBenchmark results saved to: {json_path}");
+    }
+
+    // Check for regression if baseline provided
+    let mut regression_detected = false;
+    if let Some(baseline_path) = &args.baseline {
+        let baseline_json = fs::read_to_string(baseline_path)?;
+        let baseline_report: FullBenchmarkReport = serde_json::from_str(&baseline_json)?;
+
+        println!("\n=== REGRESSION CHECK ===");
+        for current in &benchmark_results {
+            if let Some(baseline) =
+                baseline_report.results.iter().find(|r| r.thread_count == current.thread_count)
+            {
+                if check_regression(current, baseline) {
+                    regression_detected = true;
+                }
+            }
+        }
+
+        if !regression_detected {
+            println!("✅ No regression detected");
+        }
+    }
+
+    if regression_detected && args.strict {
+        std::process::exit(1);
     }
 
     Ok(())
