@@ -901,6 +901,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                 "Ponder search timeout, not sending bestmove (USI protocol)"
                             );
                             *ctx.search_state = SearchState::Idle;
+                            *ctx.current_search_is_ponder = false; // Reset ponder flag
                             break;
                         }
 
@@ -948,10 +949,12 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                     })?;
                                     *ctx.search_state = SearchState::Idle;
                                     *ctx.bestmove_sent = true;
+                                    *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
                                 } else {
                                     // Ponder search stopped - don't send bestmove
                                     log::debug!("Ponder search stopped, not sending bestmove");
                                     *ctx.search_state = SearchState::Idle;
+                                    *ctx.current_search_is_ponder = false; // Reset ponder flag
                                 }
                                 break;
                             }
@@ -981,6 +984,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                     // Ponder search - don't send bestmove (USI protocol)
                                     log::debug!("Ponder search finished without bestmove, not sending fallback (USI protocol)");
                                     *ctx.search_state = SearchState::Idle;
+                                    *ctx.current_search_is_ponder = false; // Reset ponder flag
                                     break;
                                 }
 
