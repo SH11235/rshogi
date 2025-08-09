@@ -472,6 +472,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let steal_success = self.steal_success.clone();
         let steal_failure = self.steal_failure.clone();
 
+        // Create worker-specific limits without info_callback to prevent INFO flood
+        // USI protocol: Only main thread should output INFO messages
+        let mut worker_limits = limits.clone();
+        worker_limits.info_callback = None;
+
         thread::spawn(move || {
             if log::log_enabled!(log::Level::Debug) {
                 debug!("Worker {id} started");
@@ -517,7 +522,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Search the specific root move (reusing the same position)
                                 let _result = search_thread.search_root_move(
                                     &mut pos,
-                                    &limits,
+                                    &worker_limits,
                                     depth,
                                     *move_to_search,
                                 );
@@ -553,7 +558,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             // Search the specific root move
                             let _result = search_thread.search_root_move(
                                 &mut pos,
-                                &limits,
+                                &worker_limits,
                                 depth,
                                 move_to_search,
                             );
@@ -579,7 +584,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             let mut pos = (*position).clone();
 
                             // Do the search
-                            let _result = search_thread.search_iteration(&mut pos, &limits, depth);
+                            let _result =
+                                search_thread.search_iteration(&mut pos, &worker_limits, depth);
 
                             // Update nodes (accumulate the difference)
                             let nodes = search_thread.searcher.nodes();
@@ -1117,7 +1123,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         thread::spawn(move || {
             // Calculate hard timeout
             use crate::time_management::TimeControl;
-            let hard_timeout_ms = match limits.time_control {
+
+            // Initial hard timeout calculation
+            let mut hard_timeout_ms = match &limits.time_control {
                 TimeControl::FixedTime { ms_per_move } => ms_per_move * 3, // 3x safety margin
                 TimeControl::Fischer {
                     white_ms,
@@ -1136,7 +1144,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     // Safety margin for I/O and network latency
                     const SAFETY_MARGIN_MS: u64 = 300;
 
-                    if main_time_ms > 0 {
+                    if *main_time_ms > 0 {
                         // In main time: use main time + one byoyomi period
                         main_time_ms + byoyomi_ms
                     } else {
@@ -1153,16 +1161,23 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     // For infinite search, use 1 hour as safety limit
                     3_600_000
                 }
-                TimeControl::Ponder(_) => {
-                    // For pondering, no time limit - use 1 hour as safety limit
-                    // Ponder searches should be stopped by 'stop' or 'ponderhit' commands
+                TimeControl::Ponder(ref _inner) => {
+                    // For pondering, initially use 1 hour as safety limit
+                    // Will switch to inner time control after ponderhit
                     3_600_000
                 }
             };
 
+            // Store inner time control for ponderhit switching
+            let ponder_inner = match &limits.time_control {
+                TimeControl::Ponder(ref inner) => Some((**inner).clone()),
+                _ => None,
+            };
+            let mut switched_after_hit = false;
+
             // Add extra safety margin for depth-limited searches
             // But keep it reasonable when time control is also specified
-            let hard_timeout_ms =
+            hard_timeout_ms =
                 if limits.depth.is_some() && matches!(limits.time_control, TimeControl::Infinite) {
                     hard_timeout_ms.max(10_000) // 10 seconds for depth-only searches (reduced from 60s)
                 } else {
@@ -1183,6 +1198,49 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         debug!("Fail-safe guard: Search stopped normally");
                     }
                     break;
+                }
+
+                // Check for ponderhit and switch to inner time control if needed
+                if !switched_after_hit {
+                    if let (Some(ref flag), Some(ref inner)) =
+                        (&limits.ponder_hit_flag, &ponder_inner)
+                    {
+                        if flag.load(Ordering::Acquire) {
+                            // Recalculate hard timeout based on inner time control
+                            hard_timeout_ms = match inner {
+                                TimeControl::FixedTime { ms_per_move } => ms_per_move * 3,
+                                TimeControl::Fischer {
+                                    white_ms,
+                                    black_ms,
+                                    increment_ms: _,
+                                } => {
+                                    let time_ms = white_ms.max(black_ms);
+                                    (time_ms * 9) / 10
+                                }
+                                TimeControl::Byoyomi {
+                                    main_time_ms,
+                                    byoyomi_ms,
+                                    periods: _,
+                                } => {
+                                    const SAFETY_MARGIN_MS: u64 = 300;
+                                    if *main_time_ms > 0 {
+                                        main_time_ms + byoyomi_ms
+                                    } else {
+                                        byoyomi_ms.saturating_sub(SAFETY_MARGIN_MS).max(100)
+                                    }
+                                }
+                                TimeControl::FixedNodes { .. } => 3_600_000,
+                                TimeControl::Infinite => 3_600_000,
+                                TimeControl::Ponder(_) => 3_600_000, // Shouldn't happen
+                            }
+                            .max(1000); // At least 1 second
+
+                            switched_after_hit = true;
+                            if log::log_enabled!(log::Level::Debug) {
+                                debug!("Fail-safe switched to inner time control after ponderhit: {hard_timeout_ms}ms");
+                            }
+                        }
+                    }
                 }
 
                 // Check if hard timeout exceeded
