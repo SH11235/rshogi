@@ -7,7 +7,7 @@ use clap::Parser;
 use engine_core::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     search::{parallel::ParallelSearcher, SearchLimitsBuilder, ShardedTranspositionTable},
-    shogi::Position,
+    shogi::{Move, Position},
     time_management::TimeControl,
 };
 use log::{debug, info, warn};
@@ -27,23 +27,38 @@ struct PositionEntry {
 struct BenchmarkResult {
     thread_count: usize,
     mean_nps: f64,
+    median_nps: f64,
     std_dev: f64,
     outlier_ratio: f64,
     avg_speedup: f64,
     avg_efficiency: f64,
     duplication_percentage: f64,
+    median_duplication: f64,
     effective_speedup: f64,
     tt_hit_rate: f64,
+    median_tt_hit_rate: f64,
     pv_consistency: f64,
+    mode: String,
+    mode_value: String,
 }
 
 impl BenchmarkResult {
     fn print_summary(&self) {
         println!("Performance Summary for {} thread(s):", self.thread_count);
-        println!("  NPS: {:.0} ± {:.0}", self.mean_nps, self.std_dev);
-        println!("  Duplication: {:.1}%", self.duplication_percentage);
+        println!("  Mode: {} ({})", self.mode, self.mode_value);
+        println!(
+            "  NPS: {:.0} ± {:.0} (median: {:.0})",
+            self.mean_nps, self.std_dev, self.median_nps
+        );
+        println!(
+            "  Duplication: {:.1}% (median: {:.1}%)",
+            self.duplication_percentage, self.median_duplication
+        );
         println!("  Effective Speedup: {:.2}x", self.effective_speedup);
-        println!("  TT Hit Rate: {:.1}%", self.tt_hit_rate * 100.0);
+        println!(
+            "  TT Hit Rate: {:.1}% (median: {:.1}%)",
+            self.tt_hit_rate, self.median_tt_hit_rate
+        );
         if self.pv_consistency > 0.0 {
             println!("  PV Consistency: {:.1}%", self.pv_consistency * 100.0);
         }
@@ -125,9 +140,9 @@ struct Args {
     #[arg(long)]
     material: bool,
 
-    /// Use sharded TT for better cache locality
+    /// Reuse TT across iterations (default: false = clean TT for each measurement)
     #[arg(long)]
-    sharded_tt: bool,
+    reuse_tt: bool,
 
     /// Position file (JSON format)
     #[arg(
@@ -175,6 +190,20 @@ fn calculate_outlier_ratio(values: &[f64], mean: f64, std_dev: f64) -> f64 {
     }
     let outliers = values.iter().filter(|v| (**v - mean).abs() > 2.0 * std_dev).count();
     outliers as f64 / values.len() as f64
+}
+
+fn calculate_median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
 }
 
 fn get_environment_metadata(args: &Args, positions_count: usize) -> EnvironmentMetadata {
@@ -279,6 +308,15 @@ fn check_regression(current: &BenchmarkResult, baseline: &BenchmarkResult) -> bo
     false
 }
 
+/// Configuration for a single search run
+struct SearchConfig {
+    threads: usize,
+    depth: u8,
+    fixed_ms: Option<u64>,
+    reuse_tt: bool,
+    tt_size_mb: usize,
+}
+
 fn load_positions(path: &str) -> Result<Vec<PositionEntry>> {
     let content = fs::read_to_string(path)?;
 
@@ -328,20 +366,25 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
     position: &mut Position,
     evaluator: Arc<E>,
     tt: Arc<ShardedTranspositionTable>,
-    threads: usize,
-    depth: u8,
-    fixed_ms: Option<u64>,
-) -> (u64, u64, f64, u64, String, i32) {
-    let mut searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), threads);
+    config: &SearchConfig,
+) -> (u64, u64, f64, u64, String, i32, f64, Option<Move>) {
+    // Create new TT if not reusing
+    let tt = if config.reuse_tt {
+        tt
+    } else {
+        Arc::new(ShardedTranspositionTable::new(config.tt_size_mb))
+    };
 
-    let limits = if let Some(ms) = fixed_ms {
+    let mut searcher = ParallelSearcher::new(evaluator.clone(), tt.clone(), config.threads);
+
+    let limits = if let Some(ms) = config.fixed_ms {
         SearchLimitsBuilder::default()
             .time_control(TimeControl::FixedTime { ms_per_move: ms })
             .build()
     } else {
         SearchLimitsBuilder::default()
             .time_control(TimeControl::Infinite)
-            .depth(depth)
+            .depth(config.depth)
             .build()
     };
 
@@ -359,10 +402,22 @@ fn run_single_search<E: Evaluator + Send + Sync + 'static>(
     let duplication = searcher.get_duplication_percentage();
     let effective_nodes = searcher.get_effective_nodes();
 
+    // Get TT hit rate
+    let tt_hit_rate = searcher.get_tt_hit_rate();
+
     let best_move = result.best_move.map_or("none".to_string(), |m| format!("{m}"));
     let score = result.score;
 
-    (nodes, time_ms, duplication, effective_nodes, best_move, score)
+    (
+        nodes,
+        time_ms,
+        duplication,
+        effective_nodes,
+        best_move,
+        score,
+        tt_hit_rate,
+        result.best_move,
+    )
 }
 
 fn main() -> Result<()> {
@@ -396,8 +451,9 @@ fn main() -> Result<()> {
     let tt = Arc::new(ShardedTranspositionTable::new(args.tt_size));
 
     let mut benchmark_results = Vec::new();
-    let baseline_nps = Arc::new(std::sync::Mutex::new(None));
-    let baseline_effective_nodes = Arc::new(std::sync::Mutex::new(None));
+    let baseline_nps = Arc::new(std::sync::Mutex::new(None::<f64>));
+    let _baseline_effective_nodes = Arc::new(std::sync::Mutex::new(None::<f64>));
+    let baseline_effective_nps = Arc::new(std::sync::Mutex::new(None::<f64>));
 
     // Run benchmarks for each thread count
     for &thread_count in &args.threads {
@@ -408,15 +464,16 @@ fn main() -> Result<()> {
         let mut all_tt_hit_rates = Vec::new();
         let mut _total_nodes = 0u64;
         let mut total_effective_nodes = 0u64;
-        let mut _total_time_ms = 0u64;
-        let pv_matches = 0;
-        let mut pv_total = 0;
+        let mut total_time_ms = 0u64;
+        let mut position_pv_consistencies = Vec::new(); // Per-position PV consistency
 
         for (pos_idx, position_entry) in &positions_to_test {
             info!("Position {}: {}", pos_idx, position_entry.name);
 
+            let mut position_best_moves = Vec::new(); // Best moves for this position across iterations
+
             // Parse position - handle error properly
-            let mut position = match Position::from_sfen(&position_entry.sfen) {
+            let position = match Position::from_sfen(&position_entry.sfen) {
                 Ok(pos) => pos,
                 Err(e) => {
                     warn!("Failed to parse position {}: {}", position_entry.name, e);
@@ -429,15 +486,32 @@ fn main() -> Result<()> {
 
                 // Note: We can't clear TT due to Arc, but that's okay for benchmark
 
-                let (nodes, time_ms, duplication, effective_nodes, best_move, score) =
-                    run_single_search(
-                        &mut position,
-                        evaluator.clone(),
-                        tt.clone(),
-                        thread_count,
-                        args.depth,
-                        args.fixed_total_ms,
-                    );
+                // Clone position to avoid state contamination
+                let mut position_copy = position.clone();
+
+                let search_config = SearchConfig {
+                    threads: thread_count,
+                    depth: args.depth,
+                    fixed_ms: args.fixed_total_ms,
+                    reuse_tt: args.reuse_tt,
+                    tt_size_mb: args.tt_size,
+                };
+
+                let (
+                    nodes,
+                    time_ms,
+                    duplication,
+                    effective_nodes,
+                    best_move,
+                    score,
+                    tt_hit_rate,
+                    actual_best_move,
+                ) = run_single_search(
+                    &mut position_copy,
+                    evaluator.clone(),
+                    tt.clone(),
+                    &search_config,
+                );
 
                 let nps = if time_ms > 0 {
                     nodes * 1000 / time_ms
@@ -446,21 +520,35 @@ fn main() -> Result<()> {
                 };
 
                 info!(
-                    "    Thread {thread_count}: {nodes} nodes in {time_ms}ms = {nps} nps, dup: {duplication:.1}%, move: {best_move}, score: {score}"
+                    "    Thread {thread_count}: {nodes} nodes in {time_ms}ms = {nps} nps, dup: {duplication:.1}%, TT hit: {tt_hit_rate:.1}%, move: {best_move}, score: {score}"
                 );
 
                 if nps > 0 {
                     all_nps_values.push(nps as f64);
                 }
                 all_duplication_values.push(duplication);
-                // TODO: Get actual TT hit rate from searcher
-                all_tt_hit_rates.push(0.0);
+                all_tt_hit_rates.push(tt_hit_rate);
+
+                // Track best move for PV consistency
+                if let Some(current_move) = actual_best_move {
+                    position_best_moves.push(current_move);
+                }
 
                 _total_nodes += nodes;
                 total_effective_nodes += effective_nodes;
-                _total_time_ms += time_ms;
-                pv_total += 1;
-                // TODO: Track PV consistency
+                total_time_ms += time_ms;
+            }
+
+            // Calculate PV consistency for this position
+            if position_best_moves.len() > 1 {
+                let mut consistent_count = 0;
+                for i in 1..position_best_moves.len() {
+                    if position_best_moves[i] == position_best_moves[i - 1] {
+                        consistent_count += 1;
+                    }
+                }
+                let consistency = consistent_count as f64 / (position_best_moves.len() - 1) as f64;
+                position_pv_consistencies.push(consistency);
             }
         }
 
@@ -471,6 +559,7 @@ fn main() -> Result<()> {
 
         // Calculate statistics
         let mean_nps = all_nps_values.iter().sum::<f64>() / all_nps_values.len() as f64;
+        let median_nps = calculate_median(&all_nps_values);
         let std_dev = calculate_std_dev(&all_nps_values, mean_nps);
         let outlier_ratio = calculate_outlier_ratio(&all_nps_values, mean_nps, std_dev);
 
@@ -479,12 +568,14 @@ fn main() -> Result<()> {
         } else {
             0.0
         };
+        let median_duplication = calculate_median(&all_duplication_values);
 
         let tt_hit_rate = if !all_tt_hit_rates.is_empty() {
             all_tt_hit_rates.iter().sum::<f64>() / all_tt_hit_rates.len() as f64
         } else {
             0.0
         };
+        let median_tt_hit_rate = calculate_median(&all_tt_hit_rates);
 
         // Calculate speedup relative to baseline (1 thread)
         let avg_speedup = {
@@ -503,15 +594,21 @@ fn main() -> Result<()> {
             }
         };
 
-        // Calculate effective speedup based on unique nodes
+        // Calculate effective speedup based on time-normalized unique nodes (effective NPS)
+        let effective_nps = if total_time_ms > 0 {
+            (total_effective_nodes as f64 * 1000.0) / total_time_ms as f64
+        } else {
+            0.0
+        };
+
         let effective_speedup = {
-            let mut baseline = baseline_effective_nodes.lock().unwrap();
+            let mut baseline = baseline_effective_nps.lock().unwrap();
             if baseline.is_none() && thread_count == 1 {
-                *baseline = Some(total_effective_nodes as f64);
+                *baseline = Some(effective_nps);
             }
             if let Some(base) = *baseline {
                 if base > 0.0 {
-                    total_effective_nodes as f64 / base
+                    effective_nps / base
                 } else {
                     1.0
                 }
@@ -522,23 +619,36 @@ fn main() -> Result<()> {
 
         let avg_efficiency = avg_speedup / thread_count as f64;
 
-        let pv_consistency = if pv_total > 0 {
-            pv_matches as f64 / pv_total as f64
+        // Calculate average PV consistency across all positions
+        let pv_consistency = if !position_pv_consistencies.is_empty() {
+            position_pv_consistencies.iter().sum::<f64>() / position_pv_consistencies.len() as f64
         } else {
             0.0
+        };
+
+        // Determine mode and value for display
+        let (mode, mode_value) = if let Some(ms) = args.fixed_total_ms {
+            ("time".to_string(), format!("{ms}ms"))
+        } else {
+            ("depth".to_string(), format!("depth={}", args.depth))
         };
 
         let result = BenchmarkResult {
             thread_count,
             mean_nps,
+            median_nps,
             std_dev,
             outlier_ratio,
             avg_speedup,
             avg_efficiency,
             duplication_percentage,
+            median_duplication,
             effective_speedup,
             tt_hit_rate,
+            median_tt_hit_rate,
             pv_consistency,
+            mode,
+            mode_value,
         };
 
         info!("\nSummary for {thread_count} thread(s):");
@@ -596,18 +706,24 @@ fn main() -> Result<()> {
         println!("   Consider implementing root move splitting or depth variation.");
     }
 
-    // Save JSON report if requested
-    if let Some(json_path) = &args.dump_json {
-        let metadata = get_environment_metadata(&args, positions_to_test.len());
-        let report = FullBenchmarkReport {
-            metadata,
-            results: benchmark_results.clone(),
-        };
+    // Save JSON report (always save with timestamp if not specified)
+    let json_path = if let Some(path) = &args.dump_json {
+        path.clone()
+    } else {
+        // Generate default filename with timestamp
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        format!("benchmark_results_{timestamp}.json")
+    };
 
-        let json = serde_json::to_string_pretty(&report)?;
-        fs::write(json_path, json)?;
-        info!("\nBenchmark results saved to: {json_path}");
-    }
+    let metadata = get_environment_metadata(&args, positions_to_test.len());
+    let report = FullBenchmarkReport {
+        metadata,
+        results: benchmark_results.clone(),
+    };
+
+    let json = serde_json::to_string_pretty(&report)?;
+    fs::write(&json_path, json)?;
+    info!("\nBenchmark results saved to: {json_path}");
 
     // Check for regression if baseline provided
     let mut regression_detected = false;

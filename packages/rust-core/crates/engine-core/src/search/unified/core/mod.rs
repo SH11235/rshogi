@@ -322,9 +322,12 @@ where
         if let Some(tt_entry) = searcher.probe_tt(hash) {
             // Track duplication stats
             if let Some(ref stats) = searcher.duplication_stats {
-                // For now, we consider a TT hit as potential duplication
-                // More sophisticated tracking could distinguish between first probe and duplicate
-                stats.add_node(true, true); // is_tt_hit=true, is_duplicate=true
+                // TT hit doesn't necessarily mean duplication
+                // A position can be in TT from a different path without being a duplicate
+                // For accurate duplicate detection, we'd need to track visited positions in current search
+                // For now, we only count as duplicate if depth is sufficient (heuristic)
+                let is_duplicate = tt_entry.depth() >= depth;
+                stats.add_node(true, is_duplicate); // is_tt_hit=true, is_duplicate based on depth
             }
 
             if tt_entry.depth() >= depth {
