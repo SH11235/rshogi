@@ -738,7 +738,7 @@ mod tests {
                 // Each thread performs a search
                 let result = engine_clone.search(&mut pos, limits);
 
-                println!("Thread {} completed search with {} nodes", thread_id, result.stats.nodes);
+                log::debug!("Thread {} completed search with {} nodes", thread_id, result.stats.nodes);
 
                 // Verify we got a valid result
                 assert!(result.best_move.is_some());
@@ -756,7 +756,7 @@ mod tests {
             total_nodes += nodes;
         }
 
-        println!("Total nodes searched across all threads: {total_nodes}");
+        log::debug!("Total nodes searched across all threads: {total_nodes}");
         assert!(total_nodes > 0);
     }
     */

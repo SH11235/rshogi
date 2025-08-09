@@ -1633,37 +1633,37 @@ impl DetailedTTMetrics {
             + self.replace_empty.load(Relaxed)
             + self.replace_worst.load(Relaxed);
 
-        println!("=== TT Detailed Metrics ===");
-        println!("Update patterns:");
-        println!(
+        log::info!("=== TT Detailed Metrics ===");
+        log::info!("Update patterns:");
+        log::info!(
             "  Existing updates: {} ({:.1}%)",
             self.update_existing.load(Relaxed),
             self.update_existing.load(Relaxed) as f64 / total_updates as f64 * 100.0
         );
-        println!(
+        log::info!(
             "  Empty slots used: {} ({:.1}%)",
             self.replace_empty.load(Relaxed),
             self.replace_empty.load(Relaxed) as f64 / total_updates as f64 * 100.0
         );
-        println!(
+        log::info!(
             "  Worst replaced: {} ({:.1}%)",
             self.replace_worst.load(Relaxed),
             self.replace_worst.load(Relaxed) as f64 / total_updates as f64 * 100.0
         );
 
-        println!("\nAtomic operations:");
-        println!("  Stores: {}", self.atomic_stores.load(Relaxed));
-        println!("  Loads: {}", self.atomic_loads.load(Relaxed));
+        log::info!("\nAtomic operations:");
+        log::info!("  Stores: {}", self.atomic_stores.load(Relaxed));
+        log::info!("  Loads: {}", self.atomic_loads.load(Relaxed));
 
-        println!("\nPrefetch statistics:");
-        println!("  Prefetch count: {}", self.prefetch_count.load(Relaxed));
+        log::info!("\nPrefetch statistics:");
+        log::info!("  Prefetch count: {}", self.prefetch_count.load(Relaxed));
 
         if self.cas_attempts.load(Relaxed) > 0 {
-            println!("\nCAS operations:");
-            println!("  Attempts: {}", self.cas_attempts.load(Relaxed));
-            println!("  Successes: {}", self.cas_successes.load(Relaxed));
-            println!("  Failures: {}", self.cas_failures.load(Relaxed));
-            println!(
+            log::info!("\nCAS operations:");
+            log::info!("  Attempts: {}", self.cas_attempts.load(Relaxed));
+            log::info!("  Successes: {}", self.cas_successes.load(Relaxed));
+            log::info!("  Failures: {}", self.cas_failures.load(Relaxed));
+            log::info!(
                 "  Key matches: {} ({:.1}% of failures)",
                 self.cas_key_match.load(Relaxed),
                 if self.cas_failures.load(Relaxed) > 0 {
@@ -1678,10 +1678,10 @@ impl DetailedTTMetrics {
         let depth_filtered = self.depth_filtered.load(Relaxed);
         let hashfull_filtered = self.hashfull_filtered.load(Relaxed);
         if depth_filtered > 0 || hashfull_filtered > 0 {
-            println!("\nOptimization filters:");
-            println!("  Depth filtered: {depth_filtered}");
-            println!("  Hashfull filtered: {hashfull_filtered}");
-            println!("  Effective updates: {}", self.effective_updates.load(Relaxed));
+            log::info!("\nOptimization filters:");
+            log::info!("  Depth filtered: {depth_filtered}");
+            log::info!("  Hashfull filtered: {hashfull_filtered}");
+            log::info!("  Effective updates: {}", self.effective_updates.load(Relaxed));
         }
     }
 }
@@ -3004,7 +3004,7 @@ mod tests {
         if let Some(metrics) = &tt.metrics {
             let cas_key_match = metrics.cas_key_match.load(Ordering::Relaxed);
             // We expect at least some key matches in high contention scenario
-            println!("CAS key matches in test: {cas_key_match}");
+            log::debug!("CAS key matches in test: {cas_key_match}");
         }
     }
 
@@ -3138,8 +3138,8 @@ mod tests {
 
         // Debug output to understand the difference
         if simd_idx != scalar_idx {
-            println!("SIMD idx: {simd_idx}, score: {simd_score}");
-            println!("Scalar idx: {scalar_idx}, score: {scalar_score}");
+            log::debug!("SIMD idx: {simd_idx}, score: {simd_score}");
+            log::debug!("Scalar idx: {scalar_idx}, score: {scalar_score}");
 
             // Check all scores to understand what's happening
             for i in 0..BUCKET_SIZE {
@@ -3149,7 +3149,7 @@ mod tests {
                     let data = bucket.entries[idx + 1].load(Ordering::Acquire);
                     let entry = TTEntry { key, data };
                     let score = entry.priority_score(current_age);
-                    println!(
+                    log::debug!(
                         "Entry {}: depth={}, age={}, score={}",
                         i,
                         entry.depth(),
@@ -3157,7 +3157,7 @@ mod tests {
                         score
                     );
                 } else {
-                    println!("Entry {i}: empty");
+                    log::debug!("Entry {i}: empty");
                 }
             }
         }
@@ -4131,7 +4131,7 @@ mod parallel_tests {
         assert_eq!(hits_without, 5000);
 
         // Log performance difference (prefetch might not always be faster in tests)
-        println!("Without prefetch: {time_without:?}, With prefetch: {time_with:?}");
+        log::debug!("Without prefetch: {time_without:?}, With prefetch: {time_with:?}");
     }
 
     #[test]

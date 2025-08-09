@@ -80,10 +80,12 @@ impl OpeningBookReader {
                 let version = u32::from_le_bytes(file_header[4..8].try_into().unwrap());
                 let position_count = u32::from_le_bytes(file_header[8..12].try_into().unwrap());
                 // ファイルヘッダー情報（必要に応じてログ出力）
-                println!("Found SFEN header: version={version}, position_count={position_count}");
+                log::debug!(
+                    "Found SFEN header: version={version}, position_count={position_count}"
+                );
             } else {
                 // ファイルヘッダーがない場合は位置を戻す
-                println!("No SFEN header found, parsing from beginning");
+                log::debug!("No SFEN header found, parsing from beginning");
                 cursor.set_position(0);
             }
         }
@@ -104,7 +106,7 @@ impl OpeningBookReader {
 
             // デバッグ用（必要に応じてコメントアウト）
             if positions_read < 3 {
-                println!(
+                log::debug!(
                     "Position {}: hash={}, move_count={}, cursor_pos={}",
                     positions_read,
                     position_hash,
@@ -149,7 +151,7 @@ impl OpeningBookReader {
             positions_read += 1;
         }
 
-        println!("Successfully parsed {positions_read} positions");
+        log::debug!("Successfully parsed {positions_read} positions");
 
         Ok(())
     }
@@ -537,13 +539,13 @@ mod tests {
                 let mut reader = OpeningBookReader::new();
 
                 // Act
-                println!("Loading file with {} bytes", data.len());
+                log::debug!("Loading file with {} bytes", data.len());
                 let result = reader.load_data(&data);
 
                 // Assert
                 assert!(result.is_ok(), "Failed to load real opening book file: {result:?}");
-                println!("Load result: {result:?}");
-                println!("Position count: {}", reader.position_count());
+                log::debug!("Load result: {result:?}");
+                log::debug!("Position count: {}", reader.position_count());
                 assert!(reader.position_count() > 0, "No positions loaded from file");
 
                 // 初期局面での手があることを確認
@@ -551,10 +553,10 @@ mod tests {
                     "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
                 let moves = reader.find_moves(initial_sfen);
                 // 定跡ファイルによっては初期局面の手がない場合もあるため、エラーチェックのみ
-                println!("Initial position moves found: {}", moves.len());
+                log::debug!("Initial position moves found: {}", moves.len());
             }
         } else {
-            println!("Real opening book file not found, skipping test");
+            log::debug!("Real opening book file not found, skipping test");
         }
     }
 }
