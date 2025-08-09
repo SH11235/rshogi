@@ -929,8 +929,6 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                 *ctx.search_state = SearchState::FallbackSent;
                             }
                         }
-
-                        // Keep FallbackSent state - will transition to Idle when Finished message arrives
                         break;
                     }
 
@@ -941,14 +939,20 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             ponder_move,
                             search_id,
                         }) => {
-                            // Only accept if it's for current search
+                            // Only accept if it's for current search and not pondering
                             if search_id == *ctx.current_search_id {
-                                send_response(UsiResponse::BestMove {
-                                    best_move,
-                                    ponder: ponder_move,
-                                })?;
-                                *ctx.search_state = SearchState::Idle;
-                                *ctx.bestmove_sent = true;
+                                if !*ctx.current_search_is_ponder {
+                                    send_response(UsiResponse::BestMove {
+                                        best_move,
+                                        ponder: ponder_move,
+                                    })?;
+                                    *ctx.search_state = SearchState::Idle;
+                                    *ctx.bestmove_sent = true;
+                                } else {
+                                    // Ponder search stopped - don't send bestmove
+                                    log::debug!("Ponder search stopped, not sending bestmove");
+                                    *ctx.search_state = SearchState::Idle;
+                                }
                                 break;
                             }
                         }
@@ -973,18 +977,17 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                         }) => {
                             // Only process if it's for current search
                             if search_id == *ctx.current_search_id {
-                                // Worker finished but no bestmove - use fallback strategy
-                                log::warn!(
-                                    "Worker finished without bestmove (from_guard: {from_guard})"
-                                );
-
                                 if *ctx.current_search_is_ponder {
                                     // Ponder search - don't send bestmove (USI protocol)
-                                    log::info!("Ponder search finished without bestmove, not sending fallback (USI protocol)");
+                                    log::debug!("Ponder search finished without bestmove, not sending fallback (USI protocol)");
                                     *ctx.search_state = SearchState::Idle;
                                     break;
                                 }
 
+                                // Normal search - use fallback strategy
+                                log::warn!(
+                                    "Worker finished without bestmove (from_guard: {from_guard})"
+                                );
                                 match generate_fallback_move(
                                     ctx.engine,
                                     partial_result,
@@ -1008,8 +1011,6 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                         *ctx.search_state = SearchState::FallbackSent;
                                     }
                                 }
-
-                                // State will transition to Idle when Finished arrives in main loop
                                 break;
                             }
                         }
@@ -1373,7 +1374,9 @@ fn search_worker(
                         }
                     }
                 } else {
-                    log::info!("Ponder search error (stopped), not sending bestmove (USI protocol)");
+                    log::info!(
+                        "Ponder search error (stopped), not sending bestmove (USI protocol)"
+                    );
                 }
             }
         }
