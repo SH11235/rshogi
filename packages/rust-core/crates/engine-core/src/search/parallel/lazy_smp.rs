@@ -20,8 +20,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Barrier,
     },
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 /// Lazy SMP searcher - simple but effective parallel search
@@ -55,15 +54,7 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
         // Create barrier for synchronized start
         let barrier = Arc::new(Barrier::new(self.num_threads + 1)); // +1 for main thread
 
-        // Set up timer thread for time-limited searches
-        if let TimeControl::FixedTime { ms_per_move } = limits.time_control {
-            let timer_stop = should_stop.clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(ms_per_move));
-                info!("Timer expired after {ms_per_move}ms, stopping search");
-                timer_stop.store(true, Ordering::Release);
-            });
-        }
+        // Note: Timer thread removed - relying on internal TimeManager for time control
 
         // Clear TT for new search (TODO: make TT clearable through Arc)
         // self.tt.clear();
@@ -119,6 +110,7 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
 
                         let depth_offset = thread_id % 2; // Alternate between depths for diversity
                         let max_depth = limits.depth.unwrap_or(64);
+                        let mut thread_nodes: u64 = 0; // Accumulate nodes for this thread
 
                         // Manual iterative deepening
                         for depth in 1..=max_depth {
@@ -143,16 +135,20 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
 
                             let result = searcher.search(&mut pos, search_limits);
 
+                            // Accumulate nodes from each iteration
+                            thread_nodes = thread_nodes.saturating_add(result.stats.nodes);
+
                             if let Some(best_move) = result.best_move {
                                 thread_result.best_move = Some(best_move);
                                 thread_result.score = result.score;
                                 thread_result.stats.depth = result.stats.depth;
+                                thread_result.stats.nodes = thread_nodes; // Update cumulative nodes
                             }
                         }
                     }
 
-                    // Update total nodes
-                    let final_nodes = searcher.nodes();
+                    // Update total nodes - use result.stats.nodes for consistency
+                    let final_nodes = thread_result.stats.nodes;
                     total_nodes.fetch_add(final_nodes, Ordering::Relaxed);
 
                     debug!("Thread {thread_id} finished with {final_nodes} nodes");
@@ -170,10 +166,10 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
             let results: Vec<SearchResult> =
                 handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-            // Select best result (from main thread or highest scoring)
+            // Select best result (prefer results with moves, then by score, then by depth)
             let mut best = results
                 .into_iter()
-                .max_by_key(|r| (r.best_move.is_some() as i32, r.score))
+                .max_by_key(|r| (r.best_move.is_some() as i32, r.score, r.stats.depth))
                 .unwrap_or_else(|| SearchResult::new(None, 0, SearchStats::default()));
 
             // Update final stats with total nodes and elapsed time
