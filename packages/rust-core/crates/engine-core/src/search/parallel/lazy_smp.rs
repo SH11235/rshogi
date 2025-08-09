@@ -45,6 +45,7 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
 
     /// Search with Lazy SMP
     pub fn search(&mut self, position: &Position, limits: SearchLimits) -> SearchResult {
+        assert!(self.num_threads > 0, "num_threads must be > 0");
         info!("Starting Lazy SMP search with {} threads", self.num_threads);
         info!("Search limits: {limits:?}");
 
@@ -104,7 +105,7 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
 
                         // Single search call - UnifiedSearcher handles iterative deepening internally
                         thread_result = searcher.search(&mut pos, search_limits);
-                        
+
                         // Safety check: ensure we got valid node count in time mode
                         debug_assert!(
                             thread_result.stats.nodes > 0,
@@ -155,9 +156,11 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                                 thread_result.best_move = Some(best_move);
                                 thread_result.score = result.score;
                                 thread_result.stats.depth = result.stats.depth;
-                                thread_result.stats.nodes = thread_nodes; // Update cumulative nodes
                             }
                         }
+
+                        // Always update cumulative nodes (even if no PV was found)
+                        thread_result.stats.nodes = thread_nodes;
                     }
 
                     // Update total nodes - use result.stats.nodes for consistency
