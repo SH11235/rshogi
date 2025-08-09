@@ -2468,14 +2468,14 @@ mod tests {
 
             // デバッグ: 初期配置の確認
             if piece.is_none() {
-                println!("No piece at {from:?}");
-                println!("Expected: {expected_piece_type:?}");
+                log::debug!("No piece at {from:?}");
+                log::debug!("Expected: {expected_piece_type:?}");
                 // 周辺の駒を確認
                 for rank in 0..9 {
                     for file in 0..9 {
                         if let Some(p) = pos.board.piece_on(Square(file + rank * 9)) {
                             if p.piece_type == expected_piece_type && p.color == expected_color {
-                                println!(
+                                log::debug!(
                                     "Found {expected_piece_type:?} at Square({} = file {file}, rank {rank})",
                                     file + rank * 9
                                 );
@@ -3497,7 +3497,7 @@ mod tests {
     fn test_get_lance_attackers_performance() {
         // Skip test in CI environment
         if crate::util::is_ci_environment() {
-            println!("Skipping performance test in CI environment");
+            log::debug!("Skipping performance test in CI environment");
             return;
         }
 
@@ -3537,9 +3537,9 @@ mod tests {
         let ns_per_call = elapsed.as_nanos() / iterations as u128;
         let calls_per_sec = 1_000_000_000 / ns_per_call;
 
-        println!("Lance attackers performance:");
-        println!("  Time per call: {ns_per_call} ns");
-        println!("  Calls per second: {calls_per_sec}");
+        log::debug!("Lance attackers performance:");
+        log::debug!("  Time per call: {ns_per_call} ns");
+        log::debug!("  Calls per second: {calls_per_sec}");
 
         // Assert reasonable performance
         // Note: Debug builds are much slower than release builds
