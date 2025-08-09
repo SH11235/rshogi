@@ -13,10 +13,10 @@ use crate::{
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
         history::{CounterMoveHistory, History},
-        parallel::DuplicationStats,
-        tt::{NodeType, TranspositionTable},
+        parallel::shared::DuplicationStats,
+        tt::NodeType,
         types::SearchStack,
-        SearchLimits, SearchResult, SearchStats,
+        SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable,
     },
     shogi::{Move, Position},
 };
@@ -58,7 +58,7 @@ pub struct UnifiedSearcher<
 
     /// Transposition table (conditionally compiled)
     /// Wrapped in Arc for sharing between parallel searchers
-    tt: Option<Arc<TranspositionTable>>,
+    tt: Option<Arc<ShardedTranspositionTable>>,
 
     /// Move ordering history (shared with move ordering)
     history: Arc<Mutex<History>>,
@@ -115,7 +115,7 @@ where
         Self {
             evaluator: Arc::new(evaluator),
             tt: if USE_TT {
-                Some(Arc::new(TranspositionTable::new(TT_SIZE_MB)))
+                Some(Arc::new(ShardedTranspositionTable::new(TT_SIZE_MB)))
             } else {
                 None
             },
@@ -150,7 +150,7 @@ where
         Self {
             evaluator,
             tt: if USE_TT {
-                Some(Arc::new(TranspositionTable::new(TT_SIZE_MB)))
+                Some(Arc::new(ShardedTranspositionTable::new(TT_SIZE_MB)))
             } else {
                 None
             },
@@ -174,7 +174,7 @@ where
     }
 
     /// Create a new unified searcher with shared transposition table
-    pub fn with_shared_tt(evaluator: Arc<E>, tt: Arc<TranspositionTable>) -> Self {
+    pub fn with_shared_tt(evaluator: Arc<E>, tt: Arc<ShardedTranspositionTable>) -> Self {
         let history = Arc::new(Mutex::new(History::new()));
         // Pre-allocate search stack for maximum search depth
         let mut search_stack = Vec::with_capacity(crate::search::constants::MAX_PLY + 1);
@@ -212,6 +212,11 @@ where
     /// Set duplication statistics for parallel search
     pub fn set_duplication_stats(&mut self, stats: Arc<DuplicationStats>) {
         self.duplication_stats = Some(stats);
+    }
+
+    /// Evaluate the current position
+    pub fn evaluate(&self, pos: &Position) -> i32 {
+        self.evaluator.evaluate(pos)
     }
 
     /// Get TT statistics (for benchmarking)
@@ -262,11 +267,11 @@ where
 
         // --- 新しい分岐: Ponder用の特別処理 ---
         if matches!(limits.time_control, TimeControl::Ponder(_)) {
-            log::info!("Creating TimeManager for PONDER mode");
+            log::debug!("Creating TimeManager for PONDER mode");
 
             // ① SearchLimits -> TimeLimits へ（ここで inner に unwrap される）
             let pending_limits: TimeLimits = limits.clone().into();
-            log::info!(
+            log::debug!(
                 "After conversion for ponder, time_limits.time_control: {:?}",
                 pending_limits.time_control
             );
@@ -281,12 +286,12 @@ where
             self.time_manager = Some(time_manager);
         } else if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
             // 通常の時間制御またはdepth制限がある場合
-            log::info!("Creating TimeManager with time_control: {:?}", limits.time_control);
+            log::debug!("Creating TimeManager with time_control: {:?}", limits.time_control);
 
             // Convert SearchLimits to TimeLimits
             let time_limits: TimeLimits = limits.clone().into();
 
-            log::info!(
+            log::debug!(
                 "After conversion, time_limits.time_control: {:?}",
                 time_limits.time_control
             );
@@ -563,7 +568,29 @@ where
     ) {
         if USE_TT {
             if let Some(ref tt) = self.tt {
+                // Store entry (duplication tracking temporarily disabled)
                 tt.store(hash, best_move, score as i16, 0, depth, node_type);
+
+                // // Update duplication statistics based on store result
+                // if let Some(ref stats) = self.duplication_stats {
+                //     // Always increment total nodes when storing
+                //     stats.total_nodes.fetch_add(1, Ordering::Relaxed);
+
+                //     // Only increment unique if this was a new entry
+                //     if is_new_entry {
+                //         stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
+                //     }
+
+                //     // Debug logging for duplication stats
+                //     let total = stats.total_nodes.load(Ordering::Relaxed);
+                //     let unique = stats.unique_nodes.load(Ordering::Relaxed);
+                //     if total % 1000 == 0 {
+                //         debug!(
+                //             "DuplicationStats snapshot: unique={unique}, total={total}, dup%={:.1}",
+                //             ((total - unique) as f64 * 100.0 / total as f64)
+                //         );
+                //     }
+                // }  // Temporarily disabled
             }
         }
     }
@@ -643,7 +670,7 @@ mod tests {
     fn test_shared_tt_creation() {
         // Test that we can create a searcher with a shared TT
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(crate::search::TranspositionTable::new(16));
+        let tt = Arc::new(crate::search::ShardedTranspositionTable::new(16));
 
         // Create two searchers with the same TT
         let searcher1 =

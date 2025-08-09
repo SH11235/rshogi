@@ -7,20 +7,23 @@ use crate::{
     search::{
         history::{CounterMoveHistory, History},
         unified::{ordering::KillerTable, UnifiedSearcher},
-        SearchLimits, SearchResult,
+        SearchLimits, SearchResult, SearchStats,
     },
     shogi::{Move, Position},
 };
 use crossbeam_utils::CachePadded;
+use log::trace;
 use smallvec::SmallVec;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::shared::SharedSearchState;
+#[cfg(feature = "ybwc")]
+use super::shared::SplitPoint;
 
 /// Thread state for park control
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -149,17 +152,14 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     pub fn new(
         id: usize,
         evaluator: Arc<E>,
-        tt: Arc<crate::search::TranspositionTable>,
+        tt: Arc<crate::search::ShardedTranspositionTable>,
         shared_state: Arc<SharedSearchState>,
-        duplication_stats: Option<Arc<super::DuplicationStats>>,
     ) -> Self {
         // Create searcher with shared TT
         let mut searcher = UnifiedSearcher::with_shared_tt(evaluator, tt);
 
-        // Set duplication stats if provided
-        if let Some(stats) = duplication_stats {
-            searcher.set_duplication_stats(stats);
-        }
+        // Set duplication stats from shared state
+        searcher.set_duplication_stats(shared_state.duplication_stats.clone());
 
         Self {
             id,
@@ -266,6 +266,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             // Add to local counter and auto-flush if threshold reached
             self.local_node_counter.add(diff, &self.shared_state);
             self.last_nodes = current_nodes;
+            trace!("Thread {} reported {} nodes (total: {})", self.id, diff, current_nodes);
         }
     }
 
@@ -289,6 +290,82 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
         self.search(position, limits.clone(), depth)
     }
 
+    /// Search a specific root move
+    pub fn search_root_move(
+        &mut self,
+        position: &mut Position,
+        limits: &SearchLimits,
+        depth: u8,
+        root_move: Move,
+    ) -> SearchResult {
+        // Set depth for dynamic threshold calculation
+        self.local_node_counter.set_depth(depth);
+
+        // Update searcher's internal tables with thread-local versions
+        self.searcher.set_history(self.local_history.clone());
+        self.searcher.set_counter_moves(self.local_counter_moves.clone());
+
+        // Create depth-limited search with shared stop flag
+        let depth_limits = SearchLimits {
+            depth: Some(depth),
+            stop_flag: Some(self.shared_state.stop_flag.clone()),
+            ..limits.clone()
+        };
+
+        // Apply the root move
+        let undo_info = position.do_move(root_move);
+
+        // Search from the resulting position
+        let result = if depth > 1 {
+            // Search with reduced depth
+            let search_result = self.searcher.search(position, depth_limits);
+
+            // Negate score (we searched from opponent's perspective)
+            SearchResult {
+                score: -search_result.score,
+                stats: search_result.stats,
+                best_move: Some(root_move),
+            }
+        } else {
+            // At depth 1, just evaluate the position
+            let score = -self.searcher.evaluate(position);
+            SearchResult {
+                score,
+                stats: SearchStats {
+                    depth: 1,
+                    nodes: 1,
+                    elapsed: Duration::from_millis(0),
+                    pv: vec![root_move],
+                    seldepth: None,
+                    aspiration_failures: None,
+                    tt_hits: None,
+                    null_cuts: None,
+                    lmr_count: None,
+                    aspiration_hits: None,
+                    re_searches: None,
+                    duplication_percentage: None,
+                },
+                best_move: Some(root_move),
+            }
+        };
+
+        // Unmake the move
+        position.undo_move(root_move, undo_info);
+
+        // Update local tables from searcher
+        self.local_history = self.searcher.get_history();
+        self.local_counter_moves = self.searcher.get_counter_moves();
+
+        // Update shared state if this is a better result
+        self.shared_state
+            .maybe_update_best(result.score, Some(root_move), depth, self.generation);
+
+        // Force flush at end of search to ensure all nodes are counted
+        self.flush_nodes();
+
+        result
+    }
+
     /// Check if this thread should park based on depth
     pub fn should_park(&self, depth: u8, max_depth: u8) -> bool {
         // Only park if:
@@ -302,7 +379,25 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     /// Park thread with appropriate duration
     pub fn park_with_timeout(&self, max_depth: u8, time_left_ms: Option<u64>) {
         let duration = calculate_park_duration(max_depth, time_left_ms);
-        thread::park_timeout(duration);
+        let start = Instant::now();
+
+        // Poll every 5ms to check stop flag (more frequently to avoid hanging)
+        let poll_interval = Duration::from_millis(5);
+
+        loop {
+            // Park for short interval
+            thread::park_timeout(poll_interval);
+
+            // Check stop flag immediately after waking
+            if self.shared_state.should_stop() {
+                break;
+            }
+
+            // Check if we've waited long enough
+            if start.elapsed() >= duration {
+                break;
+            }
+        }
     }
 
     /// Set thread state
@@ -326,22 +421,115 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     pub fn is_idle(&self) -> bool {
         self.state.load(Ordering::Acquire) == ThreadState::Idle as u8
     }
+
+    /// Process work from a split point (YBWC)
+    #[cfg(feature = "ybwc")]
+    pub fn process_split_point(&mut self, split_point: &Arc<SplitPoint>) {
+        // Increment active thread count for this split point
+        split_point.add_thread();
+        self.shared_state.increment_active_threads();
+
+        // Process moves from the split point until no more work
+        while !self.should_stop() {
+            // Try to get next move from split point
+            let Some(mv) = split_point.get_next_move() else {
+                break;
+            };
+
+            // Clone position for this thread's search
+            let mut pos = split_point.position.clone();
+
+            // Apply the move
+            let undo_info = pos.do_move(mv);
+
+            // Search from the resulting position
+            let limits = SearchLimits {
+                depth: Some(split_point.depth.saturating_sub(1)),
+                stop_flag: Some(self.shared_state.stop_flag.clone()),
+                ..Default::default()
+            };
+
+            let result = self.searcher.search(&mut pos, limits);
+
+            // Negate score (searched from opponent's perspective)
+            let score = -result.score;
+
+            // Undo the move
+            pos.undo_move(mv, undo_info);
+
+            // Update split point's best score if this is better
+            if split_point.update_best(score, mv) {
+                // Beta cutoff found - stop searching
+                break;
+            }
+
+            // Report nodes periodically
+            self.report_nodes();
+        }
+
+        // Clean up when done
+        split_point.remove_thread();
+        self.shared_state.decrement_active_threads();
+        self.flush_nodes();
+    }
+
+    /// Search the PV move at a split point (YBWC)
+    #[cfg(feature = "ybwc")]
+    pub fn search_pv_at_split_point(
+        &mut self,
+        split_point: &Arc<SplitPoint>,
+        pv_move: Move,
+    ) -> i32 {
+        self.shared_state.increment_active_threads();
+
+        // Clone position for PV search
+        let mut pos = split_point.position.clone();
+
+        // Apply the PV move
+        let undo_info = pos.do_move(pv_move);
+
+        // Search from the resulting position
+        let limits = SearchLimits {
+            depth: Some(split_point.depth.saturating_sub(1)),
+            stop_flag: Some(self.shared_state.stop_flag.clone()),
+            ..Default::default()
+        };
+
+        let result = self.searcher.search(&mut pos, limits);
+
+        // Negate score (searched from opponent's perspective)
+        let score = -result.score;
+
+        // Undo the move
+        pos.undo_move(pv_move, undo_info);
+
+        // Update split point's best score
+        split_point.update_best(score, pv_move);
+
+        // Mark PV as searched (signals other threads can start)
+        split_point.mark_pv_searched();
+
+        self.shared_state.decrement_active_threads();
+        self.flush_nodes();
+
+        score
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{evaluation::evaluate::MaterialEvaluator, search::TranspositionTable};
+    use crate::{evaluation::evaluate::MaterialEvaluator, search::ShardedTranspositionTable};
     use std::sync::{atomic::AtomicBool, Arc};
 
     #[test]
     fn test_search_thread_creation() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        let thread = SearchThread::new(0, evaluator, tt, shared_state, None);
+        let thread = SearchThread::new(0, evaluator, tt, shared_state);
         assert_eq!(thread.id, 0);
         assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
     }
@@ -349,11 +537,11 @@ mod tests {
     #[test]
     fn test_thread_state_transitions() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
-        let thread = SearchThread::new(1, evaluator, tt, shared_state, None);
+        let thread = SearchThread::new(1, evaluator, tt, shared_state);
 
         // Initially searching
         assert_eq!(thread.state.load(Ordering::Relaxed), ThreadState::Searching as u8);
@@ -370,19 +558,14 @@ mod tests {
     #[test]
     fn test_start_depth_calculation() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(TranspositionTable::new(16));
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let shared_state = Arc::new(SharedSearchState::new(stop_flag));
 
         // Test each thread ID separately to avoid stack overflow in release builds
         for thread_id in 0..5 {
-            let thread = SearchThread::new(
-                thread_id,
-                evaluator.clone(),
-                tt.clone(),
-                shared_state.clone(),
-                None,
-            );
+            let thread =
+                SearchThread::new(thread_id, evaluator.clone(), tt.clone(), shared_state.clone());
 
             // Calculate expected skip based on thread ID
             let skip = if thread_id == 0 {

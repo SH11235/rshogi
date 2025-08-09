@@ -31,6 +31,11 @@ where
 {
     use crate::time_management::TimeControl;
 
+    // If already stopped, check every node for immediate exit
+    if searcher.context.should_stop() {
+        return 0x0; // Check every node for immediate response
+    }
+
     // If stop_flag is present, use more frequent polling for responsiveness
     if searcher.context.limits().stop_flag.is_some() {
         return 0x1F; // Check every 32 nodes for responsive stop handling
@@ -172,6 +177,12 @@ where
         // Undo move
         pos.undo_move(mv, undo_info);
 
+        // Check stop flag immediately after alpha-beta search
+        if searcher.context.should_stop() {
+            // Skip TT storage when stopping - adds overhead
+            break;
+        }
+
         // Process events (including ponder hit) every move at root
         searcher.context.process_events(&searcher.time_manager);
 
@@ -229,8 +240,8 @@ where
     // Get adaptive polling interval based on time control
     let event_interval = get_event_poll_interval(searcher);
 
-    // Process events based on adaptive interval
-    if (searcher.stats.nodes & event_interval) == 0 {
+    // Process events based on adaptive interval (handle interval=0 for immediate check)
+    if event_interval == 0 || (searcher.stats.nodes & event_interval) == 0 {
         // Add debug logging for ponder mode
         if matches!(
             &searcher.context.limits().time_control,
@@ -309,6 +320,16 @@ where
     let hash = pos.zobrist_hash;
     if USE_TT {
         if let Some(tt_entry) = searcher.probe_tt(hash) {
+            // Track duplication stats
+            if let Some(ref stats) = searcher.duplication_stats {
+                // TT hit doesn't necessarily mean duplication
+                // A position can be in TT from a different path without being a duplicate
+                // For accurate duplicate detection, we'd need to track visited positions in current search
+                // For now, we only count as duplicate if depth is sufficient (heuristic)
+                let is_duplicate = tt_entry.depth() >= depth;
+                stats.add_node(true, is_duplicate); // is_tt_hit=true, is_duplicate based on depth
+            }
+
             if tt_entry.depth() >= depth {
                 let tt_score = tt_entry.score();
                 match tt_entry.node_type() {
@@ -325,6 +346,11 @@ where
                         }
                     }
                 }
+            }
+        } else {
+            // No TT hit - this is a unique node
+            if let Some(ref stats) = searcher.duplication_stats {
+                stats.add_node(false, false);
             }
         }
     }
@@ -382,7 +408,7 @@ where
 
     // Check time limits in quiescence search (especially important for FixedNodes)
     let event_interval = get_event_poll_interval(searcher);
-    if (searcher.stats.nodes & event_interval) == 0 {
+    if event_interval == 0 || (searcher.stats.nodes & event_interval) == 0 {
         // Check both context stop flag and time manager
         if searcher.context.should_stop() {
             return alpha;
@@ -464,6 +490,11 @@ where
 
     // Search captures
     for &mv in ordered_captures.iter() {
+        // Check stop flag at the beginning of each capture move
+        if searcher.context.should_stop() {
+            return alpha; // Return current alpha value
+        }
+
         // Delta pruning - skip captures that can't improve position enough
         if USE_PRUNING && delta_margin > 0 {
             // Estimate material gain from capture

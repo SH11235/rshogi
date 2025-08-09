@@ -309,6 +309,7 @@ mod tests {
                 pv_match_rate: 100.0,
                 nodes: 100000,
                 elapsed: std::time::Duration::from_secs(1),
+                raw_measurements: Vec::new(),
             },
             ParallelBenchmarkResult {
                 thread_count: 2,
@@ -320,6 +321,7 @@ mod tests {
                 pv_match_rate: 98.0,
                 nodes: 180000,
                 elapsed: std::time::Duration::from_secs(1),
+                raw_measurements: Vec::new(),
             },
         ];
 
@@ -361,6 +363,7 @@ mod tests {
             pv_match_rate: 100.0,
             nodes: 100000,
             elapsed: std::time::Duration::from_secs(1),
+            raw_measurements: Vec::new(),
         }];
 
         let current_results = vec![ParallelBenchmarkResult {
@@ -373,6 +376,7 @@ mod tests {
             pv_match_rate: 100.0,
             nodes: 95000,
             elapsed: std::time::Duration::from_secs(1),
+            raw_measurements: Vec::new(),
         }];
 
         let baseline_summary = calculate_summary(&baseline_results);
