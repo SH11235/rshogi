@@ -55,11 +55,6 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
         // Create barrier for synchronized start
         let barrier = Arc::new(Barrier::new(self.num_threads + 1)); // +1 for main thread
 
-        // Note: Timer thread removed - relying on internal TimeManager for time control
-
-        // Clear TT for new search (TODO: make TT clearable through Arc)
-        // self.tt.clear();
-
         let result = scope(|s| {
             let mut handles = Vec::with_capacity(self.num_threads);
 
