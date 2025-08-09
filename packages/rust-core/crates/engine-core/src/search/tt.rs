@@ -2098,11 +2098,52 @@ impl TranspositionTable {
         self.store_entry(params);
     }
 
+    /// Store entry and return whether it was a new entry
+    pub fn store_and_check_new(
+        &self,
+        hash: u64,
+        mv: Option<Move>,
+        score: i16,
+        eval: i16,
+        depth: u8,
+        node_type: NodeType,
+    ) -> bool {
+        let params = TTEntryParams {
+            key: hash,
+            mv,
+            score,
+            eval,
+            depth,
+            node_type,
+            age: self.age,
+            is_pv: false,
+            ..Default::default()
+        };
+        self.store_entry_and_check_new(params)
+    }
+
     /// Store entry in transposition table with parameters
     pub fn store_with_params(&self, mut params: TTEntryParams) {
         // Override age with current table age
         params.age = self.age;
         self.store_entry(params);
+    }
+
+    /// Store entry using parameters and return whether it was a new entry
+    fn store_entry_and_check_new(&self, params: TTEntryParams) -> bool {
+        // First check if entry already exists
+        let idx = self.bucket_index(params.key);
+        let existing = if let Some(ref flexible_buckets) = self.flexible_buckets {
+            flexible_buckets[idx].probe(params.key)
+        } else {
+            self.buckets[idx].probe(params.key)
+        };
+
+        // Store the entry
+        self.store_entry(params);
+
+        // Return true if this was a new entry (not found before)
+        existing.is_none()
     }
 
     /// Store entry using parameters

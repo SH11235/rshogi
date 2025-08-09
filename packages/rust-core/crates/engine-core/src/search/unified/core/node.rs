@@ -5,7 +5,6 @@ use crate::{
     search::{constants::SEARCH_INF, tt::NodeType, unified::UnifiedSearcher},
     shogi::{Move, Position},
 };
-use std::sync::atomic::Ordering;
 
 /// Search a single node in the tree
 pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
@@ -21,13 +20,18 @@ where
 {
     // Check stop flag periodically to minimize overhead
     // Use more frequent checking if stop_flag is present
-    let check_interval = if searcher.context.limits().stop_flag.is_some() {
-        0x3F // Check every 64 nodes when stop_flag is present
+    // If already stopped, check every node for immediate response
+    let check_interval = if searcher.context.should_stop() {
+        0x0 // Check every node if already stopped
+    } else if searcher.context.limits().stop_flag.is_some() {
+        0x7 // Check every 8 nodes when stop_flag is present (more responsive)
     } else {
-        0x3FF // Check every 1024 nodes for normal operation
+        0xFF // Check every 256 nodes for normal operation (reduced from 1024)
     };
 
-    if searcher.stats.nodes & check_interval == 0 && searcher.context.should_stop() {
+    if (check_interval == 0 || searcher.stats.nodes & check_interval == 0)
+        && searcher.context.should_stop()
+    {
         return alpha;
     }
 
@@ -106,13 +110,8 @@ where
     let tt_move = if USE_TT {
         let tt_entry = searcher.probe_tt(hash);
 
-        // Update duplication statistics if available
-        if let Some(ref stats) = searcher.duplication_stats {
-            stats.total_nodes.fetch_add(1, Ordering::Relaxed);
-            if tt_entry.is_none() {
-                stats.unique_nodes.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        // Note: Duplication statistics are now updated during TT store, not probe.
+        // This ensures accurate counting of unique vs duplicate nodes.
 
         // ABDADA: Check if sibling node found exact cut
         if depth > 2 {
@@ -125,7 +124,10 @@ where
                             return entry.score() as i32;
                         }
                     }
-                    // If no score available or depth insufficient, continue searching
+                    // Even without a good score, stop searching this node
+                    // to avoid duplication with sibling threads
+                    // Return a neutral evaluation to avoid misleading the search
+                    return searcher.evaluator.evaluate(pos);
                 }
             }
         }
@@ -161,6 +163,11 @@ where
 
     // Search moves
     for &mv in ordered_moves.iter() {
+        // Check stop flag at the beginning of each move
+        if searcher.context.should_stop() {
+            break; // Exit move loop immediately
+        }
+
         // Futility pruning for quiet moves
         if USE_PRUNING
             && can_do_futility
@@ -238,6 +245,11 @@ where
 
         // Undo move
         pos.undo_move(mv, undo_info);
+
+        // Check stop flag after alpha-beta recursion
+        if searcher.context.should_stop() {
+            return best_score.max(alpha); // Return current best value
+        }
 
         moves_searched += 1;
 
@@ -386,8 +398,6 @@ where
 
     best_score
 }
-
-// Note: Helper functions removed - now using functions from pruning module directly
 
 #[cfg(test)]
 mod tests {

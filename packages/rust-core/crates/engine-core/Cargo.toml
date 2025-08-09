@@ -16,6 +16,8 @@ nightly = []
 tt_metrics = []
 # Feature to enable hashfull-based filtering
 hashfull_filter = []
+# Feature to enable YBWC (Young Brothers Wait Concept) parallel search
+ybwc = []
 
 [dependencies]
 serde = { workspace = true }
@@ -30,6 +32,7 @@ smallvec = "1.15"
 parking_lot = "0.12"
 crossbeam = "0.8"
 crossbeam-utils = "0.8"
+crossbeam-deque = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Loom is only available for non-WASM targets
@@ -77,5 +80,5 @@ name = "false_sharing_bench"
 harness = false
 
 [[bench]]
-name = "parallel_search_benchmarks"
+name = "parallel_searcher_benchmarks"
 harness = false
