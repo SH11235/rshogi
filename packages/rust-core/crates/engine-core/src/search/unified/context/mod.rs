@@ -87,15 +87,24 @@ impl SearchContext {
                 log::info!("Ponder hit detected in process_events");
                 self.ponder_converted = true;
 
-                // Notify TimeManager about ponder hit
+                // Convert search context from ponder to normal FIRST
+                // This must be done before notifying TimeManager
+                self.convert_from_ponder();
+
+                // Now notify TimeManager about ponder hit with updated limits
                 if let Some(tm) = time_manager {
                     let elapsed_ms = self.elapsed().as_millis() as u64;
-                    tm.ponder_hit(None, elapsed_ms);
+                    // Create TimeLimits from SearchLimits
+                    let time_limits = crate::time_management::TimeLimits {
+                        time_control: self.limits.time_control.clone(),
+                        moves_to_go: self.limits.moves_to_go,
+                        depth: self.limits.depth.map(|d| d as u32),
+                        nodes: self.limits.nodes,
+                        time_parameters: self.limits.time_parameters,
+                    };
+                    tm.ponder_hit(Some(&time_limits), elapsed_ms);
                     log::info!("TimeManager notified of ponder hit after {elapsed_ms}ms");
                 }
-
-                // Convert search context from ponder to normal
-                self.convert_from_ponder();
             }
         }
     }
