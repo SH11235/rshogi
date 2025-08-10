@@ -352,7 +352,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         };
 
         // Create TimeManager if time control is specified (works with or without depth limit)
-        if !matches!(limits.time_control, TimeControl::Infinite) {
+        // Note: Ponder mode should NOT have time management
+        if !matches!(limits.time_control, TimeControl::Infinite | TimeControl::Ponder(_)) {
             let time_limits: TimeLimits = limits.clone().into();
             let time_manager = Arc::new(TimeManager::new(
                 &time_limits,
@@ -365,7 +366,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             debug!("TimeManager created with soft limit: {soft_limit}ms");
         } else {
             self.time_manager = None;
-            debug!("TimeManager disabled (infinite time control)");
+            let reason = match limits.time_control {
+                TimeControl::Infinite => "infinite time control",
+                TimeControl::Ponder(_) => "ponder mode (no time management during ponder)",
+                _ => unreachable!(),
+            };
+            debug!("TimeManager disabled ({reason})");
         }
 
         // Create all workers and collect stealers at startup (once-only initialization)
@@ -657,6 +663,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let max_depth = limits.depth.unwrap_or(255);
         let mut last_reported_nodes = 0u64; // Track last reported node count
 
+        // Heartbeat tracking for periodic info callbacks
+        let mut last_heartbeat = Instant::now();
+        let mut last_heartbeat_nodes = 0u64;
+        const HEARTBEAT_INTERVAL_MS: u64 = 200;
+        const HEARTBEAT_NODE_THRESHOLD: u64 = 1_000_000;
+
         // Iterative deepening
         for iteration in 1.. {
             // Skip stop check on first iteration to ensure we get at least one result
@@ -898,11 +910,65 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 let total_nodes = self.total_nodes.load(Ordering::Relaxed);
                 // Use elapsed time from search start
                 let elapsed = search_start.elapsed();
-                // Report current iteration result
-                debug!("Calling info callback for iteration {iteration} (depth {main_depth})");
-                callback(main_depth, result.score, total_nodes, elapsed, &result.stats.pv);
+                // Report current iteration result (ensure PV is non-empty)
+                let pv_to_send = if result.stats.pv.is_empty() {
+                    // Fall back to single-move PV from best_move if available
+                    if let Some(best_move) = result.best_move {
+                        vec![best_move]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    result.stats.pv.clone()
+                };
+
+                if !pv_to_send.is_empty() {
+                    debug!("Calling info callback for iteration {iteration} (depth {main_depth})");
+                    callback(main_depth, result.score, total_nodes, elapsed, &pv_to_send);
+                }
             } else {
                 debug!("No info callback available for iteration {iteration}");
+            }
+
+            // Send heartbeat info if enough time or nodes have passed
+            if let Some(ref callback) = limits.info_callback {
+                let total_nodes = self.total_nodes.load(Ordering::Relaxed);
+                let elapsed_since_heartbeat = last_heartbeat.elapsed();
+                let nodes_since_heartbeat = total_nodes.saturating_sub(last_heartbeat_nodes);
+
+                if elapsed_since_heartbeat >= Duration::from_millis(HEARTBEAT_INTERVAL_MS)
+                    || nodes_since_heartbeat >= HEARTBEAT_NODE_THRESHOLD
+                {
+                    // Send heartbeat with current best result
+                    let elapsed = search_start.elapsed();
+                    debug!(
+                        "Sending heartbeat (elapsed: {elapsed_since_heartbeat:?}, nodes: {total_nodes})"
+                    );
+                    // Ensure PV is not empty for heartbeat
+                    let pv_to_send = if best_result.stats.pv.is_empty() {
+                        // Use best move if available, otherwise skip heartbeat
+                        if let Some(best_move) = best_result.best_move {
+                            vec![best_move]
+                        } else {
+                            // Skip heartbeat if no PV available
+                            Vec::new()
+                        }
+                    } else {
+                        best_result.stats.pv.clone()
+                    };
+
+                    if !pv_to_send.is_empty() {
+                        callback(
+                            best_result.stats.depth.max(1),
+                            best_result.score,
+                            total_nodes,
+                            elapsed,
+                            &pv_to_send,
+                        );
+                    }
+                    last_heartbeat = Instant::now();
+                    last_heartbeat_nodes = total_nodes;
+                }
             }
 
             // Check depth limit
@@ -912,8 +978,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // Wait for workers to complete their work
                 // Check both pending queue items AND active workers
                 // Use shorter timeout if time manager is active
-                let max_wait_ms = if self.time_manager.is_some() {
-                    100 // Short wait when time-limited
+                // Calculate dynamic timeout based on remaining soft limit
+                let max_wait_ms = if let Some(ref tm) = self.time_manager {
+                    let elapsed_ms = search_start.elapsed().as_millis() as u64;
+                    let soft_limit = tm.soft_limit_ms();
+                    if soft_limit > elapsed_ms {
+                        let remaining = soft_limit - elapsed_ms;
+                        // Use 1/10 of remaining time or 300ms, whichever is smaller
+                        (remaining / 10).min(300)
+                    } else {
+                        100 // Minimal wait if already past soft limit
+                    }
                 } else {
                     2000 // Longer wait for depth-only searches
                 };
@@ -947,6 +1022,40 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         debug!(
                             "Waiting for work to complete: {pending} pending items, {active} active workers"
                         );
+
+                        // Send heartbeat during wait
+                        if let Some(ref callback) = limits.info_callback {
+                            let total_nodes = self.total_nodes.load(Ordering::Relaxed);
+                            let elapsed_since_heartbeat = last_heartbeat.elapsed();
+
+                            if elapsed_since_heartbeat
+                                >= Duration::from_millis(HEARTBEAT_INTERVAL_MS)
+                            {
+                                let elapsed = search_start.elapsed();
+                                debug!("Sending heartbeat during wait (nodes: {total_nodes})");
+                                // Ensure PV is not empty for heartbeat
+                                let pv_to_send = if best_result.stats.pv.is_empty() {
+                                    if let Some(best_move) = best_result.best_move {
+                                        vec![best_move]
+                                    } else {
+                                        Vec::new()
+                                    }
+                                } else {
+                                    best_result.stats.pv.clone()
+                                };
+
+                                if !pv_to_send.is_empty() {
+                                    callback(
+                                        best_result.stats.depth.max(1),
+                                        best_result.score,
+                                        total_nodes,
+                                        elapsed,
+                                        &pv_to_send,
+                                    );
+                                }
+                                last_heartbeat = Instant::now();
+                            }
+                        }
                     }
 
                     // Safety: don't wait forever
@@ -1024,8 +1133,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     byoyomi_ms,
                     periods: _,
                 } => {
-                    // Use main time + one byoyomi period
-                    main_time_ms + byoyomi_ms
+                    // Safety margin for I/O and network latency
+                    const SAFETY_MARGIN_MS: u64 = 300;
+
+                    if main_time_ms > 0 {
+                        // In main time: use main time + one byoyomi period
+                        main_time_ms + byoyomi_ms
+                    } else {
+                        // In byoyomi: use byoyomi time minus safety margin
+                        // This prevents timeout losses due to I/O delays
+                        byoyomi_ms.saturating_sub(SAFETY_MARGIN_MS).max(100)
+                    }
                 }
                 TimeControl::FixedNodes { .. } => {
                     // For node-limited search, use 1 hour as safety limit
@@ -1035,18 +1153,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     // For infinite search, use 1 hour as safety limit
                     3_600_000
                 }
-                TimeControl::Ponder(ref inner) => {
-                    // For pondering, use the inner time control
-                    match inner.as_ref() {
-                        TimeControl::FixedTime { ms_per_move } => ms_per_move * 3,
-                        TimeControl::Fischer {
-                            white_ms, black_ms, ..
-                        } => {
-                            let time_ms = white_ms.max(black_ms);
-                            (time_ms * 9) / 10
-                        }
-                        _ => 3_600_000,
-                    }
+                TimeControl::Ponder(_) => {
+                    // For pondering, no time limit - use 1 hour as safety limit
+                    // Ponder searches should be stopped by 'stop' or 'ponderhit' commands
+                    3_600_000
                 }
             };
 
