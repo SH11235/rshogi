@@ -90,8 +90,7 @@ struct TimeManagerInner {
     byoyomi_state: Mutex<ByoyomiState>,
 
     // Ponder-specific state
-    pending_time_control: Mutex<Option<TimeControl>>, // Time control to switch to after ponder_hit
-    is_ponder: AtomicBool,                            // Whether currently pondering
+    is_ponder: AtomicBool, // Whether currently pondering
 }
 
 /// Byoyomi (Japanese overtime) state management
@@ -150,7 +149,6 @@ impl TimeManager {
             last_pv_change_ms: AtomicU64::new(0),
             pv_threshold_ms: AtomicU64::new(params.pv_base_threshold_ms),
             byoyomi_state: Mutex::new(byoyomi_state),
-            pending_time_control: Mutex::new(None),
             is_ponder: AtomicBool::new(matches!(&limits.time_control, TimeControl::Ponder(_))),
         });
 
@@ -500,18 +498,13 @@ impl TimeManager {
             match &*active_tc {
                 TimeControl::Ponder(inner) => ((**inner).clone(), None, self.inner.params),
                 _ => {
-                    // Not pondering or already converted - use pending if available
-                    drop(active_tc);
-                    let pending = self.inner.pending_time_control.lock();
-                    if let Some(ref tc) = *pending {
-                        (tc.clone(), None, self.inner.params)
-                    } else {
-                        // Fallback: Set conservative limits
-                        self.inner.soft_limit_ms.store(1000, Ordering::Release);
-                        self.inner.hard_limit_ms.store(2000, Ordering::Release);
-                        self.inner.is_ponder.store(false, Ordering::Release);
-                        return;
-                    }
+                    log::warn!("ponder_hit: Not in Ponder mode, active_tc = {:?}", *active_tc);
+                    log::warn!("ponder_hit: No pending time control, using conservative defaults");
+                    // Fallback: Set conservative limits
+                    self.inner.soft_limit_ms.store(1000, Ordering::Release);
+                    self.inner.hard_limit_ms.store(2000, Ordering::Release);
+                    self.inner.is_ponder.store(false, Ordering::Release);
+                    return;
                 }
             }
         };
