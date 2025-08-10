@@ -2,7 +2,7 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
-    search::{SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
+    search::{GamePhase, SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
     shogi::{Move, Position},
     time_management::TimeManager,
 };
@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -205,8 +205,8 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Shared evaluator
     evaluator: Arc<E>,
 
-    /// Time manager
-    time_manager: Option<Arc<TimeManager>>,
+    /// Time manager (wrapped in Mutex for ponderhit dynamic creation)
+    time_manager: Arc<Mutex<Option<Arc<TimeManager>>>>,
 
     /// Shared search state
     shared_state: Arc<SharedSearchState>,
@@ -248,7 +248,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         Self {
             tt,
             evaluator,
-            time_manager: None,
+            time_manager: Arc::new(Mutex::new(None)),
             shared_state,
             num_threads,
             queues,
@@ -261,7 +261,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
     /// Set time manager for the search (compatibility method)
     pub fn set_time_manager(&mut self, time_manager: Arc<TimeManager>) {
-        self.time_manager = Some(time_manager);
+        *self.time_manager.lock().unwrap() = Some(time_manager);
     }
 
     /// Adjust the number of active threads dynamically
@@ -362,10 +362,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 game_phase,
             ));
             let soft_limit = time_manager.soft_limit_ms();
-            self.time_manager = Some(time_manager);
+            *self.time_manager.lock().unwrap() = Some(time_manager);
             debug!("TimeManager created with soft limit: {soft_limit}ms");
         } else {
-            self.time_manager = None;
+            *self.time_manager.lock().unwrap() = None;
             let reason = match limits.time_control {
                 TimeControl::Infinite => "infinite time control",
                 TimeControl::Ponder(_) => "ponder mode (no time management during ponder)",
@@ -406,17 +406,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let main_worker = workers.pop().unwrap();
 
         // Start time management if needed
-        let time_handle = if let Some(ref tm) = self.time_manager {
-            // Start time manager if we have any time limit
-            // Even for short searches, we need time control to work properly
-            if tm.soft_limit_ms() > 0 {
-                Some(self.start_time_manager(tm.clone()))
+        let time_handle = {
+            let tm_guard = self.time_manager.lock().unwrap();
+            if let Some(ref tm) = *tm_guard {
+                // Start time manager if we have any time limit
+                // Even for short searches, we need time control to work properly
+                if tm.soft_limit_ms() > 0 {
+                    Some(self.start_time_manager(tm.clone()))
+                } else {
+                    debug!("Skipping time manager (soft_limit: 0ms)");
+                    None
+                }
             } else {
-                debug!("Skipping time manager (soft_limit: 0ms)");
                 None
             }
-        } else {
-            None
         };
 
         // Start fail-safe guard thread
@@ -487,6 +490,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             let mut local_nodes = 0u64;
             let mut last_report = 0u64;
+            let mut last_seen_nodes = 0u64; // Track the last node count seen from searcher
 
             // Simple work loop
             while !shared_state.should_stop() {
@@ -497,7 +501,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     // Create guard which atomically increments the counter
                     let _guard = WorkerGuard::new(active_workers.clone());
 
-                    let prev_nodes = local_nodes; // Track previous node count
                     let nodes = match work {
                         WorkItem::RootBatch {
                             iteration,
@@ -533,10 +536,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 }
                             }
 
-                            // Update nodes (accumulate the difference)
-                            let nodes = search_thread.searcher.nodes();
-                            local_nodes += nodes.saturating_sub(prev_nodes);
-                            nodes
+                            // Get current node count from searcher
+                            search_thread.searcher.nodes()
                         }
                         WorkItem::RootMove {
                             iteration,
@@ -563,10 +564,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 move_to_search,
                             );
 
-                            // Update nodes (accumulate the difference)
-                            let nodes = search_thread.searcher.nodes();
-                            local_nodes += nodes.saturating_sub(prev_nodes);
-                            nodes
+                            // Get current node count from searcher
+                            search_thread.searcher.nodes()
                         }
                         WorkItem::FullPosition {
                             iteration,
@@ -587,10 +586,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             let _result =
                                 search_thread.search_iteration(&mut pos, &worker_limits, depth);
 
-                            // Update nodes (accumulate the difference)
-                            let nodes = search_thread.searcher.nodes();
-                            local_nodes += nodes.saturating_sub(prev_nodes);
-                            nodes
+                            // Get current node count from searcher
+                            search_thread.searcher.nodes()
                         }
                     };
 
@@ -600,6 +597,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
 
                     // Note: WorkerGuard will automatically decrement active_workers when dropped
+
+                    // Calculate node difference and update local counter
+                    let node_diff = nodes.saturating_sub(last_seen_nodes);
+                    local_nodes += node_diff;
+                    last_seen_nodes = nodes;
 
                     // Report nodes periodically (every 100k nodes)
                     if nodes - last_report >= 100_000 {
@@ -677,6 +679,57 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Iterative deepening
         for iteration in 1.. {
+            // Check for ponderhit and create TimeManager dynamically if needed
+            if let crate::time_management::TimeControl::Ponder(ref inner) = limits.time_control {
+                if let Some(ref flag) = limits.ponder_hit_flag {
+                    if flag.load(Ordering::Acquire) {
+                        let mut tm_guard = self.time_manager.lock().unwrap();
+                        if tm_guard.is_none() {
+                            // Create TimeManager from inner time control
+                            let game_phase = if position.ply <= 40 {
+                                GamePhase::Opening
+                            } else if position.ply <= 120 {
+                                GamePhase::MiddleGame
+                            } else {
+                                GamePhase::EndGame
+                            };
+
+                            // Convert inner TimeControl to SearchLimits for TimeManager creation
+                            let inner_limits = SearchLimits {
+                                time_control: (**inner).clone(),
+                                moves_to_go: limits.moves_to_go,
+                                depth: limits.depth,
+                                nodes: limits.nodes,
+                                time_parameters: limits.time_parameters,
+                                stop_flag: limits.stop_flag.clone(),
+                                info_callback: None, // Don't need callback for TimeManager
+                                ponder_hit_flag: None,
+                            };
+
+                            // Convert to TimeLimits
+                            let time_limits: crate::time_management::TimeLimits =
+                                inner_limits.into();
+
+                            // Create new TimeManager
+                            let tm = Arc::new(TimeManager::new(
+                                &time_limits,
+                                position.side_to_move,
+                                position.ply.into(),
+                                game_phase,
+                            ));
+
+                            let soft_limit = tm.soft_limit_ms();
+                            debug!("TimeManager created on ponderhit (soft limit: {soft_limit}ms)");
+
+                            // Start time manager thread
+                            let _tm_handle = self.start_time_manager(tm.clone());
+
+                            *tm_guard = Some(tm);
+                        }
+                    }
+                }
+            }
+
             // Skip stop check on first iteration to ensure we get at least one result
             if iteration > 1 && self.shared_state.should_stop() {
                 if log::log_enabled!(log::Level::Debug) {
@@ -687,7 +740,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Also check time manager on iterations after the first
             if iteration > 1 {
-                if let Some(ref tm) = self.time_manager {
+                let tm_guard = self.time_manager.lock().unwrap();
+                if let Some(ref tm) = *tm_guard {
                     let current_nodes = self.total_nodes.load(Ordering::Relaxed);
                     if tm.should_stop(current_nodes) {
                         if log::log_enabled!(log::Level::Debug) {
@@ -983,20 +1037,22 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // Wait for workers to complete their work
                 // Check both pending queue items AND active workers
-                // Use shorter timeout if time manager is active
                 // Calculate dynamic timeout based on remaining soft limit
-                let max_wait_ms = if let Some(ref tm) = self.time_manager {
-                    let elapsed_ms = search_start.elapsed().as_millis() as u64;
-                    let soft_limit = tm.soft_limit_ms();
-                    if soft_limit > elapsed_ms {
-                        let remaining = soft_limit - elapsed_ms;
-                        // Use 1/10 of remaining time or 300ms, whichever is smaller
-                        (remaining / 10).min(300)
+                let max_wait_ms = {
+                    let tm_guard = self.time_manager.lock().unwrap();
+                    if let Some(ref tm) = *tm_guard {
+                        let elapsed_ms = search_start.elapsed().as_millis() as u64;
+                        let soft_limit = tm.soft_limit_ms();
+                        if soft_limit > elapsed_ms {
+                            let remaining = soft_limit - elapsed_ms;
+                            // Use 1/10 of remaining time or 300ms, whichever is smaller
+                            (remaining / 10).min(300)
+                        } else {
+                            100 // Minimal wait if already past soft limit
+                        }
                     } else {
-                        100 // Minimal wait if already past soft limit
+                        2000 // Longer wait for depth-only searches
                     }
-                } else {
-                    2000 // Longer wait for depth-only searches
                 };
 
                 let mut wait_time = 0;
@@ -1005,14 +1061,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     let active = self.active_workers.load(Ordering::Acquire);
 
                     // Check TimeManager should_stop first
-                    if let Some(ref tm) = self.time_manager {
-                        let nodes = self.total_nodes.load(Ordering::Relaxed);
-                        if tm.should_stop(nodes) {
-                            debug!(
-                                "TimeManager triggered stop during wait (pending: {pending}, active: {active})"
-                            );
-                            self.shared_state.set_stop();
-                            break;
+                    {
+                        let tm_guard = self.time_manager.lock().unwrap();
+                        if let Some(ref tm) = *tm_guard {
+                            let nodes = self.total_nodes.load(Ordering::Relaxed);
+                            if tm.should_stop(nodes) {
+                                debug!(
+                                    "TimeManager triggered stop during wait (pending: {pending}, active: {active})"
+                                );
+                                self.shared_state.set_stop();
+                                break;
+                            }
                         }
                     }
 
