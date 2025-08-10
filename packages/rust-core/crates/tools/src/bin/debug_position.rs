@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let parts: Vec<&str> = sfen_input.splitn(2, " moves ").collect();
         let sfen = parts[0];
         let mut pos = Position::from_sfen(sfen)?;
-        
+
         if parts.len() > 1 {
             // Apply moves
             let moves_str = parts[1];
@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pos.do_move(mv);
             }
         }
-        
+
         pos
     } else {
         Position::from_sfen(sfen_input)?
