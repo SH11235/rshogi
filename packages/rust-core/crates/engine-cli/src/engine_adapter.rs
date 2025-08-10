@@ -34,6 +34,15 @@ fn moves_equal(m1: engine_core::shogi::Move, m2: engine_core::shogi::Move) -> bo
         && (!m1.is_drop() || m1.drop_piece_type() == m2.drop_piece_type())
 }
 
+/// Extended search result containing all necessary information
+pub struct ExtendedSearchResult {
+    pub best_move: String,
+    pub ponder_move: Option<String>,
+    pub depth: u32,
+    pub score: i32,
+    pub pv: Vec<Move>,
+}
+
 /// Time management constants for byoyomi mode
 /// These values ensure the engine finishes thinking before GUI timeout
 const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
@@ -321,6 +330,11 @@ impl EngineAdapter {
     }
 
     /// Get available options
+    /// Get current byoyomi periods setting
+    pub fn get_byoyomi_periods(&self) -> Option<u32> {
+        self.byoyomi_periods
+    }
+
     pub fn get_options(&self) -> &[EngineOption] {
         &self.options
     }
@@ -863,14 +877,14 @@ impl EngineAdapter {
         false
     }
 
-    /// Execute search with prepared data and return USI result
+    /// Execute search with prepared data and return extended result
     /// This takes a mutable reference to avoid ownership transfer
     pub fn execute_search_static(
         engine: &mut Engine,
         mut position: Position,
         limits: SearchLimits,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
-    ) -> Result<(String, Option<String>), EngineError> {
+    ) -> Result<ExtendedSearchResult, EngineError> {
         log::info!("execute_search_static called");
         log::info!("Search starting...");
 
@@ -922,7 +936,18 @@ impl EngineAdapter {
         // Convert ponder move to USI format if available
         let ponder_move_str = ponder_move.map(|m| engine_core::usi::move_to_usi(&m));
 
-        Ok((best_move_str, ponder_move_str))
+        // Extract additional information from search result
+        let depth = result.stats.depth.max(1);
+        let score = result.score;
+        let pv = result.stats.pv.clone();
+
+        Ok(ExtendedSearchResult {
+            best_move: best_move_str,
+            ponder_move: ponder_move_str,
+            depth: depth as u32,
+            score,
+            pv,
+        })
     }
 
     /// Clean up after search completion
@@ -1118,7 +1143,7 @@ impl EngineAdapter {
         let position = match &self.position {
             Some(pos) => pos,
             None => {
-                log::error!("Cannot verify move legality: no position set");
+                log::warn!("Cannot verify move legality: no position set");
                 return false;
             }
         };
@@ -1128,7 +1153,7 @@ impl EngineAdapter {
             (self.search_start_position_hash, self.search_start_side_to_move)
         {
             if start_hash != position.hash || start_side != position.side_to_move {
-                log::error!(
+                log::warn!(
                     "Position inconsistency detected during validation! Search start: hash={:016x}, side={:?} -> Current: hash={:016x}, side={:?}",
                     start_hash,
                     start_side,
@@ -1142,7 +1167,7 @@ impl EngineAdapter {
         let mv = match parse_usi_move(usi_move) {
             Ok(m) => m,
             Err(e) => {
-                log::error!("Failed to parse USI move '{usi_move}': {e}");
+                log::warn!("Failed to parse USI move '{usi_move}': {e}");
                 return false;
             }
         };
@@ -1163,17 +1188,17 @@ impl EngineAdapter {
         }
 
         // Log detailed information for debugging
-        log::error!("Move '{usi_move}' is not legal in current position");
-        log::error!("Current position SFEN: {}", engine_core::usi::position_to_sfen(position));
-        log::error!("Position hash: {:016x}, ply: {}", position.hash, position.ply);
-        log::error!("Side to move: {:?}", position.side_to_move);
-        log::error!("Legal moves count: {}", legal_moves.len());
+        log::warn!("Move '{usi_move}' is not legal in current position");
+        log::warn!("Current position SFEN: {}", engine_core::usi::position_to_sfen(position));
+        log::warn!("Position hash: {:016x}, ply: {}", position.hash, position.ply);
+        log::warn!("Side to move: {:?}", position.side_to_move);
+        log::warn!("Legal moves count: {}", legal_moves.len());
 
         // Log first few legal moves for comparison
         if !legal_moves.is_empty() {
-            log::error!("First few legal moves:");
+            log::warn!("First few legal moves:");
             for i in 0..legal_moves.len().min(10) {
-                log::error!("  {}: {}", i + 1, engine_core::usi::move_to_usi(&legal_moves[i]));
+                log::warn!("  {}: {}", i + 1, engine_core::usi::move_to_usi(&legal_moves[i]));
             }
         }
 
