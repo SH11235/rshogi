@@ -1013,6 +1013,10 @@ impl Position {
     }
 
     /// Make a move on the position
+    /// 
+    /// IMPORTANT: When capturing a promoted piece, it is automatically unpromoted
+    /// when added to hand (as per shogi rules). The promoted flag is stored in
+    /// UndoInfo for proper restoration during unmake_move.
     pub fn do_move(&mut self, mv: super::moves::Move) -> UndoInfo {
         // Save current hash to history
         self.history.push(self.hash);
@@ -1096,6 +1100,7 @@ impl Position {
                 self.hash ^= self.piece_square_zobrist(captured, to);
 
                 // Add to hand (unpromoted)
+                // IMPORTANT: When capturing a promoted piece, it becomes unpromoted in hand
                 let captured_type = captured.piece_type;
 
                 let hand_idx =
