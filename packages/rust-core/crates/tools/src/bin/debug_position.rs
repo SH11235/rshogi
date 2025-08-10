@@ -3,7 +3,7 @@ use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::movegen::MoveGen;
 use engine_core::search::limits::SearchLimits;
 use engine_core::shogi::moves::MoveList;
-use engine_core::usi::move_to_usi;
+use engine_core::usi::{move_to_usi, parse_usi_move};
 use engine_core::Position;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ struct Args {
     show_ordering: bool,
 
     /// Show transposition table statistics
-    #[arg(short = 't', long)]
+    #[arg(long)]
     show_tt_stats: bool,
 
     /// Run perft analysis instead of search
@@ -53,14 +53,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Default to initial position if no SFEN provided
-    let sfen = args
+    let sfen_input = args
         .sfen
         .as_deref()
         .unwrap_or("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
 
-    println!("Analyzing position: {sfen}");
+    println!("Analyzing position: {sfen_input}");
 
-    let mut position = Position::from_sfen(sfen)?;
+    // Parse SFEN and moves if present
+    let mut position = if sfen_input.contains(" moves ") {
+        // Split by " moves " to separate SFEN from move list
+        let parts: Vec<&str> = sfen_input.splitn(2, " moves ").collect();
+        let sfen = parts[0];
+        let mut pos = Position::from_sfen(sfen)?;
+        
+        if parts.len() > 1 {
+            // Apply moves
+            let moves_str = parts[1];
+            for move_str in moves_str.split_whitespace() {
+                let mv = parse_usi_move(move_str)?;
+                pos.do_move(mv);
+            }
+        }
+        
+        pos
+    } else {
+        Position::from_sfen(sfen_input)?
+    };
 
     // Show legal moves if requested
     if args.moves {

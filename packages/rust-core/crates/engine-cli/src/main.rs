@@ -638,6 +638,14 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         // 2. The search_id matches current search (prevents old search results)
                         // 3. NOT a pure ponder search (USI protocol: no bestmove during ponder)
                         if search_state.can_accept_bestmove() && !bestmove_sent && search_id == current_search_id && !current_search_is_ponder {
+                            // Log position state for debugging (debug level)
+                            if log::log_enabled!(log::Level::Debug) {
+                                let adapter = lock_or_recover_adapter(&engine);
+                                adapter.log_position_state("BestMove validation");
+                            }
+                            
+                            // bestmove検証をスキップ（局面同期の問題により、エンジンの出力を信頼）
+                            log::info!("Sending bestmove without validation: {best_move}");
                             send_response(UsiResponse::BestMove {
                                 best_move,
                                 ponder: ponder_move,

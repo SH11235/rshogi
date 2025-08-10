@@ -21,6 +21,16 @@ use crate::usi::{
 };
 use crate::usi::{create_position, GameResult, GoParams};
 
+/// Helper function to compare moves semantically (ignoring piece type encoding)
+/// This is needed because USI notation doesn't include piece type information
+fn moves_equal(m1: engine_core::shogi::Move, m2: engine_core::shogi::Move) -> bool {
+    m1.from() == m2.from() &&
+    m1.to() == m2.to() &&
+    m1.is_drop() == m2.is_drop() &&
+    m1.is_promote() == m2.is_promote() &&
+    (!m1.is_drop() || m1.drop_piece_type() == m2.drop_piece_type())
+}
+
 /// Time management constants for byoyomi mode
 /// These values ensure the engine finishes thinking before GUI timeout
 const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
@@ -123,6 +133,10 @@ pub struct EngineAdapter {
     pending_eval_file: Option<String>,
     /// Current stop flag for ongoing search (shared with search worker)
     current_stop_flag: Option<Arc<AtomicBool>>,
+    /// Position state at the start of search (for consistency checking)
+    search_start_position_hash: Option<u64>,
+    /// Side to move at the start of search
+    search_start_side_to_move: Option<engine_core::shogi::Color>,
 }
 
 /// State for managing ponder (think on opponent's time) functionality
@@ -184,6 +198,11 @@ impl EngineAdapter {
     /// Check if position is set
     pub fn has_position(&self) -> bool {
         self.position.is_some()
+    }
+    
+    /// Get current position (for testing and debugging)
+    pub fn get_position(&self) -> Option<&Position> {
+        self.position.as_ref()
     }
 
     /// Handle new game notification
@@ -260,6 +279,8 @@ impl EngineAdapter {
             pending_engine_type: None,
             pending_eval_file: None,
             current_stop_flag: None,
+            search_start_position_hash: None,
+            search_start_side_to_move: None,
         };
 
         // Initialize options
@@ -511,6 +532,32 @@ impl EngineAdapter {
         self.ponder_state.ponder_start_time = None;
         self.active_ponder_hit_flag = None;
     }
+    
+    /// Verify position consistency for debugging
+    pub fn log_position_state(&self, context: &str) {
+        if let Some(ref pos) = self.position {
+            log::debug!(
+                "{}: position hash={:016x}, side_to_move={:?}, ply={}",
+                context,
+                pos.hash,
+                pos.side_to_move,
+                pos.ply
+            );
+            
+            // Check if position changed unexpectedly
+            if let (Some(start_hash), Some(start_side)) = (self.search_start_position_hash, self.search_start_side_to_move) {
+                if start_hash != pos.hash || start_side != pos.side_to_move {
+                    log::error!(
+                        "Position state changed during search! Start: hash={:016x}, side={:?} -> Current: hash={:016x}, side={:?}",
+                        start_hash,
+                        start_side,
+                        pos.hash,
+                        pos.side_to_move
+                    );
+                }
+            }
+        }
+    }
 
     /// Prepare search data and return necessary components
     /// This allows releasing the mutex lock before the actual search
@@ -519,6 +566,17 @@ impl EngineAdapter {
         params: &GoParams,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<(Position, SearchLimits, Option<Arc<AtomicBool>>), EngineError> {
+        // Store position state for consistency checking
+        if let Some(ref pos) = self.position {
+            self.search_start_position_hash = Some(pos.hash);
+            self.search_start_side_to_move = Some(pos.side_to_move);
+            log::info!(
+                "Search starting with position hash={:016x}, side_to_move={:?}, ply={}",
+                pos.hash,
+                pos.side_to_move,
+                pos.ply
+            );
+        }
         log::info!(
             "Starting {} search - depth:{:?} time:{:?}ms nodes:{:?}",
             if params.ponder { "ponder" } else { "normal" },
@@ -811,6 +869,11 @@ impl EngineAdapter {
         log::info!("execute_search_static called");
         log::info!("Search starting...");
 
+        // Save original position state for verification
+        let original_hash = position.hash;
+        let original_side = position.side_to_move;
+        let original_ply = position.ply;
+
         // Set up info callback
         let (info_callback_arc, info_callback_inner) = Self::create_info_callback(info_callback);
 
@@ -833,7 +896,17 @@ impl EngineAdapter {
             result.best_move.is_some()
         );
 
-        // Process result
+        // Verify position wasn't modified during search
+        if position.hash != original_hash || position.side_to_move != original_side || position.ply != original_ply {
+            log::error!(
+                "WARNING: Position was modified during search! Original: hash={:016x}, side={:?}, ply={} -> Current: hash={:016x}, side={:?}, ply={}",
+                original_hash, original_side, original_ply,
+                position.hash, position.side_to_move, position.ply
+            );
+            // This should not happen in a correctly implemented search
+        }
+
+        // Process result - use the original position state for move validation
         let (best_move_str, ponder_move) =
             Self::process_search_result(&result, &info_callback_arc, &position)
                 .map_err(EngineError::Other)?;
@@ -853,8 +926,10 @@ impl EngineAdapter {
             }
         }
 
-        // Clear current stop flag
+        // Clear current stop flag and position state
         self.current_stop_flag = None;
+        self.search_start_position_hash = None;
+        self.search_start_side_to_move = None;
     }
 
     /// Validate engine state before attempting emergency move generation
@@ -1024,6 +1099,55 @@ impl EngineAdapter {
         Ok(move_str)
     }
 
+    /// Verify if a USI move string is legal in the current position
+    /// Returns true if the move is legal, false otherwise
+    pub fn is_legal_move(&self, usi_move: &str) -> bool {
+        use engine_core::movegen::MoveGen;
+        use engine_core::shogi::MoveList;
+        use engine_core::usi::parse_usi_move;
+        
+        // Check if position is set
+        let position = match &self.position {
+            Some(pos) => pos,
+            None => {
+                log::error!("Cannot verify move legality: no position set");
+                return false;
+            }
+        };
+        
+        // Parse USI move
+        let mv = match parse_usi_move(usi_move) {
+            Ok(m) => m,
+            Err(e) => {
+                log::error!("Failed to parse USI move '{usi_move}': {e}");
+                return false;
+            }
+        };
+        
+        // Generate all legal moves
+        let mut generator = MoveGen::new();
+        let mut legal_moves = MoveList::new();
+        generator.generate_all(position, &mut legal_moves);
+        
+        // Check if the move is in the legal move list
+        // Note: We need to compare moves semantically, not just by equality,
+        // because USI parsing doesn't include piece type information
+        for i in 0..legal_moves.len() {
+            let legal_mv = legal_moves[i];
+            if moves_equal(mv, legal_mv) {
+                return true;
+            }
+        }
+        
+        // Log detailed information for debugging
+        log::error!("Move '{usi_move}' is not legal in current position");
+        log::error!("Current position SFEN: {}", engine_core::usi::position_to_sfen(position));
+        log::error!("Side to move: {:?}", position.side_to_move);
+        log::error!("Legal moves count: {}", legal_moves.len());
+        
+        false
+    }
+    
     /// Select a move to escape check, prioritizing safety
     fn select_check_escape_move(
         position: &Position,
