@@ -266,7 +266,10 @@ enum WorkerMessage {
         from_guard: bool,
         search_id: u64, // Add search ID
     },
-    Error(String),
+    Error {
+        message: String,
+        search_id: u64,
+    },
     EngineReturn(Engine), // Return the engine after search
 }
 
@@ -386,8 +389,8 @@ fn wait_for_worker_with_timeout(
                         // Partial results during shutdown can be ignored
                         log::trace!("PartialResult during shutdown - ignoring");
                     }
-                    Ok(WorkerMessage::Error(err)) => {
-                        log::error!("Worker error during shutdown: {err}");
+                    Ok(WorkerMessage::Error { message, search_id }) => {
+                        log::error!("Worker error during shutdown (search_id: {search_id}): {message}");
                     }
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");
@@ -692,8 +695,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             log::warn!("Engine not returned within timeout after Finished");
                         }
                     }
-                    Ok(WorkerMessage::Error(err)) => {
-                        send_info_string(format!("Error: {err}"))?;
+                    Ok(WorkerMessage::Error { message, search_id }) => {
+                        send_info_string(format!("Error (search_id: {search_id}): {message}"))?;
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
@@ -860,8 +863,10 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 if let Err(e) = result {
                     log::error!("Worker thread panicked: {e:?}");
                     // Send error message to main thread
-                    let _ =
-                        tx_clone.send(WorkerMessage::Error("Worker thread panicked".to_string()));
+                    let _ = tx_clone.send(WorkerMessage::Error {
+                        message: "Worker thread panicked".to_string(),
+                        search_id,
+                    });
                     let _ = tx_clone.send(WorkerMessage::Finished {
                         from_guard: false,
                         search_id,
@@ -1175,7 +1180,10 @@ fn search_worker(
                         // Return engine and send error
                         adapter.return_engine(engine);
                         log::error!("Search preparation error: {e}");
-                        let _ = tx.send(WorkerMessage::Error(e.to_string()));
+                        let _ = tx.send(WorkerMessage::Error {
+                            message: e.to_string(),
+                            search_id,
+                        });
 
                         // Try to generate emergency move before resigning (only if not pondering)
                         if !params.ponder {
@@ -1221,7 +1229,10 @@ fn search_worker(
             }
             Err(e) => {
                 log::error!("Failed to take engine: {e}");
-                let _ = tx.send(WorkerMessage::Error(e.to_string()));
+                let _ = tx.send(WorkerMessage::Error {
+                    message: e.to_string(),
+                    search_id,
+                });
 
                 // Try to generate emergency move from adapter (only if not pondering)
                 if !params.ponder {
@@ -1353,7 +1364,10 @@ fn search_worker(
             } else {
                 // Other error - send error and try emergency move
                 // Send bestmove if not ponder OR if ponder wasn't stopped (ponderhit case)
-                let _ = tx.send(WorkerMessage::Error(e.to_string()));
+                let _ = tx.send(WorkerMessage::Error {
+                    message: e.to_string(),
+                    search_id,
+                });
                 if !was_ponder || !stop_flag.load(Ordering::Acquire) {
                     match emergency_result {
                         Ok(emergency_move) => {
