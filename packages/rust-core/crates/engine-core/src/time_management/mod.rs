@@ -165,9 +165,23 @@ impl TimeManager {
         ply: u32,
         game_phase: GamePhase,
     ) -> Self {
-        // Create ponder limits with inner time control
+        // Check if already Ponder to avoid double-wrapping
+        let time_control = match &pending_limits.time_control {
+            TimeControl::Ponder(_) => {
+                // Already Ponder, use as-is
+                log::debug!("new_ponder: time_control already Ponder, using as-is");
+                pending_limits.time_control.clone()
+            }
+            other => {
+                // Wrap in Ponder
+                log::debug!("new_ponder: wrapping time_control in Ponder: {other:?}");
+                TimeControl::Ponder(Box::new(other.clone()))
+            }
+        };
+
+        // Create ponder limits
         let ponder_limits = TimeLimits {
-            time_control: TimeControl::Ponder(Box::new(pending_limits.time_control.clone())),
+            time_control,
             moves_to_go: pending_limits.moves_to_go,
             depth: pending_limits.depth,
             nodes: pending_limits.nodes,
