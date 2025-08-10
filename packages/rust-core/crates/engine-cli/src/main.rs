@@ -1,6 +1,7 @@
 // USI (Universal Shogi Interface) adapter
 
 mod engine_adapter;
+mod search_session;
 mod usi;
 mod utils;
 
@@ -9,6 +10,7 @@ use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::{EngineAdapter, EngineError};
 use engine_core::engine::controller::Engine;
+use search_session::SearchSession;
 use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -249,10 +251,25 @@ impl SearchState {
 /// Messages from worker thread to main thread
 enum WorkerMessage {
     Info(SearchInfo),
+
+    /// Iteration completed with committed results
+    IterationComplete {
+        session: Box<SearchSession>,
+        search_id: u64,
+    },
+
+    /// Search finished (use committed results from session)
+    SearchFinished {
+        session_id: u64,
+        root_hash: u64,
+        search_id: u64,
+    },
+
+    // Legacy messages (to be phased out)
     BestMove {
         best_move: String,
         ponder_move: Option<String>,
-        search_id: u64, // Add search ID to track which search this belongs to
+        search_id: u64,
     },
     /// Partial result available during search
     PartialResult {
@@ -264,7 +281,7 @@ enum WorkerMessage {
     /// Thread finished - from_guard indicates if sent by EngineReturnGuard
     Finished {
         from_guard: bool,
-        search_id: u64, // Add search ID
+        search_id: u64,
     },
     Error {
         message: String,
@@ -286,6 +303,7 @@ struct CommandContext<'a> {
     search_id_counter: &'a mut u64,
     current_search_id: &'a mut u64,
     current_search_is_ponder: &'a mut bool,
+    current_session: &'a mut Option<SearchSession>,
     allow_null_move: bool,
 }
 
@@ -390,6 +408,14 @@ fn wait_for_worker_with_timeout(
                     }
                     Ok(WorkerMessage::Error { message, search_id }) => {
                         log::error!("Worker error during shutdown (search_id: {search_id}): {message}");
+                    }
+                    Ok(WorkerMessage::IterationComplete { .. }) => {
+                        // Iteration updates during shutdown can be ignored
+                        log::trace!("IterationComplete during shutdown - ignoring");
+                    }
+                    Ok(WorkerMessage::SearchFinished { .. }) => {
+                        // Search finished during shutdown can be ignored
+                        log::trace!("SearchFinished during shutdown - ignoring");
                     }
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");
@@ -587,6 +613,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut search_id_counter = 0u64;
     let mut current_search_id = 0u64;
     let mut current_search_is_ponder = false; // Track if current search is ponder
+    let mut current_session: Option<SearchSession> = None; // Current search session
 
     // Main event loop
     let mut should_quit = false;
@@ -616,6 +643,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 search_id_counter: &mut search_id_counter,
                 current_search_id: &mut current_search_id,
                 current_search_is_ponder: &mut current_search_is_ponder,
+                current_session: &mut current_session,
                 allow_null_move,
             };
             handle_command(cmd, &mut ctx)?;
@@ -632,6 +660,25 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                     Ok(WorkerMessage::Info(info)) => {
                         send_response(UsiResponse::Info(info))?;
                     }
+                    Ok(WorkerMessage::IterationComplete { session, search_id }) => {
+                        // Update session if it's for current search
+                        if search_id == current_search_id {
+                            log::debug!("Iteration complete for search {}, depth: {:?}",
+                                search_id,
+                                session.committed_best.as_ref().map(|b| b.depth)
+                            );
+                            current_session = Some(*session);
+                        } else {
+                            log::trace!("Ignoring iteration from old search: {search_id} (current: {current_search_id})");
+                        }
+                    }
+                    Ok(WorkerMessage::SearchFinished { session_id, root_hash, search_id }) => {
+                        // Mark search as finished
+                        if search_id == current_search_id && search_state.can_accept_bestmove() {
+                            log::info!("Search {search_id} finished (session_id: {session_id}, root_hash: {root_hash:016x})");
+                            // Don't send bestmove here - wait for stop command
+                        }
+                    }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
                         // Only send bestmove if:
                         // 1. We're still searching AND haven't sent one yet
@@ -643,13 +690,45 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 let adapter = lock_or_recover_adapter(&engine);
                                 adapter.log_position_state("BestMove validation");
                             }
-                            
-                            // bestmove検証をスキップ（局面同期の問題により、エンジンの出力を信頼）
-                            log::info!("Sending bestmove without validation: {best_move}");
-                            send_response(UsiResponse::BestMove {
-                                best_move,
-                                ponder: ponder_move,
-                            })?;
+
+                            // Validate bestmove before sending
+                            let is_valid = {
+                                let adapter = lock_or_recover_adapter(&engine);
+                                adapter.is_legal_move(&best_move)
+                            };
+
+                            if is_valid {
+                                log::info!("Sending validated bestmove: {best_move}");
+                                send_response(UsiResponse::BestMove {
+                                    best_move,
+                                    ponder: ponder_move,
+                                })?;
+                            } else {
+                                // Log detailed error information
+                                log::error!("Invalid bestmove detected: {best_move}");
+                                let adapter = lock_or_recover_adapter(&engine);
+                                adapter.log_position_state("Invalid bestmove context");
+
+                                // Try to generate a fallback move
+                                log::warn!("Attempting to generate fallback move after invalid bestmove");
+                                match generate_fallback_move(&engine, None, allow_null_move) {
+                                    Ok(fallback_move) => {
+                                        log::info!("Sending fallback move: {fallback_move}");
+                                        send_response(UsiResponse::BestMove {
+                                            best_move: fallback_move,
+                                            ponder: None, // No ponder for fallback moves
+                                        })?;
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to generate fallback move: {e}");
+                                        // As last resort, send resign
+                                        send_response(UsiResponse::BestMove {
+                                            best_move: "resign".to_string(),
+                                            ponder: None,
+                                        })?;
+                                    }
+                                }
+                            }
                             search_state = SearchState::Idle; // Clear searching flag after sending bestmove
                             bestmove_sent = true; // Mark that we've sent bestmove
                             current_search_is_ponder = false; // Reset ponder flag
@@ -919,29 +998,60 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             break;
                         }
 
-                        match generate_fallback_move(
-                            ctx.engine,
-                            partial_result,
-                            ctx.allow_null_move,
-                        ) {
-                            Ok(move_str) => {
-                                log::debug!("Sending fallback bestmove: {move_str}");
-                                send_response(UsiResponse::BestMove {
-                                    best_move: move_str.clone(),
-                                    ponder: None,
-                                })?;
-                                log::debug!("Fallback bestmove sent successfully: {move_str}");
-                                *ctx.bestmove_sent = true;
-                                *ctx.search_state = SearchState::FallbackSent;
+                        // Try to use session-based bestmove first
+                        let bestmove_result = if let Some(ref session) = *ctx.current_session {
+                            let adapter = lock_or_recover_adapter(ctx.engine);
+                            if let Some(position) = adapter.get_position() {
+                                match adapter.validate_and_get_bestmove(session, position) {
+                                    Ok((best, ponder)) => Some((best, ponder)),
+                                    Err(e) => {
+                                        log::warn!("Session bestmove validation failed: {e}");
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
                             }
-                            Err(e) => {
-                                log::error!("Fallback move generation failed: {e}");
-                                send_response(UsiResponse::BestMove {
-                                    best_move: "resign".to_string(),
-                                    ponder: None,
-                                })?;
+                        } else {
+                            None
+                        };
+
+                        match bestmove_result {
+                            Some((best_move, ponder)) => {
+                                log::info!("Sending session-validated bestmove: {best_move}");
+                                send_response(UsiResponse::BestMove { best_move, ponder })?;
                                 *ctx.bestmove_sent = true;
-                                *ctx.search_state = SearchState::FallbackSent;
+                                *ctx.search_state = SearchState::Idle;
+                            }
+                            None => {
+                                // Fallback to emergency move generation
+                                match generate_fallback_move(
+                                    ctx.engine,
+                                    partial_result,
+                                    ctx.allow_null_move,
+                                ) {
+                                    Ok(move_str) => {
+                                        log::debug!("Sending fallback bestmove: {move_str}");
+                                        send_response(UsiResponse::BestMove {
+                                            best_move: move_str.clone(),
+                                            ponder: None,
+                                        })?;
+                                        log::debug!(
+                                            "Fallback bestmove sent successfully: {move_str}"
+                                        );
+                                        *ctx.bestmove_sent = true;
+                                        *ctx.search_state = SearchState::FallbackSent;
+                                    }
+                                    Err(e) => {
+                                        log::error!("Fallback move generation failed: {e}");
+                                        send_response(UsiResponse::BestMove {
+                                            best_move: "resign".to_string(),
+                                            ponder: None,
+                                        })?;
+                                        *ctx.bestmove_sent = true;
+                                        *ctx.search_state = SearchState::FallbackSent;
+                                    }
+                                }
                             }
                         }
                         break;
@@ -987,6 +1097,15 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             if search_id == *ctx.current_search_id {
                                 partial_result = Some((current_best, depth, score));
                             }
+                        }
+                        Ok(WorkerMessage::IterationComplete { session, search_id }) => {
+                            // Update current session
+                            if search_id == *ctx.current_search_id {
+                                *ctx.current_session = Some(*session);
+                            }
+                        }
+                        Ok(WorkerMessage::SearchFinished { .. }) => {
+                            // Just continue - bestmove will be sent from session
                         }
                         Ok(WorkerMessage::Finished {
                             from_guard,
@@ -1172,7 +1291,7 @@ fn search_worker(
     // Take engine out and prepare search
     let was_ponder = params.ponder;
     log::debug!("Attempting to take engine from adapter");
-    let (engine, position, limits, ponder_hit_flag) = {
+    let (engine, position, limits, ponder_hit_flag, root_legal_moves) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::debug!("Adapter lock acquired, calling take_engine");
         match adapter.take_engine() {
@@ -1181,7 +1300,14 @@ fn search_worker(
                 match adapter.prepare_search(&params, stop_flag.clone()) {
                     Ok((pos, lim, flag)) => {
                         log::debug!("Search prepared successfully");
-                        (engine, pos, lim, flag)
+                        // Generate root legal moves for session
+                        let root_moves = {
+                            let mut gen = engine_core::movegen::generator::MoveGenImpl::new(&pos);
+                            let move_list = gen.generate_all();
+                            // Convert MoveList to Vec<Move>
+                            move_list.iter().cloned().collect::<Vec<_>>()
+                        };
+                        (engine, pos, lim, flag, root_moves)
                     }
                     Err(e) => {
                         // Return engine and send error
@@ -1287,6 +1413,19 @@ fn search_worker(
     // Explicitly drop ponder_hit_flag (it's used internally by the engine)
     drop(ponder_hit_flag);
 
+    // Create search session
+    let mut session =
+        SearchSession::new(search_id, position.hash, position.side_to_move, root_legal_moves);
+
+    // Create info callback that updates session
+    let enhanced_info_callback = move |info: SearchInfo| {
+        // Call original callback
+        info_callback(info.clone());
+
+        // Note: Session updates are handled after search completes
+        // This callback is just for forwarding info to GUI
+    };
+
     // Wrap engine in guard for panic safety
     let mut engine_guard = EngineReturnGuard::new(engine, tx.clone(), search_id);
 
@@ -1294,15 +1433,28 @@ fn search_worker(
     log::info!("Calling execute_search_static");
     let result = EngineAdapter::execute_search_static(
         &mut engine_guard,
-        position,
+        position.clone(),
         limits,
-        Box::new(info_callback),
+        Box::new(enhanced_info_callback),
     );
     log::info!("execute_search_static returned: {:?}", result.is_ok());
 
     // Handle result
     match result {
-        Ok((best_move, ponder_move)) => {
+        Ok((best_move_str, ponder_move_str)) => {
+            // Update session with final result
+            if let Ok(best_move) = engine_core::usi::parse_usi_move(&best_move_str) {
+                let ponder_move =
+                    ponder_move_str.as_ref().and_then(|s| engine_core::usi::parse_usi_move(s).ok());
+
+                // Get final score from search result
+                let final_score = 0; // TODO: Get from search result
+                let final_depth = 1; // TODO: Get from search result
+                let pv = vec![best_move]; // TODO: Get full PV
+
+                session.update_current_best(best_move, ponder_move, final_depth, final_score, pv);
+                session.commit_iteration();
+            }
             // Clean up ponder state if needed
             {
                 let mut adapter = lock_or_recover_adapter(&engine_adapter);
@@ -1325,14 +1477,22 @@ fn search_worker(
             // - Ponder search that was converted via ponderhit
             if !was_ponder || ponder_hit_occurred {
                 log::info!(
-                    "Sending bestmove: was_ponder={was_ponder}, ponder_hit={ponder_hit_occurred}"
+                    "Sending search completion: was_ponder={was_ponder}, ponder_hit={ponder_hit_occurred}"
                 );
-                if let Err(e) = tx.send(WorkerMessage::BestMove {
-                    best_move,
-                    ponder_move,
+                // Send completed session instead of raw bestmove
+                if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                    session: Box::new(session.clone()),
                     search_id,
                 }) {
-                    log::error!("Failed to send bestmove through channel: {e}");
+                    log::error!("Failed to send iteration complete: {e}");
+                }
+                // Also send SearchFinished to indicate we're done
+                if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                    session_id: session.id,
+                    root_hash: session.root_hash,
+                    search_id,
+                }) {
+                    log::error!("Failed to send search finished: {e}");
                 }
             } else {
                 log::info!("Ponder search without ponderhit, not sending bestmove (USI protocol)");
