@@ -155,3 +155,83 @@ fn test_emergency_move_generation() {
         "Emergency move {emergency_move} should be legal"
     );
 }
+
+#[test]
+fn test_partial_result_validation() {
+    // Test that partial results are validated before use
+    let mut adapter = EngineAdapter::new();
+    adapter.initialize().unwrap();
+    adapter.set_position(true, None, &[]).unwrap();
+
+    // Test with a valid move
+    assert!(adapter.is_legal_move("7g7f"), "7g7f should be legal");
+
+    // Test with an invalid move
+    assert!(!adapter.is_legal_move("8h2b+"), "8h2b+ should be illegal from start position");
+
+    // Test with invalid format
+    assert!(!adapter.is_legal_move("invalid"), "Invalid format should return false");
+}
+
+#[test]
+fn test_session_bestmove_validation() {
+    // Test that session-based bestmove validation works correctly
+    use engine_cli::search_session::{CommittedBest, Score, SearchSession};
+    use engine_core::shogi::Color;
+    use engine_core::usi::parse_usi_move;
+    use smallvec::SmallVec;
+
+    let mut adapter = EngineAdapter::new();
+    adapter.initialize().unwrap();
+    adapter.set_position(true, None, &[]).unwrap();
+
+    // Get position for testing
+    let position = adapter.get_position().unwrap();
+
+    // Create a test session with valid move
+    let best_move = parse_usi_move("7g7f").unwrap();
+    let root_legal_moves = vec![best_move]; // Simplified for test
+
+    let mut session = SearchSession::new(1, position.hash, Color::Black, root_legal_moves);
+
+    // Set up committed best
+    let committed = CommittedBest {
+        best_move,
+        ponder_move: None,
+        depth: 5,
+        score: Score::Cp(100),
+        pv: SmallVec::from_vec(vec![best_move]),
+    };
+    session.committed_best = Some(committed);
+
+    // Validate should succeed
+    let result = adapter.validate_and_get_bestmove(&session, position);
+    assert!(result.is_ok(), "Valid bestmove should pass validation");
+
+    let (best_str, _ponder) = result.unwrap();
+    assert_eq!(best_str, "7g7f", "Bestmove should be correctly converted to USI");
+}
+
+#[test]
+fn test_position_mismatch_detection() {
+    // Test that position mismatches are detected
+    use engine_cli::search_session::SearchSession;
+    use engine_core::shogi::Color;
+
+    let mut adapter = EngineAdapter::new();
+    adapter.initialize().unwrap();
+    adapter.set_position(true, None, &[]).unwrap();
+
+    let position1_hash = adapter.get_position().unwrap().hash;
+
+    // Make a move to change position
+    adapter.set_position(true, None, &["7g7f".to_string()]).unwrap();
+    let position2 = adapter.get_position().unwrap();
+
+    // Create session with old position hash
+    let session = SearchSession::new(1, position1_hash, Color::Black, vec![]);
+
+    // Validation should fail due to position mismatch
+    let result = adapter.validate_and_get_bestmove(&session, position2);
+    assert!(result.is_err(), "Position mismatch should cause validation to fail");
+}

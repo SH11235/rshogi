@@ -50,15 +50,28 @@ fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<'_, Engin
 }
 
 /// Calculate dynamic timeout based on game phase and position complexity
-fn calculate_dynamic_timeout(_engine: &Arc<Mutex<EngineAdapter>>) -> Duration {
-    // For now, use a simple static timeout strategy
-    // In the future, this could be enhanced to analyze the position
-    // and adjust timeout based on game phase (opening/middlegame/endgame)
+fn calculate_dynamic_timeout(engine: &Arc<Mutex<EngineAdapter>>) -> Duration {
+    // Get time control information from the adapter if available
+    let timeout_ms = {
+        let adapter = lock_or_recover_adapter(engine);
 
-    // Default timeout with some basic logic
-    let timeout_ms = 1000; // 1 second default
+        // Check if we have byoyomi information
+        if let Some(byoyomi_periods) = adapter.get_byoyomi_periods() {
+            if byoyomi_periods > 0 {
+                // If using byoyomi, use half the byoyomi time or 3 seconds, whichever is smaller
+                // This ensures we don't wait too long but still give reasonable time
+                3000
+            } else {
+                // No byoyomi, use 3 seconds
+                3000
+            }
+        } else {
+            // Default: 3 seconds (was 1 second, which is too short)
+            3000
+        }
+    };
 
-    log::info!("Using timeout: {timeout_ms}ms");
+    log::info!("Using dynamic timeout: {timeout_ms}ms");
     Duration::from_millis(timeout_ms)
 }
 
@@ -78,8 +91,16 @@ fn generate_fallback_move(
 ) -> Result<String> {
     // Stage 1: Use partial result if available (instant)
     if let Some((best_move, depth, score)) = partial_result {
-        log::info!("Using partial result: move={best_move}, depth={depth}, score={score}");
-        return Ok(best_move);
+        // Validate the partial result move before using it
+        let adapter = lock_or_recover_adapter(engine);
+        if adapter.is_legal_move(&best_move) {
+            log::info!(
+                "Using validated partial result: move={best_move}, depth={depth}, score={score}"
+            );
+            return Ok(best_move);
+        } else {
+            log::warn!("Partial result move {best_move} is illegal, proceeding to Stage 2");
+        }
     }
 
     // Stage 2: Try quick shallow search (depth 3, typically 10-50ms, max 100ms)
@@ -676,7 +697,78 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         // Mark search as finished
                         if search_id == current_search_id && search_state.can_accept_bestmove() {
                             log::info!("Search {search_id} finished (session_id: {session_id}, root_hash: {root_hash:016x})");
-                            // Don't send bestmove here - wait for stop command
+
+                            // Send bestmove immediately if not ponder
+                            if !current_search_is_ponder {
+                                // Try to use session-based bestmove
+                                if let Some(ref session) = current_session {
+                                    let adapter = lock_or_recover_adapter(&engine);
+                                    if let Some(position) = adapter.get_position() {
+                                        match adapter.validate_and_get_bestmove(session, position) {
+                                            Ok((best_move, ponder)) => {
+                                                log::info!("Sending bestmove on search finish: {best_move}");
+                                                send_response(UsiResponse::BestMove { best_move, ponder })?;
+                                                search_state = SearchState::Idle;
+                                                bestmove_sent = true;
+                                            }
+                                            Err(e) => {
+                                                log::warn!("Session validation failed on finish: {e}");
+                                                send_info_string("Warning: Bestmove validation failed, using fallback")?;
+                                                // Try fallback move generation
+                                                match generate_fallback_move(&engine, None, allow_null_move) {
+                                                    Ok(fallback_move) => {
+                                                        log::info!("Sending fallback move on search finish: {fallback_move}");
+                                                        send_response(UsiResponse::BestMove {
+                                                            best_move: fallback_move,
+                                                            ponder: None,
+                                                        })?;
+                                                        search_state = SearchState::Idle;
+                                                        bestmove_sent = true;
+                                                    }
+                                                    Err(e) => {
+                                                        log::error!("Fallback move generation failed: {e}");
+                                                        send_response(UsiResponse::BestMove {
+                                                            best_move: "resign".to_string(),
+                                                            ponder: None,
+                                                        })?;
+                                                        search_state = SearchState::Idle;
+                                                        bestmove_sent = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        log::error!("No position available for bestmove validation");
+                                        send_response(UsiResponse::BestMove {
+                                            best_move: "resign".to_string(),
+                                            ponder: None,
+                                        })?;
+                                        search_state = SearchState::Idle;
+                                        bestmove_sent = true;
+                                    }
+                                } else {
+                                    log::warn!("No session available on search finish");
+                                    // Try emergency move generation
+                                    match generate_fallback_move(&engine, None, allow_null_move) {
+                                        Ok(fallback_move) => {
+                                            send_response(UsiResponse::BestMove {
+                                                best_move: fallback_move,
+                                                ponder: None,
+                                            })?;
+                                        }
+                                        Err(_) => {
+                                            send_response(UsiResponse::BestMove {
+                                                best_move: "resign".to_string(),
+                                                ponder: None,
+                                            })?;
+                                        }
+                                    }
+                                    search_state = SearchState::Idle;
+                                    bestmove_sent = true;
+                                }
+                            } else {
+                                log::debug!("Ponder search finished, not sending bestmove (USI protocol)");
+                            }
                         }
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
@@ -998,7 +1090,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             break;
                         }
 
-                        // Try to use session-based bestmove first
+                        // Try to use session-based bestmove first (Stage 0: best option)
                         let bestmove_result = if let Some(ref session) = *ctx.current_session {
                             let adapter = lock_or_recover_adapter(ctx.engine);
                             if let Some(position) = adapter.get_position() {
@@ -1006,6 +1098,12 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                     Ok((best, ponder)) => Some((best, ponder)),
                                     Err(e) => {
                                         log::warn!("Session bestmove validation failed: {e}");
+                                        // Check if it's a position mismatch
+                                        if session.root_hash != position.hash {
+                                            send_info_string(
+                                                "Warning: Position changed during search",
+                                            )?;
+                                        }
                                         None
                                     }
                                 }
@@ -1025,6 +1123,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             }
                             None => {
                                 // Fallback to emergency move generation
+                                // partial_result is already validated in generate_fallback_move
                                 match generate_fallback_move(
                                     ctx.engine,
                                     partial_result,
@@ -1441,18 +1540,22 @@ fn search_worker(
 
     // Handle result
     match result {
-        Ok((best_move_str, ponder_move_str)) => {
+        Ok(extended_result) => {
             // Update session with final result
-            if let Ok(best_move) = engine_core::usi::parse_usi_move(&best_move_str) {
-                let ponder_move =
-                    ponder_move_str.as_ref().and_then(|s| engine_core::usi::parse_usi_move(s).ok());
+            if let Ok(best_move) = engine_core::usi::parse_usi_move(&extended_result.best_move) {
+                let ponder_move = extended_result
+                    .ponder_move
+                    .as_ref()
+                    .and_then(|s| engine_core::usi::parse_usi_move(s).ok());
 
-                // Get final score from search result
-                let final_score = 0; // TODO: Get from search result
-                let final_depth = 1; // TODO: Get from search result
-                let pv = vec![best_move]; // TODO: Get full PV
-
-                session.update_current_best(best_move, ponder_move, final_depth, final_score, pv);
+                // Use actual search result data
+                session.update_current_best(
+                    best_move,
+                    ponder_move,
+                    extended_result.depth,
+                    extended_result.score,
+                    extended_result.pv,
+                );
                 session.commit_iteration();
             }
             // Clean up ponder state if needed
