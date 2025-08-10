@@ -1013,7 +1013,7 @@ impl Position {
     }
 
     /// Make a move on the position
-    /// 
+    ///
     /// IMPORTANT: When capturing a promoted piece, it is automatically unpromoted
     /// when added to hand (as per shogi rules). The promoted flag is stored in
     /// UndoInfo for proper restoration during unmake_move.

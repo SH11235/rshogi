@@ -382,6 +382,7 @@ dependencies = [
  "log",
  "once_cell",
  "serial_test",
+ "smallvec",
  "thiserror",
 ]
 

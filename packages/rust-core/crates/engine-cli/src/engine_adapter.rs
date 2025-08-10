@@ -6,14 +6,17 @@
 use anyhow::{anyhow, Context, Result};
 use engine_core::{
     engine::controller::{Engine, EngineType},
+    movegen::generator::MoveGenImpl,
     search::constants::{MATE_SCORE, MAX_PLY},
     search::limits::{SearchLimits, SearchLimitsBuilder},
-    shogi::Position,
+    shogi::{Move, Position},
     time_management::TimeParameters,
+    usi::move_to_usi,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::search_session::SearchSession;
 use crate::usi::output::{Score, SearchInfo};
 use crate::usi::{
     clamp_periods, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_PERIODS,
@@ -24,11 +27,11 @@ use crate::usi::{create_position, GameResult, GoParams};
 /// Helper function to compare moves semantically (ignoring piece type encoding)
 /// This is needed because USI notation doesn't include piece type information
 fn moves_equal(m1: engine_core::shogi::Move, m2: engine_core::shogi::Move) -> bool {
-    m1.from() == m2.from() &&
-    m1.to() == m2.to() &&
-    m1.is_drop() == m2.is_drop() &&
-    m1.is_promote() == m2.is_promote() &&
-    (!m1.is_drop() || m1.drop_piece_type() == m2.drop_piece_type())
+    m1.from() == m2.from()
+        && m1.to() == m2.to()
+        && m1.is_drop() == m2.is_drop()
+        && m1.is_promote() == m2.is_promote()
+        && (!m1.is_drop() || m1.drop_piece_type() == m2.drop_piece_type())
 }
 
 /// Time management constants for byoyomi mode
@@ -199,11 +202,6 @@ impl EngineAdapter {
     pub fn has_position(&self) -> bool {
         self.position.is_some()
     }
-    
-    /// Get current position (for testing and debugging)
-    pub fn get_position(&self) -> Option<&Position> {
-        self.position.as_ref()
-    }
 
     /// Handle new game notification
     pub fn new_game(&mut self) {
@@ -217,6 +215,11 @@ impl EngineAdapter {
         // Note: Hash table clearing could be added here if engine supports it
         // For now, just log the new game
         log::debug!("New game started - cleared ponder state and position");
+    }
+
+    /// Get current position
+    pub fn get_position(&self) -> Option<&Position> {
+        self.position.as_ref()
     }
 
     /// Force reset engine state to safe defaults (used for panic recovery)
@@ -532,7 +535,7 @@ impl EngineAdapter {
         self.ponder_state.ponder_start_time = None;
         self.active_ponder_hit_flag = None;
     }
-    
+
     /// Verify position consistency for debugging
     pub fn log_position_state(&self, context: &str) {
         if let Some(ref pos) = self.position {
@@ -543,9 +546,11 @@ impl EngineAdapter {
                 pos.side_to_move,
                 pos.ply
             );
-            
+
             // Check if position changed unexpectedly
-            if let (Some(start_hash), Some(start_side)) = (self.search_start_position_hash, self.search_start_side_to_move) {
+            if let (Some(start_hash), Some(start_side)) =
+                (self.search_start_position_hash, self.search_start_side_to_move)
+            {
                 if start_hash != pos.hash || start_side != pos.side_to_move {
                     log::error!(
                         "Position state changed during search! Start: hash={:016x}, side={:?} -> Current: hash={:016x}, side={:?}",
@@ -897,7 +902,10 @@ impl EngineAdapter {
         );
 
         // Verify position wasn't modified during search
-        if position.hash != original_hash || position.side_to_move != original_side || position.ply != original_ply {
+        if position.hash != original_hash
+            || position.side_to_move != original_side
+            || position.ply != original_ply
+        {
             log::error!(
                 "WARNING: Position was modified during search! Original: hash={:016x}, side={:?}, ply={} -> Current: hash={:016x}, side={:?}, ply={}",
                 original_hash, original_side, original_ply,
@@ -1105,7 +1113,7 @@ impl EngineAdapter {
         use engine_core::movegen::MoveGen;
         use engine_core::shogi::MoveList;
         use engine_core::usi::parse_usi_move;
-        
+
         // Check if position is set
         let position = match &self.position {
             Some(pos) => pos,
@@ -1114,7 +1122,22 @@ impl EngineAdapter {
                 return false;
             }
         };
-        
+
+        // Check for position consistency
+        if let (Some(start_hash), Some(start_side)) =
+            (self.search_start_position_hash, self.search_start_side_to_move)
+        {
+            if start_hash != position.hash || start_side != position.side_to_move {
+                log::error!(
+                    "Position inconsistency detected during validation! Search start: hash={:016x}, side={:?} -> Current: hash={:016x}, side={:?}",
+                    start_hash,
+                    start_side,
+                    position.hash,
+                    position.side_to_move
+                );
+            }
+        }
+
         // Parse USI move
         let mv = match parse_usi_move(usi_move) {
             Ok(m) => m,
@@ -1123,12 +1146,12 @@ impl EngineAdapter {
                 return false;
             }
         };
-        
+
         // Generate all legal moves
         let mut generator = MoveGen::new();
         let mut legal_moves = MoveList::new();
         generator.generate_all(position, &mut legal_moves);
-        
+
         // Check if the move is in the legal move list
         // Note: We need to compare moves semantically, not just by equality,
         // because USI parsing doesn't include piece type information
@@ -1138,16 +1161,32 @@ impl EngineAdapter {
                 return true;
             }
         }
-        
+
         // Log detailed information for debugging
         log::error!("Move '{usi_move}' is not legal in current position");
         log::error!("Current position SFEN: {}", engine_core::usi::position_to_sfen(position));
+        log::error!("Position hash: {:016x}, ply: {}", position.hash, position.ply);
         log::error!("Side to move: {:?}", position.side_to_move);
         log::error!("Legal moves count: {}", legal_moves.len());
-        
+
+        // Log first few legal moves for comparison
+        if !legal_moves.is_empty() {
+            log::error!("First few legal moves:");
+            for i in 0..legal_moves.len().min(10) {
+                log::error!("  {}: {}", i + 1, engine_core::usi::move_to_usi(&legal_moves[i]));
+            }
+        }
+
+        // Check if this might be a position sync issue
+        if self.search_start_position_hash.is_some() {
+            log::error!(
+                "This might be a position synchronization issue. Consider checking thread safety."
+            );
+        }
+
         false
     }
-    
+
     /// Select a move to escape check, prioritizing safety
     fn select_check_escape_move(
         position: &Position,
@@ -1182,6 +1221,102 @@ impl EngineAdapter {
         } else {
             None
         }
+    }
+
+    /// Validate bestmove and get USI strings with fallback
+    pub fn validate_and_get_bestmove(
+        &self,
+        session: &SearchSession,
+        current_position: &Position,
+    ) -> Result<(String, Option<String>), EngineError> {
+        // 1. Position consistency check
+        if session.root_hash != current_position.hash {
+            log::error!(
+                "Position mismatch! session_hash={:016x}, current_hash={:016x}",
+                session.root_hash,
+                current_position.hash
+            );
+            return self.get_fallback_move(&session.root_legal_moves);
+        }
+
+        // 2. Check if we have committed best
+        let committed = session
+            .committed_best
+            .as_ref()
+            .ok_or_else(|| EngineError::Other(anyhow!("No committed best move")))?;
+
+        // 3. Verify best is in root legal moves
+        if !session.root_legal_moves.contains(&committed.best_move) {
+            log::error!(
+                "Best move {} not in root legal moves! Attempting fallback.",
+                move_to_usi(&committed.best_move)
+            );
+            self.log_validation_failure(session, &committed.best_move, "not_in_root_legal");
+            return self.get_fallback_move(&session.root_legal_moves);
+        }
+
+        // 4. Validate ponder if present
+        let ponder_str = if let Some(ponder) = committed.ponder_move {
+            if self.validate_ponder(current_position, &committed.best_move, &ponder) {
+                Some(move_to_usi(&ponder))
+            } else {
+                log::warn!("Invalid ponder move, skipping");
+                None
+            }
+        } else {
+            None
+        };
+
+        // 5. Convert to USI (only here)
+        Ok((move_to_usi(&committed.best_move), ponder_str))
+    }
+
+    /// Get fallback move from root legal moves
+    fn get_fallback_move(
+        &self,
+        root_legal_moves: &[Move],
+    ) -> Result<(String, Option<String>), EngineError> {
+        if root_legal_moves.is_empty() {
+            return Err(EngineError::NoLegalMoves);
+        }
+
+        // Use first legal move as fallback
+        let fallback = root_legal_moves[0];
+        log::info!("Using fallback move: {}", move_to_usi(&fallback));
+        Ok((move_to_usi(&fallback), None))
+    }
+
+    /// Validate ponder move after best move
+    fn validate_ponder(&self, position: &Position, best_move: &Move, ponder: &Move) -> bool {
+        let mut temp_pos = position.clone();
+        temp_pos.do_move(*best_move);
+
+        // Generate legal moves after best move
+        let mut gen = MoveGenImpl::new(&temp_pos);
+        let moves = gen.generate_all();
+
+        // Check if ponder is in the legal moves list
+        for &mv in moves.iter() {
+            if mv == *ponder {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Log detailed validation failure
+    fn log_validation_failure(&self, session: &SearchSession, attempted_move: &Move, reason: &str) {
+        let top_3_legal: Vec<String> =
+            session.root_legal_moves.iter().take(3).map(move_to_usi).collect();
+
+        log::error!(
+            "Bestmove validation failed:\n            search_id: {}\n            root_hash: {:016x}\n            attempted_best: {}\n            reason: {}\n            top_3_legal: {:?}",
+            session.id,
+            session.root_hash,
+            move_to_usi(attempted_move),
+            reason,
+            top_3_legal
+        );
     }
 }
 
@@ -2061,6 +2196,32 @@ mod tests {
         // Verify - with fallback, we should get a ponder move
         assert_eq!(best_move_str, engine_core::usi::move_to_usi(&move1));
         assert!(ponder_move.is_some(), "Fallback should generate ponder move");
+    }
+
+    #[test]
+    fn test_is_legal_move_validation() {
+        // Test the is_legal_move method
+        let mut adapter = EngineAdapter::new();
+
+        // Without position set, should return false
+        assert!(!adapter.is_legal_move("7g7f"));
+
+        // Set initial position
+        adapter.set_position(true, None, &[]).unwrap();
+
+        // Valid moves from initial position
+        assert!(adapter.is_legal_move("7g7f")); // Pawn advance
+        assert!(adapter.is_legal_move("2g2f")); // Pawn advance
+        assert!(!adapter.is_legal_move("8h2b+")); // Invalid - bishop can't reach 2b from 8h in one move
+
+        // Invalid USI format
+        assert!(!adapter.is_legal_move("invalid"));
+        assert!(!adapter.is_legal_move(""));
+
+        // Make a move and test again
+        adapter.set_position(true, None, &["7g7f".to_string()]).unwrap();
+        assert!(!adapter.is_legal_move("7g7f")); // Can't move same pawn again
+        assert!(adapter.is_legal_move("3c3d")); // White's turn, pawn advance
     }
 
     #[test]
