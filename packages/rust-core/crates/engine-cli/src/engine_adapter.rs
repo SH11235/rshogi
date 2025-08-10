@@ -485,13 +485,10 @@ impl EngineAdapter {
             // Clear ponder state since we're transitioning to normal search
             self.ponder_state.is_pondering = false;
 
-            // Stop current search immediately
-            if let Some(ref stop) = self.current_stop_flag {
-                log::info!("Ponder hit: Setting stop flag to terminate ponder search");
-                stop.store(true, Ordering::Release);
-            }
-
-            log::info!("Ponder hit: Converting ponder search to normal search");
+            // Don't stop the search - let it continue as normal search after ponderhit
+            // The SearchContext::process_events() will detect the ponder_hit_flag and
+            // convert from ponder to normal search mode internally
+            log::info!("Ponder hit: Converting ponder search to normal search (search continues)");
             Ok(())
         } else {
             Err(anyhow!("Ponder hit received but engine is not in ponder mode"))
