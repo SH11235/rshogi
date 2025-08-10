@@ -369,7 +369,7 @@ fn wait_for_worker_with_timeout(
                         // During shutdown, we may accept late bestmoves
                         // For safety, we could check search_id here but during shutdown
                         // we're more lenient since we're trying to clean up
-                        if search_state.can_accept_bestmove() {
+                        if search_state.can_accept_bestmove() && !*bestmove_sent {
                             log::debug!("Accepting bestmove during shutdown (search_id: {search_id})");
                             send_response_or_exit(UsiResponse::BestMove {
                                 best_move,
@@ -377,6 +377,7 @@ fn wait_for_worker_with_timeout(
                             });
                             // Mark search as finished when bestmove is received
                             *search_state = SearchState::Idle;
+                            *bestmove_sent = true;
                         } else {
                             log::warn!("Ignoring late bestmove during shutdown: {best_move} (search_id: {search_id})");
                         }
