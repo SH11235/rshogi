@@ -641,6 +641,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         limits: SearchLimits,
         _main_worker: DequeWorker<WorkItem>,
     ) -> SearchResult {
+        // Record search start time for info callback
+        let search_start = Instant::now();
+
         let mut best_result = SearchResult::new(None, 0, SearchStats::default());
 
         // Create main search thread
@@ -879,7 +882,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 || (result.score == best_result.score
                     && result.stats.depth > best_result.stats.depth)
             {
-                best_result = result;
+                best_result = result.clone();
             }
 
             // Report nodes (calculate difference from last report)
@@ -888,6 +891,19 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             self.total_nodes.fetch_add(nodes_diff, Ordering::Relaxed);
             self.shared_state.add_nodes(nodes_diff);
             last_reported_nodes = nodes;
+
+            // Report progress via info callback
+            if let Some(ref callback) = limits.info_callback {
+                // Get total nodes from all threads
+                let total_nodes = self.total_nodes.load(Ordering::Relaxed);
+                // Use elapsed time from search start
+                let elapsed = search_start.elapsed();
+                // Report current iteration result
+                debug!("Calling info callback for iteration {iteration} (depth {main_depth})");
+                callback(main_depth, result.score, total_nodes, elapsed, &result.stats.pv);
+            } else {
+                debug!("No info callback available for iteration {iteration}");
+            }
 
             // Check depth limit
             if main_depth >= max_depth {
