@@ -641,6 +641,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             })?;
                             search_state = SearchState::Idle; // Clear searching flag after sending bestmove
                             bestmove_sent = true; // Mark that we've sent bestmove
+                            current_search_is_ponder = false; // Reset ponder flag
                         } else {
                             log::warn!("Ignoring late/ponder bestmove: {best_move} (search_state={search_state:?}, bestmove_sent={bestmove_sent}, search_id={search_id}, current={current_search_id}, is_ponder={current_search_is_ponder})");
                         }
