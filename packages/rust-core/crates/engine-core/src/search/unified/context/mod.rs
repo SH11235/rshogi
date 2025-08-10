@@ -20,6 +20,9 @@ pub struct SearchContext {
 
     /// Ponder hit flag reference for mode conversion
     ponder_hit_flag: Option<Arc<AtomicBool>>,
+
+    /// Whether ponder was converted to normal search
+    ponder_converted: bool,
 }
 
 impl Default for SearchContext {
@@ -36,6 +39,7 @@ impl SearchContext {
             start_time: Instant::now(),
             internal_stop: AtomicBool::new(false),
             ponder_hit_flag: None,
+            ponder_converted: false,
         }
     }
 
@@ -44,6 +48,7 @@ impl SearchContext {
         self.start_time = Instant::now();
         self.internal_stop.store(false, Ordering::Relaxed);
         self.ponder_hit_flag = None;
+        self.ponder_converted = false;
     }
 
     /// Set search limits
@@ -77,23 +82,20 @@ impl SearchContext {
     ) {
         // Check for ponder hit (only once)
         if let Some(flag) = &self.ponder_hit_flag {
-            // Use load first to check without modifying
-            if flag.load(Ordering::Acquire) {
-                log::info!("Ponder hit flag is true, attempting to process");
-                // Now do the swap to ensure we only process once
-                if flag.swap(false, Ordering::Acquire) {
-                    log::info!("Ponder hit detected in process_events");
+            // Check if we've already converted
+            if flag.load(Ordering::Acquire) && !self.ponder_converted {
+                log::info!("Ponder hit detected in process_events");
+                self.ponder_converted = true;
 
-                    // Notify TimeManager about ponder hit
-                    if let Some(tm) = time_manager {
-                        let elapsed_ms = self.elapsed().as_millis() as u64;
-                        tm.ponder_hit(None, elapsed_ms);
-                        log::info!("TimeManager notified of ponder hit after {elapsed_ms}ms");
-                    }
-
-                    // Convert search context from ponder to normal
-                    self.convert_from_ponder();
+                // Notify TimeManager about ponder hit
+                if let Some(tm) = time_manager {
+                    let elapsed_ms = self.elapsed().as_millis() as u64;
+                    tm.ponder_hit(None, elapsed_ms);
+                    log::info!("TimeManager notified of ponder hit after {elapsed_ms}ms");
                 }
+
+                // Convert search context from ponder to normal
+                self.convert_from_ponder();
             }
         }
     }
@@ -143,5 +145,46 @@ impl SearchContext {
     /// Get reference to search limits
     pub fn limits(&self) -> &SearchLimits {
         &self.limits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::time_management::TimeControl;
+
+    #[test]
+    fn test_ponder_converted_flag() {
+        let mut context = SearchContext::new();
+
+        // Initially false
+        assert_eq!(context.ponder_converted, false);
+
+        // Set up ponder mode with a ponder hit flag
+        let ponder_hit_flag = Arc::new(AtomicBool::new(false));
+        let mut limits = SearchLimits::builder()
+            .time_control(TimeControl::Ponder(Box::new(TimeControl::Infinite)))
+            .build();
+        limits.ponder_hit_flag = Some(ponder_hit_flag.clone());
+        context.set_limits(limits);
+
+        // First call should not trigger (flag is false)
+        context.process_events(&None);
+        assert_eq!(context.ponder_converted, false);
+
+        // Set the flag to true
+        ponder_hit_flag.store(true, Ordering::Release);
+
+        // First call with flag true should convert
+        context.process_events(&None);
+        assert_eq!(context.ponder_converted, true);
+
+        // Second call should not re-process (already converted)
+        context.process_events(&None);
+        assert_eq!(context.ponder_converted, true);
+
+        // Reset should clear the flag
+        context.reset();
+        assert_eq!(context.ponder_converted, false);
     }
 }
