@@ -315,10 +315,6 @@ impl From<SearchLimits> for crate::time_management::TimeLimits {
 }
 
 /// Manual Clone implementation for SearchLimits
-///
-/// Note: `info_callback` is not cloneable and will always be `None` in the cloned instance.
-/// This is by design as function pointers cannot be cloned. Users who need to preserve
-/// the callback should set it explicitly on the cloned instance.
 impl Clone for SearchLimits {
     fn clone(&self) -> Self {
         Self {
@@ -328,7 +324,7 @@ impl Clone for SearchLimits {
             nodes: self.nodes,
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag.clone(),
-            info_callback: None, // Cannot clone function pointers
+            info_callback: self.info_callback.clone(), // Arc can be cloned
             ponder_hit_flag: self.ponder_hit_flag.clone(),
         }
     }
@@ -336,7 +332,7 @@ impl Clone for SearchLimits {
 
 /// Manual Debug implementation for SearchLimits
 ///
-/// Shows whether `stop_flag` and `info_callback` are present (Some/None)
+/// Shows whether `stop_flag`, `info_callback`, and `ponder_hit_flag` are present (Some/None)
 /// without displaying their actual values for cleaner output.
 impl std::fmt::Debug for SearchLimits {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -348,6 +344,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("time_parameters", &self.time_parameters)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
+            .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
             .finish()
     }
 }
@@ -463,5 +460,56 @@ mod tests {
         builder = builder.nodes(50000);
         builder = builder.time_control(TimeControl::FixedNodes { nodes: 100000 });
         let _limits = builder.build();
+    }
+
+    #[test]
+    fn test_info_callback_cloning() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Create a shared counter
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_clone = counter.clone();
+
+        // Create an info callback that increments the counter
+        let info_callback: InfoCallback = Arc::new(move |_depth, _score, _nodes, _time, _pv| {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+        });
+
+        // Create SearchLimits with the callback
+        let limits1 = SearchLimits::builder().info_callback(info_callback).build();
+
+        // Clone the limits
+        let limits2 = limits1.clone();
+
+        // Both should have the callback
+        assert!(limits1.info_callback.is_some());
+        assert!(limits2.info_callback.is_some());
+
+        // Call both callbacks and verify they share the same counter
+        if let Some(cb1) = &limits1.info_callback {
+            cb1(1, 0, 100, Duration::from_millis(10), &[]);
+        }
+        if let Some(cb2) = &limits2.info_callback {
+            cb2(2, 0, 200, Duration::from_millis(20), &[]);
+        }
+
+        // Both callbacks should have incremented the same counter
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_debug_output_includes_ponder_hit_flag() {
+        use std::sync::atomic::AtomicBool;
+
+        // Test without ponder_hit_flag
+        let limits_without = SearchLimits::builder().depth(10).build();
+        let debug_str_without = format!("{limits_without:?}");
+        assert!(debug_str_without.contains("ponder_hit_flag: false"));
+
+        // Test with ponder_hit_flag
+        let mut limits_with = SearchLimits::builder().depth(10).build();
+        limits_with.ponder_hit_flag = Some(Arc::new(AtomicBool::new(false)));
+        let debug_str_with = format!("{limits_with:?}");
+        assert!(debug_str_with.contains("ponder_hit_flag: true"));
     }
 }
