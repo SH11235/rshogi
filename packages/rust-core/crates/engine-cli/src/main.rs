@@ -1273,6 +1273,9 @@ fn search_worker(
         }
     }; // Lock released here
 
+    // Keep ponder_hit_flag for checking later
+    let ponder_hit_flag_ref = ponder_hit_flag.clone();
+
     // Explicitly drop ponder_hit_flag (it's used internally by the engine)
     drop(ponder_hit_flag);
 
@@ -1298,10 +1301,24 @@ fn search_worker(
                 adapter.cleanup_after_search(was_ponder);
             }
 
+            // Check if ponderhit occurred during ponder search
+            let ponder_hit_occurred = if was_ponder {
+                // Check if ponder_hit_flag was set during search
+                ponder_hit_flag_ref
+                    .as_ref()
+                    .map(|flag| flag.load(Ordering::Acquire))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
             // Send best move if:
             // - Not a ponder search OR
-            // - Ponder search that wasn't stopped (meaning ponderhit occurred)
-            if !was_ponder || !stop_flag.load(Ordering::Acquire) {
+            // - Ponder search that was converted via ponderhit
+            if !was_ponder || ponder_hit_occurred {
+                log::info!(
+                    "Sending bestmove: was_ponder={was_ponder}, ponder_hit={ponder_hit_occurred}"
+                );
                 if let Err(e) = tx.send(WorkerMessage::BestMove {
                     best_move,
                     ponder_move,
@@ -1310,7 +1327,7 @@ fn search_worker(
                     log::error!("Failed to send bestmove through channel: {e}");
                 }
             } else {
-                log::info!("Ponder search stopped, not sending bestmove (USI protocol)");
+                log::info!("Ponder search without ponderhit, not sending bestmove (USI protocol)");
             }
         }
         Err(e) => {
@@ -1330,10 +1347,21 @@ fn search_worker(
             };
 
             if stop_flag.load(Ordering::Acquire) {
-                // Stopped by user - don't send bestmove if it was a ponder that was stopped
-                // (not converted to normal via ponderhit)
-                if !was_ponder {
-                    // Normal search that was stopped - send emergency move
+                // Check if ponderhit occurred for ponder search
+                let ponder_hit_occurred = if was_ponder {
+                    ponder_hit_flag_ref
+                        .as_ref()
+                        .map(|flag| flag.load(Ordering::Acquire))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                // Stopped by user - send bestmove if:
+                // - Not a ponder search OR
+                // - Ponder search that was converted via ponderhit
+                if !was_ponder || ponder_hit_occurred {
+                    // Normal search or ponder-hit search that was stopped - send emergency move
                     match emergency_result {
                         Ok(emergency_move) => {
                             log::info!("Generated emergency move after stop: {emergency_move}");
@@ -1362,12 +1390,23 @@ fn search_worker(
                 }
             } else {
                 // Other error - send error and try emergency move
-                // Send bestmove if not ponder OR if ponder wasn't stopped (ponderhit case)
+                // Check if ponderhit occurred for ponder search
+                let ponder_hit_occurred = if was_ponder {
+                    ponder_hit_flag_ref
+                        .as_ref()
+                        .map(|flag| flag.load(Ordering::Acquire))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
                 let _ = tx.send(WorkerMessage::Error {
                     message: e.to_string(),
                     search_id,
                 });
-                if !was_ponder || !stop_flag.load(Ordering::Acquire) {
+
+                // Send bestmove if not ponder OR ponder was converted via ponderhit
+                if !was_ponder || ponder_hit_occurred {
                     match emergency_result {
                         Ok(emergency_move) => {
                             log::info!(
@@ -1394,7 +1433,7 @@ fn search_worker(
                     }
                 } else {
                     log::info!(
-                        "Ponder search error (stopped), not sending bestmove (USI protocol)"
+                        "Ponder search error without ponderhit, not sending bestmove (USI protocol)"
                     );
                 }
             }
