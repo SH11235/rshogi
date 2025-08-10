@@ -158,7 +158,7 @@ mod tests {
         let mut context = SearchContext::new();
 
         // Initially false
-        assert_eq!(context.ponder_converted, false);
+        assert!(!context.ponder_converted);
 
         // Set up ponder mode with a ponder hit flag
         let ponder_hit_flag = Arc::new(AtomicBool::new(false));
@@ -170,21 +170,21 @@ mod tests {
 
         // First call should not trigger (flag is false)
         context.process_events(&None);
-        assert_eq!(context.ponder_converted, false);
+        assert!(!context.ponder_converted);
 
         // Set the flag to true
         ponder_hit_flag.store(true, Ordering::Release);
 
         // First call with flag true should convert
         context.process_events(&None);
-        assert_eq!(context.ponder_converted, true);
+        assert!(context.ponder_converted);
 
         // Second call should not re-process (already converted)
         context.process_events(&None);
-        assert_eq!(context.ponder_converted, true);
+        assert!(context.ponder_converted);
 
         // Reset should clear the flag
         context.reset();
-        assert_eq!(context.ponder_converted, false);
+        assert!(!context.ponder_converted);
     }
 }
