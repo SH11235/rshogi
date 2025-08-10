@@ -835,7 +835,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
             *ctx.search_id_counter += 1;
             *ctx.current_search_id = *ctx.search_id_counter;
             let search_id = *ctx.current_search_id;
-            log::info!("Starting new search with ID: {search_id}");
+            log::info!("Starting new search with ID: {search_id}, ponder: {}", params.ponder);
 
             // Calculate timeout for this search
             *ctx.current_search_timeout = calculate_max_search_time(&params);
@@ -850,7 +850,7 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
             // Spawn worker thread for search with panic safety
             let handle = thread::spawn(move || {
-                log::info!("Worker thread spawned");
+                log::debug!("Worker thread spawned");
                 let result = std::panic::catch_unwind(|| {
                     search_worker(engine_clone, params, stop_clone, tx_clone.clone(), search_id);
                 });
@@ -892,10 +892,17 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     if start.elapsed() > timeout {
                         // Timeout - use fallback strategy
                         log::warn!("Timeout waiting for bestmove after stop command");
-                        log::debug!("Stop timeout reached, sending fallback bestmove");
-
                         // Log timeout error
                         log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
+
+                        if *ctx.current_search_is_ponder {
+                            // Ponder search - don't send bestmove (USI protocol)
+                            log::info!(
+                                "Ponder search timeout, not sending bestmove (USI protocol)"
+                            );
+                            *ctx.search_state = SearchState::Idle;
+                            break;
+                        }
 
                         match generate_fallback_move(
                             ctx.engine,
@@ -970,6 +977,13 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                 log::warn!(
                                     "Worker finished without bestmove (from_guard: {from_guard})"
                                 );
+
+                                if *ctx.current_search_is_ponder {
+                                    // Ponder search - don't send bestmove (USI protocol)
+                                    log::info!("Ponder search finished without bestmove, not sending fallback (USI protocol)");
+                                    *ctx.search_state = SearchState::Idle;
+                                    break;
+                                }
 
                                 match generate_fallback_move(
                                     ctx.engine,
@@ -1085,8 +1099,7 @@ fn search_worker(
     tx: Sender<WorkerMessage>,
     search_id: u64,
 ) {
-    log::info!("Search worker thread started with params: {params:?}");
-    log::debug!("Search worker thread started");
+    log::debug!("Search worker thread started with params: {params:?}");
 
     // Set up info callback with partial result tracking
     let tx_info = tx.clone();
@@ -1139,16 +1152,16 @@ fn search_worker(
 
     // Take engine out and prepare search
     let was_ponder = params.ponder;
-    log::info!("Attempting to take engine from adapter");
+    log::debug!("Attempting to take engine from adapter");
     let (engine, position, limits, ponder_hit_flag) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
-        log::info!("Adapter lock acquired, calling take_engine");
+        log::debug!("Adapter lock acquired, calling take_engine");
         match adapter.take_engine() {
             Ok(engine) => {
-                log::info!("Engine taken successfully, preparing search");
+                log::debug!("Engine taken successfully, preparing search");
                 match adapter.prepare_search(&params, stop_flag.clone()) {
                     Ok((pos, lim, flag)) => {
-                        log::info!("Search prepared successfully");
+                        log::debug!("Search prepared successfully");
                         (engine, pos, lim, flag)
                     }
                     Err(e) => {
@@ -1268,8 +1281,10 @@ fn search_worker(
                 adapter.cleanup_after_search(was_ponder);
             }
 
-            // Send best move ONLY if not pondering (USI protocol: no bestmove during ponder)
-            if !was_ponder {
+            // Send best move if:
+            // - Not a ponder search OR
+            // - Ponder search that wasn't stopped (meaning ponderhit occurred)
+            if !was_ponder || !stop_flag.load(Ordering::Acquire) {
                 if let Err(e) = tx.send(WorkerMessage::BestMove {
                     best_move,
                     ponder_move,
@@ -1278,7 +1293,7 @@ fn search_worker(
                     log::error!("Failed to send bestmove through channel: {e}");
                 }
             } else {
-                log::info!("Ponder search completed, not sending bestmove (USI protocol)");
+                log::info!("Ponder search stopped, not sending bestmove (USI protocol)");
             }
         }
         Err(e) => {
@@ -1298,8 +1313,10 @@ fn search_worker(
             };
 
             if stop_flag.load(Ordering::Acquire) {
-                // Stopped by user - send bestmove only if not pondering
+                // Stopped by user - don't send bestmove if it was a ponder that was stopped
+                // (not converted to normal via ponderhit)
                 if !was_ponder {
+                    // Normal search that was stopped - send emergency move
                     match emergency_result {
                         Ok(emergency_move) => {
                             log::info!("Generated emergency move after stop: {emergency_move}");
@@ -1323,12 +1340,14 @@ fn search_worker(
                         }
                     }
                 } else {
+                    // Ponder search that was stopped (not ponderhit) - don't send bestmove
                     log::info!("Ponder search stopped, not sending bestmove (USI protocol)");
                 }
             } else {
-                // Other error - send error and try emergency move (only if not pondering)
+                // Other error - send error and try emergency move
+                // Send bestmove if not ponder OR if ponder wasn't stopped (ponderhit case)
                 let _ = tx.send(WorkerMessage::Error(e.to_string()));
-                if !was_ponder {
+                if !was_ponder || !stop_flag.load(Ordering::Acquire) {
                     match emergency_result {
                         Ok(emergency_move) => {
                             log::info!(
@@ -1354,7 +1373,7 @@ fn search_worker(
                         }
                     }
                 } else {
-                    log::info!("Ponder search error, not sending bestmove (USI protocol)");
+                    log::info!("Ponder search error (stopped), not sending bestmove (USI protocol)");
                 }
             }
         }
