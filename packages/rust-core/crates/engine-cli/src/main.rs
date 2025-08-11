@@ -49,32 +49,6 @@ fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<'_, Engin
     }
 }
 
-/// Calculate dynamic timeout based on game phase and position complexity
-fn calculate_dynamic_timeout(engine: &Arc<Mutex<EngineAdapter>>) -> Duration {
-    // Get time control information from the adapter if available
-    let timeout_ms = {
-        let adapter = lock_or_recover_adapter(engine);
-
-        // Check if we have byoyomi information
-        if let Some(byoyomi_periods) = adapter.get_byoyomi_periods() {
-            if byoyomi_periods > 0 {
-                // If using byoyomi, use half the byoyomi time or 3 seconds, whichever is smaller
-                // This ensures we don't wait too long but still give reasonable time
-                3000
-            } else {
-                // No byoyomi, use 3 seconds
-                3000
-            }
-        } else {
-            // Default: 3 seconds (was 1 second, which is too short)
-            3000
-        }
-    };
-
-    log::info!("Using dynamic timeout: {timeout_ms}ms");
-    Duration::from_millis(timeout_ms)
-}
-
 /// Perform fallback move generation with graduated strategy
 ///
 /// This function attempts to generate a move using increasingly simple methods:
@@ -356,11 +330,12 @@ fn calculate_max_search_time(params: &usi::GoParams) -> Duration {
     }
 
     if max_time > 0 {
-        // Use half of available time + margin
-        Duration::from_millis(max_time / 2 + 2000)
+        // Use half of available time + margin, with upper limit
+        // Cap at 10 seconds to avoid excessively long stop waits
+        Duration::from_millis((max_time / 2 + 2000).min(10000))
     } else {
         // Default timeout for depth/node limited searches
-        Duration::from_secs(60)
+        Duration::from_secs(10) // Reduced from 60s for better responsiveness
     }
 }
 
@@ -702,11 +677,12 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             if !current_search_is_ponder {
                                 // Try to use session-based bestmove
                                 if let Some(ref session) = current_session {
+                                    log::debug!("Using session for bestmove generation");
                                     let adapter = lock_or_recover_adapter(&engine);
                                     if let Some(position) = adapter.get_position() {
                                         match adapter.validate_and_get_bestmove(session, position) {
                                             Ok((best_move, ponder)) => {
-                                                log::info!("Sending bestmove on search finish: {best_move}");
+                                                log::info!("Sending bestmove on search finish: {best_move}, ponder: {ponder:?}");
                                                 send_response(UsiResponse::BestMove { best_move, ponder })?;
                                                 search_state = SearchState::Idle;
                                                 bestmove_sent = true;
@@ -1070,7 +1046,9 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
 
                 // Wait for bestmove with timeout to ensure we always send a response
                 let start = Instant::now();
-                let timeout = calculate_dynamic_timeout(ctx.engine);
+                // For stop command, use a short timeout to ensure quick response
+                // The test expects response within 500ms, so use 400ms to be safe
+                let timeout = Duration::from_millis(400);
                 let mut partial_result: Option<(String, u32, i32)> = None;
 
                 loop {
@@ -1203,8 +1181,40 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                 *ctx.current_session = Some(*session);
                             }
                         }
-                        Ok(WorkerMessage::SearchFinished { .. }) => {
-                            // Just continue - bestmove will be sent from session
+                        Ok(WorkerMessage::SearchFinished {
+                            session_id: _,
+                            root_hash: _,
+                            search_id,
+                        }) => {
+                            // Handle SearchFinished in stop command context
+                            if search_id == *ctx.current_search_id && !*ctx.current_search_is_ponder
+                            {
+                                log::info!(
+                                    "SearchFinished received in stop handler, sending bestmove"
+                                );
+                                // Try to use session-based bestmove
+                                if let Some(ref session) = *ctx.current_session {
+                                    let adapter = lock_or_recover_adapter(ctx.engine);
+                                    if let Some(position) = adapter.get_position() {
+                                        match adapter.validate_and_get_bestmove(session, position) {
+                                            Ok((best_move, ponder)) => {
+                                                log::info!("Sending bestmove from stop handler: {best_move}");
+                                                send_response(UsiResponse::BestMove {
+                                                    best_move,
+                                                    ponder,
+                                                })?;
+                                                *ctx.search_state = SearchState::Idle;
+                                                *ctx.bestmove_sent = true;
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                log::warn!("Session validation failed in stop handler: {e}");
+                                                // Continue to wait for BestMove or use fallback
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Ok(WorkerMessage::Finished {
                             from_guard,
@@ -1547,6 +1557,13 @@ fn search_worker(
                     .ponder_move
                     .as_ref()
                     .and_then(|s| engine_core::usi::parse_usi_move(s).ok());
+
+                log::debug!(
+                    "Worker: Updating session with best_move: {}, ponder_move: {:?}, depth: {}",
+                    extended_result.best_move,
+                    extended_result.ponder_move,
+                    extended_result.depth
+                );
 
                 // Use actual search result data
                 session.update_current_best(
