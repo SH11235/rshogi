@@ -45,6 +45,11 @@ pub struct ExtendedSearchResult {
 
 /// Time management constants for byoyomi mode
 /// These values ensure the engine finishes thinking before GUI timeout
+///
+/// Known GUI compatibility:
+/// - ShogiGUI: Strict timing, needs at least 1000ms overhead
+/// - Shogidokoro: More lenient, 500ms overhead is sufficient
+/// - BCMShogi: Similar to ShogiGUI, requires conservative margins
 const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
 const DEFAULT_OVERHEAD_MS: u64 = 50; // Overhead for non-byoyomi modes
 const BYOYOMI_ADDITIONAL_SAFETY_MS: u64 = 500; // Additional safety margin for byoyomi hard limit
@@ -102,6 +107,12 @@ fn to_usi_score(raw_score: i32) -> Score {
         let mate_in_half = MATE_SCORE - raw_score.abs();
         // Calculate mate in moves (1 move = 2 plies)
         // Use max(1) to avoid "mate 0" (some GUIs prefer "mate 1" for immediate mate)
+        //
+        // Policy rationale: While USI spec allows "mate 0", some GUIs (e.g., older versions
+        // of ShogiGUI) have issues displaying it. Using "mate 1" for immediate mate is
+        // a conservative choice that works with all GUIs.
+        //
+        // TODO: Consider making this configurable via USI option for GUI compatibility
         let mate_in = ((mate_in_half + 1) / 2).max(1);
         if raw_score > 0 {
             Score::Mate(mate_in)
@@ -330,11 +341,6 @@ impl EngineAdapter {
     }
 
     /// Get available options
-    /// Get current byoyomi periods setting
-    pub fn get_byoyomi_periods(&self) -> Option<u32> {
-        self.byoyomi_periods
-    }
-
     pub fn get_options(&self) -> &[EngineOption] {
         &self.options
     }
@@ -373,6 +379,12 @@ impl EngineAdapter {
                     self.hash_size = val.parse::<usize>().map_err(|_| {
                         anyhow!("Invalid hash size: '{}'. Must be a number between 1 and 1024", val)
                     })?;
+
+                    // Note: Hash table is not currently implemented in the engine
+                    // This value is stored for future use
+                    crate::usi::send_info_string(
+                        "Note: Hash table is not currently implemented. This setting will be used in future versions.",
+                    )?;
                 }
             }
             "Threads" => {
@@ -1270,26 +1282,44 @@ impl EngineAdapter {
             .as_ref()
             .ok_or_else(|| EngineError::Other(anyhow!("No committed best move")))?;
 
+        log::debug!("Committed best move: {}", move_to_usi(&committed.best_move));
+
         // 3. Verify best is in root legal moves
         if !session.root_legal_moves.contains(&committed.best_move) {
             log::error!(
                 "Best move {} not in root legal moves! Attempting fallback.",
                 move_to_usi(&committed.best_move)
             );
+            log::error!("Root legal moves count: {}", session.root_legal_moves.len());
+            log::error!(
+                "First few root legal moves: {:?}",
+                session.root_legal_moves.iter().take(5).map(move_to_usi).collect::<Vec<_>>()
+            );
+
             self.log_validation_failure(session, &committed.best_move, "not_in_root_legal");
             return self.get_fallback_move(&session.root_legal_moves);
         }
 
-        // 4. Validate ponder if present
+        // 4. Validate ponder if present, or generate fallback
         let ponder_str = if let Some(ponder) = committed.ponder_move {
             if self.validate_ponder(current_position, &committed.best_move, &ponder) {
                 Some(move_to_usi(&ponder))
             } else {
-                log::warn!("Invalid ponder move, skipping");
-                None
+                log::warn!("Invalid ponder move, attempting fallback");
+                // Try to generate a fallback ponder move
+                Self::generate_ponder_fallback(current_position, &committed.best_move)
+                    .map(|m| move_to_usi(&m))
             }
         } else {
-            None
+            // No ponder move from search, try to generate one
+            log::info!("No ponder move from search, generating fallback");
+            let fallback = Self::generate_ponder_fallback(current_position, &committed.best_move);
+            if let Some(ref mv) = fallback {
+                log::info!("Generated fallback ponder move: {}", move_to_usi(mv));
+            } else {
+                log::warn!("Failed to generate fallback ponder move");
+            }
+            fallback.map(|m| move_to_usi(&m))
         };
 
         // 5. Convert to USI (only here)
@@ -1375,14 +1405,6 @@ fn is_fischer_disguised_as_byoyomi(params: &GoParams) -> bool {
         && params.periods.is_none()
 }
 
-/// Get the increment for the given side from go parameters
-fn get_increment_for_side(params: &GoParams, side: engine_core::shogi::Color) -> u64 {
-    match side {
-        engine_core::shogi::Color::Black => params.binc.unwrap_or(0),
-        engine_core::shogi::Color::White => params.winc.unwrap_or(0),
-    }
-}
-
 /// Apply infinite mode time control
 fn apply_infinite_mode(builder: SearchLimitsBuilder) -> SearchLimitsBuilder {
     builder.infinite()
@@ -1413,13 +1435,30 @@ fn apply_byoyomi_mode(
 fn apply_fischer_mode(
     builder: SearchLimitsBuilder,
     params: &GoParams,
-    position: &Position,
+    _position: &Position,
 ) -> SearchLimitsBuilder {
     let black_time = params.btime.unwrap_or(0);
     let white_time = params.wtime.unwrap_or(0);
-    let increment = get_increment_for_side(params, position.side_to_move);
 
-    // Note: fischer() expects (black_ms, white_ms, increment_ms)
+    // Handle asymmetric increments
+    let incr_b = params.binc.unwrap_or(0);
+    let incr_w = params.winc.unwrap_or(0);
+
+    // Since SearchLimits builder only supports symmetric increment,
+    // use the minimum of both increments for safety (conservative approach)
+    let increment = if incr_b == incr_w {
+        incr_b // Same increment for both sides
+    } else {
+        // Different increments - use minimum for safety
+        log::debug!(
+            "Asymmetric Fischer increments (binc={incr_b}, winc={incr_w}), using minimum={} for safety",
+            incr_b.min(incr_w)
+        );
+        incr_b.min(incr_w)
+    };
+
+    // TODO: When SearchLimits supports asymmetric increments, update to:
+    // builder.fischer_asymmetric(black_time, white_time, incr_b, incr_w)
     builder.fischer(black_time, white_time, increment)
 }
 
@@ -1949,32 +1988,8 @@ mod tests {
         assert!(!is_fischer_disguised_as_byoyomi(&params3));
     }
 
-    #[test]
-    fn test_get_increment_for_black() {
-        let params = GoParams {
-            binc: Some(2000),
-            winc: Some(3000),
-            ..Default::default()
-        };
-        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::Black), 2000);
-    }
-
-    #[test]
-    fn test_get_increment_for_white() {
-        let params = GoParams {
-            binc: Some(2000),
-            winc: Some(3000),
-            ..Default::default()
-        };
-        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::White), 3000);
-    }
-
-    #[test]
-    fn test_get_increment_missing_values() {
-        let params = GoParams::default();
-        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::Black), 0);
-        assert_eq!(get_increment_for_side(&params, engine_core::shogi::Color::White), 0);
-    }
+    // Tests for get_increment_for_side removed since the function is no longer used
+    // The functionality is now incorporated directly into apply_fischer_mode
 
     // Tests for individual time control functions
     // #[test]
