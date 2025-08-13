@@ -852,26 +852,40 @@ impl EngineAdapter {
         position: &Position,
         moves: &engine_core::shogi::MoveList,
     ) -> Option<engine_core::shogi::Move> {
-        // First pass: Look for captures
+        use engine_core::PieceType;
+
+        // First pass: Look for captures (excluding king captures)
         for i in 0..moves.len() {
             let mv = moves[i];
-            // Check if target square has opponent piece
-            if position.board.piece_on(mv.to()).is_some() {
+            // Check if target square has opponent piece and it's not a king move
+            if position.board.piece_on(mv.to()).is_some()
+                && mv.piece_type() != Some(PieceType::King)
+            {
                 return Some(mv);
             }
         }
 
-        // Second pass: Look for checks
+        // Second pass: Look for checks (excluding king moves)
         for i in 0..moves.len() {
             let mv = moves[i];
-            let mut temp_pos = position.clone();
-            temp_pos.do_move(mv);
-            if temp_pos.is_in_check() {
+            if mv.piece_type() != Some(PieceType::King) {
+                let mut temp_pos = position.clone();
+                temp_pos.do_move(mv);
+                if temp_pos.is_in_check() {
+                    return Some(mv);
+                }
+            }
+        }
+
+        // Third pass: Look for non-king moves
+        for i in 0..moves.len() {
+            let mv = moves[i];
+            if mv.piece_type() != Some(PieceType::King) {
                 return Some(mv);
             }
         }
 
-        // Third pass: Return the first legal move
+        // Last resort: Return any legal move (including king moves)
         if !moves.is_empty() {
             Some(moves[0])
         } else {

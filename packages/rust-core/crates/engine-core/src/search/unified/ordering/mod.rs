@@ -76,6 +76,29 @@ impl MoveOrdering {
             return 1_000_000;
         }
 
+        // Special handling for king moves - apply significant penalty
+        // unless we're in check (where king moves might be necessary)
+        if mv.piece_type() == Some(crate::PieceType::King) && !pos.is_in_check() {
+            // King moves should be considered last unless they're captures of major pieces
+            if mv.is_capture_hint() {
+                if let Some(victim) = mv.captured_piece_type() {
+                    use crate::PieceType;
+                    match victim {
+                        PieceType::Rook | PieceType::Bishop => {
+                            // Allow capturing major pieces with king but with penalty
+                            return 50_000 + Self::piece_value(Some(victim));
+                        }
+                        _ => {
+                            // Heavily penalize capturing minor pieces with king
+                            return -10_000 + Self::piece_value(Some(victim));
+                        }
+                    }
+                }
+            }
+            // Non-capturing king moves get heavy penalty
+            return -20_000;
+        }
+
         // Good captures
         if mv.is_capture_hint() {
             // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
@@ -182,7 +205,7 @@ impl MoveOrdering {
             Some(PieceType::Gold) => 600,
             Some(PieceType::Bishop) => 800,
             Some(PieceType::Rook) => 900,
-            Some(PieceType::King) => 10000,
+            Some(PieceType::King) => 2000, // Reduced from 10000 to discourage king captures
             None => 0,
         }
     }
@@ -206,7 +229,7 @@ impl MoveOrdering {
             score += 200;
         }
         // Center files (3-7) are important
-        if to_sq.file() >= 3 && to_sq.file() <= 7 {
+        if (3..=7).contains(&to_sq.file()) {
             score += 100;
         }
 
@@ -233,8 +256,14 @@ impl MoveOrdering {
             }
             Some(PieceType::Pawn) => {
                 // Pawns advancing in the center
-                if to_sq.file() >= 4 && to_sq.file() <= 6 {
+                if (4..=6).contains(&to_sq.file()) {
                     score += 50;
+                }
+            }
+            Some(PieceType::King) => {
+                // King moves get significant penalty unless in check
+                if !pos.is_in_check() {
+                    score -= 500; // Discourage king moves in normal play
                 }
             }
             _ => {}
