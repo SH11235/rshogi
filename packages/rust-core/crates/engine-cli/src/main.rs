@@ -1495,13 +1495,65 @@ fn search_worker(
     let mut session =
         SearchSession::new(search_id, position.hash, position.side_to_move, root_legal_moves);
 
+    // Wrap session in Arc<Mutex<>> for shared access in callback
+    let session_arc = Arc::new(Mutex::new(session.clone()));
+    let session_for_callback = session_arc.clone();
+    let tx_for_iteration = tx.clone();
+
     // Create info callback that updates session
     let enhanced_info_callback = move |info: SearchInfo| {
         // Call original callback
         info_callback(info.clone());
 
-        // Note: Session updates are handled after search completes
-        // This callback is just for forwarding info to GUI
+        // Update session on each iteration completion
+        if !info.pv.is_empty() {
+            if let Ok(best_move) = engine_core::usi::parse_usi_move(&info.pv[0]) {
+                let ponder_move =
+                    info.pv.get(1).and_then(|m| engine_core::usi::parse_usi_move(m).ok());
+
+                // Extract raw score from Score enum
+                let raw_score = match info.score {
+                    Some(Score::Cp(cp)) => cp,
+                    Some(Score::Mate(mate)) => {
+                        // Convert mate score to raw score format
+                        // Positive mate = we're winning
+                        let mate_score =
+                            engine_core::search::constants::MATE_SCORE - (mate.abs() as i32 * 2);
+                        if mate > 0 {
+                            mate_score
+                        } else {
+                            -mate_score
+                        }
+                    }
+                    None => 0,
+                };
+
+                // Convert PV from USI strings to Move objects
+                let pv_moves: Vec<_> = info
+                    .pv
+                    .iter()
+                    .filter_map(|m| engine_core::usi::parse_usi_move(m).ok())
+                    .collect();
+
+                // Update session
+                if let Ok(mut session_guard) = session_for_callback.lock() {
+                    session_guard.update_current_best(
+                        best_move,
+                        ponder_move,
+                        info.depth.unwrap_or(0),
+                        raw_score,
+                        pv_moves,
+                    );
+                    session_guard.commit_iteration();
+
+                    // Send IterationComplete message
+                    let _ = tx_for_iteration.send(WorkerMessage::IterationComplete {
+                        session: Box::new(session_guard.clone()),
+                        search_id,
+                    });
+                }
+            }
+        }
     };
 
     // Wrap engine in guard for panic safety
