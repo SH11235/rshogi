@@ -332,13 +332,13 @@ mod tests {
         }
 
         // TIME_CHECK_MASK_BYOYOMI = 0x7FF = 2047, so check every 2048 nodes
-        let expected_byoyomi = 100_000 / 2048;
-        assert!((hits_byoyomi as i32 - expected_byoyomi as i32).abs() <= 2,
+        let expected_byoyomi: i32 = 100_000 / 2048;
+        assert!((hits_byoyomi - expected_byoyomi).abs() <= 2,
             "Byoyomi mask should check approximately every 2048 nodes, got {hits_byoyomi} hits, expected around {expected_byoyomi}");
 
         // TIME_CHECK_MASK_NORMAL = 0x1FFF = 8191, so check every 8192 nodes
-        let expected_normal = 100_000 / 8192;
-        assert!((hits_normal as i32 - expected_normal as i32).abs() <= 2,
+        let expected_normal: i32 = 100_000 / 8192;
+        assert!((hits_normal - expected_normal).abs() <= 2,
             "Normal mask should check approximately every 8192 nodes, got {hits_normal} hits, expected around {expected_normal}");
     }
 
