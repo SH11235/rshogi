@@ -1093,12 +1093,12 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 };
 
                 // Use longer timeouts for byoyomi mode
-                let stage1_timeout = if overhead_ms >= engine_adapter::BYOYOMI_OVERHEAD_MS {
+                let stage1_timeout = if overhead_ms >= usi::DEFAULT_BYOYOMI_OVERHEAD_MS {
                     Duration::from_millis(500) // Byoyomi mode: wait longer for in-flight messages
                 } else {
                     Duration::from_millis(100) // Normal mode: quick wait
                 };
-                let total_timeout = if overhead_ms >= engine_adapter::BYOYOMI_OVERHEAD_MS {
+                let total_timeout = if overhead_ms >= usi::DEFAULT_BYOYOMI_OVERHEAD_MS {
                     Duration::from_millis(1000) // Byoyomi mode: up to 1 second total
                 } else {
                     Duration::from_millis(150) // Normal mode: quick fallback
