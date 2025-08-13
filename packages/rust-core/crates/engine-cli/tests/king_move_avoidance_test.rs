@@ -23,11 +23,9 @@ fn test_engine_avoids_king_moves() {
     // Collect output in a separate thread
     let output_handle = thread::spawn(move || {
         let mut lines = Vec::new();
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                println!("Engine: {line}");
-                lines.push(line);
-            }
+        for line in reader.lines().flatten() {
+            println!("Engine: {line}");
+            lines.push(line);
         }
         lines
     });
