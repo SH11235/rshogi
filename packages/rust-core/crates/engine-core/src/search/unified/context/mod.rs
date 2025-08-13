@@ -23,6 +23,12 @@ pub struct SearchContext {
 
     /// Whether ponder was converted to normal search
     ponder_converted: bool,
+
+    /// Current search depth for logging
+    current_depth: u8,
+
+    /// Flag to log time stop only once
+    time_stop_logged: bool,
 }
 
 impl Default for SearchContext {
@@ -40,6 +46,8 @@ impl SearchContext {
             internal_stop: AtomicBool::new(false),
             ponder_hit_flag: None,
             ponder_converted: false,
+            current_depth: 0,
+            time_stop_logged: false,
         }
     }
 
@@ -49,6 +57,8 @@ impl SearchContext {
         self.internal_stop.store(false, Ordering::Relaxed);
         self.ponder_hit_flag = None;
         self.ponder_converted = false;
+        self.current_depth = 0;
+        self.time_stop_logged = false;
     }
 
     /// Set search limits
@@ -84,6 +94,9 @@ impl SearchContext {
         if let Some(flag) = &self.ponder_hit_flag {
             // Check if we've already converted
             if flag.load(Ordering::Acquire) && !self.ponder_converted {
+                // Capture ponder elapsed time BEFORE converting (which resets start_time)
+                let ponder_elapsed_ms = self.elapsed().as_millis() as u64;
+
                 log::info!("Ponder hit detected in process_events");
                 self.ponder_converted = true;
 
@@ -93,17 +106,11 @@ impl SearchContext {
 
                 // Now notify TimeManager about ponder hit with updated limits
                 if let Some(tm) = time_manager {
-                    let elapsed_ms = self.elapsed().as_millis() as u64;
-                    // Create TimeLimits from SearchLimits
-                    let time_limits = crate::time_management::TimeLimits {
-                        time_control: self.limits.time_control.clone(),
-                        moves_to_go: self.limits.moves_to_go,
-                        depth: self.limits.depth.map(|d| d as u32),
-                        nodes: self.limits.nodes,
-                        time_parameters: self.limits.time_parameters,
-                    };
-                    tm.ponder_hit(Some(&time_limits), elapsed_ms);
-                    log::info!("TimeManager notified of ponder hit after {elapsed_ms}ms");
+                    // Create TimeLimits from SearchLimits using Into trait
+                    let time_limits: crate::time_management::TimeLimits =
+                        self.limits.clone().into();
+                    tm.ponder_hit(Some(&time_limits), ponder_elapsed_ms);
+                    log::info!("TimeManager notified of ponder hit after {ponder_elapsed_ms}ms");
                 }
             }
         }
@@ -155,6 +162,50 @@ impl SearchContext {
     pub fn limits(&self) -> &SearchLimits {
         &self.limits
     }
+
+    /// Check time limit via TimeManager
+    pub fn check_time_limit(
+        &mut self,
+        nodes: u64,
+        time_manager: &Option<Arc<crate::time_management::TimeManager>>,
+    ) -> bool {
+        if let Some(ref tm) = time_manager {
+            if tm.should_stop(nodes) {
+                // Log once per search (engine-core internal logging)
+                if !self.time_stop_logged {
+                    let elapsed = self.elapsed();
+                    log::info!(
+                        "Time limit exceeded: depth={} nodes={} elapsed={}ms",
+                        self.current_depth,
+                        nodes,
+                        elapsed.as_millis()
+                    );
+                    self.time_stop_logged = true;
+                }
+                self.stop();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get appropriate time check mask based on time control
+    pub fn get_time_check_mask(&self) -> u64 {
+        use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
+        use crate::time_management::TimeControl;
+
+        match &self.limits.time_control {
+            TimeControl::FixedNodes { .. } => 0x3FF, // 1024 nodes - more frequent checks for node-based limits
+            TimeControl::Byoyomi { .. } => TIME_CHECK_MASK_BYOYOMI,
+            TimeControl::Ponder(_) => TIME_CHECK_MASK_NORMAL, // Ponder always uses NORMAL (opponent's time)
+            _ => TIME_CHECK_MASK_NORMAL,
+        }
+    }
+
+    /// Set current depth for logging
+    pub fn set_current_depth(&mut self, depth: u8) {
+        self.current_depth = depth;
+    }
 }
 
 #[cfg(test)]
@@ -195,5 +246,71 @@ mod tests {
         // Reset should clear the flag
         context.reset();
         assert!(!context.ponder_converted);
+    }
+
+    #[test]
+    fn test_ponder_hit_timing() {
+        use crate::time_management::{TimeManager, TimeParameters};
+        use std::{thread, time::Duration};
+
+        let mut context = SearchContext::new();
+
+        // Set up ponder mode with a ponder hit flag
+        let ponder_hit_flag = Arc::new(AtomicBool::new(false));
+        let mut limits = SearchLimits::builder()
+            .time_control(TimeControl::Ponder(Box::new(TimeControl::Infinite)))
+            .build();
+        limits.ponder_hit_flag = Some(ponder_hit_flag.clone());
+
+        // Track the start time
+        let start = context.start_time;
+        context.set_limits(limits);
+
+        // Create a mock TimeManager to capture ponder_hit call
+        let time_params = TimeParameters::default();
+        let time_limits = crate::time_management::TimeLimits {
+            time_control: TimeControl::Infinite,
+            moves_to_go: None,
+            depth: None,
+            nodes: None,
+            time_parameters: Some(time_params),
+        };
+        let time_manager = Arc::new(TimeManager::new(
+            &time_limits,
+            crate::shogi::Color::Black,
+            0,
+            crate::time_management::GamePhase::Opening,
+        ));
+
+        // Sleep for a measurable amount of time
+        thread::sleep(Duration::from_millis(10));
+
+        // Trigger ponder hit
+        ponder_hit_flag.store(true, Ordering::Release);
+
+        // Capture elapsed time before process_events
+        let elapsed_before = start.elapsed().as_millis() as u64;
+
+        // Process events should capture elapsed time BEFORE converting
+        context.process_events(&Some(time_manager.clone()));
+
+        // Verify that elapsed time was captured correctly
+        assert!(
+            elapsed_before >= 5,
+            "Ponder elapsed time should be at least 5ms, got {}ms",
+            elapsed_before
+        );
+
+        // Verify that start_time was reset after conversion
+        let elapsed_after_convert = context.start_time.elapsed().as_millis() as u64;
+        assert!(
+            elapsed_after_convert < elapsed_before,
+            "Start time should be reset after conversion. Before: {}ms, After: {}ms",
+            elapsed_before,
+            elapsed_after_convert
+        );
+
+        // Verify that ponder was converted
+        assert!(context.ponder_converted);
     }
 }

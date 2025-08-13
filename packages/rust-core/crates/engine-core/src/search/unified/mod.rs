@@ -323,18 +323,15 @@ where
             // Clear all PV lines at the start of each iteration
             self.pv_table.clear_all();
 
+            // Set current depth for logging
+            self.context.set_current_depth(depth);
+
             // Process events including ponder hit
             self.context.process_events(&self.time_manager);
 
             // Check time limits via TimeManager (skip for depth 1 to ensure at least 1 ply)
-            if depth > 1 {
-                if let Some(ref tm) = self.time_manager {
-                    if tm.should_stop(self.stats.nodes) {
-                        log::info!("TimeManager signaled stop after {} nodes", self.stats.nodes);
-                        self.context.stop();
-                        break;
-                    }
-                }
+            if depth > 1 && self.context.check_time_limit(self.stats.nodes, &self.time_manager) {
+                break;
             }
 
             // Set up aspiration window for depth > 1
