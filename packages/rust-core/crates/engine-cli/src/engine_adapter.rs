@@ -52,7 +52,7 @@ pub struct ExtendedSearchResult {
 /// - ShogiGUI: Strict timing, needs at least 1000ms overhead
 /// - Shogidokoro: More lenient, 500ms overhead is sufficient
 /// - BCMShogi: Similar to ShogiGUI, requires conservative margins
-const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
+pub const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
 const DEFAULT_OVERHEAD_MS: u64 = 50; // Overhead for non-byoyomi modes
 const BYOYOMI_ADDITIONAL_SAFETY_MS: u64 = 500; // Additional safety margin for byoyomi hard limit
 
@@ -162,6 +162,8 @@ pub struct EngineAdapter {
     search_start_position_hash: Option<u64>,
     /// Side to move at the start of search
     search_start_side_to_move: Option<engine_core::shogi::Color>,
+    /// Last calculated overhead in milliseconds (for stop handler)
+    last_overhead_ms: u64,
 }
 
 /// State for managing ponder (think on opponent's time) functionality
@@ -306,6 +308,7 @@ impl EngineAdapter {
             current_stop_flag: None,
             search_start_position_hash: None,
             search_start_side_to_move: None,
+            last_overhead_ms: DEFAULT_OVERHEAD_MS,
         };
 
         // Initialize options
@@ -564,6 +567,11 @@ impl EngineAdapter {
         self.active_ponder_hit_flag = None;
     }
 
+    /// Get last calculated overhead in milliseconds
+    pub fn get_last_overhead_ms(&self) -> u64 {
+        self.last_overhead_ms
+    }
+
     /// Verify position consistency for debugging
     pub fn log_position_state(&self, context: &str) {
         if let Some(ref pos) = self.position {
@@ -668,6 +676,10 @@ impl EngineAdapter {
         } else {
             DEFAULT_OVERHEAD_MS
         };
+
+        // Store overhead for stop handler
+        self.last_overhead_ms = overhead_ms;
+
         let time_params = TimeParameters {
             byoyomi_soft_ratio: self.byoyomi_early_finish_ratio as f64 / 100.0,
             pv_base_threshold_ms: self.pv_stability_base,

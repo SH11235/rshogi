@@ -1086,10 +1086,26 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                     }
                 }
 
+                // Get overhead from adapter to determine timeouts
+                let overhead_ms = {
+                    let adapter = lock_or_recover_adapter(ctx.engine);
+                    adapter.get_last_overhead_ms()
+                };
+
+                // Use longer timeouts for byoyomi mode
+                let stage1_timeout = if overhead_ms >= engine_adapter::BYOYOMI_OVERHEAD_MS {
+                    Duration::from_millis(500) // Byoyomi mode: wait longer for in-flight messages
+                } else {
+                    Duration::from_millis(100) // Normal mode: quick wait
+                };
+                let total_timeout = if overhead_ms >= engine_adapter::BYOYOMI_OVERHEAD_MS {
+                    Duration::from_millis(1000) // Byoyomi mode: up to 1 second total
+                } else {
+                    Duration::from_millis(150) // Normal mode: quick fallback
+                };
+
                 // Wait for bestmove with staged timeouts
                 let start = Instant::now();
-                let stage1_timeout = Duration::from_millis(100); // Quick wait for in-flight messages
-                let total_timeout = Duration::from_millis(150); // Total time before emergency fallback
                 let mut partial_result: Option<(String, u32, i32)> = None;
                 let mut stage = 1;
 
