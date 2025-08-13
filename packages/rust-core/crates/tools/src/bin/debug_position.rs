@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for mv in move_list.as_slice() {
             let mut test_pos = position.clone();
             test_pos.do_move(*mv);
-            if !test_pos.in_check() {
+            if !test_pos.is_in_check() {
                 legal_moves.push(*mv);
             }
         }
@@ -219,7 +219,7 @@ fn perft(position: &Position, depth: u8) -> u64 {
         let undo_info = new_position.do_move(*mv);
 
         // Check if the move was legal (king not in check)
-        if !new_position.in_check() {
+        if !new_position.is_in_check() {
             nodes += perft(&new_position, depth - 1);
         }
 
@@ -282,7 +282,7 @@ mod tests {
         for mv in move_list.as_slice() {
             let mut test_pos = position.clone();
             test_pos.do_move(*mv);
-            if !test_pos.in_check() {
+            if !test_pos.is_in_check() {
                 legal_count += 1;
             }
         }

@@ -612,29 +612,6 @@ impl Board {
         self.piece_bb[color as usize][piece_type as usize]
     }
 
-    /// Check if a square is attacked by a specific color
-    pub fn is_attacked_by(&self, sq: Square, by_color: Color) -> bool {
-        use crate::shogi::ATTACK_TABLES;
-
-        // Check attacks from each piece type
-        // King attacks
-        let king_attacks = ATTACK_TABLES.king_attacks[sq.index()];
-        if !(king_attacks & self.piece_bb[by_color as usize][PieceType::King as usize]).is_empty() {
-            return true;
-        }
-
-        // Gold attacks (includes promoted pieces)
-        let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
-        if !(gold_attacks & self.piece_bb[by_color as usize][PieceType::Gold as usize]).is_empty() {
-            return true;
-        }
-
-        // TODO: Add checks for other piece types (rook, bishop, silver, knight, lance, pawn)
-        // For now, this is a simplified implementation
-
-        false
-    }
-
     /// Find king square
     pub fn king_square(&self, color: Color) -> Option<Square> {
         let mut bb = self.piece_bb[color as usize][PieceType::King as usize];
@@ -1151,17 +1128,6 @@ impl Position {
         // Simple repetition detection would go here
         // For now, return false
         false
-    }
-
-    /// Check if side is in check
-    pub fn in_check(&self) -> bool {
-        // For now, simply check if king is attacked
-        let king_bb = self.board.piece_bb[self.side_to_move as usize][PieceType::King as usize];
-        if let Some(king_sq) = king_bb.lsb() {
-            self.is_attacked(king_sq, self.side_to_move.opposite())
-        } else {
-            false
-        }
     }
 
     /// Check if specific color is in check
