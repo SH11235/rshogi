@@ -14,7 +14,7 @@ use crate::{
         constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
         unified::UnifiedSearcher,
     },
-    shogi::{Move, Position},
+    shogi::{Move, PieceType, Position},
 };
 
 /// Get event polling interval based on time limit
@@ -599,14 +599,14 @@ where
             let material_gain = if let Some(victim) = mv.captured_piece_type() {
                 // Simple piece values for delta pruning
                 match victim {
-                    crate::PieceType::Pawn => 100,
-                    crate::PieceType::Lance => 300,
-                    crate::PieceType::Knight => 400,
-                    crate::PieceType::Silver => 500,
-                    crate::PieceType::Gold => 600,
-                    crate::PieceType::Bishop => 800,
-                    crate::PieceType::Rook => 1000,
-                    crate::PieceType::King => 10000, // Should never happen
+                    PieceType::Pawn => 100,
+                    PieceType::Lance => 300,
+                    PieceType::Knight => 400,
+                    PieceType::Silver => 500,
+                    PieceType::Gold => 600,
+                    PieceType::Bishop => 800,
+                    PieceType::Rook => 1000,
+                    PieceType::King => 10000, // Should never happen
                 }
             } else {
                 0
@@ -655,7 +655,6 @@ where
 
 /// Check if position has non-pawn material
 fn has_non_pawn_material(pos: &Position) -> bool {
-    use crate::PieceType;
 
     // Check if current side has any pieces other than pawns and king
     let color = pos.side_to_move;
