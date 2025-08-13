@@ -3,7 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     search::{constants::SEARCH_INF, tt::NodeType, unified::UnifiedSearcher},
-    shogi::{Move, Position},
+    shogi::{Move, PieceType, Position},
 };
 
 /// Search a single node in the tree
@@ -214,6 +214,14 @@ where
             // Full window search for first move
             score = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, ply + 1);
         } else {
+            // Special handling for king moves - extend search to see consequences
+            let is_king_move = mv.piece_type() == Some(PieceType::King);
+            let extension = if is_king_move && depth >= 3 {
+                1 // Extend search by 1 ply for king moves
+            } else {
+                0
+            };
+
             // Late move reduction using advanced pruning module
             let gives_check = false; // TODO: implement gives_check detection
             let reduction = if USE_PRUNING
@@ -223,7 +231,10 @@ where
                     in_check,
                     gives_check,
                     mv,
-                ) {
+                )
+                && !is_king_move
+            // Don't reduce king moves
+            {
                 crate::search::unified::pruning::lmr_reduction(depth, moves_searched)
             } else {
                 0
@@ -237,12 +248,14 @@ where
             // and can lead to illegal move generation (e.g., king captures).
             // Calculate reduced depth for Late Move Reduction (LMR)
             // saturating_sub ensures depth doesn't go negative, transitioning to quiescence search when depth=0
-            let reduced_depth = depth.saturating_sub(1 + reduction);
+            let search_depth = depth.saturating_add(extension); // Add extension first
+            let reduced_depth = search_depth.saturating_sub(1 + reduction);
             score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, ply + 1);
 
             // Re-search if needed
             if score > alpha && score < beta {
-                score = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, ply + 1);
+                let full_depth = search_depth.saturating_sub(1);
+                score = -super::alpha_beta(searcher, pos, full_depth, -beta, -alpha, ply + 1);
             }
         }
 
