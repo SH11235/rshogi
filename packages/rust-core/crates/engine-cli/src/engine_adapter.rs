@@ -573,7 +573,7 @@ impl EngineAdapter {
                 }
             }
             _ => {
-                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, EvalFile, {}, {}, ByoyomiEarlyFinishRatio, PVStabilityBase, PVStabilitySlope, {}, {}, {}", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS, OPT_OVERHEAD_MS, OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_SAFETY_MS));
+                log::warn!("Unknown option '{name}' ignored for compatibility");
             }
         }
         Ok(())
@@ -648,6 +648,25 @@ impl EngineAdapter {
         }
     }
 
+    /// Pick appropriate overhead milliseconds based on effective time control mode
+    fn pick_overhead_for(&self, params: &GoParams) -> u64 {
+        match infer_time_control_mode(params) {
+            TimeControlMode::Ponder => {
+                // For ponder, determine the inner mode by removing ponder flag
+                let inner = GoParams {
+                    ponder: false,
+                    ..params.clone()
+                };
+                match infer_time_control_mode(&inner) {
+                    TimeControlMode::Byoyomi => self.byoyomi_overhead_ms,
+                    _ => self.overhead_ms,
+                }
+            }
+            TimeControlMode::Byoyomi => self.byoyomi_overhead_ms,
+            _ => self.overhead_ms,
+        }
+    }
+
     /// Prepare search data and return necessary components
     /// This allows releasing the mutex lock before the actual search
     pub fn prepare_search(
@@ -718,12 +737,8 @@ impl EngineAdapter {
 
         // Create TimeParameters from engine settings
         log::debug!("Creating TimeParameters");
-        // Use configurable overhead values based on time control mode
-        let overhead_ms = if params.byoyomi.is_some() {
-            self.byoyomi_overhead_ms
-        } else {
-            self.overhead_ms
-        };
+        // Use appropriate overhead based on effective time control mode
+        let overhead_ms = self.pick_overhead_for(params);
 
         // Store overhead for stop handler
         self.last_overhead_ms = overhead_ms;
@@ -2588,6 +2603,15 @@ mod tests {
         adapter.set_option(OPT_OVERHEAD_MS, Some("5000")).unwrap(); // MAX_OVERHEAD_MS
         adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("0")).unwrap(); // min
         adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("2000")).unwrap(); // max
+
+        // Test unknown options (should succeed for compatibility)
+        assert!(adapter.set_option("UnknownOption", Some("value")).is_ok());
+        assert!(adapter.set_option("GUI_SpecificOption", Some("123")).is_ok());
+        assert!(adapter.set_option("OtherEngine_Option", None).is_ok());
+
+        // Values should remain unchanged after unknown options
+        assert_eq!(adapter.overhead_ms, 5000); // Last set value
+        assert_eq!(adapter.byoyomi_safety_ms, 2000); // Last set value
     }
 
     #[test]
@@ -2625,6 +2649,22 @@ mod tests {
 
         // Verify byoyomi overhead was used
         assert_eq!(adapter.last_overhead_ms, 800);
+
+        // Test with Fischer disguised as byoyomi (should use normal overhead)
+        let params = GoParams {
+            byoyomi: Some(0),
+            btime: Some(10000),
+            wtime: Some(10000),
+            binc: Some(1000),
+            winc: Some(1000),
+            ..Default::default()
+        };
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (_, _limits, _) = adapter.prepare_search(&params, stop_flag).unwrap();
+
+        // Verify normal overhead was used (not byoyomi overhead)
+        assert_eq!(adapter.last_overhead_ms, 75);
     }
 
     #[test]
@@ -2644,5 +2684,76 @@ mod tests {
 
         let err = EngineAdapter::parse_u64_in_range("TestOption", "5001", 0, 5000).unwrap_err();
         assert_eq!(err.to_string(), "TestOption must be between 0 and 5000, got 5001");
+    }
+
+    #[test]
+    fn test_pick_overhead_for() {
+        let adapter = EngineAdapter::new();
+
+        // Normal time control should use normal overhead
+        let params = GoParams {
+            btime: Some(10000),
+            wtime: Some(10000),
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_OVERHEAD_MS);
+
+        // Byoyomi should use byoyomi overhead
+        let params = GoParams {
+            byoyomi: Some(6000),
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_BYOYOMI_OVERHEAD_MS);
+
+        // Fischer disguised as byoyomi (byoyomi=0 + increment) should use normal overhead
+        let params = GoParams {
+            byoyomi: Some(0),
+            binc: Some(1000),
+            winc: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_OVERHEAD_MS);
+
+        // Periods only (without byoyomi) should use byoyomi overhead
+        let params = GoParams {
+            periods: Some(3),
+            btime: Some(10000),
+            wtime: Some(10000),
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_BYOYOMI_OVERHEAD_MS);
+
+        // Ponder with inner byoyomi should use byoyomi overhead
+        let params = GoParams {
+            ponder: true,
+            byoyomi: Some(6000),
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_BYOYOMI_OVERHEAD_MS);
+
+        // Ponder with inner Fischer should use normal overhead
+        let params = GoParams {
+            ponder: true,
+            btime: Some(10000),
+            wtime: Some(10000),
+            binc: Some(1000),
+            winc: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_OVERHEAD_MS);
+
+        // Infinite mode should use normal overhead
+        let params = GoParams {
+            infinite: true,
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_OVERHEAD_MS);
+
+        // Fixed time (movetime) should use normal overhead
+        let params = GoParams {
+            movetime: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(adapter.pick_overhead_for(&params), DEFAULT_OVERHEAD_MS);
     }
 }
