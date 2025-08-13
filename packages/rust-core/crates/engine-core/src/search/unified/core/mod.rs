@@ -17,13 +17,8 @@ use crate::{
     shogi::{Move, PieceType, Position},
 };
 
-/// Get event polling interval based on time limit
-fn get_event_poll_interval<
-    E,
-    const USE_TT: bool,
-    const USE_PRUNING: bool,
-    const TT_SIZE_MB: usize,
->(
+/// Get event polling mask based on time limit
+fn get_event_poll_mask<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
     searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
 ) -> u64
 where
@@ -277,14 +272,11 @@ where
         searcher.context.process_events(&searcher.time_manager);
 
         // Also check time manager at root (but ensure at least one move is fully searched)
-        if move_idx > 0 {
-            if let Some(ref tm) = searcher.time_manager {
-                if tm.should_stop(searcher.stats.nodes) {
-                    searcher.context.stop();
-                    // Skip TT storage when stopping - adds overhead
-                    break;
-                }
-            }
+        if move_idx > 0
+            && searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)
+        {
+            // Skip TT storage when stopping - adds overhead
+            break;
         }
 
         // Check for timeout
@@ -335,11 +327,16 @@ where
     // Check limits
     searcher.stats.nodes += 1;
 
-    // Get adaptive polling interval based on time control
-    let event_interval = get_event_poll_interval(searcher);
+    // Early stop check
+    if searcher.context.should_stop() {
+        return alpha;
+    }
 
-    // Process events based on adaptive interval (handle interval=0 for immediate check)
-    if event_interval == 0 || (searcher.stats.nodes & event_interval) == 0 {
+    // Get adaptive polling mask based on time control
+    let event_mask = get_event_poll_mask(searcher);
+
+    // Process events based on adaptive mask (handle mask=0 for immediate check)
+    if event_mask == 0 || (searcher.stats.nodes & event_mask) == 0 {
         // Add debug logging for ponder mode
         if matches!(
             &searcher.context.limits().time_control,
@@ -347,20 +344,17 @@ where
         ) && searcher.stats.nodes % 10000 == 0
         {
             log::debug!(
-                "Ponder search: checking events at {} nodes (interval: {:#x})",
+                "Ponder search: checking events at {} nodes (mask: {:#x})",
                 searcher.stats.nodes,
-                event_interval
+                event_mask
             );
         }
 
         searcher.context.process_events(&searcher.time_manager);
 
-        // For FixedNodes, also check time manager
-        if let Some(ref tm) = searcher.time_manager {
-            if tm.should_stop(searcher.stats.nodes) {
-                searcher.context.stop();
-                return 0;
-            }
+        // Check time limit using unified method
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager) {
+            return alpha;
         }
     }
 
@@ -390,7 +384,7 @@ where
     if searcher.stats.nodes & stop_check_interval == 0 && searcher.context.should_stop() {
         // Skip TT storage when aborting search - it adds overhead with minimal benefit
         // The partial evaluation is likely to be overwritten anyway
-        return 0;
+        return alpha;
     }
 
     // Absolute depth limit to prevent stack overflow
@@ -504,31 +498,26 @@ where
 {
     searcher.stats.nodes += 1;
 
-    // Check time limits in quiescence search (especially important for FixedNodes)
-    let event_interval = get_event_poll_interval(searcher);
-    if event_interval == 0 || (searcher.stats.nodes & event_interval) == 0 {
-        // Check both context stop flag and time manager
+    // Early stop check
+    if searcher.context.should_stop() {
+        return alpha;
+    }
+
+    // Periodic time check
+    let time_check_mask = searcher.context.get_time_check_mask();
+    if (searcher.stats.nodes & time_check_mask) == 0 {
+        // Process events
+        searcher.context.process_events(&searcher.time_manager);
+
+        // Check time limit
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager) {
+            return alpha;
+        }
+
+        // Check if stop was triggered
         if searcher.context.should_stop() {
             return alpha;
         }
-        if let Some(ref tm) = searcher.time_manager {
-            if tm.should_stop(searcher.stats.nodes) {
-                searcher.context.stop();
-                return alpha; // Return current best value
-            }
-        }
-    }
-
-    // Check stop flag periodically to minimize overhead
-    // Use more frequent checking if stop_flag is present
-    let stop_check_interval = if searcher.context.limits().stop_flag.is_some() {
-        0x3F // Check every 64 nodes when stop_flag is present
-    } else {
-        0x3FF // Check every 1024 nodes for normal operation
-    };
-
-    if searcher.stats.nodes & stop_check_interval == 0 && searcher.context.should_stop() {
-        return alpha;
     }
 
     // Stand pat
@@ -641,6 +630,11 @@ where
         // Undo move
         pos.undo_move(mv, undo_info);
 
+        // Stop check after recursion
+        if searcher.context.should_stop() {
+            return alpha;
+        }
+
         // Update alpha
         if score >= beta {
             return beta; // Beta cutoff
@@ -749,14 +743,14 @@ mod tests {
     }
 
     #[test]
-    fn test_get_event_poll_interval_values() {
-        // Test that the polling interval function returns expected values
+    fn test_get_event_poll_mask_values() {
+        // Test that the polling mask function returns expected values
         let evaluator = MaterialEvaluator;
         let searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
 
         // Without time manager, should return 0x7F (127) for responsiveness
-        let interval = get_event_poll_interval(&searcher);
-        assert_eq!(interval, 0x7F, "Without time manager should return 0x7F");
+        let mask = get_event_poll_mask(&searcher);
+        assert_eq!(mask, 0x7F, "Without time manager should return 0x7F");
     }
 
     #[test]
