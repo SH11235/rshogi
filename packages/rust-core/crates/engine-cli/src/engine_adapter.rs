@@ -1435,7 +1435,7 @@ fn apply_byoyomi_mode(
 fn apply_fischer_mode(
     builder: SearchLimitsBuilder,
     params: &GoParams,
-    _position: &Position,
+    position: &Position,
 ) -> SearchLimitsBuilder {
     let black_time = params.btime.unwrap_or(0);
     let white_time = params.wtime.unwrap_or(0);
@@ -1445,17 +1445,19 @@ fn apply_fischer_mode(
     let incr_w = params.winc.unwrap_or(0);
 
     // Since SearchLimits builder only supports symmetric increment,
-    // use the minimum of both increments for safety (conservative approach)
-    let increment = if incr_b == incr_w {
-        incr_b // Same increment for both sides
-    } else {
-        // Different increments - use minimum for safety
-        log::debug!(
-            "Asymmetric Fischer increments (binc={incr_b}, winc={incr_w}), using minimum={} for safety",
-            incr_b.min(incr_w)
-        );
-        incr_b.min(incr_w)
+    // use the side-to-move's increment for accurate time management
+    let increment = match position.side_to_move {
+        engine_core::shogi::Color::Black => incr_b,
+        engine_core::shogi::Color::White => incr_w,
     };
+
+    if incr_b != incr_w {
+        log::debug!(
+            "Asymmetric Fischer increments (binc={incr_b}, winc={incr_w}), using {} for {:?} side",
+            increment,
+            position.side_to_move
+        );
+    }
 
     // TODO: When SearchLimits supports asymmetric increments, update to:
     // builder.fischer_asymmetric(black_time, white_time, incr_b, incr_w)
@@ -1831,6 +1833,40 @@ mod tests {
                 assert_eq!(black_ms, 300000);
                 assert_eq!(white_ms, 300000);
                 assert_eq!(increment_ms, 2000); // Black to move, so black increment
+            }
+            _ => panic!("Expected Fischer time control"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_fischer_white_to_move_uses_winc() {
+        let params = GoParams {
+            btime: Some(300000),
+            wtime: Some(300000),
+            binc: Some(2000),
+            winc: Some(4000),
+            ..Default::default()
+        };
+
+        // Create position with white to move
+        let mut position = Position::startpos();
+        // Make one move to switch to white
+        let mv = parse_and_validate_move(&position, "7g7f").unwrap();
+        position.do_move(mv);
+        assert_eq!(position.side_to_move, engine_core::shogi::Color::White);
+
+        let builder = SearchLimits::builder();
+        let limits = apply_go_params(builder, &params, &position, DEFAULT_BYOYOMI_PERIODS).unwrap();
+
+        match limits.time_control {
+            TimeControl::Fischer {
+                black_ms,
+                white_ms,
+                increment_ms,
+            } => {
+                assert_eq!(black_ms, 300000);
+                assert_eq!(white_ms, 300000);
+                assert_eq!(increment_ms, 4000); // White to move, so white increment
             }
             _ => panic!("Expected Fischer time control"),
         }
