@@ -9,7 +9,7 @@ use std::time::Duration;
 fn test_bestmove_matches_pv_in_search() {
     // Start the engine
     let mut child = Command::new("cargo")
-        .args(&["run", "--bin", "engine-cli", "--release"])
+        .args(["run", "--bin", "engine-cli", "--release"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -25,7 +25,7 @@ fn test_bestmove_matches_pv_in_search() {
         let mut lines = Vec::new();
         for line in reader.lines() {
             if let Ok(line) = line {
-                println!("Engine: {}", line); // Debug output
+                println!("Engine: {line}"); // Debug output
                 lines.push(line);
             }
         }
@@ -77,7 +77,7 @@ fn test_bestmove_matches_pv_in_search() {
     // If no PV found, just check that bestmove exists (shallow searches might not output PV)
     if last_pv_line.is_none() {
         println!("No PV found in output, skipping PV consistency check");
-        println!("Bestmove found: {}", bestmove);
+        println!("Bestmove found: {bestmove}");
         return;
     }
 
@@ -91,9 +91,8 @@ fn test_bestmove_matches_pv_in_search() {
     // Verify bestmove matches PV[0]
     assert_eq!(
         bestmove, pv_first_move,
-        "bestmove '{}' should match PV[0] '{}'",
-        bestmove, pv_first_move
+        "bestmove '{bestmove}' should match PV[0] '{pv_first_move}'"
     );
 
-    println!("✓ bestmove matches PV[0]: {}", bestmove);
+    println!("✓ bestmove matches PV[0]: {bestmove}");
 }

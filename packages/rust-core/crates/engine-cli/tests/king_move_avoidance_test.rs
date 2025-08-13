@@ -9,7 +9,7 @@ use std::time::Duration;
 fn test_engine_avoids_king_moves() {
     // Start the engine
     let mut child = Command::new("cargo")
-        .args(&["run", "--bin", "engine-cli", "--release"])
+        .args(["run", "--bin", "engine-cli", "--release"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -25,7 +25,7 @@ fn test_engine_avoids_king_moves() {
         let mut lines = Vec::new();
         for line in reader.lines() {
             if let Ok(line) = line {
-                println!("Engine: {}", line);
+                println!("Engine: {line}");
                 lines.push(line);
             }
         }
@@ -47,10 +47,10 @@ fn test_engine_avoids_king_moves() {
     ];
 
     for (position, desc) in test_positions {
-        println!("\nTesting position: {}", desc);
+        println!("\nTesting position: {desc}");
 
         // Set position
-        writeln!(stdin, "position {}", position).unwrap();
+        writeln!(stdin, "position {position}").unwrap();
         thread::sleep(Duration::from_millis(100));
 
         // Start search with enough time for deep search
@@ -82,9 +82,9 @@ fn test_engine_avoids_king_moves() {
             // Check if it's a king move (5i or 5a in the move)
             if bestmove.contains("5i") || bestmove.contains("5a") {
                 king_move_count += 1;
-                println!("Found king move: {}", bestmove);
+                println!("Found king move: {bestmove}");
             } else {
-                println!("Found non-king move: {}", bestmove);
+                println!("Found non-king move: {bestmove}");
             }
         }
 
@@ -101,18 +101,16 @@ fn test_engine_avoids_king_moves() {
     }
 
     println!("\nResults:");
-    println!("Total moves: {}", total_moves);
-    println!("King moves: {}", king_move_count);
-    println!("Max search depth: {}", last_depth);
+    println!("Total moves: {total_moves}");
+    println!("King moves: {king_move_count}");
+    println!("Max search depth: {last_depth}");
 
     // Assert that king moves are rare (allow at most 1 out of 3)
     assert!(
         king_move_count <= 1,
-        "Too many king moves: {} out of {}",
-        king_move_count,
-        total_moves
+        "Too many king moves: {king_move_count} out of {total_moves}"
     );
 
     // Assert that we achieved reasonable search depth
-    assert!(last_depth >= 3, "Search depth too shallow: {}", last_depth);
+    assert!(last_depth >= 3, "Search depth too shallow: {last_depth}");
 }
