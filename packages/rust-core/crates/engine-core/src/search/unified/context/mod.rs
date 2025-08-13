@@ -297,17 +297,14 @@ mod tests {
         // Verify that elapsed time was captured correctly
         assert!(
             elapsed_before >= 5,
-            "Ponder elapsed time should be at least 5ms, got {}ms",
-            elapsed_before
+            "Ponder elapsed time should be at least 5ms, got {elapsed_before}ms"
         );
 
         // Verify that start_time was reset after conversion
         let elapsed_after_convert = context.start_time.elapsed().as_millis() as u64;
         assert!(
             elapsed_after_convert < elapsed_before,
-            "Start time should be reset after conversion. Before: {}ms, After: {}ms",
-            elapsed_before,
-            elapsed_after_convert
+            "Start time should be reset after conversion. Before: {elapsed_before}ms, After: {elapsed_after_convert}ms"
         );
 
         // Verify that ponder was converted
