@@ -37,7 +37,9 @@ fn moves_equal(m1: engine_core::shogi::Move, m2: engine_core::shogi::Move) -> bo
 /// Extended search result containing all necessary information
 pub struct ExtendedSearchResult {
     pub best_move: String,
+    pub best_move_internal: Move, // Keep the original Move object
     pub ponder_move: Option<String>,
+    pub ponder_move_internal: Option<Move>, // Keep the original ponder Move object
     pub depth: u32,
     pub score: i32,
     pub pv: Vec<Move>,
@@ -742,6 +744,22 @@ impl EngineAdapter {
         // Convert move to USI format
         let best_move_str = engine_core::usi::move_to_usi(&best_move);
 
+        // Check PV consistency
+        if !result.stats.pv.is_empty() {
+            let pv_first_move_str = engine_core::usi::move_to_usi(&result.stats.pv[0]);
+            if best_move_str != pv_first_move_str {
+                log::error!(
+                    "PV consistency error: bestmove={best_move_str} but pv[0]={pv_first_move_str}"
+                );
+                log::error!(
+                    "Full PV: {:?}",
+                    result.stats.pv.iter().map(engine_core::usi::move_to_usi).collect::<Vec<_>>()
+                );
+                // Use PV[0] as the authoritative best move
+                log::error!("Fixing inconsistency by using PV[0] as best_move");
+            }
+        }
+
         // Extract ponder move from PV if available
         let mut ponder_move = if result.stats.pv.len() >= 2 {
             Some(result.stats.pv[1])
@@ -940,6 +958,17 @@ impl EngineAdapter {
             // This should not happen in a correctly implemented search
         }
 
+        // Get the original best_move before processing
+        let mut best_move_internal = result
+            .best_move
+            .ok_or_else(|| EngineError::Other(anyhow!("No best move in search result")))?;
+
+        // Ensure consistency: if PV exists and doesn't match best_move, use PV[0]
+        if !result.stats.pv.is_empty() && !moves_equal(best_move_internal, result.stats.pv[0]) {
+            log::warn!("Fixing best_move inconsistency: using PV[0] instead of result.best_move");
+            best_move_internal = result.stats.pv[0];
+        }
+
         // Process result - use the original position state for move validation
         let (best_move_str, ponder_move) =
             Self::process_search_result(&result, &info_callback_arc, &position)
@@ -955,7 +984,9 @@ impl EngineAdapter {
 
         Ok(ExtendedSearchResult {
             best_move: best_move_str,
+            best_move_internal,
             ponder_move: ponder_move_str,
+            ponder_move_internal: ponder_move,
             depth: depth as u32,
             score,
             pv,
@@ -1285,7 +1316,14 @@ impl EngineAdapter {
         log::debug!("Committed best move: {}", move_to_usi(&committed.best_move));
 
         // 3. Verify best is in root legal moves
-        if !session.root_legal_moves.contains(&committed.best_move) {
+        // Note: We use moves_equal for comparison to handle moves that may have
+        // different piece type encoding but are semantically the same
+        let best_in_legal = session
+            .root_legal_moves
+            .iter()
+            .any(|&legal_mv| moves_equal(legal_mv, committed.best_move));
+
+        if !best_in_legal {
             log::error!(
                 "Best move {} not in root legal moves! Attempting fallback.",
                 move_to_usi(&committed.best_move)
@@ -1351,8 +1389,9 @@ impl EngineAdapter {
         let moves = gen.generate_all();
 
         // Check if ponder is in the legal moves list
+        // Use moves_equal to handle different piece type encodings
         for &mv in moves.iter() {
-            if mv == *ponder {
+            if moves_equal(mv, *ponder) {
                 return true;
             }
         }
