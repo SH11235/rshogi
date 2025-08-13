@@ -23,7 +23,7 @@ fn test_engine_avoids_king_moves() {
     // Collect output in a separate thread
     let output_handle = thread::spawn(move || {
         let mut lines = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             println!("Engine: {line}");
             lines.push(line);
         }
