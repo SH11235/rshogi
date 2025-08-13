@@ -21,21 +21,28 @@ where
     // Clear PV at this ply on entry
     searcher.pv_table.clear_len_at(ply as usize);
 
-    // Check stop flag periodically to minimize overhead
-    // Use more frequent checking if stop_flag is present
-    // If already stopped, check every node for immediate response
-    let check_interval = if searcher.context.should_stop() {
-        0x0 // Check every node if already stopped
-    } else if searcher.context.limits().stop_flag.is_some() {
-        0x7 // Check every 8 nodes when stop_flag is present (more responsive)
-    } else {
-        0xFF // Check every 256 nodes for normal operation (reduced from 1024)
-    };
+    // Get time check mask based on time control
+    let time_check_mask = searcher.context.get_time_check_mask();
 
-    if (check_interval == 0 || searcher.stats.nodes & check_interval == 0)
-        && searcher.context.should_stop()
-    {
+    // Early stop check
+    if searcher.context.should_stop() {
         return alpha;
+    }
+
+    // Periodic time and event check
+    if (searcher.stats.nodes & time_check_mask) == 0 {
+        // Process events (including ponder hit)
+        searcher.context.process_events(&searcher.time_manager);
+
+        // Check time limit
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager) {
+            return alpha;
+        }
+
+        // Check if stop was triggered by events
+        if searcher.context.should_stop() {
+            return alpha;
+        }
     }
 
     let original_alpha = alpha;
