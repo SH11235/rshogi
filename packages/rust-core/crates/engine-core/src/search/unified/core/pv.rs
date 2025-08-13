@@ -4,64 +4,103 @@
 
 use crate::{search::constants::MAX_PLY, shogi::Move};
 
-/// Principal Variation table
-pub struct PVTable {
-    /// PV lines for each ply [ply][move_index]
-    lines: Vec<Vec<Move>>,
-}
+/// NULL move constant for uninitialized entries
+const NULL_MOVE: Move = Move::NULL;
 
-impl Default for PVTable {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Principal Variation table with strict length management
+pub struct PVTable {
+    /// Move storage [ply][move_index]
+    mv: [[Move; MAX_PLY]; MAX_PLY],
+    /// Length of PV at each ply
+    len: [usize; MAX_PLY],
 }
 
 impl PVTable {
     /// Create a new PV table
     pub fn new() -> Self {
         Self {
-            lines: vec![Vec::new(); MAX_PLY],
+            mv: [[NULL_MOVE; MAX_PLY]; MAX_PLY],
+            len: [0; MAX_PLY],
         }
     }
 
-    /// Clear all PV lines
-    pub fn clear(&mut self) {
-        for line in &mut self.lines {
-            line.clear();
+    /// Clear all PV lines (for new iteration)
+    #[inline]
+    pub fn clear_all(&mut self) {
+        self.len.fill(0);
+    }
+
+    /// Clear PV at specific ply (on node entry)
+    #[inline]
+    pub fn clear_len_at(&mut self, ply: usize) {
+        if ply < MAX_PLY {
+            self.len[ply] = 0;
         }
     }
 
-    /// Update PV at given ply
-    pub fn update(&mut self, ply: usize, best_move: Move, child_pv: &[Move]) {
-        if ply >= self.lines.len() {
+    /// Get PV line with length (no allocation)
+    #[inline]
+    pub fn line(&self, ply: usize) -> (&[Move], usize) {
+        if ply < MAX_PLY {
+            let len = self.len[ply];
+            (&self.mv[ply][..len], len)
+        } else {
+            (&[], 0)
+        }
+    }
+
+    /// Set PV line with head move and tail from child
+    #[inline]
+    pub fn set_line(&mut self, ply: usize, head: Move, tail: &[Move]) {
+        if ply >= MAX_PLY {
             return;
         }
 
-        self.lines[ply].clear();
-        self.lines[ply].push(best_move);
-        self.lines[ply].extend_from_slice(child_pv);
+        let tail_len = tail.len().min(MAX_PLY - 1);
+        self.mv[ply][0] = head;
+        self.mv[ply][1..=tail_len].copy_from_slice(&tail[..tail_len]);
+        self.len[ply] = tail_len + 1;
     }
 
-    /// Update from a complete line
+    /// Get PV as Vec (only for final output)
+    pub fn get_pv_snapshot(&self, ply: usize) -> Vec<Move> {
+        let (line, len) = self.line(ply);
+        line[..len].to_vec()
+    }
+
+    /// Clear all PV lines (backward compatibility)
+    pub fn clear(&mut self) {
+        self.clear_all();
+    }
+
+    /// Update PV at given ply (backward compatibility)
+    pub fn update(&mut self, ply: usize, best_move: Move, child_pv: &[Move]) {
+        self.set_line(ply, best_move, child_pv);
+    }
+
+    /// Update from a complete line (backward compatibility)
     pub fn update_from_line(&mut self, pv: &[Move]) {
-        if !pv.is_empty() {
-            self.lines[0].clear();
-            self.lines[0].extend_from_slice(pv);
+        if !pv.is_empty() && pv.len() < MAX_PLY {
+            self.mv[0][..pv.len()].copy_from_slice(pv);
+            self.len[0] = pv.len();
         }
     }
 
-    /// Get PV line at given ply
+    /// Get PV line at given ply (backward compatibility)
     pub fn get_line(&self, ply: usize) -> &[Move] {
-        if ply < self.lines.len() {
-            &self.lines[ply]
-        } else {
-            &[]
-        }
+        let (line, _) = self.line(ply);
+        line
     }
 
-    /// Get the main PV (from root)
+    /// Get the main PV (from root) (backward compatibility)
     pub fn get_pv(&self) -> &[Move] {
-        &self.lines[0]
+        self.get_line(0)
+    }
+}
+
+impl Default for PVTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
