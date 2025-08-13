@@ -311,6 +311,9 @@ where
 
     // Validate PV before returning
     if !pv.is_empty() {
+        // First check occupancy invariants (doesn't rely on move generator)
+        pv_local_sanity(pos, &pv);
+        // Then check legal moves
         assert_pv_legal(pos, &pv);
     }
 
@@ -696,13 +699,8 @@ where
     // Don't do null move if we might be in zugzwang
     // Check if we have non-pawn material (simplified check)
     if has_non_pawn_material(pos) {
-        // Make null move by changing side to move
-        pos.side_to_move = pos.side_to_move.opposite();
-        pos.ply += 1;
-
-        // Update zobrist hash for side to move change
-        pos.hash ^= pos.side_to_move_zobrist();
-        pos.zobrist_hash = pos.hash;
+        // Make null move using the Position's method
+        let undo_info = pos.do_null_move();
 
         // Search with reduced depth using pruning module
         let reduction = crate::search::unified::pruning::null_move_reduction(depth);
@@ -716,12 +714,7 @@ where
         );
 
         // Undo null move
-        pos.side_to_move = pos.side_to_move.opposite();
-        pos.ply -= 1;
-
-        // Restore zobrist hash
-        pos.hash ^= pos.side_to_move_zobrist();
-        pos.zobrist_hash = pos.hash;
+        pos.undo_null_move(undo_info);
 
         if score >= beta {
             return Some(beta);
