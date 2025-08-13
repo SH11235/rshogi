@@ -483,7 +483,7 @@ mod tests {
         // Black should be ahead by material difference (rook=1000 - bishop=800 = 200)
         // Both kings are safe in corners, so king safety bonus should be similar
         // Expected: 200 (material) + small king safety difference
-        assert!(score >= 180 && score <= 220, "Score was {score}, expected around 200");
+        assert!((180..=220).contains(&score), "Score was {score}, expected around 200");
     }
 
     #[test]
