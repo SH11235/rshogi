@@ -19,8 +19,10 @@ use std::sync::Arc;
 use crate::search_session::SearchSession;
 use crate::usi::output::{Score, SearchInfo};
 use crate::usi::{
-    clamp_periods, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_PERIODS,
-    OPT_USI_BYOYOMI_PERIODS,
+    clamp_periods, EngineOption, DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS,
+    DEFAULT_OVERHEAD_MS, MAX_BYOYOMI_PERIODS, MAX_OVERHEAD_MS, MIN_BYOYOMI_PERIODS,
+    MIN_OVERHEAD_MS, OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS,
+    OPT_OVERHEAD_MS, OPT_USI_BYOYOMI_PERIODS,
 };
 use crate::usi::{create_position, GameResult, GoParams};
 
@@ -52,9 +54,10 @@ pub struct ExtendedSearchResult {
 /// - ShogiGUI: Strict timing, needs at least 1000ms overhead
 /// - Shogidokoro: More lenient, 500ms overhead is sufficient
 /// - BCMShogi: Similar to ShogiGUI, requires conservative margins
+///
+/// Note: These are now just used as compile-time constants for compatibility.
+/// The actual values are configurable via USI options.
 pub const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
-const DEFAULT_OVERHEAD_MS: u64 = 50; // Overhead for non-byoyomi modes
-const BYOYOMI_ADDITIONAL_SAFETY_MS: u64 = 500; // Additional safety margin for byoyomi hard limit
 
 /// Engine error types for better error handling
 #[derive(Debug)]
@@ -164,6 +167,12 @@ pub struct EngineAdapter {
     search_start_side_to_move: Option<engine_core::shogi::Color>,
     /// Last calculated overhead in milliseconds (for stop handler)
     last_overhead_ms: u64,
+    /// Time management overhead in milliseconds
+    overhead_ms: u64,
+    /// Byoyomi-specific overhead in milliseconds
+    byoyomi_overhead_ms: u64,
+    /// Byoyomi hard limit additional safety margin in milliseconds
+    byoyomi_safety_ms: u64,
 }
 
 /// State for managing ponder (think on opponent's time) functionality
@@ -309,6 +318,9 @@ impl EngineAdapter {
             search_start_position_hash: None,
             search_start_side_to_move: None,
             last_overhead_ms: DEFAULT_OVERHEAD_MS,
+            overhead_ms: DEFAULT_OVERHEAD_MS,
+            byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
+            byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
         };
 
         // Initialize options
@@ -342,6 +354,19 @@ impl EngineAdapter {
             EngineOption::spin("ByoyomiEarlyFinishRatio", 80, 50, 95),
             EngineOption::spin("PVStabilityBase", 80, 10, 200),
             EngineOption::spin("PVStabilitySlope", 5, 0, 20),
+            EngineOption::spin(
+                OPT_OVERHEAD_MS,
+                DEFAULT_OVERHEAD_MS as i64,
+                MIN_OVERHEAD_MS as i64,
+                MAX_OVERHEAD_MS as i64,
+            ),
+            EngineOption::spin(
+                OPT_BYOYOMI_OVERHEAD_MS,
+                DEFAULT_BYOYOMI_OVERHEAD_MS as i64,
+                MIN_OVERHEAD_MS as i64,
+                MAX_OVERHEAD_MS as i64,
+            ),
+            EngineOption::spin(OPT_BYOYOMI_SAFETY_MS, DEFAULT_BYOYOMI_SAFETY_MS as i64, 0, 2000),
         ];
     }
 
@@ -524,8 +549,32 @@ impl EngineAdapter {
                     }
                 }
             }
+            OPT_OVERHEAD_MS => {
+                if let Some(val) = value {
+                    self.overhead_ms = val.parse::<u64>().map_err(|_| {
+                        anyhow!(
+                            "Invalid overhead value: '{}'. Must be a number between {} and {}",
+                            val,
+                            MIN_OVERHEAD_MS,
+                            MAX_OVERHEAD_MS
+                        )
+                    })?;
+                }
+            }
+            OPT_BYOYOMI_OVERHEAD_MS => {
+                if let Some(val) = value {
+                    self.byoyomi_overhead_ms = val.parse::<u64>()
+                        .map_err(|_| anyhow!("Invalid byoyomi overhead value: '{}'. Must be a number between {} and {}", val, MIN_OVERHEAD_MS, MAX_OVERHEAD_MS))?;
+                }
+            }
+            OPT_BYOYOMI_SAFETY_MS => {
+                if let Some(val) = value {
+                    self.byoyomi_safety_ms = val.parse::<u64>()
+                        .map_err(|_| anyhow!("Invalid byoyomi safety value: '{}'. Must be a number between 0 and 2000", val))?;
+                }
+            }
             _ => {
-                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, EvalFile, {}, {}, ByoyomiEarlyFinishRatio, PVStabilityBase, PVStabilitySlope", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS));
+                return Err(anyhow!("Unknown option: '{}'. Available options: USI_Hash, Threads, USI_Ponder, EngineType, EvalFile, {}, {}, ByoyomiEarlyFinishRatio, PVStabilityBase, PVStabilitySlope, {}, {}, {}", name, OPT_BYOYOMI_PERIODS, OPT_USI_BYOYOMI_PERIODS, OPT_OVERHEAD_MS, OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_SAFETY_MS));
             }
         }
         Ok(())
@@ -670,11 +719,11 @@ impl EngineAdapter {
 
         // Create TimeParameters from engine settings
         log::debug!("Creating TimeParameters");
-        // Use larger overhead for byoyomi mode to ensure we finish before GUI timeout
+        // Use configurable overhead values based on time control mode
         let overhead_ms = if params.byoyomi.is_some() {
-            BYOYOMI_OVERHEAD_MS
+            self.byoyomi_overhead_ms
         } else {
-            DEFAULT_OVERHEAD_MS
+            self.overhead_ms
         };
 
         // Store overhead for stop handler
@@ -685,7 +734,7 @@ impl EngineAdapter {
             pv_base_threshold_ms: self.pv_stability_base,
             pv_depth_slope_ms: self.pv_stability_slope,
             overhead_ms,
-            byoyomi_hard_limit_reduction_ms: BYOYOMI_ADDITIONAL_SAFETY_MS,
+            byoyomi_hard_limit_reduction_ms: self.byoyomi_safety_ms,
             ..Default::default()
         };
 
@@ -2497,5 +2546,74 @@ mod tests {
                 elapsed.as_millis()
             );
         }
+    }
+
+    #[test]
+    fn test_time_management_options() {
+        let mut adapter = EngineAdapter::new();
+
+        // Test default values
+        assert_eq!(adapter.overhead_ms, DEFAULT_OVERHEAD_MS);
+        assert_eq!(adapter.byoyomi_overhead_ms, DEFAULT_BYOYOMI_OVERHEAD_MS);
+        assert_eq!(adapter.byoyomi_safety_ms, DEFAULT_BYOYOMI_SAFETY_MS);
+
+        // Test setting OverheadMs
+        adapter.set_option(OPT_OVERHEAD_MS, Some("100")).unwrap();
+        assert_eq!(adapter.overhead_ms, 100);
+
+        // Test setting ByoyomiOverheadMs
+        adapter.set_option(OPT_BYOYOMI_OVERHEAD_MS, Some("1500")).unwrap();
+        assert_eq!(adapter.byoyomi_overhead_ms, 1500);
+
+        // Test setting ByoyomiSafetyMs
+        adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("300")).unwrap();
+        assert_eq!(adapter.byoyomi_safety_ms, 300);
+
+        // Test invalid values
+        assert!(adapter.set_option(OPT_OVERHEAD_MS, Some("abc")).is_err());
+        assert!(adapter.set_option(OPT_BYOYOMI_OVERHEAD_MS, Some("-100")).is_err());
+        assert!(adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("not_a_number")).is_err());
+
+        // Values should remain unchanged after errors
+        assert_eq!(adapter.overhead_ms, 100);
+        assert_eq!(adapter.byoyomi_overhead_ms, 1500);
+        assert_eq!(adapter.byoyomi_safety_ms, 300);
+    }
+
+    #[test]
+    fn test_time_parameters_creation_with_custom_overhead() {
+        let mut adapter = EngineAdapter::new();
+        adapter.set_position(true, None, &[]).unwrap();
+
+        // Set custom overhead values
+        adapter.set_option(OPT_OVERHEAD_MS, Some("75")).unwrap();
+        adapter.set_option(OPT_BYOYOMI_OVERHEAD_MS, Some("800")).unwrap();
+        adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("400")).unwrap();
+
+        // Test with normal time control
+        let params = GoParams {
+            btime: Some(10000),
+            wtime: Some(10000),
+            ..Default::default()
+        };
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (_, _limits, _) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+
+        // Verify custom overhead was used
+        assert_eq!(adapter.last_overhead_ms, 75);
+
+        // Test with byoyomi time control
+        let params = GoParams {
+            byoyomi: Some(6000),
+            btime: Some(0),
+            wtime: Some(0),
+            ..Default::default()
+        };
+
+        let (_, _limits, _) = adapter.prepare_search(&params, stop_flag).unwrap();
+
+        // Verify byoyomi overhead was used
+        assert_eq!(adapter.last_overhead_ms, 800);
     }
 }
