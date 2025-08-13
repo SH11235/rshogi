@@ -624,7 +624,7 @@ impl Board {
         }
 
         // Gold attacks (includes promoted pieces)
-        let gold_attacks = ATTACK_TABLES.gold_attacks[by_color as usize][sq.index()];
+        let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
         if !(gold_attacks & self.piece_bb[by_color as usize][PieceType::Gold as usize]).is_empty() {
             return true;
         }
@@ -1143,14 +1143,7 @@ impl Position {
 
     /// Check if the current side to move is in check
     pub fn is_in_check(&self) -> bool {
-        // Get the king square for the side to move
-        if let Some(king_sq) = self.board.king_square(self.side_to_move) {
-            // Check if the king is attacked by the opponent
-            self.board.is_attacked_by(king_sq, self.side_to_move.opposite())
-        } else {
-            // No king on board - shouldn't happen in a legal position
-            false
-        }
+        self.is_check(self.side_to_move)
     }
 
     /// Check if position is draw (simplified check)
@@ -1419,7 +1412,7 @@ impl Position {
             & !self.board.promoted_bb;
 
         // Use file mask to get lances in the same file
-        let file_mask = ATTACK_TABLES.file_mask(king_sq.file());
+        let file_mask = ATTACK_TABLES.file_masks[king_sq.file() as usize];
         let lances_in_file = enemy_lances & file_mask;
 
         if !lances_in_file.is_empty() {
