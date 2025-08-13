@@ -714,8 +714,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                         search_session::Score::Mate(mate) => format!("mate {mate}"),
                                                     })
                                                     .unwrap_or_else(|| "unknown".to_string());
-                                                send_info_string(&format!("bestmove_from=session depth={depth} score={score_str}"))?;
-                                                
+                                                send_info_string(format!("bestmove_from=session depth={depth} score={score_str}"))?;
+
                                                 log::info!("Sending bestmove on search finish: {best_move}, ponder: {ponder:?}");
                                                 send_bestmove_once(best_move, ponder, &mut search_state, &mut bestmove_sent)?;
                                             }
@@ -1059,15 +1059,20 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             adapter.validate_and_get_bestmove(session, position)
                         {
                             // Send info string about bestmove source
-                            let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-                            let score_str = session.committed_best.as_ref()
+                            let depth =
+                                session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
+                            let score_str = session
+                                .committed_best
+                                .as_ref()
                                 .map(|b| match &b.score {
                                     search_session::Score::Cp(cp) => format!("cp {cp}"),
                                     search_session::Score::Mate(mate) => format!("mate {mate}"),
                                 })
                                 .unwrap_or_else(|| "unknown".to_string());
-                            send_info_string(&format!("bestmove_from=session_on_stop depth={depth} score={score_str}"))?;
-                            
+                            send_info_string(format!(
+                                "bestmove_from=session_on_stop depth={depth} score={score_str}"
+                            ))?;
+
                             log::info!(
                                 "Sending committed bestmove from session on stop: {best_move}"
                             );
@@ -1125,7 +1130,9 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                             Ok(move_str) => {
                                 // Send info string about fallback source
                                 if let Some((_, depth, score)) = partial_result {
-                                    send_info_string(&format!("bestmove_from=partial_result depth={depth} score={score}"))?;
+                                    send_info_string(format!(
+                                        "bestmove_from=partial_result depth={depth} score={score}"
+                                    ))?;
                                 } else {
                                     send_info_string("bestmove_from=emergency_fallback_timeout")?;
                                 }
@@ -1215,15 +1222,25 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                         match adapter.validate_and_get_bestmove(session, position) {
                                             Ok((best_move, ponder)) => {
                                                 // Send info string about bestmove source
-                                                let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-                                                let score_str = session.committed_best.as_ref()
+                                                let depth = session
+                                                    .committed_best
+                                                    .as_ref()
+                                                    .map(|b| b.depth)
+                                                    .unwrap_or(0);
+                                                let score_str = session
+                                                    .committed_best
+                                                    .as_ref()
                                                     .map(|b| match &b.score {
-                                                        search_session::Score::Cp(cp) => format!("cp {cp}"),
-                                                        search_session::Score::Mate(mate) => format!("mate {mate}"),
+                                                        search_session::Score::Cp(cp) => {
+                                                            format!("cp {cp}")
+                                                        }
+                                                        search_session::Score::Mate(mate) => {
+                                                            format!("mate {mate}")
+                                                        }
                                                     })
                                                     .unwrap_or_else(|| "unknown".to_string());
-                                                send_info_string(&format!("bestmove_from=session_in_stop_handler depth={depth} score={score_str}"))?;
-                                                
+                                                send_info_string(format!("bestmove_from=session_in_stop_handler depth={depth} score={score_str}"))?;
+
                                                 log::info!("Sending bestmove from stop handler: {best_move}");
                                                 send_bestmove_once(
                                                     best_move,
@@ -1268,9 +1285,11 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                     Ok(move_str) => {
                                         // Send info string about fallback source
                                         if let Some((_, depth, score)) = partial_result {
-                                            send_info_string(&format!("bestmove_from=partial_result_on_finish depth={depth} score={score}"))?;
+                                            send_info_string(format!("bestmove_from=partial_result_on_finish depth={depth} score={score}"))?;
                                         } else {
-                                            send_info_string("bestmove_from=emergency_fallback_on_finish")?;
+                                            send_info_string(
+                                                "bestmove_from=emergency_fallback_on_finish",
+                                            )?;
                                         }
                                         send_bestmove_once(
                                             move_str,
@@ -1565,6 +1584,11 @@ fn search_worker(
                 }
                 *last = depth;
             }
+            // Note: The info.pv contains USI strings which lose piece type information.
+            // This is a limitation of the current architecture where SearchInfo uses strings.
+            // For now, we parse them back but accept the loss of piece type info.
+            // TODO: Consider passing original Move objects through a different channel
+            // to preserve full move information including piece types.
             if let Ok(best_move) = engine_core::usi::parse_usi_move(&info.pv[0]) {
                 let ponder_move =
                     info.pv.get(1).and_then(|m| engine_core::usi::parse_usi_move(m).ok());
@@ -1576,7 +1600,7 @@ fn search_worker(
                         // Convert mate score to raw score format
                         // Positive mate = we're winning
                         let mate_score =
-                            engine_core::search::constants::MATE_SCORE - (mate.abs() as i32 * 2);
+                            engine_core::search::constants::MATE_SCORE - (mate.abs() * 2);
                         if mate > 0 {
                             mate_score
                         } else {
@@ -1587,6 +1611,7 @@ fn search_worker(
                 };
 
                 // Convert PV from USI strings to Move objects
+                // WARNING: This loses piece type information from the original moves
                 let pv_moves: Vec<_> = info
                     .pv
                     .iter()
@@ -1630,30 +1655,25 @@ fn search_worker(
     // Handle result
     match result {
         Ok(extended_result) => {
-            // Update session with final result
-            if let Ok(best_move) = engine_core::usi::parse_usi_move(&extended_result.best_move) {
-                let ponder_move = extended_result
-                    .ponder_move
-                    .as_ref()
-                    .and_then(|s| engine_core::usi::parse_usi_move(s).ok());
+            // Update session with final result using the original Move objects
+            log::debug!(
+                "Worker: Updating session with best_move: {}, ponder_move: {:?}, depth: {}",
+                extended_result.best_move,
+                extended_result.ponder_move,
+                extended_result.depth
+            );
 
-                log::debug!(
-                    "Worker: Updating session with best_move: {}, ponder_move: {:?}, depth: {}",
-                    extended_result.best_move,
-                    extended_result.ponder_move,
-                    extended_result.depth
-                );
-
-                // Use actual search result data
-                session.update_current_best(
-                    best_move,
-                    ponder_move,
-                    extended_result.depth,
-                    extended_result.score,
-                    extended_result.pv,
-                );
-                session.commit_iteration();
-            }
+            // Use actual search result data with original Move objects
+            // This preserves the piece type information that would be lost if we
+            // converted to USI strings and back
+            session.update_current_best(
+                extended_result.best_move_internal,
+                extended_result.ponder_move_internal,
+                extended_result.depth,
+                extended_result.score,
+                extended_result.pv, // Original Move objects with piece types preserved
+            );
+            session.commit_iteration();
             // Clean up ponder state if needed
             {
                 let mut adapter = lock_or_recover_adapter(&engine_adapter);
