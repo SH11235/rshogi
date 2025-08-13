@@ -58,7 +58,10 @@ impl PVTable {
 
         let tail_len = tail.len().min(MAX_PLY - 1);
         self.mv[ply][0] = head;
-        self.mv[ply][1..=tail_len].copy_from_slice(&tail[..tail_len]);
+        if tail_len > 0 {
+            // Use exclusive range to avoid panic when tail_len == 0
+            self.mv[ply][1..(1 + tail_len)].copy_from_slice(&tail[..tail_len]);
+        }
         self.len[ply] = tail_len + 1;
     }
 
@@ -128,5 +131,44 @@ mod tests {
         assert_eq!(main_pv.len(), 2);
         assert_eq!(main_pv[0], move1);
         assert_eq!(main_pv[1], move2);
+    }
+
+    #[test]
+    fn test_pv_set_line_zero_tail() {
+        // Regression test for zero-length tail panic
+        let mut pv = PVTable::new();
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+
+        // This should not panic
+        pv.set_line(0, move1, &[]);
+
+        let (line, len) = pv.line(0);
+        assert_eq!(len, 1);
+        assert_eq!(line[0], move1);
+    }
+
+    #[test]
+    fn test_pv_clear_all() {
+        let mut pv = PVTable::new();
+        let move1 =
+            Move::normal(parse_usi_square("2g").unwrap(), parse_usi_square("2f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false);
+
+        // Set multiple PV lines
+        pv.set_line(0, move1, &[move2]);
+        pv.set_line(1, move2, &[]);
+
+        assert_eq!(pv.len[0], 2);
+        assert_eq!(pv.len[1], 1);
+
+        // Clear all
+        pv.clear_all();
+
+        // All lengths should be zero
+        assert_eq!(pv.len[0], 0);
+        assert_eq!(pv.len[1], 0);
+        assert_eq!(pv.get_pv().len(), 0);
     }
 }

@@ -1534,6 +1534,48 @@ impl Position {
         }
     }
 
+    /// Do null move - switches side to move without making any actual move
+    /// Used in null move pruning for search optimization
+    /// Returns undo information to restore the position state
+    pub fn do_null_move(&mut self) -> UndoInfo {
+        // Save current hash to history
+        self.history.push(self.hash);
+
+        // Create undo info
+        let undo_info = UndoInfo {
+            captured: None,
+            moved_piece_was_promoted: false,
+            previous_hash: self.hash,
+            previous_ply: self.ply,
+        };
+
+        // Switch side to move
+        self.side_to_move = self.side_to_move.opposite();
+
+        // Update hash by toggling side to move
+        self.hash ^= ZOBRIST.side_to_move;
+        self.zobrist_hash = self.hash;
+
+        // Increment ply
+        self.ply += 1;
+
+        undo_info
+    }
+
+    /// Undo null move - restores position state after null move
+    pub fn undo_null_move(&mut self, undo_info: UndoInfo) {
+        // Remove last hash from history
+        self.history.pop();
+
+        // Restore hash value
+        self.hash = undo_info.previous_hash;
+        self.zobrist_hash = self.hash;
+
+        // Restore side to move and ply
+        self.side_to_move = self.side_to_move.opposite();
+        self.ply = undo_info.previous_ply;
+    }
+
     /// Static Exchange Evaluation (SEE)
     /// Evaluates the material gain/loss from a capture sequence
     /// Returns the expected material gain from the move (positive = good, negative = bad)
@@ -3422,6 +3464,64 @@ mod tests {
             let square = Square(sq);
             assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
         }
+    }
+
+    #[test]
+    fn test_do_null_move_undo_null_move() {
+        // Test null move functionality
+        let mut pos = Position::startpos();
+        let original_pos = pos.clone();
+
+        // Execute null move
+        let undo_info = pos.do_null_move();
+
+        // Check that only side to move and ply changed
+        assert_eq!(pos.side_to_move, Color::White); // Changed from Black to White
+        assert_eq!(pos.ply, 1); // Incremented from 0 to 1
+        assert_ne!(pos.hash, original_pos.hash); // Hash should be different
+        assert_eq!(pos.history.len(), 1); // History should contain one entry
+
+        // Board should remain unchanged
+        for sq in 0..81 {
+            let square = Square(sq);
+            assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
+        }
+
+        // Hands should remain unchanged
+        for color in 0..2 {
+            for piece_type in 0..7 {
+                assert_eq!(pos.hands[color][piece_type], original_pos.hands[color][piece_type]);
+            }
+        }
+
+        // Undo null move
+        pos.undo_null_move(undo_info);
+
+        // Everything should be back to original
+        assert_eq!(pos.side_to_move, original_pos.side_to_move);
+        assert_eq!(pos.ply, original_pos.ply);
+        assert_eq!(pos.hash, original_pos.hash);
+        assert_eq!(pos.zobrist_hash, original_pos.zobrist_hash);
+        assert_eq!(pos.history.len(), 0); // History should be empty again
+
+        // Test null move in the middle of a game
+        let move1 = crate::usi::parse_usi_move("3g3f").unwrap();
+        let _undo1 = pos.do_move(move1);
+
+        let pos_after_move = pos.clone();
+
+        // Do null move
+        let null_undo = pos.do_null_move();
+        assert_eq!(pos.side_to_move, Color::Black); // Back to Black after White's null
+        assert_eq!(pos.ply, 2);
+
+        // Undo null move
+        pos.undo_null_move(null_undo);
+
+        // Should be back to state after first move
+        assert_eq!(pos.hash, pos_after_move.hash);
+        assert_eq!(pos.side_to_move, pos_after_move.side_to_move);
+        assert_eq!(pos.ply, pos_after_move.ply);
     }
 
     #[test]
