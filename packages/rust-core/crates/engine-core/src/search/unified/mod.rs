@@ -429,6 +429,10 @@ where
             // Call info callback if not stopped
             if !self.context.should_stop() {
                 if let Some(callback) = self.context.info_callback() {
+                    // Validate PV before sending to callback
+                    if !pv.is_empty() {
+                        core::assert_pv_legal(pos, &pv);
+                    }
                     callback(depth, score, self.stats.nodes, self.context.elapsed(), &pv);
                 }
             }
