@@ -23,7 +23,7 @@ fn test_bestmove_matches_pv_in_search() {
     // Collect output in a separate thread
     let output_handle = thread::spawn(move || {
         let mut lines = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             println!("Engine: {line}"); // Debug output
             lines.push(line);
         }
