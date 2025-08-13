@@ -848,7 +848,7 @@ impl EngineAdapter {
             let mv = moves[i];
             let mut temp_pos = position.clone();
             temp_pos.do_move(mv);
-            if temp_pos.in_check() {
+            if temp_pos.is_in_check() {
                 return Some(mv);
             }
         }
@@ -1011,7 +1011,7 @@ impl EngineAdapter {
             .ok_or(EngineError::EngineNotAvailable("No position set".to_string()))?;
 
         // Check if we're in check - if so, prioritize king safety
-        let in_check = position.in_check();
+        let in_check = position.is_in_check();
 
         // Generate legal moves for the current position
         let mut generator = MoveGen::new();
@@ -1236,7 +1236,7 @@ impl EngineAdapter {
                 // Verify it escapes check
                 let mut temp_pos = position.clone();
                 temp_pos.do_move(mv);
-                if !temp_pos.in_check() {
+                if !temp_pos.is_in_check() {
                     return Some(mv);
                 }
             }
@@ -1247,7 +1247,7 @@ impl EngineAdapter {
             let mv = moves[i];
             let mut temp_pos = position.clone();
             temp_pos.do_move(mv);
-            if !temp_pos.in_check() {
+            if !temp_pos.is_in_check() {
                 return Some(mv);
             }
         }

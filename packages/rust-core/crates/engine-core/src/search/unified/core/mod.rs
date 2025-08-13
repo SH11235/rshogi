@@ -655,7 +655,6 @@ where
 
 /// Check if position has non-pawn material
 fn has_non_pawn_material(pos: &Position) -> bool {
-
     // Check if current side has any pieces other than pawns and king
     let color = pos.side_to_move;
 
