@@ -374,3 +374,133 @@ fn create_mock_stats(nodes: u64) -> SearchStats {
         total_moves: 4000,               // Increased sample size to reduce environment variance
     }
 }
+
+#[cfg(test)]
+mod byoyomi_timeout_tests {
+    use engine_core::{
+        evaluate::MaterialEvaluator,
+        search::{unified::UnifiedSearcher, SearchLimitsBuilder},
+        shogi::Position,
+        time_management::TimeControl,
+    };
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    /// Test that byoyomi respects time limit
+    #[test]
+    fn test_byoyomi_respects_time_limit() {
+        // Create engine with 1 second byoyomi
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+
+        // Use a standard starting position for stability
+        let pos = Position::startpos();
+
+        let byoyomi_ms = 1000;
+        // Use conservative values for test stability
+        let overhead_ms = 50; // Default overhead
+        let safety_ms = 500; // Default safety margin
+
+        let limits = SearchLimitsBuilder::default()
+            .time_control(TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms,
+                periods: 1,
+            })
+            .build();
+
+        let start = Instant::now();
+        let result = searcher.search(&mut pos.clone(), limits);
+        let elapsed = start.elapsed();
+
+        // Expected maximum time = byoyomi - overhead - safety + tolerance
+        let expected_max_ms =
+            byoyomi_ms.saturating_sub(overhead_ms).saturating_sub(safety_ms) + 100; // 100ms tolerance
+
+        println!("Byoyomi search test:");
+        println!("  Byoyomi: {byoyomi_ms}ms");
+        println!("  Elapsed: {}ms", elapsed.as_millis());
+        println!("  Expected max: {expected_max_ms}ms");
+        println!("  Best move: {:?}", result.best_move);
+        println!("  Nodes searched: {}", searcher.nodes());
+
+        assert!(
+            elapsed.as_millis() < expected_max_ms as u128,
+            "Search took {}ms, expected < {}ms",
+            elapsed.as_millis(),
+            expected_max_ms
+        );
+        assert!(result.best_move.is_some(), "Should find a best move");
+    }
+
+    /// Test that time checks work in quiescence search
+    #[test]
+    fn test_quiescence_time_check() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+
+        // Use a standard middle game position
+        let pos = Position::startpos();
+
+        // Very short time limit to test time checking
+        let limits = SearchLimitsBuilder::default()
+            .time_control(TimeControl::FixedTime { ms_per_move: 50 })
+            .depth(10) // High depth to ensure we hit time limit
+            .build();
+
+        let start = Instant::now();
+        let result = searcher.search(&mut pos.clone(), limits);
+        let elapsed = start.elapsed();
+
+        println!("Quiescence time check test:");
+        println!("  Time limit: 50ms");
+        println!("  Elapsed: {}ms", elapsed.as_millis());
+        println!("  Nodes searched: {}", searcher.nodes());
+
+        // Should stop within reasonable time (with some tolerance for system delays)
+        assert!(
+            elapsed.as_millis() < 150,
+            "Search should stop quickly with time limit, took {}ms",
+            elapsed.as_millis()
+        );
+        assert!(result.best_move.is_some(), "Should find at least one move");
+    }
+
+    /// Test multiple byoyomi searches to ensure consistency
+    #[test]
+    fn test_byoyomi_consistency() {
+        let evaluator = Arc::new(MaterialEvaluator);
+
+        // Run multiple searches to check consistency
+        let mut elapsed_times = Vec::new();
+
+        for i in 0..3 {
+            let mut searcher =
+                UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+            let pos = Position::startpos();
+
+            let limits = SearchLimitsBuilder::default()
+                .time_control(TimeControl::Byoyomi {
+                    main_time_ms: 0,
+                    byoyomi_ms: 500, // Shorter time for faster test
+                    periods: 1,
+                })
+                .build();
+
+            let start = Instant::now();
+            let _ = searcher.search(&mut pos.clone(), limits);
+            let elapsed = start.elapsed();
+
+            elapsed_times.push(elapsed.as_millis());
+            println!("Byoyomi consistency test {} elapsed: {}ms", i + 1, elapsed.as_millis());
+        }
+
+        // All searches should complete within the time limit
+        for &elapsed_ms in &elapsed_times {
+            assert!(
+                elapsed_ms < 600, // 500ms byoyomi + 100ms tolerance
+                "Search took too long: {elapsed_ms}ms"
+            );
+        }
+    }
+}
