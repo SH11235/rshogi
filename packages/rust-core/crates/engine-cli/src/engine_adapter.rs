@@ -47,18 +47,6 @@ pub struct ExtendedSearchResult {
     pub pv: Vec<Move>,
 }
 
-/// Time management constants for byoyomi mode
-/// These values ensure the engine finishes thinking before GUI timeout
-///
-/// Known GUI compatibility:
-/// - ShogiGUI: Strict timing, needs at least 1000ms overhead
-/// - Shogidokoro: More lenient, 500ms overhead is sufficient
-/// - BCMShogi: Similar to ShogiGUI, requires conservative margins
-///
-/// Note: These are now just used as compile-time constants for compatibility.
-/// The actual values are configurable via USI options.
-pub const BYOYOMI_OVERHEAD_MS: u64 = 1000; // Basic overhead for byoyomi mode (1 second)
-
 /// Engine error types for better error handling
 #[derive(Debug)]
 pub enum EngineError {
@@ -384,6 +372,15 @@ impl EngineAdapter {
         Ok(())
     }
 
+    /// Helper function to parse u64 with range check
+    fn parse_u64_in_range(name: &str, val: &str, min: u64, max: u64) -> anyhow::Result<u64> {
+        let v = val.parse::<u64>().with_context(|| format!("Invalid {name}: '{val}'"))?;
+        if !(min..=max).contains(&v) {
+            anyhow::bail!("{name} must be between {min} and {max}, got {v}");
+        }
+        Ok(v)
+    }
+
     /// Set position from USI command
     pub fn set_position(
         &mut self,
@@ -551,26 +548,28 @@ impl EngineAdapter {
             }
             OPT_OVERHEAD_MS => {
                 if let Some(val) = value {
-                    self.overhead_ms = val.parse::<u64>().map_err(|_| {
-                        anyhow!(
-                            "Invalid overhead value: '{}'. Must be a number between {} and {}",
-                            val,
-                            MIN_OVERHEAD_MS,
-                            MAX_OVERHEAD_MS
-                        )
-                    })?;
+                    self.overhead_ms = Self::parse_u64_in_range(
+                        OPT_OVERHEAD_MS,
+                        val,
+                        MIN_OVERHEAD_MS,
+                        MAX_OVERHEAD_MS,
+                    )?;
                 }
             }
             OPT_BYOYOMI_OVERHEAD_MS => {
                 if let Some(val) = value {
-                    self.byoyomi_overhead_ms = val.parse::<u64>()
-                        .map_err(|_| anyhow!("Invalid byoyomi overhead value: '{}'. Must be a number between {} and {}", val, MIN_OVERHEAD_MS, MAX_OVERHEAD_MS))?;
+                    self.byoyomi_overhead_ms = Self::parse_u64_in_range(
+                        OPT_BYOYOMI_OVERHEAD_MS,
+                        val,
+                        MIN_OVERHEAD_MS,
+                        MAX_OVERHEAD_MS,
+                    )?;
                 }
             }
             OPT_BYOYOMI_SAFETY_MS => {
                 if let Some(val) = value {
-                    self.byoyomi_safety_ms = val.parse::<u64>()
-                        .map_err(|_| anyhow!("Invalid byoyomi safety value: '{}'. Must be a number between 0 and 2000", val))?;
+                    self.byoyomi_safety_ms =
+                        Self::parse_u64_in_range(OPT_BYOYOMI_SAFETY_MS, val, 0, 2000)?;
                 }
             }
             _ => {
@@ -2569,15 +2568,26 @@ mod tests {
         adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("300")).unwrap();
         assert_eq!(adapter.byoyomi_safety_ms, 300);
 
-        // Test invalid values
+        // Test invalid values (parse errors)
         assert!(adapter.set_option(OPT_OVERHEAD_MS, Some("abc")).is_err());
         assert!(adapter.set_option(OPT_BYOYOMI_OVERHEAD_MS, Some("-100")).is_err());
         assert!(adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("not_a_number")).is_err());
+
+        // Test out of range values
+        assert!(adapter.set_option(OPT_OVERHEAD_MS, Some("5001")).is_err()); // > MAX_OVERHEAD_MS
+        assert!(adapter.set_option(OPT_BYOYOMI_OVERHEAD_MS, Some("10000")).is_err()); // > MAX_OVERHEAD_MS
+        assert!(adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("2001")).is_err()); // > 2000
 
         // Values should remain unchanged after errors
         assert_eq!(adapter.overhead_ms, 100);
         assert_eq!(adapter.byoyomi_overhead_ms, 1500);
         assert_eq!(adapter.byoyomi_safety_ms, 300);
+
+        // Test boundary values (should succeed)
+        adapter.set_option(OPT_OVERHEAD_MS, Some("0")).unwrap(); // MIN_OVERHEAD_MS
+        adapter.set_option(OPT_OVERHEAD_MS, Some("5000")).unwrap(); // MAX_OVERHEAD_MS
+        adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("0")).unwrap(); // min
+        adapter.set_option(OPT_BYOYOMI_SAFETY_MS, Some("2000")).unwrap(); // max
     }
 
     #[test]
@@ -2615,5 +2625,24 @@ mod tests {
 
         // Verify byoyomi overhead was used
         assert_eq!(adapter.last_overhead_ms, 800);
+    }
+
+    #[test]
+    fn test_parse_u64_in_range() {
+        // Test successful parse within range
+        assert_eq!(EngineAdapter::parse_u64_in_range("TestOption", "100", 0, 200).unwrap(), 100);
+        assert_eq!(EngineAdapter::parse_u64_in_range("TestOption", "0", 0, 200).unwrap(), 0);
+        assert_eq!(EngineAdapter::parse_u64_in_range("TestOption", "200", 0, 200).unwrap(), 200);
+
+        // Test parse failure
+        let err = EngineAdapter::parse_u64_in_range("TestOption", "abc", 0, 200).unwrap_err();
+        assert!(err.to_string().contains("Invalid TestOption: 'abc'"));
+
+        // Test out of range
+        let err = EngineAdapter::parse_u64_in_range("TestOption", "201", 0, 200).unwrap_err();
+        assert_eq!(err.to_string(), "TestOption must be between 0 and 200, got 201");
+
+        let err = EngineAdapter::parse_u64_in_range("TestOption", "5001", 0, 5000).unwrap_err();
+        assert_eq!(err.to_string(), "TestOption must be between 0 and 5000, got 5001");
     }
 }
