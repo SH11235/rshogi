@@ -60,6 +60,13 @@ pub const ASPIRATION_WINDOW_MAX: i32 = 100;
 /// When remaining time < elapsed time * threshold, enter time pressure mode
 pub const TIME_PRESSURE_THRESHOLD: f64 = 0.1;
 
+/// Time check masks - check every N nodes using bitwise AND
+/// These masks control how frequently we check time limits during search
+/// Using bitwise AND with node count is extremely fast (single CPU instruction)
+pub const TIME_CHECK_MASK_NORMAL: u64 = 0x1FFF; // 8192 nodes - for normal time controls
+pub const TIME_CHECK_MASK_BYOYOMI: u64 = 0x7FF; // 2048 nodes - more frequent for byoyomi
+pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
+
 /// Validate that constants maintain proper relationships
 #[cfg(test)]
 mod tests {
