@@ -706,6 +706,16 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                     if let Some(position) = adapter.get_position() {
                                         match adapter.validate_and_get_bestmove(session, position) {
                                             Ok((best_move, ponder)) => {
+                                                // Send info string about bestmove source
+                                                let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
+                                                let score_str = session.committed_best.as_ref()
+                                                    .map(|b| match &b.score {
+                                                        search_session::Score::Cp(cp) => format!("cp {cp}"),
+                                                        search_session::Score::Mate(mate) => format!("mate {mate}"),
+                                                    })
+                                                    .unwrap_or_else(|| "unknown".to_string());
+                                                send_info_string(&format!("bestmove_from=session depth={depth} score={score_str}"))?;
+                                                
                                                 log::info!("Sending bestmove on search finish: {best_move}, ponder: {ponder:?}");
                                                 send_bestmove_once(best_move, ponder, &mut search_state, &mut bestmove_sent)?;
                                             }
@@ -715,6 +725,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                 // Try fallback move generation
                                                 match generate_fallback_move(&engine, None, allow_null_move) {
                                                     Ok(fallback_move) => {
+                                                        send_info_string("bestmove_from=emergency_fallback")?;
                                                         log::info!("Sending fallback move on search finish: {fallback_move}");
                                                         send_bestmove_once(fallback_move, None, &mut search_state, &mut bestmove_sent)?;
                                                     }
@@ -734,6 +745,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                     // Try emergency move generation
                                     match generate_fallback_move(&engine, None, allow_null_move) {
                                         Ok(fallback_move) => {
+                                            send_info_string("bestmove_from=emergency_fallback_no_session")?;
                                             send_bestmove_once(fallback_move, None, &mut search_state, &mut bestmove_sent)?;
                                         }
                                         Err(_) => {
@@ -1046,6 +1058,16 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                         if let Ok((best_move, ponder)) =
                             adapter.validate_and_get_bestmove(session, position)
                         {
+                            // Send info string about bestmove source
+                            let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
+                            let score_str = session.committed_best.as_ref()
+                                .map(|b| match &b.score {
+                                    search_session::Score::Cp(cp) => format!("cp {cp}"),
+                                    search_session::Score::Mate(mate) => format!("mate {mate}"),
+                                })
+                                .unwrap_or_else(|| "unknown".to_string());
+                            send_info_string(&format!("bestmove_from=session_on_stop depth={depth} score={score_str}"))?;
+                            
                             log::info!(
                                 "Sending committed bestmove from session on stop: {best_move}"
                             );
@@ -1097,10 +1119,16 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                         // Use emergency fallback (session already tried at the beginning)
                         match generate_fallback_move(
                             ctx.engine,
-                            partial_result,
+                            partial_result.clone(),
                             ctx.allow_null_move,
                         ) {
                             Ok(move_str) => {
+                                // Send info string about fallback source
+                                if let Some((_, depth, score)) = partial_result {
+                                    send_info_string(&format!("bestmove_from=partial_result depth={depth} score={score}"))?;
+                                } else {
+                                    send_info_string("bestmove_from=emergency_fallback_timeout")?;
+                                }
                                 log::debug!("Sending emergency fallback bestmove: {move_str}");
                                 send_bestmove_once(
                                     move_str,
@@ -1186,6 +1214,16 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                     if let Some(position) = adapter.get_position() {
                                         match adapter.validate_and_get_bestmove(session, position) {
                                             Ok((best_move, ponder)) => {
+                                                // Send info string about bestmove source
+                                                let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
+                                                let score_str = session.committed_best.as_ref()
+                                                    .map(|b| match &b.score {
+                                                        search_session::Score::Cp(cp) => format!("cp {cp}"),
+                                                        search_session::Score::Mate(mate) => format!("mate {mate}"),
+                                                    })
+                                                    .unwrap_or_else(|| "unknown".to_string());
+                                                send_info_string(&format!("bestmove_from=session_in_stop_handler depth={depth} score={score_str}"))?;
+                                                
                                                 log::info!("Sending bestmove from stop handler: {best_move}");
                                                 send_bestmove_once(
                                                     best_move,
@@ -1224,10 +1262,16 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                                 );
                                 match generate_fallback_move(
                                     ctx.engine,
-                                    partial_result,
+                                    partial_result.clone(),
                                     ctx.allow_null_move,
                                 ) {
                                     Ok(move_str) => {
+                                        // Send info string about fallback source
+                                        if let Some((_, depth, score)) = partial_result {
+                                            send_info_string(&format!("bestmove_from=partial_result_on_finish depth={depth} score={score}"))?;
+                                        } else {
+                                            send_info_string("bestmove_from=emergency_fallback_on_finish")?;
+                                        }
                                         send_bestmove_once(
                                             move_str,
                                             None,
@@ -1500,6 +1544,10 @@ fn search_worker(
     let session_for_callback = session_arc.clone();
     let tx_for_iteration = tx.clone();
 
+    // Track last committed depth to avoid committing same depth multiple times
+    let last_committed_depth = Arc::new(Mutex::new(0u32));
+    let last_committed_depth_cb = last_committed_depth.clone();
+
     // Create info callback that updates session
     let enhanced_info_callback = move |info: SearchInfo| {
         // Call original callback
@@ -1507,6 +1555,16 @@ fn search_worker(
 
         // Update session on each iteration completion
         if !info.pv.is_empty() {
+            // Only commit when depth increases (not for same depth updates)
+            let depth = info.depth.unwrap_or(0);
+            {
+                let mut last = lock_or_recover_generic(&last_committed_depth_cb);
+                if depth <= *last {
+                    // Same or lower depth - skip commit
+                    return;
+                }
+                *last = depth;
+            }
             if let Ok(best_move) = engine_core::usi::parse_usi_move(&info.pv[0]) {
                 let ponder_move =
                     info.pv.get(1).and_then(|m| engine_core::usi::parse_usi_move(m).ok());
