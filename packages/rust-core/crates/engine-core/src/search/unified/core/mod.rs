@@ -74,6 +74,24 @@ where
     }
 }
 
+/// Validate that all moves in a PV are legal from the given position
+pub(super) fn assert_pv_legal(pos: &Position, pv: &[Move]) {
+    let mut p = pos.clone();
+    for (i, mv) in pv.iter().enumerate() {
+        if !p.is_legal_move(*mv) {
+            eprintln!("[BUG] illegal pv at ply {i}: {}", crate::usi::move_to_usi(mv));
+            eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+            eprintln!("  Full PV: {}", pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" "));
+            #[cfg(debug_assertions)]
+            panic!("Illegal move in PV");
+            #[cfg(not(debug_assertions))]
+            break;
+        }
+        let _undo_info = p.do_move(*mv);
+        // For PV validation, we don't need to undo since we're working on a clone
+    }
+}
+
 /// Search from root position with aspiration window
 pub(super) fn search_root_with_window<
     E,
@@ -217,6 +235,11 @@ where
                 alpha = score;
             }
         }
+    }
+
+    // Validate PV before returning
+    if !pv.is_empty() {
+        assert_pv_legal(pos, &pv);
     }
 
     (best_score, pv)
