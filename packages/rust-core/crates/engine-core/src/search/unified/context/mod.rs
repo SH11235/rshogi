@@ -310,4 +310,71 @@ mod tests {
         // Verify that ponder was converted
         assert!(context.ponder_converted);
     }
+
+    #[test]
+    fn test_time_check_mask_efficiency() {
+        use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
+
+        // Test that mask check is efficient
+        let mask_byoyomi = TIME_CHECK_MASK_BYOYOMI;
+        let mask_normal = TIME_CHECK_MASK_NORMAL;
+
+        let mut hits_byoyomi = 0;
+        let mut hits_normal = 0;
+
+        for i in 0..100_000 {
+            if (i & mask_byoyomi) == 0 {
+                hits_byoyomi += 1;
+            }
+            if (i & mask_normal) == 0 {
+                hits_normal += 1;
+            }
+        }
+
+        // TIME_CHECK_MASK_BYOYOMI = 0x7FF = 2047, so check every 2048 nodes
+        let expected_byoyomi = 100_000 / 2048;
+        assert!((hits_byoyomi as i32 - expected_byoyomi as i32).abs() <= 2,
+            "Byoyomi mask should check approximately every 2048 nodes, got {hits_byoyomi} hits, expected around {expected_byoyomi}");
+
+        // TIME_CHECK_MASK_NORMAL = 0x1FFF = 8191, so check every 8192 nodes
+        let expected_normal = 100_000 / 8192;
+        assert!((hits_normal as i32 - expected_normal as i32).abs() <= 2,
+            "Normal mask should check approximately every 8192 nodes, got {hits_normal} hits, expected around {expected_normal}");
+    }
+
+    #[test]
+    fn test_search_context_time_check_mask() {
+        use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};
+
+        let mut ctx = SearchContext::new();
+
+        // Test normal time control
+        ctx.set_limits(SearchLimits::default());
+        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_NORMAL);
+
+        // Test byoyomi
+        let byoyomi_limits = SearchLimits::builder()
+            .time_control(TimeControl::Byoyomi {
+                main_time_ms: 0,
+                byoyomi_ms: 6000,
+                periods: 1,
+            })
+            .build();
+        ctx.set_limits(byoyomi_limits);
+        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_BYOYOMI);
+
+        // Test fixed nodes (should use more frequent checks)
+        let node_limits = SearchLimits::builder()
+            .time_control(TimeControl::FixedNodes { nodes: 100000 })
+            .build();
+        ctx.set_limits(node_limits);
+        assert_eq!(ctx.get_time_check_mask(), 0x3FF); // 1024 nodes
+
+        // Test ponder mode (should use normal mask)
+        let ponder_limits = SearchLimits::builder()
+            .time_control(TimeControl::Ponder(Box::new(TimeControl::Infinite)))
+            .build();
+        ctx.set_limits(ponder_limits);
+        assert_eq!(ctx.get_time_check_mask(), TIME_CHECK_MASK_NORMAL);
+    }
 }

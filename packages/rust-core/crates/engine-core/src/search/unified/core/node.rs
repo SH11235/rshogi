@@ -18,6 +18,9 @@ pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const 
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // Increment node count at function entry for consistent time check distribution
+    searcher.stats.nodes += 1;
+
     // Clear PV at this ply on entry
     searcher.pv_table.clear_len_at(ply as usize);
 
@@ -206,7 +209,6 @@ where
 
         // Make move
         let undo_info = pos.do_move(mv);
-        searcher.stats.nodes += 1;
 
         // Simple optimization: selective prefetch
         if USE_TT && !crate::search::tt_filter::should_skip_prefetch(depth, moves_searched as usize)
