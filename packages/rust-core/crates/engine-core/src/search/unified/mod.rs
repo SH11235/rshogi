@@ -320,6 +320,9 @@ where
         let mut depth = 1;
 
         while depth <= max_depth && !self.context.should_stop() {
+            // Clear all PV lines at the start of each iteration
+            self.pv_table.clear_all();
+
             // Process events including ponder hit
             self.context.process_events(&self.time_manager);
 
@@ -429,11 +432,16 @@ where
             // Call info callback if not stopped
             if !self.context.should_stop() {
                 if let Some(callback) = self.context.info_callback() {
-                    // Validate PV before sending to callback
-                    if !pv.is_empty() {
-                        core::assert_pv_legal(pos, &pv);
+                    // Create snapshot of PV before validation and callback
+                    let pv_snapshot = self.pv_table.get_pv_snapshot(0);
+
+                    // Validate PV snapshot
+                    if !pv_snapshot.is_empty() {
+                        core::pv_local_sanity(pos, &pv_snapshot);
                     }
-                    callback(depth, score, self.stats.nodes, self.context.elapsed(), &pv);
+
+                    // Use snapshot for callback (immune to concurrent updates)
+                    callback(depth, score, self.stats.nodes, self.context.elapsed(), &pv_snapshot);
                 }
             }
 
@@ -979,6 +987,43 @@ mod tests {
         searcher.score_volatility = 400; // High volatility
         let window = searcher.calculate_aspiration_window(5);
         assert_eq!(window, 25 + 100); // Initial + max adjustment
+    }
+
+    #[test]
+    fn test_pv_consistency_depth5() {
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
+        let mut pos = Position::startpos();
+
+        // Search to depth 5 with fixed seed for reproducibility
+        let limits = SearchLimitsBuilder::default().depth(5).build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // Verify PV consistency
+        assert!(result.best_move.is_some());
+        let best_move = result.best_move.unwrap();
+
+        // PV first move must match bestmove
+        assert!(!result.stats.pv.is_empty());
+        assert_eq!(
+            result.stats.pv[0],
+            best_move,
+            "bestmove {:?} != pv[0] {:?}",
+            crate::usi::move_to_usi(&best_move),
+            crate::usi::move_to_usi(&result.stats.pv[0])
+        );
+
+        // No duplicate moves in PV
+        for i in 1..result.stats.pv.len() {
+            assert_ne!(
+                result.stats.pv[i - 1],
+                result.stats.pv[i],
+                "Duplicate move in PV at index {}: {}",
+                i,
+                crate::usi::move_to_usi(&result.stats.pv[i])
+            );
+        }
     }
 
     #[test]

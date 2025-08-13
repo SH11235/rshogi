@@ -81,7 +81,10 @@ pub(super) fn assert_pv_legal(pos: &Position, pv: &[Move]) {
         if !p.is_legal_move(*mv) {
             eprintln!("[BUG] illegal pv at ply {i}: {}", crate::usi::move_to_usi(mv));
             eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
-            eprintln!("  Full PV: {}", pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" "));
+            eprintln!(
+                "  Full PV: {}",
+                pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" ")
+            );
             #[cfg(debug_assertions)]
             panic!("Illegal move in PV");
             #[cfg(not(debug_assertions))]
@@ -89,6 +92,75 @@ pub(super) fn assert_pv_legal(pos: &Position, pv: &[Move]) {
         }
         let _undo_info = p.do_move(*mv);
         // For PV validation, we don't need to undo since we're working on a clone
+    }
+}
+
+/// Validate PV using occupancy invariants (not relying on move generator)
+pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
+    let mut p = pos.clone();
+
+    for (i, &mv) in pv.iter().enumerate() {
+        // Skip null moves
+        if mv == Move::NULL {
+            eprintln!("[BUG] NULL move in PV at ply {i}");
+            return;
+        }
+
+        let usi = crate::usi::move_to_usi(&mv);
+
+        // Pre-move validation
+        if mv.is_drop() {
+            // For drops: check we have the piece in hand
+            let piece_type = mv.drop_piece_type();
+            let hands = &p.hands[p.side_to_move as usize];
+            let count = hands[piece_type as usize];
+            if count == 0 {
+                eprintln!("[BUG] No piece in hand for drop at ply {i}: {usi}");
+                eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+                return;
+            }
+        } else {
+            // For normal moves: check piece exists at from square
+            if let Some(from) = mv.from() {
+                if p.piece_at(from).is_none() {
+                    eprintln!("[BUG] No piece at from square at ply {i}: {usi}");
+                    eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+                    eprintln!("  From square {from:?} is empty");
+                    return;
+                }
+            } else {
+                eprintln!("[BUG] Normal move has no from square at ply {i}: {usi}");
+                return;
+            }
+        }
+
+        // Apply move
+        let _undo_info = p.do_move(mv);
+
+        // Post-move validation
+        if !mv.is_drop() {
+            // Check from square is now empty
+            if let Some(from) = mv.from() {
+                if p.piece_at(from).is_some() {
+                    eprintln!("[BUG] From square not cleared at ply {i}: {usi}");
+                    eprintln!("  Position after move: {}", crate::usi::position_to_sfen(&p));
+                    return;
+                }
+            }
+        }
+
+        // Check to square has our piece
+        let to = mv.to();
+        match p.piece_at(to) {
+            Some(piece) if piece.color == p.side_to_move.opposite() => {
+                // OK - we just moved there
+            }
+            _ => {
+                eprintln!("[BUG] To square not occupied by our piece at ply {i}: {usi}");
+                eprintln!("  Position after move: {}", crate::usi::position_to_sfen(&p));
+                return;
+            }
+        }
     }
 }
 

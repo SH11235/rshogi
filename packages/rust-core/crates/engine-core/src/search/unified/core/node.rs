@@ -18,6 +18,9 @@ pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const 
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    // Clear PV at this ply on entry
+    searcher.pv_table.clear_len_at(ply as usize);
+
     // Check stop flag periodically to minimize overhead
     // Use more frequent checking if stop_flag is present
     // If already stopped, check every node for immediate response
@@ -261,11 +264,18 @@ where
             if score > alpha {
                 alpha = score;
 
-                // Update PV
-                // We need to clone the child PV to avoid borrowing issues
-                let child_pv_vec: Vec<Move> =
-                    searcher.pv_table.get_line((ply + 1) as usize).to_vec();
-                searcher.pv_table.update(ply as usize, mv, &child_pv_vec);
+                // Update PV safely - need to create temporary slice to avoid borrowing issues
+                {
+                    let child_pv = searcher.pv_table.get_line((ply + 1) as usize).to_vec();
+                    searcher.pv_table.set_line(ply as usize, mv, &child_pv);
+                }
+
+                // Validate PV immediately in debug builds
+                #[cfg(debug_assertions)]
+                {
+                    let root_pv = searcher.pv_table.get_line(0).to_vec();
+                    super::pv_local_sanity(pos, &root_pv);
+                }
 
                 if alpha >= beta {
                     // Beta cutoff - update killers and history
