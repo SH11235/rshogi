@@ -1,5 +1,6 @@
 //! Detailed metrics collection for transposition table performance analysis
 
+#[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
 
 /// Detailed metrics for TT performance analysis
