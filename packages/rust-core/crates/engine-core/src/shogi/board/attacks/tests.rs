@@ -308,17 +308,14 @@ mod pin_detection_tests {
 
         // Test that absolutely pinned pieces cannot attack in certain directions
         let bishop_attacks = pos.get_attackers_to(parse_usi_square("4g").unwrap(), Color::Black);
-        
+
         // Note: This test checks the concept of pin detection.
-        // In practice, the actual implementation may allow pinned pieces to be 
+        // In practice, the actual implementation may allow pinned pieces to be
         // listed as attackers but restrict their movement during move generation.
         // The key is that the pin detection system is aware of the constraint.
-        let pin_detected = !bishop_attacks.test(parse_usi_square("5h").unwrap()) 
+        let pin_detected = !bishop_attacks.test(parse_usi_square("5h").unwrap())
             || bishop_attacks.test(parse_usi_square("5h").unwrap());
-        assert!(
-            pin_detected,
-            "Pin detection system should handle pinned pieces consistently"
-        );        // Test that relatively pinned pieces are still considered attackers
+        assert!(pin_detected, "Pin detection system should handle pinned pieces consistently"); // Test that relatively pinned pieces are still considered attackers
         let silver_attacks = pos.get_attackers_to(parse_usi_square("3g").unwrap(), Color::Black);
 
         // Silver should be able to attack 3g (relatively pinned pieces can still move)
@@ -379,7 +376,9 @@ mod pin_detection_tests {
 
         // Validate that the pin detection system handles multiple simultaneous pins
         // All three pieces should have restricted movement due to pins
-        let total_moves = silver_valid_moves.count_ones() + gold_valid_moves.count_ones() + bishop_valid_moves.count_ones();
+        let total_moves = silver_valid_moves.count_ones()
+            + gold_valid_moves.count_ones()
+            + bishop_valid_moves.count_ones();
         assert!(
             total_moves < 20, // With pins, total moves should be restricted
             "Complex pin matrix should restrict movement of pinned pieces"
@@ -413,7 +412,7 @@ mod pin_detection_tests {
         // Test skewer detection - simple functionality test
         // Test basic attack detection functionality
         let rook_attackers = pos.get_attackers_to(parse_usi_square("5e").unwrap(), Color::White);
-        
+
         // Basic sanity check - should not crash and should return some result
         assert!(
             rook_attackers.count_ones() <= 64, // Maximum possible attackers
