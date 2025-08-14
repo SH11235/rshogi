@@ -17,7 +17,8 @@ fn main() {
 
     // Check initial state
     println!("\n2. Checking initial ABDADA flag state...");
-    let has_flag = tt.has_exact_cut(test_hash);
+    let entry = tt.probe(test_hash);
+    let has_flag = entry.as_ref().map(|e| e.has_abdada_cut()).unwrap_or(false);
     println!("   Flag is set: {has_flag}");
     assert!(!has_flag, "Flag should not be set initially");
 
@@ -29,7 +30,8 @@ fn main() {
 
     // Verify flag is set
     println!("\n4. Verifying flag is set...");
-    let has_flag = tt.has_exact_cut(test_hash);
+    let entry = tt.probe(test_hash);
+    let has_flag = entry.as_ref().map(|e| e.has_abdada_cut()).unwrap_or(false);
     println!("   Flag is set: {has_flag}");
     assert!(has_flag, "Flag should be set after setting");
 
@@ -41,14 +43,16 @@ fn main() {
 
     // Verify flag is cleared
     println!("\n6. Verifying flag is cleared...");
-    let has_flag = tt.has_exact_cut(test_hash);
+    let entry = tt.probe(test_hash);
+    let has_flag = entry.as_ref().map(|e| e.has_abdada_cut()).unwrap_or(false);
     println!("   Flag is set: {has_flag}");
     assert!(!has_flag, "Flag should be cleared after clearing");
 
     // Test non-existent entry
     println!("\n7. Testing non-existent entry...");
     let non_existent_hash = 0xFEDCBA0987654321;
-    let has_flag = tt.has_exact_cut(non_existent_hash);
+    let entry = tt.probe(non_existent_hash);
+    let has_flag = entry.as_ref().map(|e| e.has_abdada_cut()).unwrap_or(false);
     let set_result = tt.set_exact_cut(non_existent_hash);
     println!("   Non-existent entry has flag: {has_flag}");
     println!("   Attempt to set flag on non-existent: {set_result}");
