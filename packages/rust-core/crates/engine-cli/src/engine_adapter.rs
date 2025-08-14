@@ -13,7 +13,7 @@ use engine_core::{
     time_management::TimeParameters,
     usi::move_to_usi,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::search_session::SearchSession;
@@ -154,7 +154,7 @@ pub struct EngineAdapter {
     /// Side to move at the start of search
     search_start_side_to_move: Option<engine_core::shogi::Color>,
     /// Last calculated overhead in milliseconds (for stop handler)
-    last_overhead_ms: u64,
+    last_overhead_ms: AtomicU64,
     /// Time management overhead in milliseconds
     overhead_ms: u64,
     /// Byoyomi-specific overhead in milliseconds
@@ -305,7 +305,7 @@ impl EngineAdapter {
             current_stop_flag: None,
             search_start_position_hash: None,
             search_start_side_to_move: None,
-            last_overhead_ms: DEFAULT_OVERHEAD_MS,
+            last_overhead_ms: AtomicU64::new(DEFAULT_OVERHEAD_MS),
             overhead_ms: DEFAULT_OVERHEAD_MS,
             byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
@@ -617,7 +617,7 @@ impl EngineAdapter {
 
     /// Get last calculated overhead in milliseconds
     pub fn get_last_overhead_ms(&self) -> u64 {
-        self.last_overhead_ms
+        self.last_overhead_ms.load(Ordering::Acquire)
     }
 
     /// Verify position consistency for debugging
@@ -741,7 +741,7 @@ impl EngineAdapter {
         let overhead_ms = self.pick_overhead_for(params);
 
         // Store overhead for stop handler
-        self.last_overhead_ms = overhead_ms;
+        self.last_overhead_ms.store(overhead_ms, Ordering::Release);
 
         let time_params = TimeParameters {
             byoyomi_soft_ratio: self.byoyomi_early_finish_ratio as f64 / 100.0,
@@ -2635,7 +2635,7 @@ mod tests {
         let (_, _limits, _) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
 
         // Verify custom overhead was used
-        assert_eq!(adapter.last_overhead_ms, 75);
+        assert_eq!(adapter.last_overhead_ms.load(Ordering::Acquire), 75);
 
         // Test with byoyomi time control
         let params = GoParams {
@@ -2648,7 +2648,7 @@ mod tests {
         let (_, _limits, _) = adapter.prepare_search(&params, stop_flag).unwrap();
 
         // Verify byoyomi overhead was used
-        assert_eq!(adapter.last_overhead_ms, 800);
+        assert_eq!(adapter.last_overhead_ms.load(Ordering::Acquire), 800);
 
         // Test with Fischer disguised as byoyomi (should use normal overhead)
         let params = GoParams {
@@ -2664,7 +2664,7 @@ mod tests {
         let (_, _limits, _) = adapter.prepare_search(&params, stop_flag).unwrap();
 
         // Verify normal overhead was used (not byoyomi overhead)
-        assert_eq!(adapter.last_overhead_ms, 75);
+        assert_eq!(adapter.last_overhead_ms.load(Ordering::Acquire), 75);
     }
 
     #[test]
