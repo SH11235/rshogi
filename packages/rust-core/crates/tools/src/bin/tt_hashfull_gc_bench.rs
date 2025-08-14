@@ -89,7 +89,7 @@ fn run_benchmark(size_mb: usize, _features: &[&str]) -> BenchmarkResults {
         // Periodic GC check (every 1000 stores)
         if i % 1000 == 0 && tt.should_trigger_gc() {
             let gc_start = Instant::now();
-            while !tt.incremental_gc(256) {
+            while !tt.perform_incremental_gc(256) {
                 // Continue GC
             }
             let gc_duration = gc_start.elapsed();
@@ -143,7 +143,7 @@ fn run_stability_test(size_mb: usize) {
 
         // GC maintenance
         if i % 1000 == 0 && tt.should_trigger_gc() {
-            while !tt.incremental_gc(512) {}
+            while !tt.perform_incremental_gc(512) {}
         }
 
         // Checkpoint every 100k operations

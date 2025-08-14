@@ -576,10 +576,11 @@ fn main() {
                 let tt = if mode == TestMode::NoTT {
                     None
                 } else {
-                    let mut tt = TranspositionTable::new_with_config(128, None);
+                    let tt = TranspositionTable::new_with_config(128, None);
                     // Enable prefetch statistics for TTPrefetch mode
                     if mode == TestMode::TTPrefetch {
-                        tt.enable_prefetch_stats();
+                        // Note: enable_prefetch_stats method no longer exists
+                        // Prefetch functionality is always available
                     }
                     Some(Arc::new(tt))
                 };
