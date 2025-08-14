@@ -142,7 +142,7 @@ fn run_benchmark(config: &BenchConfig) -> (Duration, u64, Option<DetailedMetrics
     let hashfull = tt.hashfull() as f32 / 10.0; // Convert to percentage
 
     // Get metrics
-    let metrics = tt.metrics.as_ref().map(|m| DetailedMetrics {
+    let metrics = tt.metrics().as_ref().map(|m| DetailedMetrics {
         cas_attempts: m.cas_attempts.load(Ordering::Relaxed),
         cas_successes: m.cas_successes.load(Ordering::Relaxed),
         cas_failures: m.cas_failures.load(Ordering::Relaxed),

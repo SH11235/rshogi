@@ -28,7 +28,7 @@ fn benchmark_position(
         tt.clear();
 
         // Reset metrics
-        if let Some(ref metrics) = tt.metrics {
+        if let Some(metrics) = tt.metrics() {
             metrics.reset();
         }
 
@@ -52,7 +52,7 @@ fn benchmark_position(
         println!("NPS: {:.0}", nodes as f64 / duration.as_secs_f64());
 
         // Print TT metrics
-        if let Some(ref metrics) = tt.metrics {
+        if let Some(metrics) = tt.metrics() {
             metrics.print_summary();
         }
     }
