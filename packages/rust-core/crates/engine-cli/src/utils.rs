@@ -1,5 +1,10 @@
 //! Common utility functions
+//!
+//! This module contains shared utility functions used across the engine adapter,
+//! including move comparison, score conversion, and synchronization utilities.
 
+use crate::usi::output::Score;
+use engine_core::search::constants::{MATE_SCORE, MAX_PLY};
 use std::sync::{Mutex, MutexGuard};
 
 /// Generic helper function to lock a mutex with recovery for Poisoned state
@@ -10,6 +15,48 @@ pub fn lock_or_recover_generic<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
             log::error!("Mutex was poisoned, attempting recovery");
             poisoned.into_inner()
         }
+    }
+}
+
+/// Convert raw engine score to USI score format (Cp or Mate)
+///
+/// This function transforms internal engine scores to the USI protocol format:
+/// - Regular evaluations are reported as centipawns (cp)
+/// - Mate scores are converted to "mate in N moves" format
+///
+/// # Arguments
+///
+/// * `raw_score` - The raw score from the engine (in centipawns or mate score)
+///
+/// # Returns
+///
+/// A `Score` enum variant representing either centipawns or mate distance
+///
+/// # Notes
+///
+/// - Mate scores are identified when the absolute value exceeds `MATE_SCORE - MAX_PLY`
+/// - For GUI compatibility, immediate mate (0 moves) is reported as "mate 1"
+/// - Positive scores favor the side to move, negative scores favor the opponent
+pub fn to_usi_score(raw_score: i32) -> Score {
+    if raw_score.abs() >= MATE_SCORE - MAX_PLY as i32 {
+        // It's a mate score - calculate mate distance
+        let mate_in_half = MATE_SCORE - raw_score.abs();
+        // Calculate mate in moves (1 move = 2 plies)
+        // Use max(1) to avoid "mate 0" (some GUIs prefer "mate 1" for immediate mate)
+        //
+        // Policy rationale: While USI spec allows "mate 0", some GUIs (e.g., older versions
+        // of ShogiGUI) have issues displaying it. Using "mate 1" for immediate mate is
+        // a conservative choice that works with all GUIs.
+        //
+        // TODO: Consider making this configurable via USI option for GUI compatibility
+        let mate_in = ((mate_in_half + 1) / 2).max(1);
+        if raw_score > 0 {
+            Score::Mate(mate_in)
+        } else {
+            Score::Mate(-mate_in)
+        }
+    } else {
+        Score::Cp(raw_score)
     }
 }
 
@@ -151,5 +198,33 @@ mod tests {
                 assert_eq!(*guard, i + 1);
             }
         }
+    }
+
+    #[test]
+    fn test_to_usi_score() {
+        // Test regular centipawn scores
+        assert_eq!(to_usi_score(100), Score::Cp(100));
+        assert_eq!(to_usi_score(-200), Score::Cp(-200));
+        assert_eq!(to_usi_score(0), Score::Cp(0));
+
+        // Test mate scores
+        // Assuming MATE_SCORE = 30000 and MAX_PLY = 128
+        let mate_threshold = MATE_SCORE - MAX_PLY as i32;
+
+        // Mate in 1 (2 plies from mate)
+        assert_eq!(to_usi_score(MATE_SCORE - 2), Score::Mate(1));
+        assert_eq!(to_usi_score(-(MATE_SCORE - 2)), Score::Mate(-1));
+
+        // Mate in 3 (6 plies from mate)
+        assert_eq!(to_usi_score(MATE_SCORE - 6), Score::Mate(3));
+        assert_eq!(to_usi_score(-(MATE_SCORE - 6)), Score::Mate(-3));
+
+        // Immediate mate (0 plies) should be reported as mate 1
+        assert_eq!(to_usi_score(MATE_SCORE), Score::Mate(1));
+        assert_eq!(to_usi_score(-MATE_SCORE), Score::Mate(-1));
+
+        // Score just below mate threshold
+        assert_eq!(to_usi_score(mate_threshold - 1), Score::Cp(mate_threshold - 1));
+        assert_eq!(to_usi_score(-(mate_threshold - 1)), Score::Cp(-(mate_threshold - 1)));
     }
 }
