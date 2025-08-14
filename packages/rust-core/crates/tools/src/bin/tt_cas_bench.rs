@@ -149,7 +149,7 @@ fn run_benchmark(
     let total_nodes = stats.total_nodes.load(Ordering::Relaxed);
 
     // Get metrics
-    let metrics = tt.metrics.as_ref().map(|m| DetailedTTMetrics {
+    let metrics = tt.metrics().as_ref().map(|m| DetailedTTMetrics {
         cas_attempts: AtomicU64::new(m.cas_attempts.load(Ordering::Relaxed)),
         cas_successes: AtomicU64::new(m.cas_successes.load(Ordering::Relaxed)),
         cas_failures: AtomicU64::new(m.cas_failures.load(Ordering::Relaxed)),
