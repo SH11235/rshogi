@@ -110,8 +110,12 @@ impl Position {
             let mut lance_bb = lances_in_file;
             while let Some(lance_sq) = lance_bb.pop_lsb() {
                 let can_attack = match enemy {
-                    Color::Black => lance_sq.rank() < king_sq.rank(),
-                    Color::White => lance_sq.rank() > king_sq.rank(),
+                    // Black lance attacks upward (towards smaller rank numbers)
+                    // For a black lance to attack the king, the lance must be below the king (higher rank index)
+                    Color::Black => lance_sq.rank() > king_sq.rank(),
+                    // White lance attacks downward (towards larger rank numbers)
+                    // For a white lance to attack the king, the lance must be above the king (smaller rank index)
+                    Color::White => lance_sq.rank() < king_sq.rank(),
                 };
 
                 if can_attack {
