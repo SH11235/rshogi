@@ -1,9 +1,27 @@
 //! Utility functions for transposition table
+//!
+//! ## Performance Optimizations
+//!
+//! ### CAS Retry Strategy
+//! - Uses exponential backoff for high-contention scenarios
+//! - Maximum 3 retry attempts to prevent excessive spinning
+//! - First retry uses `spin_loop()` hint for CPU efficiency
+//! - Subsequent retries use minimal exponential backoff (100ns base)
+//!
+//! ### Memory Ordering
+//! - Release/Relaxed ordering for optimal performance on x86/ARM
+//! - Atomic operations are carefully minimized for game engine requirements
 
 use super::entry::{TTEntry, DEPTH_MASK, DEPTH_SHIFT};
 #[cfg(feature = "tt_metrics")]
 use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
 use crate::util::sync_compat::{AtomicU64, Ordering};
+
+/// Maximum number of CAS retry attempts before giving up
+const MAX_CAS_RETRIES: usize = 3;
+
+/// Base backoff duration in nanoseconds for failed CAS operations
+const BASE_BACKOFF_NS: u64 = 100;
 
 /// Result of update attempt
 #[derive(Debug, PartialEq)]
@@ -93,46 +111,82 @@ pub(crate) fn try_update_entry_generic(
             UpdateResult::Updated
         }
         Err(current_data) => {
-            // CAS failed - check if another thread updated with same key
-            if extract_depth(current_data) >= new_entry.depth() {
-                // Another thread already updated with better/equal depth
+            // CAS failed - implement retry with exponential backoff
+            try_update_with_backoff(
+                entries,
+                idx,
+                new_entry,
+                current_data,
+                #[cfg(feature = "tt_metrics")]
+                metrics,
+                #[cfg(not(feature = "tt_metrics"))]
+                _metrics,
+            )
+        }
+    }
+}
+
+/// Optimized CAS retry with exponential backoff for high-contention scenarios
+#[inline(always)]
+fn try_update_with_backoff(
+    entries: &[AtomicU64],
+    idx: usize,
+    new_entry: &TTEntry,
+    mut current_data: u64,
+    #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+    #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+) -> UpdateResult {
+    for attempt in 1..MAX_CAS_RETRIES {
+        // Check if another thread updated with better/equal depth
+        if extract_depth(current_data) >= new_entry.depth() {
+            #[cfg(feature = "tt_metrics")]
+            if let Some(m) = metrics {
+                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return UpdateResult::Filtered;
+        }
+
+        // Add CPU-friendly spin hint for first retry
+        if attempt == 1 {
+            std::hint::spin_loop();
+        } else {
+            // Exponential backoff for subsequent retries (only in high contention)
+            // Keep it minimal to avoid excessive delays in game engines
+            std::thread::sleep(std::time::Duration::from_nanos(BASE_BACKOFF_NS << (attempt - 2)));
+        }
+
+        // Attempt CAS with fresh current value
+        match entries[idx + 1].compare_exchange_weak(
+            current_data,
+            new_entry.data,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                #[cfg(feature = "tt_metrics")]
+                if let Some(m) = metrics {
+                    m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    record_metric(m, MetricType::UpdateExisting);
+                    record_metric(m, MetricType::AtomicStore(attempt as u32));
+                    record_metric(m, MetricType::EffectiveUpdate);
+                }
+                return UpdateResult::Updated;
+            }
+            Err(new_current) => {
+                current_data = new_current;
                 #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
                     m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Check if it was the same key (Phase 5 optimization case)
-                    if old_key == new_entry.key {
-                        m.cas_key_match.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-                UpdateResult::Filtered
-            } else {
-                // Retry once if depth is still better
-                match entries[idx + 1].compare_exchange_weak(
-                    current_data,
-                    new_entry.data,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            record_metric(m, MetricType::UpdateExisting);
-                            record_metric(m, MetricType::AtomicStore(1));
-                            record_metric(m, MetricType::EffectiveUpdate);
-                        }
-                        UpdateResult::Updated
-                    }
-                    Err(_) => {
-                        // Give up after second failure
-                        #[cfg(feature = "tt_metrics")]
-                        if let Some(m) = metrics {
-                            m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        UpdateResult::Filtered
-                    }
                 }
             }
         }
     }
+
+    // Final attempt exhausted - give up
+    #[cfg(feature = "tt_metrics")]
+    if let Some(m) = metrics {
+        record_metric(m, MetricType::DepthFiltered); // Reuse existing metric type
+    }
+
+    UpdateResult::Filtered
 }
