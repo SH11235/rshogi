@@ -11,6 +11,10 @@ mod position;
 mod see;
 mod types;
 
+// Performance test module
+#[cfg(test)]
+mod performance_tests;
+
 // Re-export all public items from submodules
 pub use self::bitboard::*;
 pub use self::board_repr::*;

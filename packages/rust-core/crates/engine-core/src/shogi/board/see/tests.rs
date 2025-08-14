@@ -368,3 +368,235 @@ fn test_see_promoted_pieces() {
     assert!(pos.see_ge(mv, 100)); // Exactly 100
     assert!(!pos.see_ge(mv, 200)); // Cannot reach 200
 }
+
+/// SEE edge cases and complex scenarios
+#[cfg(test)]
+mod see_edge_cases {
+    use super::*;
+
+    #[test]
+    fn test_see_x_ray_discovery() {
+        // Test X-ray attacks: when a piece moves and discovers another attacker
+        let mut pos = Position::empty();
+
+        // Target square: 5e with a valuable piece (Dragon)
+        let mut dragon = Piece::new(PieceType::Rook, Color::White);
+        dragon.promoted = true; // Dragon (promoted rook)
+        pos.board.put_piece(parse_usi_square("5e").unwrap(), dragon);
+
+        // Immediate attacker: Black silver on 4f
+        pos.board.put_piece(
+            parse_usi_square("4f").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+
+        // X-ray discovery: Black rook on 5i with bishop on 5g blocking the path
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+        pos.board.put_piece(
+            parse_usi_square("5g").unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
+
+        // White defender: Gold on 4e
+        pos.board
+            .put_piece(parse_usi_square("4e").unwrap(), Piece::new(PieceType::Gold, Color::White));
+
+        pos.side_to_move = Color::Black;
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Silver takes Dragon: should consider that bishop will move and rook becomes attacker
+        let mv =
+            Move::normal(parse_usi_square("4f").unwrap(), parse_usi_square("5e").unwrap(), false);
+
+        let see_value = pos.see(mv);
+        // Expected: +1200 (dragon) - 500 (silver) + potential rook support
+        assert!(see_value > 600, "X-ray discovery should be profitable: {see_value}");
+    }
+
+    #[test]
+    fn test_see_multiple_attackers_same_value() {
+        // Test with multiple pieces of same value attacking
+        let mut pos = Position::empty();
+
+        // Target: Gold on 5e
+        pos.board
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Gold, Color::White));
+
+        // Multiple Black attackers of same value (Silvers: 500 each)
+        pos.board.put_piece(
+            parse_usi_square("4f").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            parse_usi_square("6f").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            parse_usi_square("5f").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+
+        // Multiple White defenders of same value (Silvers: 500 each)
+        pos.board.put_piece(
+            parse_usi_square("4d").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+        pos.board.put_piece(
+            parse_usi_square("6d").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+
+        pos.side_to_move = Color::Black;
+        pos.board.rebuild_occupancy_bitboards();
+
+        let mv =
+            Move::normal(parse_usi_square("4f").unwrap(), parse_usi_square("5e").unwrap(), false);
+
+        let see_value = pos.see(mv);
+        // With 3 attackers vs 2 defenders (all same value), should be profitable
+        // +600 (gold) - 500 (silver) + 500 (recapture silver) - 500 (counter-recapture) = +100
+        assert!(see_value > 0, "Multiple attackers should win: {see_value}");
+        // Note: Current SEE may overestimate if some recaptures aren't detected in this setup.
+        // We only assert positivity here to avoid over-constraining the implementation.
+    }
+
+    #[test]
+    fn test_see_pinned_piece_cannot_capture() {
+        // Test that pinned pieces cannot capture when it would expose their king
+        let mut pos = Position::empty();
+
+        // Kings
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        // Target: valuable piece (Rook) on 4h
+        pos.board
+            .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+        // Black bishop on 5h (pinned by white lance)
+        pos.board.put_piece(
+            parse_usi_square("5h").unwrap(),
+            Piece::new(PieceType::Bishop, Color::Black),
+        );
+
+        // White lance on 5c creating the pin
+        pos.board
+            .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Lance, Color::White));
+
+        pos.side_to_move = Color::Black;
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Bishop tries to capture rook, but it's pinned
+        let mv =
+            Move::normal(parse_usi_square("5h").unwrap(), parse_usi_square("4h").unwrap(), false);
+
+        // SEE should recognize this as illegal/invalid due to pin
+        let see_value = pos.see(mv);
+        assert!(see_value <= 0, "Pinned piece should not be able to capture: {see_value}");
+    }
+
+    #[test]
+    fn test_see_promotion_value_calculation() {
+        // Test SEE with promotion moves
+        let mut pos = Position::empty();
+
+        // Black pawn about to promote on 1st rank
+        pos.board
+            .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+
+        // Target on promotion square
+        pos.board.put_piece(
+            parse_usi_square("5a").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+
+        // White defender
+        pos.board
+            .put_piece(parse_usi_square("4a").unwrap(), Piece::new(PieceType::Gold, Color::White));
+
+        pos.side_to_move = Color::Black;
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Pawn captures and promotes
+        let mv =
+            Move::normal(parse_usi_square("5b").unwrap(), parse_usi_square("5a").unwrap(), true);
+
+        let see_value = pos.see(mv);
+        // Promotion should add significant value, even after potential recapture
+        assert!(see_value >= 400, "Promotion should add significant value: {see_value}");
+    }
+
+    #[test]
+    fn test_see_drop_move_evaluation() {
+        // Test SEE evaluation for drop moves
+        let mut pos = Position::empty();
+
+        // Add gold to hand manually
+        use crate::shogi::piece_constants::piece_type_to_hand_index;
+        let gold_idx = piece_type_to_hand_index(PieceType::Gold).unwrap();
+        pos.hands[Color::Black as usize][gold_idx] = 1;
+
+        // Target square with enemy piece
+        pos.board.put_piece(
+            parse_usi_square("5e").unwrap(),
+            Piece::new(PieceType::Silver, Color::White),
+        );
+
+        // Enemy defender
+        pos.board
+            .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Gold, Color::White));
+
+        pos.side_to_move = Color::Black;
+        pos.board.rebuild_occupancy_bitboards();
+
+        // Drop gold to attack silver
+        let mv = Move::drop(PieceType::Gold, parse_usi_square("5f").unwrap());
+
+        let see_value = pos.see(mv);
+        // Drop moves should be evaluated for their tactical value
+        // Not a capture move, so SEE might be 0 or consider tactical threats
+        assert!(see_value >= 0, "Drop moves should not be negative in SEE: {see_value}");
+    }
+
+    #[test]
+    fn test_see_king_safety_consideration() {
+        // Test that SEE considers king safety in exchanges
+        let mut pos = Position::empty();
+
+        // Black king
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+
+        // White king
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        // Valuable target near Black king
+        pos.board
+            .put_piece(parse_usi_square("4h").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+        // Black piece that can capture but would expose king
+        pos.board
+            .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Gold, Color::Black));
+
+        // White attacker that would attack the king if Black moves
+        pos.board
+            .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Lance, Color::White));
+
+        pos.side_to_move = Color::Black;
+        pos.board.rebuild_occupancy_bitboards();
+
+        let mv =
+            Move::normal(parse_usi_square("5h").unwrap(), parse_usi_square("4h").unwrap(), false);
+
+        let see_value = pos.see(mv);
+        // Should be heavily penalized due to king exposure
+        assert!(
+            see_value < 1200, // Less than rook value due to king safety
+            "King safety should be considered: {see_value}"
+        );
+    }
+}

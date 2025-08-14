@@ -57,7 +57,24 @@ impl Position {
         let attacker_value = if mv.is_promote() {
             Self::see_promoted_piece_value(attacker.piece_type)
         } else {
-            Self::see_piece_value(attacker)
+            Self::see_piece_type_value(attacker.piece_type)
+        };
+
+        // 初手のピン合法性を確認（違法なら早期リターン）
+        {
+            let initial_pins = self.calculate_pins_for_color(self.side_to_move);
+            if !initial_pins.can_move(from, to) {
+                // 閾値比較を考慮し、到達不能にする十分小さい値を返す
+                return if threshold != 0 { threshold - 1 } else { -10_000 };
+            }
+        }
+
+        // プロモーション加点（初手の利得に昇格価値差を反映）
+        let promotion_bonus = if mv.is_promote() {
+            Self::see_promoted_piece_value(attacker.piece_type)
+                - Self::see_piece_type_value(attacker.piece_type)
+        } else {
+            0
         };
 
         // Delta pruning optimization for SEE
@@ -69,9 +86,9 @@ impl Position {
         // - Positions with limited attacking pieces
         //
         // Only apply for see_ge calls (threshold != 0)
-        if threshold != 0 && captured_value < threshold {
-            // Best case is just capturing the target piece
-            return captured_value;
+        if threshold != 0 && (captured_value + promotion_bonus) < threshold {
+            // Best case is just capturing the target piece + promotion bonus
+            return captured_value + promotion_bonus;
         }
 
         // Calculate pin information for both colors
@@ -82,10 +99,10 @@ impl Position {
         let mut depth = 0;
 
         // Track cumulative evaluation to avoid O(n²) recalculation
-        let mut cumulative_eval = captured_value;
+        let mut cumulative_eval = captured_value + promotion_bonus;
 
-        // gain[0] is the initial capture value
-        gain[0] = captured_value;
+        // gain[0] is the initial capture value (+昇格加点)
+        gain[0] = captured_value + promotion_bonus;
 
         // Make the initial capture
         occupied.clear(from);
