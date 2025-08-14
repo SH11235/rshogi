@@ -132,8 +132,8 @@ where
                 if tt.has_exact_cut(hash) {
                     // Early return with the stored score if available
                     if let Some(entry) = tt_entry {
-                        // Only trust the early cutoff if the entry has sufficient depth
-                        if entry.depth() >= depth.saturating_sub(1) {
+                        // Only trust the early cutoff if the entry has sufficient depth and matches key
+                        if entry.matches(hash) && entry.depth() >= depth.saturating_sub(1) {
                             return entry.score() as i32;
                         }
                     }
@@ -145,7 +145,24 @@ where
             }
         }
 
-        tt_entry.and_then(|entry| entry.get_move())
+        // Get TT move and validate it against legal moves
+        let candidate = tt_entry.filter(|e| e.matches(hash)).and_then(|entry| entry.get_move());
+        match candidate {
+            Some(m) if moves.iter().any(|&lm| lm == m) => Some(m),
+            Some(m) => {
+                // TT move was invalid - log for debugging
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "[DEBUG] TT move {} rejected - not in legal moves",
+                        crate::usi::move_to_usi(&m)
+                    );
+                    eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
+                }
+                None
+            }
+            _ => None,
+        }
     } else {
         None
     };
@@ -181,6 +198,21 @@ where
             break; // Exit move loop immediately
         }
 
+        // Double safety check: verify piece ownership for normal moves
+        if !mv.is_drop() {
+            if let Some(from) = mv.from() {
+                if let Some(piece) = pos.piece_at(from) {
+                    if piece.color != pos.side_to_move {
+                        // Skip moves that attempt to move opponent's piece
+                        continue;
+                    }
+                } else {
+                    // Skip if from square is empty
+                    continue;
+                }
+            }
+        }
+
         // Futility pruning for quiet moves
         if USE_PRUNING
             && can_do_futility
@@ -206,6 +238,19 @@ where
         }
 
         // Skip aggressive prefetching - it has shown negative performance impact
+
+        // Validate move is pseudo-legal before execution
+        if !pos.is_pseudo_legal(mv) {
+            #[cfg(debug_assertions)]
+            {
+                eprintln!(
+                    "[WARNING] Skipping illegal move {} in search",
+                    crate::usi::move_to_usi(&mv)
+                );
+                eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
+            }
+            continue;
+        }
 
         // Make move
         let undo_info = pos.do_move(mv);
@@ -288,6 +333,15 @@ where
 
                 // Update PV safely - need to create temporary slice to avoid borrowing issues
                 {
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!(
+                            "[DEBUG] Setting PV move {} at ply {}",
+                            crate::usi::move_to_usi(&mv),
+                            ply
+                        );
+                        eprintln!("  Current position: {}", crate::usi::position_to_sfen(pos));
+                    }
                     let child_pv = searcher.pv_table.get_line((ply + 1) as usize).to_vec();
                     searcher.pv_table.set_line(ply as usize, mv, &child_pv);
                 }
@@ -295,8 +349,8 @@ where
                 // Validate PV immediately in debug builds
                 #[cfg(debug_assertions)]
                 {
-                    let root_pv = searcher.pv_table.get_line(0).to_vec();
-                    super::pv_local_sanity(pos, &root_pv);
+                    let local_pv = searcher.pv_table.get_line(ply as usize).to_vec();
+                    super::pv_local_sanity(pos, &local_pv);
                 }
 
                 if alpha >= beta {
