@@ -73,6 +73,10 @@ impl MoveOrdering {
     ) -> i32 {
         // TT move gets highest priority
         if Some(mv) == tt_move {
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("[DEBUG] TT move {} gets highest priority", crate::usi::move_to_usi(&mv));
+            }
             return 1_000_000;
         }
 
@@ -283,7 +287,6 @@ impl MoveOrdering {
         use crate::Color;
 
         let to_sq = mv.to();
-        let _enemy_color = pos.side_to_move.flip();
 
         // Check if the destination square is near enemy pieces
         // This is a simplified heuristic - proper attack detection would require
