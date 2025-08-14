@@ -65,7 +65,11 @@ impl Position {
             let initial_pins = self.calculate_pins_for_color(self.side_to_move);
             if !initial_pins.can_move(from, to) {
                 // 閾値比較を考慮し、到達不能にする十分小さい値を返す
-                return if threshold != 0 { threshold - 1 } else { -10_000 };
+                return if threshold != 0 {
+                    threshold - 1
+                } else {
+                    -10_000
+                };
             }
         }
 
