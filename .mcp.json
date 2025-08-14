@@ -1,35 +1,33 @@
 {
-  "mcpServers": {
-    "playwright": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "@playwright/mcp@latest"
-      ],
-      "env": {}
-    },
-    "serena": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run",
-        "--rm",
-        "-i",
-        "--network",
-        "host",
-        "-v",
-        "/home/sh11235/development/shogi:/workspaces/projects",
-        "ghcr.io/oraios/serena:latest",
-        "serena",
-        "start-mcp-server",
-        "--transport",
-        "stdio",
-        "--context",
-        "ide-assistant",
-        "--project",
-        "/workspaces/projects"
-      ],
-      "env": {}
+    "mcpServers": {
+        "playwright": {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["@playwright/mcp@latest"],
+            "env": {}
+        },
+        "serena": {
+            "type": "stdio",
+            "command": "docker",
+            "args": [
+                "run",
+                "--rm",
+                "-i",
+                "--network",
+                "host",
+                "-v",
+                "/home/sh11235/development/shogi:/workspaces/projects",
+                "ghcr.io/oraios/serena:latest",
+                "serena",
+                "start-mcp-server",
+                "--transport",
+                "stdio",
+                "--context",
+                "ide-assistant",
+                "--project",
+                "/workspaces/projects"
+            ],
+            "env": {}
+        }
     }
-  }
 }
