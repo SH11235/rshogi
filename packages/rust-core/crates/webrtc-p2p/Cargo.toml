@@ -37,4 +37,4 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 log = { workspace = true }
 base64 = "0.22.1"
-futures = "0.3.31"
+futures = { workspace = true }
