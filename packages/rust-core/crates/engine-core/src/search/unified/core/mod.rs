@@ -129,6 +129,14 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             }
         }
 
+        // Check if move is pseudo-legal before applying
+        if !p.is_pseudo_legal(mv) {
+            eprintln!("[BUG] Illegal move in PV at ply {i}: {usi}");
+            eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+            eprintln!("  Move is not pseudo-legal");
+            return;
+        }
+
         // Apply move
         let _undo_info = p.do_move(mv);
 
@@ -412,31 +420,39 @@ where
     let hash = pos.zobrist_hash;
     if USE_TT {
         if let Some(tt_entry) = searcher.probe_tt(hash) {
-            // Track duplication stats
-            if let Some(ref stats) = searcher.duplication_stats {
-                // TT hit doesn't necessarily mean duplication
-                // A position can be in TT from a different path without being a duplicate
-                // For accurate duplicate detection, we'd need to track visited positions in current search
-                // For now, we only count as duplicate if depth is sufficient (heuristic)
-                let is_duplicate = tt_entry.depth() >= depth;
-                stats.add_node(true, is_duplicate); // is_tt_hit=true, is_duplicate based on depth
-            }
+            // Verify key match before using entry
+            if tt_entry.matches(hash) {
+                // Track duplication stats
+                if let Some(ref stats) = searcher.duplication_stats {
+                    // TT hit doesn't necessarily mean duplication
+                    // A position can be in TT from a different path without being a duplicate
+                    // For accurate duplicate detection, we'd need to track visited positions in current search
+                    // For now, we only count as duplicate if depth is sufficient (heuristic)
+                    let is_duplicate = tt_entry.depth() >= depth;
+                    stats.add_node(true, is_duplicate); // is_tt_hit=true, is_duplicate based on depth
+                }
 
-            if tt_entry.depth() >= depth {
-                let tt_score = tt_entry.score();
-                match tt_entry.node_type() {
-                    crate::search::tt::NodeType::Exact => return tt_score as i32,
-                    crate::search::tt::NodeType::LowerBound => {
-                        if tt_score as i32 >= beta {
-                            return tt_score as i32;
+                if tt_entry.depth() >= depth {
+                    let tt_score = tt_entry.score();
+                    match tt_entry.node_type() {
+                        crate::search::tt::NodeType::Exact => return tt_score as i32,
+                        crate::search::tt::NodeType::LowerBound => {
+                            if tt_score as i32 >= beta {
+                                return tt_score as i32;
+                            }
+                            alpha = alpha.max(tt_score as i32);
                         }
-                        alpha = alpha.max(tt_score as i32);
-                    }
-                    crate::search::tt::NodeType::UpperBound => {
-                        if tt_score as i32 <= alpha {
-                            return tt_score as i32;
+                        crate::search::tt::NodeType::UpperBound => {
+                            if tt_score as i32 <= alpha {
+                                return tt_score as i32;
+                            }
                         }
                     }
+                }
+            } else {
+                // Key mismatch - treat as no TT hit
+                if let Some(ref stats) = searcher.duplication_stats {
+                    stats.add_node(false, false);
                 }
             }
         } else {
