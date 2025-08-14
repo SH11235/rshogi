@@ -1,6 +1,8 @@
 # ベンチマーク
 
 このドキュメントでは、engine-coreのベンチマークの実行方法と結果を記載します。
+> 全体的なベンチマークの使い方・基礎（Criterion の共通オプション、ベースライン管理 等）は上位ガイドを参照してください。
+> [ベンチマークガイド（共通）](../../../docs/performance/benchmark-guide.md)
 
 ## ベンチマークの実行方法
 
@@ -111,3 +113,57 @@ timeout 180s cargo bench --bench search_benchmarks
 - ベンチマーク実行時は他の重いプロセスを停止することを推奨
 - 結果は実行環境（CPU、メモリ等）に依存します
 - criterionのHTMLレポートは `target/criterion/` に生成されます
+
+---
+
+## TT 衝突クラスター・ベンチ（tt_collision_cluster_bench）
+
+置換表の同一バケットに多数のキーが集中する最悪系パターンで、store/probe の挙動とスループットを測定します。固定サイズバケット（4）および可変バケット（4/8/16）を対象にしています。
+
+### 実行方法（推奨: ベンチバイナリを限定）
+
+```
+# このベンチのみ実行（他のベンチの設定に影響されない）
+cargo bench -p engine-core --bench tt_collision_cluster_bench
+
+# 関数フィルタ（例: store のみ）
+cargo bench -p engine-core --bench tt_collision_cluster_bench -- store_clustered
+
+# グループ指定（例: 可変バケット群）
+cargo bench -p engine-core --bench tt_collision_cluster_bench -- tt_collision_flexible
+```
+
+Criterion のフィルタ（末尾の引数）はベンチバイナリごとに適用されます。Cargo はデフォルトで全ベンチバイナリを起動するため、他のベンチによる失敗を避けるには `--bench tt_collision_cluster_bench` の指定を推奨します。
+
+### 実行環境（計測条件）の設定
+
+このベンチは以下の環境変数で計測条件を調整できます（未設定時は保守的なデフォルト）。
+
+- BENCH_SAMPLE_SIZE: サンプル数（例: 30）
+- BENCH_WARMUP_MS: ウォームアップ時間(ms)
+- BENCH_MEASUREMENT_MS: 計測時間(ms)
+- BENCH_TABLE_MB: 置換表サイズ(MB)
+- BENCH_COLLISION_KEYS: 固定バケット用の衝突キー総数
+- BENCH_PREFILL: 固定バケットの事前投入件数
+- BENCH_KEYS_PER_ENTRY: 可変バケットでの「バケット容量×倍率」のキー数
+- BENCH_PREFILL_MULT: 可変バケットの事前投入倍率
+
+例:
+
+```
+BENCH_SAMPLE_SIZE=30 \
+BENCH_WARMUP_MS=200 \
+BENCH_MEASUREMENT_MS=800 \
+BENCH_TABLE_MB=8 \
+ cargo bench -p engine-core --bench tt_collision_cluster_bench -- probe_clustered
+```
+
+### 出力と指標
+
+- 各ベンチは `Throughput::Elements(1)` を設定しており、1 イテレーション当たりの処理件数をスループットの基準として表示します。
+- レポート・プロットは `target/criterion/` 以下に保存されます。
+
+### トラブルシューティング
+
+- 実行時に他のベンチで失敗が出る場合は、必ず `--bench tt_collision_cluster_bench` を付けてこのベンチのみを対象にしてください。
+- Linux 環境で gnuplot が無い場合は plotters バックエンドに自動フォールバックします（表示品質が異なる場合があります）。

@@ -615,18 +615,24 @@ impl TranspositionTable {
         let new_entry = TTEntry::from_params(params);
 
         if let Some(ref flexible_buckets) = self.flexible_buckets {
-            flexible_buckets[idx].store_with_metrics(
+            // Propagate empty_slot_mode to bucket store
+            let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
+            flexible_buckets[idx].store_with_metrics_and_mode(
                 new_entry,
                 self.age,
+                empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 self.metrics.as_ref(),
                 #[cfg(not(feature = "tt_metrics"))]
                 _metrics,
             );
         } else {
-            self.buckets[idx].store_with_metrics(
+            // Propagate empty_slot_mode to bucket store
+            let empty_slot_mode = self.empty_slot_mode_enabled.load(Ordering::Relaxed);
+            self.buckets[idx].store_with_mode(
                 new_entry,
                 self.age,
+                empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 self.metrics.as_ref(),
                 #[cfg(not(feature = "tt_metrics"))]

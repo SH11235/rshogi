@@ -248,7 +248,6 @@ fn test_partial_result_validation() {
 fn test_session_bestmove_validation() {
     // Test that session-based bestmove validation works correctly
     use engine_cli::search_session::{CommittedBest, Score, SearchSession};
-    use engine_core::shogi::Color;
     use engine_core::usi::parse_usi_move;
     use smallvec::SmallVec;
 
@@ -261,14 +260,11 @@ fn test_session_bestmove_validation() {
 
     // Create a test session with valid move
     let best_move = parse_usi_move("7g7f").unwrap();
-    let root_legal_moves = vec![best_move]; // Simplified for test
 
-    let mut session = SearchSession::new(1, position.hash, Color::Black, root_legal_moves);
+    let mut session = SearchSession::new(1, position.hash);
 
     // Set up committed best
     let committed = CommittedBest {
-        best_move,
-        ponder_move: None,
         depth: 5,
         score: Score::Cp(100),
         pv: SmallVec::from_vec(vec![best_move]),
@@ -323,7 +319,6 @@ fn test_legal_move_drop_disambiguation() {
 fn test_position_mismatch_detection() {
     // Test that position mismatches are detected
     use engine_cli::search_session::SearchSession;
-    use engine_core::shogi::Color;
 
     let mut adapter = EngineAdapter::new();
     adapter.initialize().unwrap();
@@ -336,7 +331,7 @@ fn test_position_mismatch_detection() {
     let position2 = adapter.get_position().unwrap();
 
     // Create session with old position hash
-    let session = SearchSession::new(1, position1_hash, Color::Black, vec![]);
+    let session = SearchSession::new(1, position1_hash);
 
     // Validation should fail due to position mismatch
     let result = adapter.validate_and_get_bestmove(&session, position2);
@@ -370,7 +365,6 @@ fn test_ponder_behavior() {
     // Test that ponder searches don't send bestmove immediately
     // This is more of an integration test but we can test the validation part
     use engine_cli::search_session::{CommittedBest, Score, SearchSession};
-    use engine_core::shogi::Color;
     use engine_core::usi::parse_usi_move;
     use smallvec::SmallVec;
 
@@ -389,12 +383,10 @@ fn test_ponder_behavior() {
     let initial_position = adapter.get_position().unwrap();
     let best_move = parse_usi_move("7g7f").unwrap();
 
-    let mut session = SearchSession::new(1, initial_position.hash, Color::Black, vec![best_move]);
+    let mut session = SearchSession::new(1, initial_position.hash);
 
     // Set up a committed best with ponder move
     let committed = CommittedBest {
-        best_move,
-        ponder_move: Some(ponder_move),
         depth: 10,
         score: Score::Cp(50),
         pv: SmallVec::from_vec(vec![best_move, ponder_move]),

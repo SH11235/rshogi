@@ -10,6 +10,7 @@ use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::{EngineAdapter, EngineError};
 use engine_core::engine::controller::Engine;
+use engine_core::usi::move_to_usi;
 use search_session::SearchSession;
 use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -716,6 +717,17 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                     .unwrap_or_else(|| "unknown".to_string());
                                                 send_info_string(format!("bestmove_from=session depth={depth} score={score_str}"))?;
 
+                                                // Also output a final PV info line to ensure consistency with bestmove
+                                                if let Some(committed) = session.committed_best.as_ref() {
+                                                    let pv_usi: Vec<String> = committed.pv.iter().map(move_to_usi).collect();
+                                                    let info = SearchInfo {
+                                                        depth: Some(committed.depth),
+                                                        pv: pv_usi,
+                                                        ..Default::default()
+                                                    };
+                                                    let _ = send_response(UsiResponse::Info(info));
+                                                }
+
                                                 log::info!("Sending bestmove on search finish: {best_move}, ponder: {ponder:?}");
                                                 send_bestmove_once(best_move, ponder, &mut search_state, &mut bestmove_sent)?;
                                             }
@@ -1050,6 +1062,10 @@ fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
                 *ctx.search_state = SearchState::StopRequested;
                 ctx.stop_flag.store(true, Ordering::Release);
                 log::info!("Stop flag set to true, search_state = StopRequested");
+
+                // Debug: Verify stop flag was actually set
+                let stop_value = ctx.stop_flag.load(Ordering::Acquire);
+                log::info!("Stop flag verification: {stop_value}");
 
                 // First try to use committed best from session immediately
                 if let Some(ref session) = *ctx.current_session {
@@ -1448,7 +1464,7 @@ fn search_worker(
     // Take engine out and prepare search
     let was_ponder = params.ponder;
     log::debug!("Attempting to take engine from adapter");
-    let (engine, position, limits, ponder_hit_flag, root_legal_moves) = {
+    let (engine, position, limits, ponder_hit_flag) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::debug!("Adapter lock acquired, calling take_engine");
         match adapter.take_engine() {
@@ -1457,14 +1473,7 @@ fn search_worker(
                 match adapter.prepare_search(&params, stop_flag.clone()) {
                     Ok((pos, lim, flag)) => {
                         log::debug!("Search prepared successfully");
-                        // Generate root legal moves for session
-                        let root_moves = {
-                            let mut gen = engine_core::movegen::generator::MoveGenImpl::new(&pos);
-                            let move_list = gen.generate_all();
-                            // Convert MoveList to Vec<Move>
-                            move_list.iter().cloned().collect::<Vec<_>>()
-                        };
-                        (engine, pos, lim, flag, root_moves)
+                        (engine, pos, lim, flag)
                     }
                     Err(e) => {
                         // Return engine and send error
@@ -1571,8 +1580,7 @@ fn search_worker(
     drop(ponder_hit_flag);
 
     // Create search session
-    let mut session =
-        SearchSession::new(search_id, position.hash, position.side_to_move, root_legal_moves);
+    let mut session = SearchSession::new(search_id, position.hash);
 
     // Wrap session in Arc<Mutex<>> for shared access in callback
     let session_arc = Arc::new(Mutex::new(session.clone()));
@@ -1605,10 +1613,7 @@ fn search_worker(
             // For now, we parse them back but accept the loss of piece type info.
             // TODO: Consider passing original Move objects through a different channel
             // to preserve full move information including piece types.
-            if let Ok(best_move) = engine_core::usi::parse_usi_move(&info.pv[0]) {
-                let ponder_move =
-                    info.pv.get(1).and_then(|m| engine_core::usi::parse_usi_move(m).ok());
-
+            if !info.pv.is_empty() {
                 // Extract raw score from Score enum
                 let raw_score = match info.score {
                     Some(Score::Cp(cp)) => cp,
@@ -1636,13 +1641,7 @@ fn search_worker(
 
                 // Update session
                 if let Ok(mut session_guard) = session_for_callback.lock() {
-                    session_guard.update_current_best(
-                        best_move,
-                        ponder_move,
-                        info.depth.unwrap_or(0),
-                        raw_score,
-                        pv_moves,
-                    );
+                    session_guard.update_current_best(info.depth.unwrap_or(0), raw_score, pv_moves);
                     session_guard.commit_iteration();
 
                     // Send IterationComplete message
@@ -1683,8 +1682,6 @@ fn search_worker(
             // This preserves the piece type information that would be lost if we
             // converted to USI strings and back
             session.update_current_best(
-                extended_result.best_move_internal,
-                extended_result.ponder_move_internal,
                 extended_result.depth,
                 extended_result.score,
                 extended_result.pv, // Original Move objects with piece types preserved

@@ -41,7 +41,7 @@ mod attack_performance {
         let ns_per_call = elapsed.as_nanos() / (iterations * target_squares.len() * 2) as u128;
 
         println!("is_attacked performance:");
-        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Time per call: {ns_per_call} ns");
         println!("  Calls per second: {}", 1_000_000_000 / ns_per_call);
 
         // Performance requirement: should be under 200ns per call in debug mode
@@ -52,9 +52,7 @@ mod attack_performance {
 
         assert!(
             ns_per_call < max_ns,
-            "is_attacked is too slow: {} ns (max: {} ns)",
-            ns_per_call,
-            max_ns
+            "is_attacked is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
     }
 
@@ -83,7 +81,7 @@ mod attack_performance {
         let ns_per_call = elapsed.as_nanos() / (iterations * target_squares.len() * 2) as u128;
 
         println!("get_attackers_to performance:");
-        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Time per call: {ns_per_call} ns");
         println!("  Calls per second: {}", 1_000_000_000 / ns_per_call);
 
         #[cfg(debug_assertions)]
@@ -93,9 +91,7 @@ mod attack_performance {
 
         assert!(
             ns_per_call < max_ns,
-            "get_attackers_to is too slow: {} ns (max: {} ns)",
-            ns_per_call,
-            max_ns
+            "get_attackers_to is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
     }
 }
@@ -124,7 +120,7 @@ mod see_performance {
         let ns_per_call = elapsed.as_nanos() / (iterations * test_moves.len()) as u128;
 
         println!("SEE calculation performance:");
-        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Time per call: {ns_per_call} ns");
         println!("  Calls per second: {}", 1_000_000_000 / ns_per_call);
 
         #[cfg(debug_assertions)]
@@ -134,9 +130,7 @@ mod see_performance {
 
         assert!(
             ns_per_call < max_ns,
-            "SEE calculation is too slow: {} ns (max: {} ns)",
-            ns_per_call,
-            max_ns
+            "SEE calculation is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
     }
 
@@ -163,7 +157,7 @@ mod see_performance {
             elapsed.as_nanos() / (iterations * test_moves.len() * thresholds.len()) as u128;
 
         println!("SEE >= threshold performance:");
-        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Time per call: {ns_per_call} ns");
         println!("  Calls per second: {}", 1_000_000_000 / ns_per_call);
 
         #[cfg(debug_assertions)]
@@ -173,9 +167,7 @@ mod see_performance {
 
         assert!(
             ns_per_call < max_ns,
-            "SEE >= calculation is too slow: {} ns (max: {} ns)",
-            ns_per_call,
-            max_ns
+            "SEE >= calculation is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
     }
 }
@@ -205,7 +197,7 @@ mod move_performance {
         let ns_per_call = elapsed.as_nanos() / (iterations * test_moves.len()) as u128;
 
         println!("make_move performance:");
-        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Time per call: {ns_per_call} ns");
         println!("  Calls per second: {}", 1_000_000_000 / ns_per_call);
 
         #[cfg(debug_assertions)]
@@ -215,9 +207,7 @@ mod move_performance {
 
         assert!(
             ns_per_call < max_ns,
-            "make_move is too slow: {} ns (max: {} ns)",
-            ns_per_call,
-            max_ns
+            "make_move is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
     }
 
@@ -240,7 +230,7 @@ mod move_performance {
         let ns_per_call = elapsed.as_nanos() / (iterations * test_moves.len()) as u128;
 
         println!("is_legal_move performance:");
-        println!("  Time per call: {} ns", ns_per_call);
+        println!("  Time per call: {ns_per_call} ns");
         println!("  Calls per second: {}", 1_000_000_000 / ns_per_call);
 
         #[cfg(debug_assertions)]
@@ -250,9 +240,7 @@ mod move_performance {
 
         assert!(
             ns_per_call < max_ns,
-            "is_legal_move is too slow: {} ns (max: {} ns)",
-            ns_per_call,
-            max_ns
+            "is_legal_move is too slow: {ns_per_call} ns (max: {max_ns} ns)"
         );
     }
 }

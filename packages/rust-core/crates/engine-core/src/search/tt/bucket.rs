@@ -157,6 +157,7 @@ impl TTBucket {
     }
 
     /// Store entry in bucket with metrics tracking
+    #[allow(dead_code)]
     pub(crate) fn store_with_metrics(
         &self,
         new_entry: TTEntry,
@@ -168,6 +169,26 @@ impl TTBucket {
             new_entry,
             current_age,
             false, // empty_slot_mode = false
+            #[cfg(feature = "tt_metrics")]
+            metrics,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        );
+    }
+
+    /// Store entry in bucket with explicit empty_slot_mode control
+    pub(crate) fn store_with_mode(
+        &self,
+        new_entry: TTEntry,
+        current_age: u8,
+        empty_slot_mode: bool,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) {
+        self.store_with_metrics_and_mode(
+            new_entry,
+            current_age,
+            empty_slot_mode,
             #[cfg(feature = "tt_metrics")]
             metrics,
             #[cfg(not(feature = "tt_metrics"))]
@@ -608,6 +629,7 @@ impl FlexibleTTBucket {
     }
 
     /// Store entry with metrics tracking
+    #[allow(dead_code)]
     pub(crate) fn store_with_metrics(
         &self,
         new_entry: TTEntry,
@@ -615,10 +637,31 @@ impl FlexibleTTBucket {
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
+        self.store_with_metrics_and_mode(
+            new_entry,
+            current_age,
+            false,
+            #[cfg(feature = "tt_metrics")]
+            metrics,
+            #[cfg(not(feature = "tt_metrics"))]
+            None,
+        );
+    }
+
+    /// Store entry with metrics tracking and explicit empty_slot_mode
+    pub(crate) fn store_with_metrics_and_mode(
+        &self,
+        new_entry: TTEntry,
+        current_age: u8,
+        empty_slot_mode: bool,
+        #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
+        #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
+    ) {
         match self.size {
             BucketSize::Small => self.store_small(
                 new_entry,
                 current_age,
+                empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 metrics,
                 #[cfg(not(feature = "tt_metrics"))]
@@ -627,6 +670,7 @@ impl FlexibleTTBucket {
             BucketSize::Medium => self.store_medium(
                 new_entry,
                 current_age,
+                empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 metrics,
                 #[cfg(not(feature = "tt_metrics"))]
@@ -635,6 +679,7 @@ impl FlexibleTTBucket {
             BucketSize::Large => self.store_large(
                 new_entry,
                 current_age,
+                empty_slot_mode,
                 #[cfg(feature = "tt_metrics")]
                 metrics,
                 #[cfg(not(feature = "tt_metrics"))]
@@ -648,6 +693,7 @@ impl FlexibleTTBucket {
         &self,
         new_entry: TTEntry,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
@@ -656,11 +702,12 @@ impl FlexibleTTBucket {
             new_entry,
             current_age,
             4,
+            empty_slot_mode,
             #[cfg(feature = "tt_metrics")]
             metrics,
             #[cfg(not(feature = "tt_metrics"))]
             None,
-        )
+        );
     }
 
     /// Store implementation for medium buckets
@@ -668,6 +715,7 @@ impl FlexibleTTBucket {
         &self,
         new_entry: TTEntry,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
@@ -675,11 +723,12 @@ impl FlexibleTTBucket {
             new_entry,
             current_age,
             8,
+            empty_slot_mode,
             #[cfg(feature = "tt_metrics")]
             metrics,
             #[cfg(not(feature = "tt_metrics"))]
             None,
-        )
+        );
     }
 
     /// Store implementation for large buckets
@@ -687,6 +736,7 @@ impl FlexibleTTBucket {
         &self,
         new_entry: TTEntry,
         current_age: u8,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
@@ -694,19 +744,20 @@ impl FlexibleTTBucket {
             new_entry,
             current_age,
             16,
+            empty_slot_mode,
             #[cfg(feature = "tt_metrics")]
             metrics,
             #[cfg(not(feature = "tt_metrics"))]
             None,
-        )
+        );
     }
 
-    /// Generic store implementation
     fn store_generic(
         &self,
         new_entry: TTEntry,
         current_age: u8,
         entries: usize,
+        empty_slot_mode: bool,
         #[cfg(feature = "tt_metrics")] metrics: Option<&DetailedTTMetrics>,
         #[cfg(not(feature = "tt_metrics"))] _metrics: Option<&()>,
     ) {
@@ -749,6 +800,11 @@ impl FlexibleTTBucket {
                 }
                 return;
             }
+        }
+
+        // If empty slot mode is enabled, skip replacement
+        if empty_slot_mode {
+            return;
         }
 
         // Second pass: find worst entry to replace

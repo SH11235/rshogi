@@ -15,20 +15,18 @@ fn test_extended_search_result_pv_consistency() {
     // Create ExtendedSearchResult
     let result = ExtendedSearchResult {
         best_move: "7g7f".to_string(),
-        best_move_internal: best_move,
         ponder_move: Some("3c3d".to_string()),
-        ponder_move_internal: Some(ponder_move),
         depth: 10,
         score: 100,
         pv: pv.clone(),
     };
 
     // Verify consistency
-    assert_eq!(result.best_move_internal, result.pv[0], "best_move_internal should match PV[0]");
+    assert_eq!(result.pv[0], best_move, "PV[0] should match the best move");
     assert_eq!(
-        result.ponder_move_internal,
-        Some(result.pv[1]),
-        "ponder_move_internal should match PV[1]"
+        result.pv.get(1).copied(),
+        Some(ponder_move),
+        "PV[1] should match the ponder move"
     );
 }
 
