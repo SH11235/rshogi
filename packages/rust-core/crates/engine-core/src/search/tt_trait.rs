@@ -1,6 +1,9 @@
 //! Trait for transposition tables to allow using both regular and sharded implementations
 
-use super::tt::{NodeType, TTEntry, TTEntryParams};
+use super::tt::{
+    entry::{NodeType, TTEntry, TTEntryParams},
+    TranspositionTable,
+};
 use crate::shogi::Move;
 
 /// Common interface for transposition tables
@@ -47,7 +50,7 @@ pub trait TranspositionTableTrait: Send + Sync {
 }
 
 /// Implement the trait for TranspositionTable
-impl TranspositionTableTrait for super::tt::TranspositionTable {
+impl TranspositionTableTrait for TranspositionTable {
     fn probe(&self, hash: u64) -> Option<TTEntry> {
         self.probe(hash)
     }
