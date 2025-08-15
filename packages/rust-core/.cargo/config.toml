@@ -1,2 +1,5 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=getrandom_backend=\"wasm_js\""]
+
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
