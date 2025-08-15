@@ -10,6 +10,8 @@ mod drops;
 mod pieces;
 #[cfg(test)]
 mod promotion_from_promotion_zone;
+#[cfg(test)]
+mod underflow_test;
 
 #[cfg(test)]
 mod lance_edge_tests {

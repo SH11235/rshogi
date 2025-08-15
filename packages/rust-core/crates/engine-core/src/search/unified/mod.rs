@@ -244,8 +244,20 @@ where
 
     /// Main search entry point
     pub fn search(&mut self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
+        self.search_with_options(pos, limits, true)
+    }
+
+    /// Search with options to control state reset (for parallel search)
+    pub fn search_with_options(
+        &mut self,
+        pos: &mut Position,
+        limits: SearchLimits,
+        reset_stats: bool,
+    ) -> SearchResult {
         // Reset search state
-        self.stats = SearchStats::default();
+        if reset_stats {
+            self.stats = SearchStats::default();
+        }
         self.context.reset();
         self.pv_table.clear();
         self.score_history.clear();

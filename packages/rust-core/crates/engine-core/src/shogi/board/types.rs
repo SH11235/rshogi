@@ -25,7 +25,20 @@ impl Square {
     #[inline]
     pub const fn new(file: u8, rank: u8) -> Self {
         debug_assert!(file < 9 && rank < 9);
+        // Add runtime check in release builds to prevent invalid squares
+        assert!(file < 9 && rank < 9, "Square::new called with invalid coordinates");
         Square(rank * 9 + file)
+    }
+
+    /// Create square from file and rank with bounds checking
+    /// Returns None if coordinates are out of bounds
+    #[inline]
+    pub const fn new_safe(file: u8, rank: u8) -> Option<Self> {
+        if file < 9 && rank < 9 {
+            Some(Square(rank * 9 + file))
+        } else {
+            None
+        }
     }
 
     /// Get file (0-8, left to right in internal representation)
@@ -375,6 +388,7 @@ impl Color {
 mod tests {
     use super::*;
     use crate::usi::parse_usi_square;
+    use std::panic;
 
     #[test]
     fn test_promotion_zones() {
@@ -523,6 +537,38 @@ mod tests {
         let mut promoted_pawn = Piece::new(PieceType::Pawn, Color::Black);
         promoted_pawn.promoted = true;
         assert_eq!(promoted_pawn.to_index(), 15); // 7 + 8
+    }
+
+    #[test]
+    fn test_square_bounds_checking() {
+        // Test valid squares
+        let sq = Square::new(0, 0);
+        assert_eq!(sq.file(), 0);
+        assert_eq!(sq.rank(), 0);
+
+        let sq = Square::new(8, 8);
+        assert_eq!(sq.file(), 8);
+        assert_eq!(sq.rank(), 8);
+
+        // Test new_safe with valid coordinates
+        assert!(Square::new_safe(0, 0).is_some());
+        assert!(Square::new_safe(8, 8).is_some());
+
+        // Test new_safe with invalid coordinates
+        assert!(Square::new_safe(9, 0).is_none());
+        assert!(Square::new_safe(0, 9).is_none());
+        assert!(Square::new_safe(255, 255).is_none());
+
+        // Test that invalid coordinates panic
+        let result = panic::catch_unwind(|| Square::new(9, 0));
+        assert!(result.is_err());
+
+        let result = panic::catch_unwind(|| Square::new(0, 9));
+        assert!(result.is_err());
+
+        // Test u8 underflow case (255)
+        let result = panic::catch_unwind(|| Square::new(255, 0));
+        assert!(result.is_err());
     }
 
     #[test]

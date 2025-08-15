@@ -421,10 +421,18 @@ impl Position {
         // Black pawn attacks upward (toward rank 0), white pawn attacks downward (toward rank 8)
         let expected_king_sq = if self.side_to_move == Color::Black {
             // Black pawn at rank N attacks rank N-1
-            Square::new(pawn_sq.file(), pawn_sq.rank() - 1)
+            let rank = pawn_sq.rank();
+            if rank == 0 {
+                return false; // Black pawn at rank 0 cannot attack (invalid position)
+            }
+            Square::new(pawn_sq.file(), rank - 1)
         } else {
             // White pawn at rank N attacks rank N+1
-            Square::new(pawn_sq.file(), pawn_sq.rank() + 1)
+            let rank = pawn_sq.rank();
+            if rank == 8 {
+                return false; // White pawn at rank 8 cannot attack (invalid position)
+            }
+            Square::new(pawn_sq.file(), rank + 1)
         };
 
         if king_sq != expected_king_sq {
