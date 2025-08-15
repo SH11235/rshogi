@@ -354,11 +354,13 @@ where
             let mut valid_child_pv = Vec::new();
             let mut temp_pos = pos.clone();
             let undo_info = temp_pos.do_move(mv);
+            let mut undo_infos = Vec::new();
 
             for &child_mv in child_pv {
                 if temp_pos.is_pseudo_legal(child_mv) {
                     valid_child_pv.push(child_mv);
-                    let _child_undo = temp_pos.do_move(child_mv);
+                    let child_undo = temp_pos.do_move(child_mv);
+                    undo_infos.push((child_mv, child_undo));
                 } else {
                     #[cfg(debug_assertions)]
                     if std::env::var("SHOGI_DEBUG_PV").is_ok() {
@@ -370,6 +372,10 @@ where
                 }
             }
 
+            // Undo all child moves in reverse order
+            for (child_mv, child_undo) in undo_infos.iter().rev() {
+                temp_pos.undo_move(*child_mv, child_undo.clone());
+            }
             temp_pos.undo_move(mv, undo_info);
             pv.extend_from_slice(&valid_child_pv);
 
@@ -936,22 +942,22 @@ mod tests {
         // Test that PV validation catches moves from wrong positions (TT pollution)
         use crate::usi::parse_usi_move;
         
-        // Position 1: Black bishop on 4b
-        let sfen1 = "lnsgkgsnl/r2B3b1/ppppppppp/9/9/9/PPPPPPPPP/7R1/LNSGKGSNL b - 1";
+        // Position 1: Black bishop on 3b
+        let sfen1 = "lnsgkgsnl/r5B1b/ppppppppp/9/9/9/PPPPPPPPP/7R1/LNSGKGSNL b - 1";
         let pos1 = Position::from_sfen(sfen1).expect("Valid SFEN");
         
-        // Position 2: Empty 4b square (the problematic case)
+        // Position 2: Empty 3b square (no bishop)
         let sfen2 = "lnsgkgsnl/r6b1/ppppppppp/8p/9/9/PPPPPPPPP/1BG3K1R/LNS2GSNL w - 4";
         let pos2 = Position::from_sfen(sfen2).expect("Valid SFEN");
         
         // Move that's valid in pos1 but not in pos2
-        let move_4b5b = parse_usi_move("4b5b").expect("Valid USI move");
+        let move_3b5b = parse_usi_move("3b5b").expect("Valid USI move");
         
-        assert!(pos1.is_pseudo_legal(move_4b5b), "Move should be legal in position 1");
-        assert!(!pos2.is_pseudo_legal(move_4b5b), "Move should be illegal in position 2");
+        assert!(pos1.is_pseudo_legal(move_3b5b), "Move should be legal in position 1");
+        assert!(!pos2.is_pseudo_legal(move_3b5b), "Move should be illegal in position 2");
         
         // Test pv_local_sanity catches this
-        let bad_pv = vec![move_4b5b];
+        let bad_pv = vec![move_3b5b];
         pv_local_sanity(&pos2, &bad_pv);
         // Should not panic, just return early
     }
