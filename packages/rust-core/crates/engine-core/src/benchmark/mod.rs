@@ -231,8 +231,8 @@ fn create_test_positions() -> Vec<Position> {
 
     // Position with pieces in hand
     let mut hand_position = Position::startpos();
-    hand_position.hands[Color::Black as usize][6] = 2; // 2 pawns in hand
-    hand_position.hands[Color::White as usize][6] = 1; // 1 pawn in hand
+    hand_position.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 2; // 2 pawns in hand
+    hand_position.hands[Color::White as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // 1 pawn in hand
     positions.push(hand_position);
 
     positions
@@ -306,7 +306,7 @@ mod tests {
 
         // Verify hand position has pieces in hand
         let hand_pos = &positions[2];
-        assert!(hand_pos.hands[Color::Black as usize][6] > 0);
+        assert!(hand_pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] > 0);
     }
 }
 
