@@ -737,6 +737,80 @@ mod tt_tests {
             log::debug!("Prefetch stats: {stats:?}");
         }
     }
+
+    #[test]
+    fn test_tt_bucket_store_with_metrics_default() {
+        // This test ensures TTBucket::store_with_metrics is referenced in default builds
+        let bucket = bucket::TTBucket::new();
+        let key = 0xA1B2C3D4E5F60708_u64;
+        let entry = TTEntry::new(key, None, 123, 45, 7, NodeType::Exact, 0);
+
+        #[cfg(feature = "tt_metrics")]
+        let metrics_none: Option<&metrics::DetailedTTMetrics> = None;
+        #[cfg(not(feature = "tt_metrics"))]
+        let metrics_none: Option<&()> = None;
+
+        bucket.store_with_metrics(entry, 0, metrics_none);
+        let found = bucket.probe(key);
+        assert!(found.is_some());
+        let e = found.unwrap();
+        assert_eq!(e.score(), 123);
+        assert_eq!(e.depth(), 7);
+    }
+
+    #[test]
+    fn test_flexible_bucket_store_with_metrics_default() {
+        // This test ensures FlexibleTTBucket::store_with_metrics is referenced in default builds
+        let bucket = bucket::FlexibleTTBucket::new(BucketSize::Medium);
+        let key = 0x0FEDCBA987654321_u64;
+        let entry = TTEntry::new(key, None, 200, 60, 9, NodeType::Exact, 1);
+
+        #[cfg(feature = "tt_metrics")]
+        let metrics_none: Option<&metrics::DetailedTTMetrics> = None;
+        #[cfg(not(feature = "tt_metrics"))]
+        let metrics_none: Option<&()> = None;
+
+        bucket.store_with_metrics(entry, 1, metrics_none);
+        let found = bucket.probe(key);
+        assert!(found.is_some());
+        let e = found.unwrap();
+        assert_eq!(e.eval(), 60);
+        assert_eq!(e.depth(), 9);
+    }
+
+    #[test]
+    fn test_flexible_bucket_empty_slot_mode_no_replacement() {
+        // Fill a small flexible bucket fully, then attempt to store with empty_slot_mode=true
+        let bucket = bucket::FlexibleTTBucket::new(BucketSize::Small); // 4 entries
+
+        // Fill with 4 unique keys
+        for i in 0..4u64 {
+            let k = 0x1000_0000_0000_0000_u64 | i;
+            let e = TTEntry::new(k, None, 100 + i as i16, 0, 8, NodeType::Exact, 0);
+
+            #[cfg(feature = "tt_metrics")]
+            let metrics_none: Option<&metrics::DetailedTTMetrics> = None;
+            #[cfg(not(feature = "tt_metrics"))]
+            let metrics_none: Option<&()> = None;
+
+            bucket.store_with_metrics(e, 0, metrics_none);
+        }
+
+        // New key mapping to same bucket layout (independent in FlexibleTTBucket)
+        let new_key = 0x2000_0000_0000_0000_u64;
+        let new_entry = TTEntry::new(new_key, None, 999, 0, 20, NodeType::Exact, 0);
+
+        #[cfg(feature = "tt_metrics")]
+        let metrics_none: Option<&metrics::DetailedTTMetrics> = None;
+        #[cfg(not(feature = "tt_metrics"))]
+        let metrics_none: Option<&()> = None;
+
+        // Store with empty_slot_mode=true must not replace any entry in a full bucket
+        bucket.store_with_metrics_and_mode(new_entry, 0, true, metrics_none);
+
+        // Should not be present
+        assert!(bucket.probe(new_key).is_none());
+    }
 }
 
 #[cfg(test)]
