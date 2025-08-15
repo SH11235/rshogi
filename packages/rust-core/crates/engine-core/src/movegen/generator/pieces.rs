@@ -403,16 +403,18 @@ pub(super) fn generate_pawn_moves(gen: &mut MoveGenImpl, from: Square, promoted:
     // Pawns move one square forward
     let to = match us {
         Color::Black => {
-            if from.rank() == 0 {
+            let rank = from.rank();
+            if rank == 0 {
                 return;
             } // Can't move further
-            Square::new(from.file(), from.rank() - 1)
+            Square::new(from.file(), rank - 1)
         }
         Color::White => {
-            if from.rank() == 8 {
+            let rank = from.rank();
+            if rank == 8 {
                 return;
             } // Can't move further
-            Square::new(from.file(), from.rank() + 1)
+            Square::new(from.file(), rank + 1)
         }
     };
 
