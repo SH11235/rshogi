@@ -47,8 +47,6 @@ enum MovePickerStage {
     RootPV,
     /// TT move
     TTMove,
-    /// PV move (from previous iteration)
-    PVMove,
     /// Generate captures
     GenerateCaptures,
     /// Good captures (SEE >= 0)
@@ -161,18 +159,11 @@ impl<'a> MovePicker<'a> {
                 }
 
                 MovePickerStage::TTMove => {
-                    self.stage = MovePickerStage::PVMove;
+                    self.stage = MovePickerStage::GenerateCaptures;
                     if let Some(tt_move) = self.tt_move {
                         if self.pos.is_legal_move(tt_move) {
                             return Some(tt_move);
                         }
-                    }
-                }
-
-                MovePickerStage::PVMove => {
-                    self.stage = MovePickerStage::GenerateCaptures;
-                    if let Some(pv_move) = self.pv_move {
-                        return Some(pv_move);
                     }
                 }
 
@@ -184,7 +175,7 @@ impl<'a> MovePicker<'a> {
 
                 MovePickerStage::GoodCaptures => {
                     if let Some(mv) = self.pick_best() {
-                        if Some(mv) != self.tt_move {
+                        if Some(mv) != self.tt_move && Some(mv) != self.pv_move {
                             // Separate good and bad captures
                             let score = self.see(mv);
                             if score >= 0 {
@@ -210,6 +201,7 @@ impl<'a> MovePicker<'a> {
                         if let Some(killer) = self.stack.killers[self.current] {
                             self.current += 1; // Move to next killer slot
                             if Some(killer) != self.tt_move
+                                && Some(killer) != self.pv_move
                                 && !self.is_capture(killer)
                                 && self.pos.is_legal_move(killer)
                             {
@@ -252,7 +244,7 @@ impl<'a> MovePicker<'a> {
                     if self.current < self.bad_captures.len() {
                         let mv = self.bad_captures[self.current].mv;
                         self.current += 1; // Move to next bad capture
-                        if Some(mv) != self.tt_move {
+                        if Some(mv) != self.tt_move && Some(mv) != self.pv_move {
                             return Some(mv);
                         }
                     } else {
@@ -286,9 +278,13 @@ impl<'a> MovePicker<'a> {
         let mut gen = MoveGen::new();
         gen.generate_all(&self.pos, &mut move_list);
 
-        // Add only non-captures that are not killers or TT move
+        // Add only non-captures that are not killers, TT move, or PV move
         for &mv in move_list.as_slice() {
-            if !self.is_capture(mv) && Some(mv) != self.tt_move && !self.is_killer(mv) {
+            if !self.is_capture(mv)
+                && Some(mv) != self.tt_move
+                && Some(mv) != self.pv_move
+                && !self.is_killer(mv)
+            {
                 self.moves.push(ScoredMove::new(mv, 0));
             }
         }
@@ -1429,6 +1425,41 @@ mod tests {
             !pos.is_legal_move(illegal_drop),
             "White should not be able to drop lance on rank 8"
         );
+    }
+
+    #[test]
+    fn test_pv_move_no_duplication() {
+        // Test that PV move is not returned multiple times
+        let pos = Position::startpos();
+        let history = History::new();
+        let stack = SearchStack::default();
+
+        // Create a legal move as PV move
+        let pv_move = Some(Move::normal(
+            parse_usi_square("7g").unwrap(),
+            parse_usi_square("7f").unwrap(),
+            false,
+        ));
+
+        // Create move picker with PV move at root (ply 0)
+        let mut picker = MovePicker::new(&pos, None, pv_move, &history, &stack, 0);
+
+        // Collect all moves and check for duplicates
+        let mut moves = Vec::new();
+        let mut pv_count = 0;
+        while let Some(mv) = picker.next_move() {
+            if Some(mv) == pv_move {
+                pv_count += 1;
+            }
+            moves.push(mv);
+        }
+
+        // PV move should appear exactly once
+        assert_eq!(pv_count, 1, "PV move should be returned exactly once");
+
+        // Check that we got a reasonable number of moves (should be all legal moves)
+        assert!(moves.len() > 20, "Should generate many moves from starting position");
+        assert!(moves.len() < 40, "Should not have duplicate moves");
     }
 
     #[test]
