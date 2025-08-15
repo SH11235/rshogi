@@ -73,7 +73,8 @@ fn test_do_move_capture() {
     assert_eq!(pos.board.piece_on(to), Some(Piece::new(PieceType::Pawn, Color::Black)));
 
     // 持ち駒が増えていることを確認
-    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1); // 歩のインデックスは6
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1);
+    // 歩のインデックスは6
 }
 
 #[test]

@@ -170,6 +170,13 @@ pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promote
     }
 
     let us = gen.pos.side_to_move;
+
+    // Check if knight is too close to edge to move
+    let rank = from.rank();
+    if (us == Color::Black && rank <= 1) || (us == Color::White && rank >= 7) {
+        return; // Knight cannot move from these ranks
+    }
+
     let attacks = ATTACK_TABLES.knight_attacks(from, us);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
 
@@ -271,23 +278,51 @@ pub(super) fn generate_lance_moves(gen: &mut MoveGenImpl, from: Square, promoted
     }
 
     let us = gen.pos.side_to_move;
-    // Get lance attack rays and mask with actual reachable squares
-    let lance_rays = ATTACK_TABLES.lance_attacks(from, us);
-    let all_pieces = gen.pos.board.all_bb;
 
-    // For lances, we need to stop at the first blocker
+    // Check if lance is at edge and cannot move forward
+    // Black lances move towards rank 0, White lances move towards rank 8
+    // So we need to check if they're already at their destination edge
+    let rank = from.rank();
+    if (us == Color::Black && rank == 0) || (us == Color::White && rank == 8) {
+        return; // Lance at edge cannot move
+    }
+
+    // For lances, we need to manually iterate along the ray in the correct order
+    // because pop_lsb() doesn't guarantee the order we need for blocker detection
     let mut targets = Bitboard::EMPTY;
-    let mut ray = lance_rays;
+    let file = from.file();
+    let rank = from.rank() as i8;
 
-    while let Some(sq) = ray.pop_lsb() {
-        if all_pieces.test(sq) {
-            // Hit a piece - can capture if enemy, then stop
-            if !gen.pos.board.occupied_bb[us as usize].test(sq) {
+    // Determine direction and iterate square by square
+    match us {
+        Color::Black => {
+            // Black moves towards rank 0 (up the board)
+            for r in (0..rank).rev() {
+                let sq = Square::new(file, r as u8);
+                if gen.pos.board.all_bb.test(sq) {
+                    // Hit a piece - can capture if enemy, then stop
+                    if !gen.pos.board.occupied_bb[us as usize].test(sq) {
+                        targets.set(sq);
+                    }
+                    break;
+                }
                 targets.set(sq);
             }
-            break;
         }
-        targets.set(sq);
+        Color::White => {
+            // White moves towards rank 8 (down the board)
+            for r in (rank + 1)..9 {
+                let sq = Square::new(file, r as u8);
+                if gen.pos.board.all_bb.test(sq) {
+                    // Hit a piece - can capture if enemy, then stop
+                    if !gen.pos.board.occupied_bb[us as usize].test(sq) {
+                        targets.set(sq);
+                    }
+                    break;
+                }
+                targets.set(sq);
+            }
+        }
     }
 
     // If pinned, can only move along pin ray

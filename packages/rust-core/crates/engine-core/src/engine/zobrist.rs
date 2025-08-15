@@ -174,7 +174,8 @@ impl ZobristHashing for Position {
 
             // Update hand hash (piece goes to hand)
             let color_idx = moving.color as usize;
-            let piece_idx = captured_piece.piece_type.hand_index().expect("King is never captured to hand");
+            let piece_idx =
+                captured_piece.piece_type.hand_index().expect("King is never captured to hand");
             let old_count = self.hands[color_idx][piece_idx];
             let new_count = old_count + 1;
 

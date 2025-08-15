@@ -86,24 +86,33 @@ fn test_drop_pawn_mate_with_capture() {
 }
 
 #[test]
-fn test_drop_pawn_mate_without_support() {
+fn test_drop_pawn_check_without_support() {
     let mut pos = Position::empty();
-    // Black king far away - pawn has no support
+    // Realistic scenario: White king at initial position
     pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White)); // White king at 5a (initial position)
+                                                                                                // Black king far away - pawn has no support
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black)); // Black king at 5i (initial position)
 
     // Black has a pawn in hand
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // Pawn
 
+    // Rebuild occupancy bitboards after manual piece placement
+    pos.board.rebuild_occupancy_bitboards();
+
     let mut gen = MoveGenImpl::new(&pos);
     let moves = gen.generate_all();
 
-    let sq_4g = parse_usi_square("5h").unwrap();
-    // Pawn drop at 4g has no support - king can capture it - should be allowed
-    let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_4g);
-    assert!(legal_drop.is_some(), "Unsupported pawn drop should be allowed");
+    let sq_5b = parse_usi_square("5b").unwrap();
+    // Pawn drop at 5b gives check to White king at 5a
+    // Black pawn attacks towards rank 0, so from 5b (rank=1) it attacks 5a (rank=0)
+    // But pawn has no support (Black king at 5i is far) - White king can capture it - should be allowed
+    let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5b);
+    assert!(
+        legal_drop.is_some(),
+        "Unsupported pawn drop check should be allowed (not checkmate)"
+    );
 }
 
 #[test]
