@@ -13,6 +13,38 @@ impl<'a> MoveGenImpl<'a> {
         self.add_moves_with_type(from, targets, piece_type);
     }
 
+    /// Add a single move from a square to a target square
+    pub(super) fn add_single_move(&mut self, from: Square, to: Square, piece_type: PieceType) {
+        // Get the piece to check if it's already promoted
+        let piece = self.pos.board.piece_on(from).expect("Piece must exist at from square");
+        let is_promoted = piece.promoted;
+        let us = self.pos.side_to_move;
+        let captured_type = self.get_captured_type(to);
+
+        // Check if the piece can promote (not already promoted and can promote based on rules)
+        let can_promote = !is_promoted
+            && self.can_promote(from, to, us)
+            && matches!(
+                piece_type,
+                PieceType::Rook
+                    | PieceType::Bishop
+                    | PieceType::Silver
+                    | PieceType::Knight
+                    | PieceType::Lance
+                    | PieceType::Pawn
+            );
+
+        // Always add non-promotion move
+        self.moves
+            .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
+
+        // Add promotion move if piece can promote
+        if can_promote {
+            self.moves
+                .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+        }
+    }
+
     /// Add moves from a square to target squares with known piece type
     pub(super) fn add_moves_with_type(
         &mut self,

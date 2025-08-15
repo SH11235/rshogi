@@ -149,16 +149,8 @@ where
         let candidate = tt_entry.filter(|e| e.matches(hash)).and_then(|entry| entry.get_move());
         match candidate {
             Some(m) if moves.iter().any(|&lm| lm == m) => Some(m),
-            Some(m) => {
-                // TT move was invalid - log for debugging
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!(
-                        "[DEBUG] TT move {} rejected - not in legal moves",
-                        crate::usi::move_to_usi(&m)
-                    );
-                    eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
-                }
+            Some(_) => {
+                // TT move was invalid
                 None
             }
             _ => None,
@@ -333,15 +325,6 @@ where
 
                 // Update PV safely - need to create temporary slice to avoid borrowing issues
                 {
-                    #[cfg(debug_assertions)]
-                    {
-                        eprintln!(
-                            "[DEBUG] Setting PV move {} at ply {}",
-                            crate::usi::move_to_usi(&mv),
-                            ply
-                        );
-                        eprintln!("  Current position: {}", crate::usi::position_to_sfen(pos));
-                    }
                     let child_pv = searcher.pv_table.get_line((ply + 1) as usize).to_vec();
                     searcher.pv_table.set_line(ply as usize, mv, &child_pv);
                 }

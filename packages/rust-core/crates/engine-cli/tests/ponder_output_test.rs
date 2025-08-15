@@ -3,10 +3,10 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -137,10 +137,17 @@ fn test_ponder_output_movetime() {
         let mut logs = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             // Log more information for debugging
-            if line.contains("Best move:") || line.contains("Search completed") 
-                || line.contains("execute_search_static") || line.contains("SearchFinished")
-                || line.contains("time") || line.contains("depth") || line.contains("Time")
-                || line.contains("limit") || line.contains("emergency") || line.contains("fallback") {
+            if line.contains("Best move:")
+                || line.contains("Search completed")
+                || line.contains("execute_search_static")
+                || line.contains("SearchFinished")
+                || line.contains("time")
+                || line.contains("depth")
+                || line.contains("Time")
+                || line.contains("limit")
+                || line.contains("emergency")
+                || line.contains("fallback")
+            {
                 println!("LOG: {line}");
                 logs.push(line.clone());
             }
@@ -193,7 +200,7 @@ fn test_ponder_output_movetime() {
 
     // Wait slightly to see if bestmove comes automatically
     thread::sleep(Duration::from_millis(600));
-    
+
     // Check if we got bestmove already
     let early_bestmove = bestmove_rx.try_recv().ok();
     if let Some(ref bm) = early_bestmove {
@@ -207,7 +214,8 @@ fn test_ponder_output_movetime() {
     }
 
     // First, try to receive bestmove within 2s after stop (or use early one)
-    let maybe_bestmove = early_bestmove.or_else(|| bestmove_rx.recv_timeout(Duration::from_millis(2000)).ok());
+    let maybe_bestmove =
+        early_bestmove.or_else(|| bestmove_rx.recv_timeout(Duration::from_millis(2000)).ok());
 
     // If not received yet, send quit and then inspect all collected lines
     if maybe_bestmove.is_none() {
