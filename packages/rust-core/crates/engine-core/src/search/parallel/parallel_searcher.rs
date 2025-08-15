@@ -494,167 +494,182 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         worker_limits.info_callback = None;
 
         thread::spawn(move || {
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("Worker {id} started");
-            }
+            use std::panic::{self, AssertUnwindSafe};
 
-            // Create search thread
-            let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
+            let res = panic::catch_unwind(AssertUnwindSafe(|| {
+                if log::log_enabled!(log::Level::Debug) {
+                    debug!("Worker {id} started");
+                }
 
-            let mut last_report = 0u64;
-            let mut last_seen_nodes = 0u64; // Track the last absolute node count seen from searcher
+                // Create search thread
+                let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
 
-            // Simple work loop
-            while !shared_state.should_stop() {
-                // Try to get work using truly lock-free work stealing
-                let work = get_job(&worker, &queues, id, &steal_success, &steal_failure);
+                let mut last_report = 0u64;
+                let mut last_seen_nodes = 0u64; // Track the last absolute node count seen from searcher
 
-                if let Some(work) = work {
-                    // Create guard which atomically increments the counter
-                    let _guard = WorkerGuard::new(active_workers.clone());
+                // Simple work loop
+                while !shared_state.should_stop() {
+                    // Try to get work using truly lock-free work stealing
+                    let work = get_job(&worker, &queues, id, &steal_success, &steal_failure);
 
-                    let nodes = match work {
-                        WorkItem::RootBatch {
-                            iteration,
-                            depth,
-                            position,
-                            moves,
-                            start_index,
-                        } => {
-                            // Skip debug logging in hot path unless explicitly enabled
-                            if log::log_enabled!(log::Level::Debug) {
-                                debug!(
+                    if let Some(work) = work {
+                        // Create guard which atomically increments the counter
+                        // IMPORTANT: Guard must be created here (after work is obtained, before processing)
+                        // to ensure proper active worker count even with early returns or panics
+                        let _guard = WorkerGuard::new(active_workers.clone());
+
+                        let nodes = match work {
+                            WorkItem::RootBatch {
+                                iteration,
+                                depth,
+                                position,
+                                moves,
+                                start_index,
+                            } => {
+                                // Skip debug logging in hot path unless explicitly enabled
+                                if log::log_enabled!(log::Level::Debug) {
+                                    debug!(
                                     "Worker {id} processing RootBatch with {} moves starting at #{start_index} (iteration {iteration}, depth {depth})",
                                     moves.len()
                                 );
+                                }
+
+                                // Clone position only once per batch (not per move)
+                                let mut pos = (*position).clone();
+
+                                // Process all moves in the batch
+                                for move_to_search in moves.iter() {
+                                    // Search the specific root move (reusing the same position)
+                                    let _result = search_thread.search_root_move(
+                                        &mut pos,
+                                        &worker_limits,
+                                        depth,
+                                        *move_to_search,
+                                    );
+
+                                    // Check stop flag between moves
+                                    if shared_state.should_stop() {
+                                        break;
+                                    }
+                                }
+
+                                // Get current node count from searcher
+                                search_thread.searcher.nodes()
                             }
+                            WorkItem::RootMove {
+                                iteration,
+                                depth,
+                                position,
+                                move_to_search,
+                                move_index,
+                            } => {
+                                // Skip debug logging in hot path unless explicitly enabled
+                                if log::log_enabled!(log::Level::Debug) {
+                                    debug!(
+                                    "Worker {id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
+                                );
+                                }
 
-                            // Clone position only once per batch (not per move)
-                            let mut pos = (*position).clone();
+                                // Clone position from Arc for this search
+                                let mut pos = (*position).clone();
 
-                            // Process all moves in the batch
-                            for move_to_search in moves.iter() {
-                                // Search the specific root move (reusing the same position)
+                                // Search the specific root move
                                 let _result = search_thread.search_root_move(
                                     &mut pos,
                                     &worker_limits,
                                     depth,
-                                    *move_to_search,
+                                    move_to_search,
                                 );
 
-                                // Check stop flag between moves
-                                if shared_state.should_stop() {
-                                    break;
-                                }
+                                // Get current node count from searcher
+                                search_thread.searcher.nodes()
                             }
-
-                            // Get current node count from searcher
-                            search_thread.searcher.nodes()
-                        }
-                        WorkItem::RootMove {
-                            iteration,
-                            depth,
-                            position,
-                            move_to_search,
-                            move_index,
-                        } => {
-                            // Skip debug logging in hot path unless explicitly enabled
-                            if log::log_enabled!(log::Level::Debug) {
-                                debug!(
-                                    "Worker {id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
-                                );
-                            }
-
-                            // Clone position from Arc for this search
-                            let mut pos = (*position).clone();
-
-                            // Search the specific root move
-                            let _result = search_thread.search_root_move(
-                                &mut pos,
-                                &worker_limits,
+                            WorkItem::FullPosition {
+                                iteration,
                                 depth,
-                                move_to_search,
-                            );
-
-                            // Get current node count from searcher
-                            search_thread.searcher.nodes()
-                        }
-                        WorkItem::FullPosition {
-                            iteration,
-                            depth,
-                            position,
-                        } => {
-                            // Skip debug logging in hot path unless explicitly enabled
-                            if log::log_enabled!(log::Level::Debug) {
-                                debug!(
+                                position,
+                            } => {
+                                // Skip debug logging in hot path unless explicitly enabled
+                                if log::log_enabled!(log::Level::Debug) {
+                                    debug!(
                                     "Worker {id} processing FullPosition (iteration {iteration}, depth {depth})"
                                 );
+                                }
+
+                                // Clone position from Arc for this search
+                                let mut pos = (*position).clone();
+
+                                // Do the search
+                                let _result =
+                                    search_thread.search_iteration(&mut pos, &worker_limits, depth);
+
+                                // Get current node count from searcher
+                                search_thread.searcher.nodes()
                             }
+                        };
 
-                            // Clone position from Arc for this search
-                            let mut pos = (*position).clone();
-
-                            // Do the search
-                            let _result =
-                                search_thread.search_iteration(&mut pos, &worker_limits, depth);
-
-                            // Get current node count from searcher
-                            search_thread.searcher.nodes()
+                        // Skip debug logging in hot path unless explicitly enabled
+                        if log::log_enabled!(log::Level::Debug) {
+                            debug!("Worker {id} work completed");
                         }
-                    };
 
-                    // Skip debug logging in hot path unless explicitly enabled
-                    if log::log_enabled!(log::Level::Debug) {
-                        debug!("Worker {id} work completed");
-                    }
+                        // Note: WorkerGuard will automatically decrement active_workers when dropped
 
-                    // Note: WorkerGuard will automatically decrement active_workers when dropped
+                        // Track last absolute node count (for periodic reporting and final flush)
+                        last_seen_nodes = nodes;
 
-                    // Track last absolute node count (for periodic reporting and final flush)
-                    last_seen_nodes = nodes;
+                        // Report nodes periodically (every 100k nodes)
+                        // nodes は SearchThread 内部の累積で、場合によってはリセットされうる。
+                        // 減算は飽和させて underflow を防ぐ。
+                        let delta = nodes.saturating_sub(last_report);
+                        if delta >= 100_000 {
+                            total_nodes.fetch_add(delta, Ordering::Relaxed);
+                            shared_state.add_nodes(delta);
+                            last_report = nodes;
+                        }
 
-                    // Report nodes periodically (every 100k nodes)
-                    if nodes - last_report >= 100_000 {
-                        total_nodes.fetch_add(nodes - last_report, Ordering::Relaxed);
-                        shared_state.add_nodes(nodes - last_report);
-                        last_report = nodes;
-                    }
-
-                    // Check stop every work item
-                    if shared_state.should_stop() {
-                        break;
-                    }
-                } else {
-                    // No work available, check for split points (YBWC)
-                    #[cfg(feature = "ybwc")]
-                    {
-                        if let Some(split_point) =
-                            shared_state.split_point_manager.get_available_split_point()
+                        // Check stop every work item
+                        if shared_state.should_stop() {
+                            break;
+                        }
+                    } else {
+                        // No work available, check for split points (YBWC)
+                        #[cfg(feature = "ybwc")]
                         {
-                            // Process the split point
-                            search_thread.process_split_point(&split_point);
-                        } else {
-                            // No work or split points available, brief sleep
-                            thread::sleep(Duration::from_micros(50));
+                            if let Some(split_point) =
+                                shared_state.split_point_manager.get_available_split_point()
+                            {
+                                // Process the split point
+                                search_thread.process_split_point(&split_point);
+                            } else {
+                                // No work or split points available, brief sleep
+                                thread::sleep(Duration::from_micros(50));
+                            }
                         }
-                    }
-                    #[cfg(not(feature = "ybwc"))]
-                    {
-                        // No work available, brief sleep
-                        thread::sleep(Duration::from_micros(100));
+                        #[cfg(not(feature = "ybwc"))]
+                        {
+                            // No work available, brief sleep
+                            thread::sleep(Duration::from_micros(100));
+                        }
                     }
                 }
-            }
 
-            // Final node report (flush remaining absolute - reported)
-            if last_seen_nodes > last_report {
-                let rem = last_seen_nodes - last_report;
-                total_nodes.fetch_add(rem, Ordering::Relaxed);
-                shared_state.add_nodes(rem);
-            }
+                // Final node report (flush remaining absolute - reported)
+                let rem = last_seen_nodes.saturating_sub(last_report);
+                if rem > 0 {
+                    total_nodes.fetch_add(rem, Ordering::Relaxed);
+                    shared_state.add_nodes(rem);
+                }
 
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("Worker {id} stopped with {last_seen_nodes} nodes");
+                if log::log_enabled!(log::Level::Debug) {
+                    debug!("Worker {id} stopped with {last_seen_nodes} nodes");
+                }
+            }));
+
+            if res.is_err() {
+                // どれかワーカーが落ちたら全体停止フラグを立てる
+                error!("Worker {id} panicked; requesting graceful stop");
+                shared_state.set_stop();
             }
         })
     }
