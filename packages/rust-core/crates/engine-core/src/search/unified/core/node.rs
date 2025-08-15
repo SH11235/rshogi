@@ -326,7 +326,19 @@ where
                 // Update PV safely - need to create temporary slice to avoid borrowing issues
                 {
                     let child_pv = searcher.pv_table.get_line((ply + 1) as usize).to_vec();
-                    searcher.pv_table.set_line(ply as usize, mv, &child_pv);
+
+                    // Validate that the move is still pseudo-legal before adding to PV
+                    // This prevents TT pollution from causing invalid PVs
+                    if pos.is_pseudo_legal(mv) {
+                        searcher.pv_table.set_line(ply as usize, mv, &child_pv);
+                    } else {
+                        #[cfg(debug_assertions)]
+                        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                            eprintln!("[WARNING] Skipping invalid move in PV update at ply {ply}");
+                            eprintln!("  Move: {}", crate::usi::move_to_usi(&mv));
+                            eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
+                        }
+                    }
                 }
 
                 // Validate PV immediately in debug builds
