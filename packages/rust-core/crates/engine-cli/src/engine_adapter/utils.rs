@@ -137,19 +137,40 @@ impl EngineAdapter {
         }
 
         // Execute search
-        info!("Calling engine.search");
-        let result = engine.search(&mut position, limits);
-        info!(
-            "Search completed - depth:{} nodes:{} time:{}ms bestmove:{}",
-            result.stats.depth,
-            result.stats.nodes,
-            result.stats.elapsed.as_millis(),
-            result
-                .best_move
-                .as_ref()
-                .map(move_to_usi)
-                .unwrap_or_else(|| "(none)".to_string())
-        );
+        info!("Calling engine.search with limits: {limits:?}");
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.search(&mut position, limits)
+        })) {
+            Ok(search_result) => {
+                info!(
+                    "Search completed - depth:{} nodes:{} time:{}ms bestmove:{} pv_len:{}",
+                    search_result.stats.depth,
+                    search_result.stats.nodes,
+                    search_result.stats.elapsed.as_millis(),
+                    search_result
+                        .best_move
+                        .as_ref()
+                        .map(move_to_usi)
+                        .unwrap_or_else(|| "(none)".to_string()),
+                    search_result.stats.pv.len()
+                );
+                search_result
+            }
+            Err(panic_info) => {
+                // Try to extract panic message
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                error!("PANIC in engine.search: {panic_msg}");
+                return Err(EngineError::EngineNotAvailable(
+                    format!("Engine panicked during search: {panic_msg}"),
+                ));
+            }
+        };
 
         // Verify position wasn't modified
         if position.hash != original_hash
@@ -172,7 +193,25 @@ impl EngineAdapter {
         result: SearchResult,
         position: &Position,
     ) -> Result<ExtendedSearchResult, EngineError> {
-        let best_move = result.best_move.ok_or_else(|| EngineError::NoLegalMoves)?;
+        let best_move = result.best_move.ok_or_else(|| {
+            error!(
+                "No best move in search result. Stats: depth={}, nodes={}, elapsed={}ms, pv_len={}",
+                result.stats.depth,
+                result.stats.nodes,
+                result.stats.elapsed.as_millis(),
+                result.stats.pv.len()
+            );
+            if result.stats.nodes == 0 {
+                EngineError::NoLegalMoves
+            } else {
+                EngineError::EngineNotAvailable(format!(
+                    "Search completed but no best move (depth={}, nodes={}, time={}ms)",
+                    result.stats.depth,
+                    result.stats.nodes,
+                    result.stats.elapsed.as_millis()
+                ))
+            }
+        })?;
 
         // Extract PV from stats
         let pv = result.stats.pv.clone();

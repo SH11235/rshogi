@@ -1,0 +1,184 @@
+//! Core move generation implementation
+
+use crate::{
+    shogi::{MoveList, ALL_PIECE_TYPES},
+    Bitboard, Color, PieceType, Position, Square,
+};
+
+/// Move generator implementation
+pub struct MoveGenImpl<'a> {
+    pub(super) pos: &'a Position,
+    pub(super) moves: MoveList,
+    pub(super) king_sq: Square,
+    pub checkers: Bitboard,
+    pub(super) pinned: Bitboard,
+    pub(super) pin_rays: [Bitboard; 81],
+}
+
+impl<'a> MoveGenImpl<'a> {
+    /// Create new move generator for position
+    pub fn new(pos: &'a Position) -> Self {
+        let us = pos.side_to_move;
+        let king_sq = pos.board.king_square(us).expect("King must exist");
+
+        let mut gen = MoveGenImpl {
+            pos,
+            moves: MoveList::new(),
+            king_sq,
+            checkers: Bitboard::EMPTY,
+            pinned: Bitboard::EMPTY,
+            pin_rays: [Bitboard::EMPTY; 81],
+        };
+
+        // Calculate checkers and pins
+        gen.calculate_checkers_and_pins();
+
+        gen
+    }
+
+    /// Helper to get captured piece type at a square
+    #[inline]
+    pub(super) fn get_captured_type(&self, to: Square) -> Option<PieceType> {
+        self.pos.board.piece_on(to).map(|p| p.piece_type)
+    }
+
+    /// Generate all legal moves
+    pub fn generate_all(&mut self) -> MoveList {
+        self.moves.clear();
+
+        let us = self.pos.side_to_move;
+        let them = us.opposite();
+        let _our_pieces = self.pos.board.occupied_bb[us as usize];
+        let _their_pieces = self.pos.board.occupied_bb[them as usize];
+        let _all_pieces = self.pos.board.all_bb;
+
+        // If in double check, only king moves are legal
+        if self.checkers.count_ones() > 1 {
+            self.generate_king_moves();
+            return std::mem::take(&mut self.moves);
+        }
+
+        // Generate moves for each piece type
+        for &piece_type_enum in &ALL_PIECE_TYPES {
+            let piece_type = piece_type_enum as usize;
+            let mut pieces = self.pos.board.piece_bb[us as usize][piece_type];
+
+            while let Some(from) = pieces.pop_lsb() {
+                // Check if the piece is promoted
+                let piece = self.pos.board.piece_on(from);
+                let promoted = piece.map(|p| p.promoted).unwrap_or(false);
+
+                match piece_type_enum {
+                    PieceType::King => self.generate_king_moves_from(from),
+                    PieceType::Rook => self.generate_sliding_moves(from, piece_type_enum, promoted),
+                    PieceType::Bishop => {
+                        self.generate_sliding_moves(from, piece_type_enum, promoted)
+                    }
+                    PieceType::Gold => self.generate_gold_moves(from, promoted),
+                    PieceType::Silver => self.generate_silver_moves(from, promoted),
+                    PieceType::Knight => self.generate_knight_moves(from, promoted),
+                    PieceType::Lance => self.generate_lance_moves(from, promoted),
+                    PieceType::Pawn => self.generate_pawn_moves(from, promoted),
+                }
+            }
+        }
+
+        // Generate drop moves
+        // When in check, drops can still be legal if they block the check
+        self.generate_drop_moves();
+
+        // Note: promoted pieces are already handled in the piece-specific methods
+
+        // Filter out any moves that would capture the enemy king (should not happen)
+        let enemy_king_bb = self.pos.board.piece_bb[them as usize][PieceType::King as usize];
+        if let Some(enemy_king_sq) = enemy_king_bb.lsb() {
+            self.moves.as_mut_slice().retain(|m| m.to() != enemy_king_sq);
+        }
+
+        std::mem::take(&mut self.moves)
+    }
+}
+
+// Forward declarations for methods implemented in other modules
+impl<'a> MoveGenImpl<'a> {
+    // From pieces.rs
+    pub(super) fn generate_king_moves(&mut self) {
+        super::pieces::generate_king_moves(self);
+    }
+
+    pub(super) fn generate_king_moves_from(&mut self, from: Square) {
+        super::pieces::generate_king_moves_from(self, from);
+    }
+
+    pub(super) fn generate_gold_moves(&mut self, from: Square, promoted: bool) {
+        super::pieces::generate_gold_moves(self, from, promoted);
+    }
+
+    pub(super) fn generate_silver_moves(&mut self, from: Square, promoted: bool) {
+        super::pieces::generate_silver_moves(self, from, promoted);
+    }
+
+    pub(super) fn generate_knight_moves(&mut self, from: Square, promoted: bool) {
+        super::pieces::generate_knight_moves(self, from, promoted);
+    }
+
+    pub(super) fn generate_pawn_moves(&mut self, from: Square, promoted: bool) {
+        super::pieces::generate_pawn_moves(self, from, promoted);
+    }
+
+    // From sliding.rs
+    pub(super) fn generate_sliding_moves(
+        &mut self,
+        from: Square,
+        piece_type: PieceType,
+        promoted: bool,
+    ) {
+        super::sliding::generate_sliding_moves(self, from, piece_type, promoted);
+    }
+
+    pub(super) fn generate_lance_moves(&mut self, from: Square, promoted: bool) {
+        super::sliding::generate_lance_moves(self, from, promoted);
+    }
+
+    // From drops.rs
+    pub(super) fn generate_drop_moves(&mut self) {
+        super::drops::generate_drop_moves(self);
+    }
+
+    // Expose is_drop_pawn_mate for tests
+    #[cfg(test)]
+    pub fn is_drop_pawn_mate(&self, to: Square, them: Color) -> bool {
+        super::drops::is_drop_pawn_mate(self, to, them)
+    }
+
+    // From checks.rs
+    pub(super) fn calculate_checkers_and_pins(&mut self) {
+        super::checks::calculate_checkers_and_pins(self);
+    }
+
+    pub(super) fn would_be_in_check(&self, from: Square, to: Square) -> bool {
+        super::checks::would_be_in_check(self, from, to)
+    }
+
+    pub(super) fn calculate_pinned_pieces(&self, color: Color) -> Bitboard {
+        super::checks::calculate_pinned_pieces(self, color)
+    }
+
+    // From attacks.rs
+    pub(super) fn attackers_to(&self, sq: Square, color: Color) -> Bitboard {
+        super::attacks::attackers_to(self, sq, color)
+    }
+
+    pub(super) fn attackers_to_except_king_pawn_lance(&self, sq: Square, color: Color) -> Bitboard {
+        super::attacks::attackers_to_except_king_pawn_lance(self, sq, color)
+    }
+
+    pub(super) fn attackers_to_with_occupancy(
+        &self,
+        sq: Square,
+        color: Color,
+        occupancy: Bitboard,
+    ) -> Bitboard {
+        super::attacks::attackers_to_with_occupancy(self, sq, color, occupancy)
+    }
+}

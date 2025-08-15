@@ -513,33 +513,33 @@ mod tests {
 
         // Single piece
         let hands = parse_hands("P").unwrap();
-        assert_eq!(hands[0][6], 1); // Black pawn
+        assert_eq!(hands[0][PieceType::Pawn.hand_index().unwrap()], 1); // Black pawn
 
         // Multiple pieces
         let hands = parse_hands("2P3l").unwrap();
-        assert_eq!(hands[0][6], 2); // 2 Black pawns
-        assert_eq!(hands[1][5], 3); // 3 White lances
+        assert_eq!(hands[0][PieceType::Pawn.hand_index().unwrap()], 2); // 2 Black pawns
+        assert_eq!(hands[1][PieceType::Lance.hand_index().unwrap()], 3); // 3 White lances
 
         // Complex hands
         let hands = parse_hands("RBG2S2N2L9P2b2s2n2l9p").unwrap();
-        assert_eq!(hands[0][0], 1); // Black rook
-        assert_eq!(hands[0][1], 1); // Black bishop
-        assert_eq!(hands[0][2], 1); // Black gold
-        assert_eq!(hands[0][3], 2); // Black silver
-        assert_eq!(hands[0][6], 9); // Black pawns
-        assert_eq!(hands[1][1], 2); // White bishops
-        assert_eq!(hands[1][6], 9); // White pawns
+        assert_eq!(hands[0][PieceType::Rook.hand_index().unwrap()], 1); // Black rook
+        assert_eq!(hands[0][PieceType::Bishop.hand_index().unwrap()], 1); // Black bishop
+        assert_eq!(hands[0][PieceType::Gold.hand_index().unwrap()], 1); // Black gold
+        assert_eq!(hands[0][PieceType::Silver.hand_index().unwrap()], 2); // Black silver
+        assert_eq!(hands[0][PieceType::Pawn.hand_index().unwrap()], 9); // Black pawns
+        assert_eq!(hands[1][PieceType::Bishop.hand_index().unwrap()], 2); // White bishops
+        assert_eq!(hands[1][PieceType::Pawn.hand_index().unwrap()], 9); // White pawns
 
         // Test accumulation of duplicate pieces
         let hands = parse_hands("2P3P").unwrap();
-        assert_eq!(hands[0][6], 5); // 2 + 3 = 5 Black pawns
+        assert_eq!(hands[0][PieceType::Pawn.hand_index().unwrap()], 5); // 2 + 3 = 5 Black pawns
 
         // Test clipping to maximum
         let hands = parse_hands("10P10P").unwrap();
-        assert_eq!(hands[0][6], 18); // Clipped to max 18 pawns
+        assert_eq!(hands[0][PieceType::Pawn.hand_index().unwrap()], 18); // Clipped to max 18 pawns
 
         let hands = parse_hands("3R2R").unwrap();
-        assert_eq!(hands[0][0], 2); // Clipped to max 2 rooks
+        assert_eq!(hands[0][PieceType::Rook.hand_index().unwrap()], 2); // Clipped to max 2 rooks
     }
 
     #[test]
@@ -586,7 +586,7 @@ mod tests {
         let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b 2P 5";
         let pos = parse_sfen(sfen).unwrap();
 
-        assert_eq!(pos.hands[0][6], 2); // Black has 2 pawns
+        assert_eq!(pos.hands[0][PieceType::Pawn.hand_index().unwrap()], 2); // Black has 2 pawns
         assert_eq!(pos.ply, 8); // Move 5, black to move
     }
 
@@ -745,29 +745,29 @@ mod tests {
     fn test_parse_piece_type_and_color() {
         // Test Black pieces (uppercase)
         let (color, hand_idx) = parse_piece_type_and_color('P').unwrap();
-        assert_eq!(color, 0); // Black
-        assert_eq!(hand_idx, 6); // Pawn index
+        assert_eq!(color, 0);
+        assert_eq!(hand_idx, PieceType::Pawn.hand_index().unwrap());
 
         let (color, hand_idx) = parse_piece_type_and_color('R').unwrap();
-        assert_eq!(color, 0); // Black
-        assert_eq!(hand_idx, 0); // Rook index
+        assert_eq!(color, 0);
+        assert_eq!(hand_idx, PieceType::Rook.hand_index().unwrap());
 
         let (color, hand_idx) = parse_piece_type_and_color('G').unwrap();
-        assert_eq!(color, 0); // Black
-        assert_eq!(hand_idx, 2); // Gold index
+        assert_eq!(color, 0);
+        assert_eq!(hand_idx, PieceType::Gold.hand_index().unwrap());
 
         // Test White pieces (lowercase)
         let (color, hand_idx) = parse_piece_type_and_color('p').unwrap();
-        assert_eq!(color, 1); // White
-        assert_eq!(hand_idx, 6); // Pawn index
+        assert_eq!(color, 1);
+        assert_eq!(hand_idx, PieceType::Pawn.hand_index().unwrap());
 
         let (color, hand_idx) = parse_piece_type_and_color('b').unwrap();
-        assert_eq!(color, 1); // White
-        assert_eq!(hand_idx, 1); // Bishop index
+        assert_eq!(color, 1);
+        assert_eq!(hand_idx, PieceType::Bishop.hand_index().unwrap());
 
         let (color, hand_idx) = parse_piece_type_and_color('n').unwrap();
-        assert_eq!(color, 1); // White
-        assert_eq!(hand_idx, 4); // Knight index
+        assert_eq!(color, 1);
+        assert_eq!(hand_idx, PieceType::Knight.hand_index().unwrap());
 
         // Test invalid piece
         let err = parse_piece_type_and_color('X').unwrap_err();

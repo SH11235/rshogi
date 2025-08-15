@@ -123,12 +123,15 @@ fn test_problem_position_2f2e() {
         println!("Move {}: {}", move_str, if is_legal { "legal" } else { "illegal" });
     }
 
-    // 2f2e should be legal
-    assert!(adapter.is_legal_move("2f2e"), "2f2e should be legal after the given sequence");
+    // After the sequence, Black king is in check from B*4d
+    // Only moves that address the check are legal
+    assert!(adapter.is_legal_move("7g6h"), "7g6h should be legal (king escapes check)");
+    assert!(adapter.is_legal_move("5f5e"), "5f5e should be legal (blocks check)");
 
-    // Also test some other moves that should be legal
-    assert!(adapter.is_legal_move("1g1f"), "1g1f should be legal");
-    assert!(adapter.is_legal_move("4g4f"), "4g4f should be legal"); // Changed from 6i6h to 4g4f
+    // These moves don't address the check, so they should be illegal
+    assert!(!adapter.is_legal_move("2f2e"), "2f2e should be illegal (doesn't address check)");
+    assert!(!adapter.is_legal_move("1g1f"), "1g1f should be illegal (doesn't address check)");
+    assert!(!adapter.is_legal_move("4g4f"), "4g4f should be illegal (doesn't address check)");
 
     // Test illegal moves in this position
     assert!(!adapter.is_legal_move("2e2d"), "2e2d should be illegal (no piece on 2e)");

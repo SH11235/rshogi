@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn test_calculate_update_drop() {
         let mut pos = Position::startpos();
-        pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // Pawn is index 6
 
         let mv = Move::make_drop(PieceType::Pawn, parse_usi_square("5e").unwrap()); // P*5e
 
