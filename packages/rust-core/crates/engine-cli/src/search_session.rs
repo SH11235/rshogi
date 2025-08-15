@@ -3,12 +3,11 @@
 //! This module provides SearchSession to encapsulate all search-related data
 //! within a single worker thread, preventing cross-thread contamination.
 
-use engine_core::shogi::{Color, Move};
+use engine_core::shogi::Move;
 use smallvec::SmallVec;
 
 /// Score representation that preserves cp/mate distinction
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum Score {
     /// Centipawn score
     Cp(i32),
@@ -40,11 +39,6 @@ pub struct SearchSession {
 
     /// Root position state for validation
     pub root_hash: u64,
-    #[allow(dead_code)]
-    pub side_to_move: Color,
-
-    /// Legal moves at root (computed once, used for validation)
-    pub root_legal_moves: Vec<Move>,
 
     /// Committed best move (updated only on iteration completion)
     pub committed_best: Option<CommittedBest>,
@@ -55,12 +49,10 @@ pub struct SearchSession {
 
 impl SearchSession {
     /// Create a new search session
-    pub fn new(id: u64, root_hash: u64, side_to_move: Color, root_legal_moves: Vec<Move>) -> Self {
+    pub fn new(id: u64, root_hash: u64) -> Self {
         Self {
             id,
             root_hash,
-            side_to_move,
-            root_legal_moves,
             committed_best: None,
             current_iteration_best: None,
         }
@@ -74,17 +66,8 @@ impl SearchSession {
     }
 
     /// Update current iteration best
-    pub fn update_current_best(
-        &mut self,
-        best_move: Move,
-        ponder_move: Option<Move>,
-        depth: u32,
-        score: i32,
-        pv: Vec<Move>,
-    ) {
+    pub fn update_current_best(&mut self, depth: u32, score: i32, pv: Vec<Move>) {
         self.current_iteration_best = Some(CommittedBest {
-            best_move,
-            ponder_move,
             depth,
             score: Score::from_raw(score),
             pv: pv.into_iter().collect(),
@@ -95,20 +78,12 @@ impl SearchSession {
 /// Committed best move information (internal representation)
 #[derive(Clone, Debug)]
 pub struct CommittedBest {
-    /// Best move in internal representation
-    pub best_move: Move,
-
-    /// Ponder move (optional, already validated)
-    pub ponder_move: Option<Move>,
-
     /// Search depth
     pub depth: u32,
 
     /// Evaluation score (preserves cp/mate)
-    #[allow(dead_code)]
     pub score: Score,
 
     /// Principal variation (fixed-size optimized)
-    #[allow(dead_code)]
     pub pv: SmallVec<[Move; 32]>,
 }
