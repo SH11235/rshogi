@@ -217,9 +217,6 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Work queues (truly lock-free, no locks at all)
     queues: Arc<Queues>,
 
-    /// Node counter
-    total_nodes: Arc<AtomicU64>,
-
     /// Active worker count for proper synchronization
     active_workers: Arc<AtomicUsize>,
 
@@ -255,7 +252,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             shared_state,
             num_threads,
             queues,
-            total_nodes: Arc::new(AtomicU64::new(0)),
             active_workers: Arc::new(AtomicUsize::new(0)),
             steal_success: Arc::new(AtomicU64::new(0)),
             steal_failure: Arc::new(AtomicU64::new(0)),
@@ -341,7 +337,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         while !self.queues.injector.is_empty() {
             let _ = self.queues.injector.steal();
         }
-        self.total_nodes.store(0, Ordering::Release);
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
 
@@ -483,7 +478,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let tt = self.tt.clone();
         let shared_state = self.shared_state.clone();
         let queues = self.queues.clone();
-        let total_nodes = self.total_nodes.clone();
         let active_workers = self.active_workers.clone();
         let steal_success = self.steal_success.clone();
         let steal_failure = self.steal_failure.clone();
@@ -504,9 +498,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // Create search thread
                 let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
 
-                let mut last_report = 0u64;
-                let mut last_seen_nodes = 0u64; // Track the last absolute node count seen from searcher
-
                 // Simple work loop
                 while !shared_state.should_stop() {
                     // Try to get work using truly lock-free work stealing
@@ -518,7 +509,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         // to ensure proper active worker count even with early returns or panics
                         let _guard = WorkerGuard::new(active_workers.clone());
 
-                        let nodes = match work {
+                        match work {
                             WorkItem::RootBatch {
                                 iteration,
                                 depth,
@@ -552,9 +543,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                         break;
                                     }
                                 }
-
-                                // Get current node count from searcher
-                                search_thread.searcher.nodes()
                             }
                             WorkItem::RootMove {
                                 iteration,
@@ -580,9 +568,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                     depth,
                                     move_to_search,
                                 );
-
-                                // Get current node count from searcher
-                                search_thread.searcher.nodes()
                             }
                             WorkItem::FullPosition {
                                 iteration,
@@ -602,11 +587,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Do the search
                                 let _result =
                                     search_thread.search_iteration(&mut pos, &worker_limits, depth);
-
-                                // Get current node count from searcher
-                                search_thread.searcher.nodes()
                             }
-                        };
+                        }
 
                         // Skip debug logging in hot path unless explicitly enabled
                         if log::log_enabled!(log::Level::Debug) {
@@ -614,19 +596,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         }
 
                         // Note: WorkerGuard will automatically decrement active_workers when dropped
-
-                        // Track last absolute node count (for periodic reporting and final flush)
-                        last_seen_nodes = nodes;
-
-                        // Report nodes periodically (every 100k nodes)
-                        // nodes は SearchThread 内部の累積で、場合によってはリセットされうる。
-                        // 減算は飽和させて underflow を防ぐ。
-                        let delta = nodes.saturating_sub(last_report);
-                        if delta >= 100_000 {
-                            total_nodes.fetch_add(delta, Ordering::Relaxed);
-                            shared_state.add_nodes(delta);
-                            last_report = nodes;
-                        }
+                        // Note: SearchThread internally handles node counting and reporting to shared_state
 
                         // Check stop every work item
                         if shared_state.should_stop() {
@@ -654,15 +624,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
                 }
 
-                // Final node report (flush remaining absolute - reported)
-                let rem = last_seen_nodes.saturating_sub(last_report);
-                if rem > 0 {
-                    total_nodes.fetch_add(rem, Ordering::Relaxed);
-                    shared_state.add_nodes(rem);
-                }
+                // SearchThread automatically flushes nodes when work is completed
+                // No need for manual node reporting here
 
                 if log::log_enabled!(log::Level::Debug) {
-                    debug!("Worker {id} stopped with {last_seen_nodes} nodes");
+                    debug!("Worker {id} stopped");
                 }
             }));
 
@@ -695,7 +661,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         );
 
         let max_depth = limits.depth.unwrap_or(255);
-        let mut last_reported_nodes = 0u64; // Track last reported node count
 
         // Heartbeat tracking for periodic info callbacks
         let mut last_heartbeat = Instant::now();
@@ -774,7 +739,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // Narrow lock scope by cloning Arc
                 let tm_opt = { self.time_manager.lock().unwrap().clone() };
                 if let Some(ref tm) = tm_opt {
-                    let current_nodes = self.total_nodes.load(Ordering::Relaxed);
+                    let current_nodes = self.shared_state.get_nodes();
                     if tm.should_stop(current_nodes) {
                         if log::log_enabled!(log::Level::Debug) {
                             debug!(
@@ -989,17 +954,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 best_result = result.clone();
             }
 
-            // Report nodes (calculate difference from last report)
-            let nodes = main_thread.searcher.nodes();
-            let nodes_diff = nodes.saturating_sub(last_reported_nodes);
-            self.total_nodes.fetch_add(nodes_diff, Ordering::Relaxed);
-            self.shared_state.add_nodes(nodes_diff);
-            last_reported_nodes = nodes;
+            // SearchThread internally handles node counting and reporting to shared_state
+            // Get total nodes from shared_state for info callbacks
+            let total_nodes_from_shared = self.shared_state.get_nodes();
 
             // Report progress via info callback
             if let Some(ref callback) = limits.info_callback {
-                // Get total nodes from all threads
-                let total_nodes = self.total_nodes.load(Ordering::Relaxed);
+                // Use nodes from shared_state which already aggregates all threads
+                let total_nodes = total_nodes_from_shared;
                 // Use elapsed time from search start
                 let elapsed = search_start.elapsed();
                 // Report current iteration result (ensure PV is non-empty)
@@ -1024,7 +986,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             // Send heartbeat info if enough time or nodes have passed
             if let Some(ref callback) = limits.info_callback {
-                let total_nodes = self.total_nodes.load(Ordering::Relaxed);
+                let total_nodes = self.shared_state.get_nodes();
                 let elapsed_since_heartbeat = last_heartbeat.elapsed();
                 let nodes_since_heartbeat = total_nodes.saturating_sub(last_heartbeat_nodes);
 
@@ -1096,7 +1058,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     {
                         let tm_opt = { self.time_manager.lock().unwrap().clone() };
                         if let Some(ref tm) = tm_opt {
-                            let nodes = self.total_nodes.load(Ordering::Relaxed);
+                            let nodes = self.shared_state.get_nodes();
                             if tm.should_stop(nodes) {
                                 debug!(
                                     "TimeManager triggered stop during wait (pending: {pending}, active: {active})"
@@ -1122,7 +1084,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                         // Send heartbeat during wait
                         if let Some(ref callback) = limits.info_callback {
-                            let total_nodes = self.total_nodes.load(Ordering::Relaxed);
+                            let total_nodes = self.shared_state.get_nodes();
                             let elapsed_since_heartbeat = last_heartbeat.elapsed();
 
                             if elapsed_since_heartbeat
@@ -1187,7 +1149,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
         }
 
-        best_result.stats.nodes = self.total_nodes.load(Ordering::Relaxed);
+        best_result.stats.nodes = self.shared_state.get_nodes();
 
         // Ensure we always have a move (fallback to first legal move if needed)
         if best_result.best_move.is_none() && best_result.stats.nodes > 0 {
@@ -1366,7 +1328,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     /// Start time management thread
     fn start_time_manager(&self, time_manager: Arc<TimeManager>) -> thread::JoinHandle<()> {
         let shared_state = self.shared_state.clone();
-        let total_nodes = self.total_nodes.clone();
 
         thread::spawn(move || {
             if log::log_enabled!(log::Level::Debug) {
@@ -1388,7 +1349,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     break;
                 }
 
-                let nodes = total_nodes.load(Ordering::Relaxed);
+                let nodes = shared_state.get_nodes();
                 // Don't stop if we haven't done any real work yet
                 if nodes > 100 && time_manager.should_stop(nodes) {
                     info!("Time limit reached after {nodes} nodes, stopping search");
