@@ -61,62 +61,50 @@ fn get_valid_drop_squares(
 
     match piece_type {
         PieceType::Pawn => {
-            // Pawns cannot be dropped on files where we already have a pawn
-            for file in 0..9 {
-                if has_pawn_on_file(gen, file, us) {
-                    // Remove all squares on this file
-                    for rank in 0..9 {
-                        valid.clear(Square::new(file, rank));
-                    }
+            // Pawns cannot be dropped on files where we already have an unpromoted pawn
+            let pawns = gen.pos.board.piece_bb[us as usize][PieceType::Pawn as usize]
+                & !gen.pos.board.promoted_bb;
+            for file in 0..9u8 {
+                let file_mask = ATTACK_TABLES.file_mask(file);
+                if !(pawns & file_mask).is_empty() {
+                    valid &= !file_mask; // 一括でその筋を禁止
                 }
             }
 
             // Pawns cannot be dropped on last rank
             match us {
                 Color::Black => {
-                    for file in 0..9 {
-                        valid.clear(Square::new(file, 0)); // Black's last rank
-                    }
+                    valid &= !ATTACK_TABLES.rank_mask(0); // Black's last rank
                 }
                 Color::White => {
-                    for file in 0..9 {
-                        valid.clear(Square::new(file, 8)); // White's last rank
-                    }
+                    valid &= !ATTACK_TABLES.rank_mask(8); // White's last rank
                 }
             }
 
             // Check for illegal pawn drop checkmate
             let them = us.opposite();
-            let their_king_sq = gen.pos.board.king_square(them);
-            if let Some(king_sq) = their_king_sq {
-                // Check if any pawn drop would give check to enemy king
+            if let Some(king_sq) = gen.pos.board.king_square(them) {
                 // A pawn gives check if it's one square in front of the king (from the pawn's perspective)
                 let pawn_check_sq = match us {
                     Color::Black => {
-                        // Black pawns move towards rank 0, so they give check from rank+1
                         if king_sq.rank() < 8 {
                             Some(Square::new(king_sq.file(), king_sq.rank() + 1))
                         } else {
-                            None
+                            None // King at rank 8, pawn can't be placed behind it
                         }
                     }
                     Color::White => {
-                        // White pawns move towards rank 8, so they give check from rank-1
                         if king_sq.rank() > 0 {
                             Some(Square::new(king_sq.file(), king_sq.rank() - 1))
                         } else {
-                            None
+                            None // King at rank 0, pawn can't be placed behind it
                         }
                     }
                 };
 
-                // If the pawn drop would give check, verify it's not checkmate
                 if let Some(check_sq) = pawn_check_sq {
-                    if valid.test(check_sq) {
-                        let is_mate = is_drop_pawn_mate(gen, check_sq, them);
-                        if is_mate {
-                            valid.clear(check_sq);
-                        }
+                    if valid.test(check_sq) && is_drop_pawn_mate(gen, check_sq, them) {
+                        valid.clear(check_sq);
                     }
                 }
             }
@@ -125,14 +113,10 @@ fn get_valid_drop_squares(
             // Lances cannot be dropped on last rank
             match us {
                 Color::Black => {
-                    for file in 0..9 {
-                        valid.clear(Square::new(file, 0)); // Black's last rank
-                    }
+                    valid &= !ATTACK_TABLES.rank_mask(0);
                 }
                 Color::White => {
-                    for file in 0..9 {
-                        valid.clear(Square::new(file, 8)); // White's last rank
-                    }
+                    valid &= !ATTACK_TABLES.rank_mask(8);
                 }
             }
         }
@@ -140,16 +124,12 @@ fn get_valid_drop_squares(
             // Knights cannot be dropped on last two ranks
             match us {
                 Color::Black => {
-                    for file in 0..9 {
-                        valid.clear(Square::new(file, 0)); // Black can't drop on rank 0-1
-                        valid.clear(Square::new(file, 1));
-                    }
+                    valid &= !ATTACK_TABLES.rank_mask(0);
+                    valid &= !ATTACK_TABLES.rank_mask(1);
                 }
                 Color::White => {
-                    for file in 0..9 {
-                        valid.clear(Square::new(file, 7)); // White can't drop on rank 7-8
-                        valid.clear(Square::new(file, 8));
-                    }
+                    valid &= !ATTACK_TABLES.rank_mask(7);
+                    valid &= !ATTACK_TABLES.rank_mask(8);
                 }
             }
         }
@@ -157,18 +137,6 @@ fn get_valid_drop_squares(
     }
 
     valid
-}
-
-/// Check if we have a pawn on the given file
-fn has_pawn_on_file(gen: &MoveGenImpl, file: u8, color: Color) -> bool {
-    let pawns = gen.pos.board.piece_bb[color as usize][PieceType::Pawn as usize]
-        & !gen.pos.board.promoted_bb; // Only consider unpromoted pawns
-    for rank in 0..9 {
-        if pawns.test(Square::new(file, rank)) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Check if dropping a pawn at 'to' would be checkmate (illegal)

@@ -1,6 +1,6 @@
 //! Sliding piece move generation (rook, bishop, lance)
 
-use crate::{shogi::ATTACK_TABLES, PieceType, Square};
+use crate::{Bitboard, PieceType, Square};
 
 use super::core::MoveGenImpl;
 
@@ -12,52 +12,160 @@ pub(super) fn generate_sliding_moves(
     promoted: bool,
 ) {
     let us = gen.pos.side_to_move;
-    let all_pieces = gen.pos.board.all_bb;
     let targets = !gen.pos.board.occupied_bb[us as usize];
 
-    // Get attack squares for the piece
-    let attacks = match (piece_type, promoted) {
-        (PieceType::Rook, false) => {
-            ATTACK_TABLES.sliding_attacks(from, all_pieces, PieceType::Rook)
+    match piece_type {
+        PieceType::Rook => {
+            generate_rook_moves_ordered(gen, from, targets);
+            if promoted {
+                // Dragon (promoted rook) also has king moves
+                generate_king_style_moves(gen, from, targets, piece_type);
+            }
         }
-        (PieceType::Rook, true) => {
-            // Dragon (promoted rook) = rook + king moves
-            let rook_attacks = ATTACK_TABLES.sliding_attacks(from, all_pieces, PieceType::Rook);
-            let king_attacks = ATTACK_TABLES.king_attacks(from);
-            rook_attacks | king_attacks
+        PieceType::Bishop => {
+            generate_bishop_moves_ordered(gen, from, targets);
+            if promoted {
+                // Horse (promoted bishop) also has king moves
+                generate_king_style_moves(gen, from, targets, piece_type);
+            }
         }
-        (PieceType::Bishop, false) => {
-            ATTACK_TABLES.sliding_attacks(from, all_pieces, PieceType::Bishop)
-        }
-        (PieceType::Bishop, true) => {
-            // Horse (promoted bishop) = bishop + king moves
-            let bishop_attacks = ATTACK_TABLES.sliding_attacks(from, all_pieces, PieceType::Bishop);
-            let king_attacks = ATTACK_TABLES.king_attacks(from);
-            bishop_attacks | king_attacks
-        }
-        _ => return,
-    };
+        _ => {}
+    }
+}
 
-    let valid_targets = attacks & targets;
+/// Generate rook moves in order along each ray (up, down, left, right)
+fn generate_rook_moves_ordered(gen: &mut MoveGenImpl, from: Square, targets: Bitboard) {
+    let all_pieces = gen.pos.board.all_bb;
 
-    // If pinned, can only move along pin ray
+    // Direction vectors for rook: up, down, left, right
+    let directions = [
+        (0, -1), // up (decreasing rank)
+        (0, 1),  // down (increasing rank)
+        (-1, 0), // left (decreasing file)
+        (1, 0),  // right (increasing file)
+    ];
+
+    for (file_delta, rank_delta) in directions {
+        generate_ray_moves(gen, from, targets, all_pieces, file_delta, rank_delta, PieceType::Rook);
+    }
+}
+
+/// Generate bishop moves in order along each diagonal ray
+fn generate_bishop_moves_ordered(gen: &mut MoveGenImpl, from: Square, targets: Bitboard) {
+    let all_pieces = gen.pos.board.all_bb;
+
+    // Direction vectors for bishop: diagonals
+    let directions = [
+        (-1, -1), // up-left
+        (1, -1),  // up-right
+        (-1, 1),  // down-left
+        (1, 1),   // down-right
+    ];
+
+    for (file_delta, rank_delta) in directions {
+        generate_ray_moves(
+            gen,
+            from,
+            targets,
+            all_pieces,
+            file_delta,
+            rank_delta,
+            PieceType::Bishop,
+        );
+    }
+}
+
+/// Generate moves along a ray in a specific direction
+fn generate_ray_moves(
+    gen: &mut MoveGenImpl,
+    from: Square,
+    targets: Bitboard,
+    all_pieces: Bitboard,
+    file_delta: i8,
+    rank_delta: i8,
+    piece_type: PieceType,
+) {
+    let mut moves = Vec::new();
+    let from_file = from.file() as i8;
+    let from_rank = from.rank() as i8;
+
+    let mut current_file = from_file + file_delta;
+    let mut current_rank = from_rank + rank_delta;
+
+    while (0..9).contains(&current_file) && (0..9).contains(&current_rank) {
+        let to = Square::new(current_file as u8, current_rank as u8);
+
+        // Check if this square is occupied
+        if all_pieces.test(to) {
+            // Can capture if it's an enemy piece
+            if targets.test(to) {
+                moves.push(to);
+            }
+            break; // Stop at any piece
+        }
+
+        // Empty square - can move here
+        moves.push(to);
+
+        // Continue along the ray
+        current_file += file_delta;
+        current_rank += rank_delta;
+    }
+
+    // Apply pin and check constraints if needed, then add moves
+    if !moves.is_empty() {
+        let mut valid_moves = Bitboard::EMPTY;
+        for &to in &moves {
+            valid_moves.set(to);
+        }
+
+        // Apply constraints
+        if gen.pinned.test(from) {
+            let pin_ray = gen.pin_rays[from.index()];
+            valid_moves &= pin_ray;
+        }
+
+        if !gen.checkers.is_empty() {
+            let check_mask =
+                gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
+            valid_moves &= check_mask;
+        }
+
+        // Add moves in order
+        for &to in &moves {
+            if valid_moves.test(to) {
+                gen.add_single_move(from, to, piece_type);
+            }
+        }
+    }
+}
+
+/// Generate king-style moves (for promoted rook/bishop)
+fn generate_king_style_moves(
+    gen: &mut MoveGenImpl,
+    from: Square,
+    targets: Bitboard,
+    piece_type: PieceType,
+) {
+    use crate::shogi::ATTACK_TABLES;
+
+    let king_attacks = ATTACK_TABLES.king_attacks(from);
+    let valid_targets = king_attacks & targets;
+
+    // Apply constraints
+    let mut final_targets = valid_targets;
     if gen.pinned.test(from) {
         let pin_ray = gen.pin_rays[from.index()];
-        let pinned_targets = valid_targets & pin_ray;
-        gen.add_moves_with_type(from, pinned_targets, piece_type);
-        return;
+        final_targets &= pin_ray;
     }
 
-    // If in check, can only block or capture checker
     if !gen.checkers.is_empty() {
         let check_mask = gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
-        let check_targets = valid_targets & check_mask;
-        gen.add_moves_with_type(from, check_targets, piece_type);
-        return;
+        final_targets &= check_mask;
     }
 
-    // Normal moves
-    gen.add_moves_with_type(from, valid_targets, piece_type);
+    // Add moves
+    gen.add_moves_with_type(from, final_targets, piece_type);
 }
 
 /// Generate lance moves

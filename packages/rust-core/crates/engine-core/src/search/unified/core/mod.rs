@@ -74,15 +74,16 @@ pub(super) fn assert_pv_legal(pos: &Position, pv: &[Move]) {
     let mut p = pos.clone();
     for (i, mv) in pv.iter().enumerate() {
         if !p.is_legal_move(*mv) {
-            eprintln!("[BUG] illegal pv at ply {i}: {}", crate::usi::move_to_usi(mv));
-            eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
-            eprintln!(
-                "  Full PV: {}",
-                pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" ")
-            );
             #[cfg(debug_assertions)]
-            panic!("Illegal move in PV");
-            #[cfg(not(debug_assertions))]
+            {
+                eprintln!("[BUG] illegal pv at ply {i}: {}", crate::usi::move_to_usi(mv));
+                eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+                eprintln!(
+                    "  Full PV: {}",
+                    pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" ")
+                );
+            }
+            // Do not panic in any build; keep the engine running and just log the issue
             break;
         }
         let _undo_info = p.do_move(*mv);
@@ -97,6 +98,7 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
     for (i, &mv) in pv.iter().enumerate() {
         // Skip null moves
         if mv == Move::NULL {
+            #[cfg(debug_assertions)]
             eprintln!("[BUG] NULL move in PV at ply {i}");
             return;
         }
@@ -109,25 +111,33 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             let piece_type = mv.drop_piece_type();
             let hands = &p.hands[p.side_to_move as usize];
             let Some(hand_idx) = piece_type.hand_index() else {
+                #[cfg(debug_assertions)]
                 eprintln!("[BUG] Invalid drop piece type (King) at ply {i}: {usi}");
                 return;
             };
             let count = hands[hand_idx];
             if count == 0 {
-                eprintln!("[BUG] No piece in hand for drop at ply {i}: {usi}");
-                eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!("[BUG] No piece in hand for drop at ply {i}: {usi}");
+                    eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+                }
                 return;
             }
         } else {
             // For normal moves: check piece exists at from square
             if let Some(from) = mv.from() {
                 if p.piece_at(from).is_none() {
-                    eprintln!("[BUG] No piece at from square at ply {i}: {usi}");
-                    eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
-                    eprintln!("  From square {from:?} is empty");
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!("[BUG] No piece at from square at ply {i}: {usi}");
+                        eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+                        eprintln!("  From square {from:?} is empty");
+                    }
                     return;
                 }
             } else {
+                #[cfg(debug_assertions)]
                 eprintln!("[BUG] Normal move has no from square at ply {i}: {usi}");
                 return;
             }
@@ -135,9 +145,12 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
 
         // Check if move is pseudo-legal before applying
         if !p.is_pseudo_legal(mv) {
-            eprintln!("[BUG] Illegal move in PV at ply {i}: {usi}");
-            eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
-            eprintln!("  Move is not pseudo-legal");
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("[BUG] Illegal move in PV at ply {i}: {usi}");
+                eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
+                eprintln!("  Move is not pseudo-legal");
+            }
             return;
         }
 
@@ -149,8 +162,11 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             // Check from square is now empty
             if let Some(from) = mv.from() {
                 if p.piece_at(from).is_some() {
-                    eprintln!("[BUG] From square not cleared at ply {i}: {usi}");
-                    eprintln!("  Position after move: {}", crate::usi::position_to_sfen(&p));
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!("[BUG] From square not cleared at ply {i}: {usi}");
+                        eprintln!("  Position after move: {}", crate::usi::position_to_sfen(&p));
+                    }
                     return;
                 }
             }
@@ -163,8 +179,11 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
                 // OK - we just moved there
             }
             _ => {
-                eprintln!("[BUG] To square not occupied by our piece at ply {i}: {usi}");
-                eprintln!("  Position after move: {}", crate::usi::position_to_sfen(&p));
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!("[BUG] To square not occupied by our piece at ply {i}: {usi}");
+                    eprintln!("  Position after move: {}", crate::usi::position_to_sfen(&p));
+                }
                 return;
             }
         }

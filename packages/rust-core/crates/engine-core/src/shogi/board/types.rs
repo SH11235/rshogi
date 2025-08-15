@@ -214,7 +214,11 @@ impl PieceType {
     /// hands のインデックスから PieceType を取得（範囲外は None）
     #[inline]
     pub const fn from_hand_index(index: usize) -> Option<PieceType> {
-        if index < 7 { Some(HAND_ORDER[index]) } else { None }
+        if index < 7 {
+            Some(HAND_ORDER[index])
+        } else {
+            None
+        }
     }
 
     /// Check if piece can promote
@@ -397,7 +401,7 @@ mod tests {
         println!("to.rank() = {} (is <= 2? {})", to.rank(), to.rank() <= 2);
 
         let black_can_promote = from.rank() <= 2 || to.rank() <= 2;
-        println!("Can Black promote? {}", black_can_promote);
+        println!("Can Black promote? {black_can_promote}");
         assert!(black_can_promote, "Black should be able to promote when leaving promotion zone");
 
         println!("\nFor White piece moving from 2b to 8h:");
@@ -405,7 +409,7 @@ mod tests {
         println!("to.rank() = {} (is >= 6? {})", to.rank(), to.rank() >= 6);
 
         let white_can_promote = from.rank() >= 6 || to.rank() >= 6;
-        println!("Can White promote? {}", white_can_promote);
+        println!("Can White promote? {white_can_promote}");
         assert!(
             white_can_promote,
             "White should be able to promote when entering promotion zone"

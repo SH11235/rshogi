@@ -971,19 +971,19 @@ mod tests {
 
         // Test 2: Only one side has pieces
         pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 18; // 18 pawns in hand
-                                                  // Pawns have weight 0, so still endgame
+                                                                                      // Pawns have weight 0, so still endgame
         assert_eq!(engine.detect_game_phase(&pos), GamePhase::EndGame);
 
         // Add valuable pieces to hand
         pos.hands[Color::Black as usize][PieceType::Rook.hand_index().unwrap()] = 2; // 2 rooks in hand
-                                                 // 2 rooks * 4 = 8, normalized: (8 * 128) / 52 = 19
-                                                 // Still below PHASE_ENDGAME_THRESHOLD (32)
+                                                                                     // 2 rooks * 4 = 8, normalized: (8 * 128) / 52 = 19
+                                                                                     // Still below PHASE_ENDGAME_THRESHOLD (32)
         assert_eq!(engine.detect_game_phase(&pos), GamePhase::EndGame);
 
         // Add more pieces to cross into middle game
         pos.hands[Color::Black as usize][PieceType::Bishop.hand_index().unwrap()] = 2; // 2 bishops
         pos.hands[Color::Black as usize][PieceType::Gold.hand_index().unwrap()] = 4; // 4 golds
-                                                 // Total: 2*4 + 2*4 + 4*3 = 28, normalized: (28 * 128) / 52 = 68
+                                                                                     // Total: 2*4 + 2*4 + 4*3 = 28, normalized: (28 * 128) / 52 = 68
         assert_eq!(engine.detect_game_phase(&pos), GamePhase::MiddleGame);
     }
 

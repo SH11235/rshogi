@@ -166,9 +166,9 @@ impl EngineAdapter {
                     "Unknown panic".to_string()
                 };
                 error!("PANIC in engine.search: {panic_msg}");
-                return Err(EngineError::EngineNotAvailable(
-                    format!("Engine panicked during search: {panic_msg}"),
-                ));
+                return Err(EngineError::EngineNotAvailable(format!(
+                    "Engine panicked during search: {panic_msg}"
+                )));
             }
         };
 
