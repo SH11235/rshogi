@@ -267,28 +267,9 @@ fn test_ponder_sequence() {
 
     let stdin = engine.stdin.as_mut().expect("Failed to get stdin");
     let stdout = engine.stdout.as_mut().expect("Failed to get stdout");
-    let stderr = engine.stderr.take().expect("Failed to get stderr");
     let mut reader = BufReader::new(stdout);
 
-    // Spawn a thread to read stderr
-    let _stderr_handle = {
-        thread::spawn(move || {
-            let mut stderr_reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                match stderr_reader.read_line(&mut line) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        if !line.is_empty() {
-                            eprintln!("ENGINE STDERR: {}", line.trim());
-                            line.clear();
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        })
-    };
+    // Note: stderr is inherited by parent, so we see errors in console directly
 
     // Initialize
     send_command(stdin, "usi");
