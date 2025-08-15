@@ -87,12 +87,19 @@ impl EngineAdapter {
         // Note: We need to compare moves semantically (ignoring piece type encoding)
         // because USI notation doesn't include piece type information
         let is_legal = legal_moves.as_slice().iter().any(|&legal_move| {
+            // Basic move matching
             parsed_move.from() == legal_move.from()
                 && parsed_move.to() == legal_move.to()
                 && parsed_move.is_drop() == legal_move.is_drop()
-                && parsed_move.is_promote() == legal_move.is_promote()
                 && (!parsed_move.is_drop()
                     || parsed_move.drop_piece_type() == legal_move.drop_piece_type())
+                && (
+                    // Either promotion flags match exactly
+                    parsed_move.is_promote() == legal_move.is_promote()
+                    // OR the parsed move tries to promote but the legal move doesn't allow it
+                    // (This handles cases like "2b8h+" where promotion is impossible)
+                    || (parsed_move.is_promote() && !legal_move.is_promote())
+                )
         });
 
         if !is_legal {

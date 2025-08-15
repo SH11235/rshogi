@@ -150,6 +150,17 @@ pub enum PieceType {
     Pawn = 7,   // P
 }
 
+// 手駒配列 (Position.hands) の並び順を一元管理（King を除く 7 種）
+pub const HAND_ORDER: [PieceType; 7] = [
+    PieceType::Rook,
+    PieceType::Bishop,
+    PieceType::Gold,
+    PieceType::Silver,
+    PieceType::Knight,
+    PieceType::Lance,
+    PieceType::Pawn,
+];
+
 impl TryFrom<u8> for PieceType {
     type Error = &'static str;
 
@@ -189,6 +200,21 @@ impl PieceType {
             7 => Some(PieceType::Pawn),
             _ => None,
         }
+    }
+
+    /// Position.hands に対応するインデックス（King は None）
+    #[inline]
+    pub const fn hand_index(self) -> Option<usize> {
+        match self {
+            PieceType::King => None,
+            _ => Some(self as usize - 1),
+        }
+    }
+
+    /// hands のインデックスから PieceType を取得（範囲外は None）
+    #[inline]
+    pub const fn from_hand_index(index: usize) -> Option<PieceType> {
+        if index < 7 { Some(HAND_ORDER[index]) } else { None }
     }
 
     /// Check if piece can promote
@@ -345,6 +371,46 @@ impl Color {
 mod tests {
     use super::*;
     use crate::usi::parse_usi_square;
+
+    #[test]
+    fn test_promotion_zones() {
+        // Test USI rank mapping and promotion zones
+        println!("\nUSI rank mapping test:");
+
+        let test_squares = vec!["2a", "2b", "2c", "2d", "2e", "2f", "2g", "2h", "2i"];
+
+        for sq_str in &test_squares {
+            let sq = parse_usi_square(sq_str).unwrap();
+            println!("{} -> rank = {}", sq_str, sq.rank());
+        }
+
+        println!("\nPromotion zone test:");
+        let from = parse_usi_square("2b").unwrap();
+        let to = parse_usi_square("8h").unwrap();
+
+        println!("2b rank = {}", from.rank());
+        println!("8h rank = {}", to.rank());
+
+        // Check if promotion is possible from 2b to 8h
+        println!("\nFor Black piece moving from 2b to 8h:");
+        println!("from.rank() = {} (is <= 2? {})", from.rank(), from.rank() <= 2);
+        println!("to.rank() = {} (is <= 2? {})", to.rank(), to.rank() <= 2);
+
+        let black_can_promote = from.rank() <= 2 || to.rank() <= 2;
+        println!("Can Black promote? {}", black_can_promote);
+        assert!(black_can_promote, "Black should be able to promote when leaving promotion zone");
+
+        println!("\nFor White piece moving from 2b to 8h:");
+        println!("from.rank() = {} (is >= 6? {})", from.rank(), from.rank() >= 6);
+        println!("to.rank() = {} (is >= 6? {})", to.rank(), to.rank() >= 6);
+
+        let white_can_promote = from.rank() >= 6 || to.rank() >= 6;
+        println!("Can White promote? {}", white_can_promote);
+        assert!(
+            white_can_promote,
+            "White should be able to promote when entering promotion zone"
+        );
+    }
 
     #[test]
     fn test_square_operations() {

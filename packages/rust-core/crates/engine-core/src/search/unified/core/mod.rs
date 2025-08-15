@@ -108,7 +108,11 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
             // For drops: check we have the piece in hand
             let piece_type = mv.drop_piece_type();
             let hands = &p.hands[p.side_to_move as usize];
-            let count = hands[piece_type as usize];
+            let Some(hand_idx) = piece_type.hand_index() else {
+                eprintln!("[BUG] Invalid drop piece type (King) at ply {i}: {usi}");
+                return;
+            };
+            let count = hands[hand_idx];
             if count == 0 {
                 eprintln!("[BUG] No piece in hand for drop at ply {i}: {usi}");
                 eprintln!("  Position: {}", crate::usi::position_to_sfen(&p));
@@ -684,8 +688,8 @@ fn has_non_pawn_material(pos: &Position) -> bool {
 
     // Check pieces in hand
     let color_idx = color as usize;
-    for piece_idx in 0..7 {
-        if piece_idx != PieceType::Pawn as usize && pos.hands[color_idx][piece_idx] > 0 {
+    for (hand_idx, &pt) in crate::shogi::HAND_PIECE_TYPES.iter().enumerate() {
+        if pt != PieceType::Pawn && pos.hands[color_idx][hand_idx] > 0 {
             return true;
         }
     }
