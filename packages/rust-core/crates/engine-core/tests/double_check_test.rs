@@ -26,7 +26,7 @@ fn test_double_check_only_king_moves() {
     }
 
     // King should have some moves available
-    assert!(moves.len() > 0, "King should have moves to escape double check");
+    assert!(!moves.is_empty(), "King should have moves to escape double check");
 }
 
 #[test]
@@ -152,5 +152,5 @@ fn test_double_check_with_many_pieces() {
     }
 
     // King should have some moves available
-    assert!(moves.len() > 0, "King should have moves to escape double check");
+    assert!(!moves.is_empty(), "King should have moves to escape double check");
 }
