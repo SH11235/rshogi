@@ -7,10 +7,10 @@ use engine_core::{
 
 #[test]
 fn test_drop_pawn_mate_no_support_but_king_cannot_capture() {
-    // White king at 1a, black rook at 1c and black gold at 2b, black king at 9i
-    // Dropping a pawn at 1b would be checkmate even without support
-    // because the gold prevents king from capturing
-    let pos = Position::from_sfen("k8/1G7/R8/9/9/9/9/9/8K b P 1").unwrap();
+    // White king at 1a, black rook at 2c and black gold at 2b, black king at 9i
+    // Dropping a pawn at 1b would be checkmate
+    // The rook protects 2b, preventing Kx2b escape
+    let pos = Position::from_sfen("k8/1G7/1R7/9/9/9/9/9/8K b P 1").unwrap();
     let mut move_gen = MoveGen::new();
     let mut moves = MoveList::new();
     move_gen.generate_all(&pos, &mut moves);
@@ -30,9 +30,9 @@ fn test_drop_pawn_mate_no_support_but_king_cannot_capture() {
 
 #[test]
 fn test_drop_pawn_mate_with_support() {
-    // Simple pawn drop mate: White king at 1a, black gold at 2a, rook at 1c
-    // P*1b would be mate (king can't escape, gold blocks 2a)
-    let pos = Position::from_sfen("kG7/9/R8/9/9/9/9/9/K8 b P 1").unwrap();
+    // Simple pawn drop mate: White king at 1a, black gold at 2a, rook at 2c
+    // P*1b would be mate (king can't escape, gold blocks 2a, rook covers 2b)
+    let pos = Position::from_sfen("kG7/9/1R7/9/9/9/9/9/K8 b P 1").unwrap();
     let mut move_gen = MoveGen::new();
     let mut moves = MoveList::new();
     move_gen.generate_all(&pos, &mut moves);
@@ -105,9 +105,9 @@ fn test_drop_pawn_not_mate_other_piece_can_capture() {
 fn test_drop_pawn_mate_complex_position() {
     // Complex position where pawn drop creates mate
     // White king at 5a, surrounded by black pieces
-    // Black: gold at 4a, silver at 6a, rook at 5c, black king at 5i
-    // Dropping pawn at 5b is mate
-    let pos = Position::from_sfen("3GkS3/9/4R4/9/9/9/9/9/4K4 b P 1").unwrap();
+    // Black: rooks at 4c and 6c (covering 4a and 6a), rook at 5c, black king at 5i
+    // Dropping pawn at 5b is mate (rooks prevent all escapes)
+    let pos = Position::from_sfen("3RkR3/9/4R4/9/9/9/9/9/4K4 b P 1").unwrap();
     let mut move_gen = MoveGen::new();
     let mut moves = MoveList::new();
     move_gen.generate_all(&pos, &mut moves);
