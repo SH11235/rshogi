@@ -453,14 +453,18 @@ where
                                 // Penalize captures that didn't cause cutoff
                                 for &capture_mv in captures_tried.iter().take(MAX_MOVES_TO_UPDATE) {
                                     if capture_mv != mv {
-                                        if let (Some(attacker), Some(victim)) = (
-                                            capture_mv.piece_type(),
-                                            capture_mv.captured_piece_type(),
-                                        ) {
+                                        // Try metadata first, fall back to board lookup
+                                        let attacker = capture_mv.piece_type();
+                                        let victim =
+                                            capture_mv.captured_piece_type().or_else(|| {
+                                                pos.piece_at(capture_mv.to()).map(|p| p.piece_type)
+                                            });
+
+                                        if let (Some(att), Some(vic)) = (attacker, victim) {
                                             history.capture.update_bad(
                                                 pos.side_to_move,
-                                                attacker,
-                                                victim,
+                                                att,
+                                                vic,
                                                 depth as i32,
                                             );
                                         }

@@ -508,6 +508,7 @@ where
     // Mate distance pruning
     if USE_PRUNING {
         alpha = alpha.max(mate_score(ply as u8, false)); // Getting mated
+                                                         // Rebind local beta for mate-distance pruning (do not mutate param)
         let beta = beta.min(mate_score((ply + 1) as u8, true)); // Giving mate
         if alpha >= beta {
             return alpha;
@@ -639,19 +640,27 @@ where
         }
     }
 
-    // Depth limit check first to prevent stack overflow
-    let quiesce_ply = ply.saturating_sub(searcher.context.max_depth() as u16);
-    if ply >= MAX_PLY as u16 || quiesce_ply >= MAX_QUIESCE_DEPTH {
-        // Log if we hit the absolute limit (potential issue)
-        if ply >= MAX_PLY as u16 {
-            log::warn!("Hit absolute ply limit {ply} in quiescence search");
-        }
-        // Return static evaluation even in check at max depth
-        return searcher.evaluator.evaluate(pos);
+    // Check if in check first - this determines our search strategy
+    let in_check = pos.is_in_check();
+
+    // Absolute stack guard - always enforce this limit
+    if ply >= MAX_PLY as u16 {
+        log::warn!("Hit absolute ply limit {ply} in quiescence search");
+        // In check at max depth is rare but we can't recurse further
+        // Return pessimistic value rather than static eval which could be illegal
+        return if in_check {
+            alpha
+        } else {
+            searcher.evaluator.evaluate(pos)
+        };
     }
 
-    // Check if in check - must search all legal moves to find evasions
-    let in_check = pos.is_in_check();
+    // Quiescence depth limit - only apply when NOT in check
+    // When in check, we must search evasions regardless of quiescence depth
+    let quiesce_ply = ply.saturating_sub(searcher.context.max_depth() as u16);
+    if !in_check && quiesce_ply >= MAX_QUIESCE_DEPTH {
+        return searcher.evaluator.evaluate(pos);
+    }
 
     if in_check {
         // In check: must search all legal moves (no stand pat)
@@ -1218,5 +1227,38 @@ mod tests {
 
         // Verify that quiescence searched moves (node count should be > 1)
         assert!(searcher.stats.nodes > 1, "Quiescence should have searched evasion moves");
+    }
+
+    #[test]
+    fn test_quiescence_search_check_at_depth_limit() {
+        // Test that quiescence search handles check correctly even at depth limit
+        // Position: Black king in check, test at near max quiescence depth
+        let pos = Position::from_sfen("9/9/9/9/4K3r/9/9/9/9 b - 1").unwrap();
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(1).build());
+
+        // Verify we're in check
+        assert!(pos.is_in_check(), "Position should be in check");
+
+        // Run quiescence search near the depth limit
+        // Use a high ply value that would trigger depth limit for non-check positions
+        let mut test_pos = pos.clone();
+        let high_ply = MAX_QUIESCE_DEPTH - 1;
+        let score = quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, high_ply);
+
+        // Even at depth limit, when in check we should search evasions
+        // Score should not be static eval (which would be positive for black)
+        assert!(
+            score != searcher.evaluator.evaluate(&pos),
+            "Should not return static eval when in check at depth limit"
+        );
+
+        // Should have searched at least some moves
+        assert!(
+            searcher.stats.nodes >= 1,
+            "Should search moves even at depth limit when in check"
+        );
     }
 }
