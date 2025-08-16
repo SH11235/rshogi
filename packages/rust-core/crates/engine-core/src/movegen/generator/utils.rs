@@ -161,6 +161,9 @@ impl<'a> MoveGenImpl<'a> {
     }
 
     /// Check if a piece at given square is a sliding piece
+    /// Note: Dragon (promoted Rook) and Horse (promoted Bishop) are considered sliding pieces
+    /// even though they can make adjacent moves. This is correct because between_bb returns
+    /// empty for adjacent squares, making drop blocking logic work properly in both cases.
     pub(super) fn is_sliding_piece(&self, sq: Square) -> bool {
         if let Some(piece) = self.pos.board.piece_on(sq) {
             matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop | PieceType::Lance)

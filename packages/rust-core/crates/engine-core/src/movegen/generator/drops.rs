@@ -33,6 +33,11 @@ pub(super) fn generate_drop_moves(gen: &mut MoveGenImpl) {
         empty_squares
     };
 
+    // Early return if no valid drop targets
+    if drop_targets.is_empty() {
+        return;
+    }
+
     // Check each piece type in hand (King を除く HAND_ORDER)
     for (piece_idx, &piece_type) in crate::shogi::board::HAND_ORDER.iter().enumerate() {
         let count = gen.pos.hands[us as usize][piece_idx];
