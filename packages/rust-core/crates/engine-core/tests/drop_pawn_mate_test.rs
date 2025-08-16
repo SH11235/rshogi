@@ -30,9 +30,10 @@ fn test_drop_pawn_mate_no_support_but_king_cannot_capture() {
 
 #[test]
 fn test_drop_pawn_mate_with_support() {
-    // Simple pawn drop mate: White king at 1a, black gold at 2a, rook at 2c
-    // P*1b would be mate (king can't escape, gold blocks 2a, rook covers 2b)
-    let pos = Position::from_sfen("kG7/9/1R7/9/9/9/9/9/K8 b P 1").unwrap();
+    // Simple pawn drop mate: White king at 1a, black silver at 2a, rook at 2c
+    // P*1b would be mate (king can't escape, silver attacks 1b, rook covers 2b)
+    // Note: Silver (not gold) is needed here because silver can attack backwards diagonally
+    let pos = Position::from_sfen("kS7/9/1R7/9/9/9/9/9/K8 b P 1").unwrap();
     let mut move_gen = MoveGen::new();
     let mut moves = MoveList::new();
     move_gen.generate_all(&pos, &mut moves);
