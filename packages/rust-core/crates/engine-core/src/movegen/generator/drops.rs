@@ -173,60 +173,23 @@ pub(super) fn is_drop_pawn_mate(gen: &MoveGenImpl, to: Square, them: Color) -> b
         }
     }
 
-    // 2) Check if any piece (except king) can capture the dropped pawn
+    // 2) Check if any piece (except king) can legally capture the dropped pawn
     let defenders_all = gen.attackers_to_with_occupancy(to, them, occupied_after_drop);
     let king_bb = gen.pos.board.piece_bb[them as usize][PieceType::King as usize];
-    let defenders = defenders_all & !king_bb;
+    let mut defenders = defenders_all & !king_bb;
 
-    // Check if any unpinned piece can capture
-    if defenders.count_ones() > 0 {
-        // Calculate pinned pieces for the defending side
-        let pinned = gen.calculate_pinned_pieces(them);
+    while let Some(def_sq) = defenders.pop_lsb() {
+        // Simulate: defender on def_sq captures the pawn on `to`
+        let mut occ_after_def_capture = occupied_after_drop;
+        occ_after_def_capture.clear(def_sq); // defender leaves its square
+                                             // `to` remains occupied (was pawn, now defender)
 
-        // Check each defender individually
-        let mut def_bb = defenders;
-        while let Some(def_sq) = def_bb.pop_lsb() {
-            // If not pinned, can capture
-            if !pinned.test(def_sq) {
-                return false; // Can capture the pawn
-            }
-
-            // If pinned, check if the pawn is on the pin ray
-            // A pinned piece can still capture if the target is on the pin ray
-            // For pawn drops, we need to check if capturing the pawn would be along the pin line
-
-            // Get the king position
-            let king_sq = match gen.pos.board.king_square(them) {
-                Some(sq) => sq,
-                None => continue, // No king, shouldn't happen
-            };
-
-            // Check if the pawn square (to) is between the defender and the king
-            // This would mean the capture is along the pin ray
-            if gen.is_aligned_rook(def_sq, king_sq) && gen.is_aligned_rook(to, king_sq) {
-                // All three squares are on same rank or file
-                if (def_sq.file() == king_sq.file() && to.file() == king_sq.file())
-                    || (def_sq.rank() == king_sq.rank() && to.rank() == king_sq.rank())
-                {
-                    // The pawn is on the pin ray, so the pinned piece can capture
-                    return false;
-                }
-            } else if gen.is_aligned_bishop(def_sq, king_sq) && gen.is_aligned_bishop(to, king_sq) {
-                // Check diagonal alignment
-                let def_to_king_file_diff = (def_sq.file() as i8 - king_sq.file() as i8).signum();
-                let def_to_king_rank_diff = (def_sq.rank() as i8 - king_sq.rank() as i8).signum();
-                let to_to_king_file_diff = (to.file() as i8 - king_sq.file() as i8).signum();
-                let to_to_king_rank_diff = (to.rank() as i8 - king_sq.rank() as i8).signum();
-
-                if def_to_king_file_diff == to_to_king_file_diff
-                    && def_to_king_rank_diff == to_to_king_rank_diff
-                {
-                    // The pawn is on the pin ray (diagonal), so the pinned piece can capture
-                    return false;
-                }
-            }
-
-            // If we get here, the piece is pinned and cannot capture the pawn
+        // Check if king is still in check after the capture
+        let still_in_check = !gen
+            .attackers_to_with_occupancy(their_king_sq, us, occ_after_def_capture)
+            .is_empty();
+        if !still_in_check {
+            return false; // Defender can capture and resolve the check
         }
     }
 

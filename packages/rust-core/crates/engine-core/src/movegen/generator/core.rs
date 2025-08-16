@@ -160,10 +160,6 @@ impl<'a> MoveGenImpl<'a> {
         super::checks::would_be_in_check(self, from, to)
     }
 
-    pub(super) fn calculate_pinned_pieces(&self, color: Color) -> Bitboard {
-        super::checks::calculate_pinned_pieces(self, color)
-    }
-
     pub(super) fn attackers_to_with_occupancy(
         &self,
         sq: Square,

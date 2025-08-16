@@ -30,21 +30,22 @@ fn test_drop_pawn_mate_no_support_but_king_cannot_capture() {
 
 #[test]
 fn test_drop_pawn_mate_with_support() {
-    // White king at 1g (rank 6), black rook at 1a supporting pawn drop, black king at 9a
-    // Dropping a pawn at 1h (rank 7) would be checkmate
-    let pos = Position::from_sfen("r7K/9/9/9/9/9/k8/9/9 b P 1").unwrap();
+    // Simple pawn drop mate: White king at 1a, black gold at 2a, rook at 1c
+    // P*1b would be mate (king can't escape, gold blocks 2a)
+    let pos = Position::from_sfen("kG7/9/R8/9/9/9/9/9/K8 b P 1").unwrap();
     let mut move_gen = MoveGen::new();
     let mut moves = MoveList::new();
     move_gen.generate_all(&pos, &mut moves);
 
-    // Check that P*1h is not in the move list (illegal drop pawn mate)
+    // Check that P*2h is not in the move list (illegal drop pawn mate)
     for i in 0..moves.len() {
         let mv = &moves[i];
         if mv.is_drop() {
             let to = mv.to();
             let piece_type = mv.drop_piece_type();
-            if piece_type == PieceType::Pawn && to.file() == 0 && to.rank() == 7 {
-                panic!("P*1h should not be allowed - it's drop pawn mate");
+            // P*1b is file=0, rank=1
+            if piece_type == PieceType::Pawn && to.file() == 0 && to.rank() == 1 {
+                panic!("P*1b should not be allowed - it's drop pawn mate");
             }
         }
     }
