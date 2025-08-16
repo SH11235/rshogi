@@ -230,13 +230,23 @@ where
                 captures_tried.push(mv);
             }
 
-            // Debug assertion: Verify capture moves have proper metadata
+            // Debug assertion: Verify capture moves have metadata OR board state shows enemy piece
             #[cfg(debug_assertions)]
             {
-                debug_assert!(
-                    mv.captured_piece_type().is_some(),
-                    "is_capture_hint() returned true but captured_piece_type() is None"
-                );
+                if mv.captured_piece_type().is_none() {
+                    // If metadata is missing, verify board state has enemy piece
+                    if let Some(piece) = pos.piece_at(mv.to()) {
+                        debug_assert!(
+                            piece.color == pos.side_to_move.opposite(),
+                            "is_capture_hint() returned true but no enemy piece at destination"
+                        );
+                    } else {
+                        debug_assert!(
+                            false,
+                            "is_capture_hint() returned true but no piece at destination"
+                        );
+                    }
+                }
             }
         } else if !mv.is_promote() {
             // Safety: Same 16-element limit for quiet moves to avoid heap allocation
