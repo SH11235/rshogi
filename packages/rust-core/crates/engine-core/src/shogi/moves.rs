@@ -3,6 +3,11 @@
 //! Defines move types and basic move operations for shogi
 
 use super::board::{PieceType, Square};
+use smallvec::SmallVec;
+
+/// Type alias for move lists using SmallVec
+/// Most shogi positions have < 128 legal moves, so this avoids heap allocation
+pub type MoveVec = SmallVec<[Move; 128]>;
 
 /// Move representation
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
