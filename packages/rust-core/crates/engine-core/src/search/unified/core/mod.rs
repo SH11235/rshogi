@@ -20,7 +20,7 @@ use crate::{
 /// Get victim score for MVV-LVA ordering
 /// Higher value pieces get higher scores
 #[inline]
-fn victim_score(pt: PieceType) -> i32 {
+const fn victim_score(pt: PieceType) -> i32 {
     match pt {
         PieceType::Pawn => 100,
         PieceType::Lance => 300,
@@ -311,8 +311,7 @@ where
         // Make move
         let undo_info = pos.do_move(mv);
 
-        // Increment node counter
-        searcher.stats.nodes += 1;
+        // Note: Node counting is done in alpha_beta() to avoid double counting
 
         // Prefetch TT entry for the new position (root moves are always important)
         if USE_TT && !searcher.disable_prefetch {
@@ -640,6 +639,69 @@ where
         }
     }
 
+    // Depth limit check first to prevent stack overflow
+    let quiesce_ply = ply.saturating_sub(searcher.context.max_depth() as u16);
+    if ply >= MAX_PLY as u16 || quiesce_ply >= MAX_QUIESCE_DEPTH {
+        // Log if we hit the absolute limit (potential issue)
+        if ply >= MAX_PLY as u16 {
+            log::warn!("Hit absolute ply limit {ply} in quiescence search");
+        }
+        // Return static evaluation even in check at max depth
+        return searcher.evaluator.evaluate(pos);
+    }
+
+    // Check if in check - must search all legal moves to find evasions
+    let in_check = pos.is_in_check();
+
+    if in_check {
+        // In check: must search all legal moves (no stand pat)
+        // Generate all legal moves
+        let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
+        let moves = move_gen_impl.generate_all();
+
+        // If no legal moves, it's checkmate
+        if moves.is_empty() {
+            return mate_score(ply as u8, false); // Getting mated
+        }
+
+        // Search all legal moves to find check evasion
+        let mut best = -SEARCH_INF;
+        for &mv in moves.iter() {
+            // Validate move
+            if !pos.is_pseudo_legal(mv) {
+                continue;
+            }
+
+            // Make move
+            let undo_info = pos.do_move(mv);
+
+            // Recursive search
+            let score = -quiescence_search(searcher, pos, -beta, -alpha, ply + 1);
+
+            // Undo move
+            pos.undo_move(mv, undo_info);
+
+            // Check stop flag
+            if searcher.context.should_stop() {
+                return alpha;
+            }
+
+            // Update bounds
+            if score >= beta {
+                return beta;
+            }
+            if score > best {
+                best = score;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+        }
+
+        return alpha.max(best);
+    }
+
+    // Not in check: normal quiescence search with captures only
     // Stand pat
     let stand_pat = searcher.evaluator.evaluate(pos);
     if stand_pat >= beta {
@@ -655,17 +717,6 @@ where
     } else {
         0
     };
-
-    // Depth limit check to prevent infinite recursion and stack overflow
-    // More conservative limit: either absolute ply limit or quiescence depth limit
-    let quiesce_ply = ply.saturating_sub(searcher.context.max_depth() as u16);
-    if ply >= MAX_PLY as u16 || quiesce_ply >= MAX_QUIESCE_DEPTH {
-        // Log if we hit the absolute limit (potential issue)
-        if ply >= MAX_PLY as u16 {
-            log::warn!("Hit absolute ply limit {ply} in quiescence search");
-        }
-        return alpha;
-    }
 
     // Generate all moves for quiescence (we'll filter captures manually)
     let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
@@ -713,6 +764,9 @@ where
             // Estimate material gain from capture
             let material_gain = if let Some(victim) = mv.captured_piece_type() {
                 victim_score(victim)
+            } else if let Some(piece) = pos.piece_at(mv.to()) {
+                // Fallback to board lookup if metadata is missing
+                victim_score(piece.piece_type)
             } else {
                 0
             };
@@ -838,6 +892,7 @@ where
 mod tests {
     use super::*;
     use crate::evaluation::evaluate::MaterialEvaluator;
+    use crate::search::SearchLimits;
     use crate::Position;
 
     #[test]
@@ -1122,5 +1177,46 @@ mod tests {
                 assert_eq!(tt_move, move_7g7f, "TT should return the stored move");
             }
         }
+    }
+
+    #[test]
+    fn test_quiescence_search_check_evasion() {
+        // Test that quiescence search correctly handles check evasions
+        // Create a position where the only legal move is a non-capture evasion
+
+        // Position: Black king in check from white rook, must move (non-capture)
+        // In shogi SFEN: K=black king, k=white king, R=black rook, r=white rook
+        // 9 . . . . . . . . .
+        // 8 . . . . . . . . .
+        // 7 . . . . . . . . .
+        // 6 . . . . . . . . .
+        // 5 . . . . K . . . r  (Black King at 5e, white rook at 1e)
+        // 4 . . . . . . . . .
+        // 3 . . . . . . . . .
+        // 2 . . . . . . . . .
+        // 1 . . . . . . . . .
+        //   9 8 7 6 5 4 3 2 1
+        let pos = Position::from_sfen("9/9/9/9/4K3r/9/9/9/9 b - 1").unwrap();
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(1).build());
+
+        // Verify we're in check
+        assert!(pos.is_in_check(), "Position should be in check");
+
+        // Run quiescence search at depth 0
+        let mut test_pos = pos.clone();
+        let score = quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0);
+
+        // Score should not be mate (we have legal moves)
+        assert!(
+            score != mate_score(0, false),
+            "Should not return mate score when evasions exist"
+        );
+        assert!(score > -30000, "Score should be reasonable, not mate");
+
+        // Verify that quiescence searched moves (node count should be > 1)
+        assert!(searcher.stats.nodes > 1, "Quiescence should have searched evasion moves");
     }
 }
