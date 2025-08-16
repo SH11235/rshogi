@@ -11,6 +11,11 @@ pub(super) fn generate_sliding_moves(
     piece_type: PieceType,
     promoted: bool,
 ) {
+    // Double check - only king moves are legal
+    if gen.checkers.count_ones() >= 2 {
+        return;
+    }
+
     let us = gen.pos.side_to_move;
     let targets = !gen.pos.board.occupied_bb[us as usize];
 
@@ -171,6 +176,11 @@ fn generate_king_style_moves(
 
 /// Generate lance moves
 pub(super) fn generate_lance_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
+    // Double check - only king moves are legal
+    if gen.checkers.count_ones() >= 2 {
+        return;
+    }
+
     if promoted {
         // Promoted lance moves like gold
         super::pieces::generate_gold_moves(gen, from, promoted);

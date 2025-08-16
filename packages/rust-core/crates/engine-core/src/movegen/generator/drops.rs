@@ -84,20 +84,22 @@ fn get_valid_drop_squares(
             // Check for illegal pawn drop checkmate
             let them = us.opposite();
             if let Some(king_sq) = gen.pos.board.king_square(them) {
-                // A pawn gives check if it's one square in front of the king (from the pawn's perspective)
+                // A pawn gives check if it's one square behind the king (from where it can attack)
+                // Black pawns at rank n attack rank n-1, so to attack king at rank k, pawn must be at rank k+1
+                // White pawns at rank n attack rank n+1, so to attack king at rank k, pawn must be at rank k-1
                 let pawn_check_sq = match us {
                     Color::Black => {
                         if king_sq.rank() < 8 {
                             Some(Square::new(king_sq.file(), king_sq.rank() + 1))
                         } else {
-                            None // King at rank 8, pawn can't be placed behind it
+                            None // King at rank 8, pawn can't be placed at rank 9
                         }
                     }
                     Color::White => {
                         if king_sq.rank() > 0 {
                             Some(Square::new(king_sq.file(), king_sq.rank() - 1))
                         } else {
-                            None // King at rank 0, pawn can't be placed behind it
+                            None // King at rank 0, pawn can't be placed at rank -1
                         }
                     }
                 };
@@ -154,14 +156,27 @@ pub(super) fn is_drop_pawn_mate(gen: &MoveGenImpl, to: Square, them: Color) -> b
         return false; // Not even a check
     }
 
-    // Check if the pawn has support (if not, king can capture it)
-    let pawn_supporters = gen.attackers_to(to, us);
-    if pawn_supporters.is_empty() {
-        return false; // No support - king can capture the pawn
+    // Simulate position after pawn drop
+    let occupied_after_drop = gen.pos.board.all_bb | Bitboard::from_square(to);
+
+    // 1) Check if king can capture the pawn safely
+    {
+        // King captures the pawn - create virtual occupancy
+        let mut occ_after_king_capture = occupied_after_drop;
+        occ_after_king_capture.clear(their_king_sq);
+        // The pawn at 'to' is captured, so we just have the king at 'to'
+
+        // Check if 'to' is attacked by any of our pieces after king capture
+        let attackers = gen.attackers_to_with_occupancy(to, us, occ_after_king_capture);
+        if attackers.is_empty() {
+            return false; // King can safely capture the pawn
+        }
     }
 
-    // Check if any piece (except king, pawn, lance) can capture the dropped pawn
-    let defenders = gen.attackers_to_except_king_pawn_lance(to, them);
+    // 2) Check if any piece (except king) can capture the dropped pawn
+    let defenders_all = gen.attackers_to_with_occupancy(to, them, occupied_after_drop);
+    let king_bb = gen.pos.board.piece_bb[them as usize][PieceType::King as usize];
+    let defenders = defenders_all & !king_bb;
 
     // Check if any unpinned piece can capture
     if defenders.count_ones() > 0 {
@@ -215,31 +230,37 @@ pub(super) fn is_drop_pawn_mate(gen: &MoveGenImpl, to: Square, them: Color) -> b
         }
     }
 
-    // Check if king has any escape squares
+    // 3) Check if king has any escape squares
     let king_attacks = ATTACK_TABLES.king_attacks(their_king_sq);
     let their_pieces = gen.pos.board.occupied_bb[them as usize];
     let our_pieces = gen.pos.board.occupied_bb[us as usize];
 
-    // King can only move to squares that are:
-    // 1. Not occupied by own pieces (their_pieces)
-    // 2. Not the pawn square (it has support)
-    let mut escape_squares = king_attacks & !their_pieces;
+    // King can move to squares that are not occupied by own pieces
+    let escape_squares = king_attacks & !their_pieces;
 
-    // Remove the pawn square from escape squares (can't capture it - it has support)
-    escape_squares &= !Bitboard::from_square(to);
-
-    // Simulate position after pawn drop
-    let occupied_after_drop = gen.pos.board.all_bb | Bitboard::from_square(to);
+    // Note: We don't exclude 'to' here since we already checked king capture safety above
 
     let mut escapes = escape_squares;
     while let Some(escape_sq) = escapes.pop_lsb() {
-        // First check if the square is occupied by our piece (enemy king can't move there)
-        if our_pieces.test(escape_sq) {
+        // Skip if the square is occupied by our piece (but 'to' has a pawn we just dropped)
+        if escape_sq != to && our_pieces.test(escape_sq) {
             continue; // Can't move to a square occupied by enemy piece
         }
 
-        // Check if escape square is attacked by any enemy piece
-        let attackers = gen.attackers_to_with_occupancy(escape_sq, us, occupied_after_drop);
+        // Create virtual occupancy after king moves to escape_sq
+        let mut occ_after_escape = occupied_after_drop;
+        occ_after_escape.clear(their_king_sq);
+        occ_after_escape.set(escape_sq);
+
+        // If escaping to 'to', the pawn is captured
+        if escape_sq == to {
+            // This case was already handled in step 1, but we check again for completeness
+            occ_after_escape.clear(to);
+            occ_after_escape.set(to); // King is now at 'to'
+        }
+
+        // Check if escape square is safe
+        let attackers = gen.attackers_to_with_occupancy(escape_sq, us, occ_after_escape);
         if attackers.is_empty() {
             return false; // King can escape
         }
