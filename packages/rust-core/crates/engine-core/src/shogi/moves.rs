@@ -219,7 +219,7 @@ impl Move {
         } else {
             // PieceType enum values: King=0, Rook=1, ..., Pawn=7
             // We stored piece_type + 1, so subtract 1 to get original value
-            Some(unsafe { std::mem::transmute::<u8, PieceType>(piece_bits - 1) })
+            PieceType::try_from(piece_bits.saturating_sub(1)).ok()
         }
     }
 
@@ -231,7 +231,7 @@ impl Move {
             None // No capture (15) or unknown/old format (0)
         } else {
             // Values 1-14 represent actual piece types
-            Some(unsafe { std::mem::transmute::<u8, PieceType>(captured_bits - 1) })
+            PieceType::try_from(captured_bits.saturating_sub(1)).ok()
         }
     }
 
@@ -317,12 +317,11 @@ impl MoveList {
         &self.moves
     }
 
-    /// Get mutable slice of moves
+    /// Get mutable reference to the underlying Vec
     ///
-    /// Note: Returns &mut Vec<Move> for compatibility with methods like retain()
-    /// that are only available on Vec, not slices.
+    /// Returns &mut Vec<Move> to allow using Vec-specific methods like retain()
     #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut Vec<Move> {
+    pub fn as_mut_vec(&mut self) -> &mut Vec<Move> {
         &mut self.moves
     }
 

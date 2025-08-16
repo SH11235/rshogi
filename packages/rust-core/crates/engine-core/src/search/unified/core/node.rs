@@ -18,22 +18,22 @@ pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const 
 where
     E: Evaluator + Send + Sync + 'static,
 {
-    // Increment node count at function entry for consistent time check distribution
-    searcher.stats.nodes += 1;
+    // Note: Node count is incremented in alpha_beta() to avoid double counting
+    // searcher.stats.nodes += 1; // Removed to prevent double counting
 
     // Clear PV at this ply on entry
     searcher.pv_table.clear_len_at(ply as usize);
 
-    // Get time check mask based on time control
-    let time_check_mask = searcher.context.get_time_check_mask();
+    // Get adaptive polling mask based on time control (unified with alpha_beta)
+    let time_check_mask = super::get_event_poll_mask(searcher);
 
     // Early stop check
     if searcher.context.should_stop() {
         return alpha;
     }
 
-    // Periodic time and event check
-    if (searcher.stats.nodes & time_check_mask) == 0 {
+    // Periodic time and event check (mask=0 means check every node)
+    if time_check_mask == 0 || (searcher.stats.nodes & time_check_mask) == 0 {
         // Process events (including ponder hit)
         searcher.context.process_events(&searcher.time_manager);
 
@@ -139,8 +139,8 @@ where
                     }
                     // Even without a good score, stop searching this node
                     // to avoid duplication with sibling threads
-                    // Return a neutral evaluation to avoid misleading the search
-                    return searcher.evaluator.evaluate(pos);
+                    // Return alpha to maintain fail-soft consistency
+                    return alpha;
                 }
             }
         }
@@ -245,6 +245,20 @@ where
             }
         }
 
+        // Check if this is a king move (before making the move)
+        let is_king_move = if let Some(pt) = mv.piece_type() {
+            pt == PieceType::King
+        } else if !mv.is_drop() {
+            // Fallback: check board state if metadata is missing
+            if let Some(from) = mv.from() {
+                pos.piece_at(from).map(|p| p.piece_type == PieceType::King).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         // Update current move in search stack
         if crate::search::types::SearchStack::is_valid_ply(ply) {
             searcher.search_stack[ply as usize].current_move = Some(mv);
@@ -283,7 +297,6 @@ where
             score = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, ply + 1);
         } else {
             // Special handling for king moves - extend search to see consequences
-            let is_king_move = mv.piece_type() == Some(PieceType::King);
             let extension = if is_king_move && depth >= 3 {
                 1 // Extend search by 1 ply for king moves
             } else {
