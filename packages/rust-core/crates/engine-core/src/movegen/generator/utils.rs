@@ -1,9 +1,6 @@
 //! Utility functions for move generation
 
-use crate::{
-    shogi::{attacks, Move},
-    Bitboard, Color, PieceType, Square,
-};
+use crate::{shogi::Move, Bitboard, Color, PieceType, Square};
 
 use super::core::MoveGenImpl;
 
@@ -30,6 +27,16 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Add a single move from a square to a target square
     pub(super) fn add_single_move(&mut self, from: Square, to: Square, piece_type: PieceType) {
+        // Apply check mask for non-king pieces
+        if !self.non_king_check_mask.test(to) {
+            return;
+        }
+
+        // If piece is pinned, only allow moves along pin ray
+        if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
+            return;
+        }
+
         // Get the piece to check if it's already promoted
         let piece = self.pos.board.piece_on(from).expect("Piece must exist at from square");
         let is_promoted = piece.promoted;
@@ -76,17 +83,8 @@ impl<'a> MoveGenImpl<'a> {
         mut targets: Bitboard,
         piece_type: PieceType,
     ) {
-        // If we're in check, only allow moves that block or capture checker
-        if !self.checkers.is_empty() {
-            // Double check - only king moves are legal
-            if self.checkers.count_ones() >= 2 {
-                return; // No non-King moves allowed
-            }
-            // Single check - only allow block/capture
-            let checker_sq = self.checkers.lsb().unwrap();
-            let block_squares = attacks::between_bb(checker_sq, self.king_sq) | self.checkers;
-            targets &= block_squares;
-        }
+        // Apply non-king check mask first (smaller bitcount usually)
+        targets &= self.non_king_check_mask;
 
         // If piece is pinned, only allow moves along pin ray
         if self.pinned.test(from) {
@@ -157,20 +155,6 @@ impl<'a> MoveGenImpl<'a> {
         match color {
             Color::Black => from.rank() <= 2 || to.rank() <= 2, // Ranks 0,1,2 are Black's promotion zone
             Color::White => from.rank() >= 6 || to.rank() >= 6, // Ranks 6,7,8 are White's promotion zone
-        }
-    }
-
-    /// Check if a piece at given square is a sliding piece
-    /// Note: Dragon (promoted Rook) and Horse (promoted Bishop) are considered sliding pieces
-    /// even though they can make adjacent moves. This is correct because between_bb returns
-    /// empty for adjacent squares, making drop blocking logic work properly in both cases.
-    pub(super) fn is_sliding_piece(&self, sq: Square) -> bool {
-        if let Some(piece) = self.pos.board.piece_on(sq) {
-            matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop | PieceType::Lance)
-                || (piece.promoted
-                    && matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop))
-        } else {
-            false
         }
     }
 
