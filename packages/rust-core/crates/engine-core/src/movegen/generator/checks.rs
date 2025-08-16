@@ -1,6 +1,9 @@
 //! Check and pin calculation
 
-use crate::{shogi::ATTACK_TABLES, Bitboard, Color, PieceType, Square};
+use crate::{
+    shogi::{attacks, ATTACK_TABLES},
+    Bitboard, Color, PieceType, Square,
+};
 
 use super::core::MoveGenImpl;
 
@@ -64,7 +67,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
         };
 
         if can_attack {
-            let between = gen.between_bb(lance_sq, king_sq);
+            let between = attacks::between_bb(lance_sq, king_sq);
             let blockers = between & gen.pos.board.all_bb;
 
             if blockers.is_empty() {
@@ -96,7 +99,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
     let mut rook_bb = enemy_rooks;
     while let Some(rook_sq) = rook_bb.pop_lsb() {
         if gen.is_aligned_rook(rook_sq, king_sq) {
-            let between = gen.between_bb(rook_sq, king_sq);
+            let between = attacks::between_bb(rook_sq, king_sq);
             let blockers = between & gen.pos.board.all_bb;
 
             if blockers.is_empty() {
@@ -115,7 +118,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
     let mut bishop_bb = enemy_bishops;
     while let Some(bishop_sq) = bishop_bb.pop_lsb() {
         if gen.is_aligned_bishop(bishop_sq, king_sq) {
-            let between = gen.between_bb(bishop_sq, king_sq);
+            let between = attacks::between_bb(bishop_sq, king_sq);
             let blockers = between & gen.pos.board.all_bb;
 
             if blockers.is_empty() {
@@ -153,7 +156,7 @@ pub(super) fn calculate_pinned_pieces(gen: &MoveGenImpl, color: Color) -> Bitboa
     while let Some(rook_sq) = rook_bb.pop_lsb() {
         // Check if rook is aligned with king
         if gen.is_aligned_rook(rook_sq, king_sq) {
-            let between = gen.between_bb(king_sq, rook_sq);
+            let between = attacks::between_bb(king_sq, rook_sq);
             let blocking = between & all_pieces;
 
             if blocking.count_ones() == 1 {
@@ -177,7 +180,7 @@ pub(super) fn calculate_pinned_pieces(gen: &MoveGenImpl, color: Color) -> Bitboa
         };
 
         if can_attack {
-            let between = gen.between_bb(king_sq, lance_sq);
+            let between = attacks::between_bb(king_sq, lance_sq);
             let blocking = between & all_pieces;
 
             if blocking.count_ones() == 1 {
@@ -195,7 +198,7 @@ pub(super) fn calculate_pinned_pieces(gen: &MoveGenImpl, color: Color) -> Bitboa
     while let Some(bishop_sq) = bishop_bb.pop_lsb() {
         // Check if bishop is aligned with king
         if gen.is_aligned_bishop(bishop_sq, king_sq) {
-            let between = gen.between_bb(king_sq, bishop_sq);
+            let between = attacks::between_bb(king_sq, bishop_sq);
             let blocking = between & all_pieces;
 
             if blocking.count_ones() == 1 {
@@ -312,7 +315,7 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
             Color::White => lance_sq.rank() < to.rank() && lance_sq.file() == to.file(),
         };
         if can_attack {
-            let between = gen.between_bb(lance_sq, to);
+            let between = attacks::between_bb(lance_sq, to);
             if (between & occupancy_after).is_empty() {
                 return true;
             }

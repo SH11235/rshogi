@@ -97,7 +97,8 @@ pub(super) fn generate_silver_moves(gen: &mut MoveGenImpl, from: Square, promote
 
     // If in check, can only block or capture checker
     if !gen.checkers.is_empty() {
-        let check_mask = gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
+        let check_mask =
+            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
         let check_targets = valid_targets & check_mask;
         let mut moves = check_targets;
         while let Some(to) = moves.pop_lsb() {
@@ -173,7 +174,7 @@ pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promote
 
     // Check if knight is too close to edge to move
     let rank = from.rank();
-    if (us == Color::Black && rank <= 1) || (us == Color::White && rank >= 7) {
+    if (us == Color::Black && rank == 0) || (us == Color::White && rank == 8) {
         return; // Knight cannot move from these ranks
     }
 
@@ -187,7 +188,8 @@ pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promote
 
     // If in check, can only block or capture checker
     if !gen.checkers.is_empty() {
-        let check_mask = gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
+        let check_mask =
+            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
         let valid_targets = targets & check_mask;
         let mut moves = valid_targets;
         while let Some(to) = moves.pop_lsb() {
@@ -311,7 +313,8 @@ pub(super) fn generate_pawn_moves(gen: &mut MoveGenImpl, from: Square, promoted:
 
     // If in check, can only block or capture checker
     if !gen.checkers.is_empty() {
-        let check_mask = gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
+        let check_mask =
+            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
         if !check_mask.test(to) {
             return;
         }

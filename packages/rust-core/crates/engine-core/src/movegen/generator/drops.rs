@@ -1,7 +1,7 @@
 //! Drop move generation
 
 use crate::{
-    shogi::{Move, ATTACK_TABLES},
+    shogi::{attacks, Move, ATTACK_TABLES},
     Bitboard, Color, PieceType, Square,
 };
 
@@ -20,7 +20,7 @@ pub(super) fn generate_drop_moves(gen: &mut MoveGenImpl) {
 
         // For sliding pieces, we can drop on squares between checker and king
         if gen.is_sliding_piece(checker_sq) {
-            gen.between_bb(checker_sq, king_sq) & empty_squares
+            attacks::between_bb(checker_sq, king_sq) & empty_squares
         } else {
             // Non-sliding pieces can't be blocked
             Bitboard::EMPTY
