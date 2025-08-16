@@ -142,8 +142,8 @@ impl PVTable {
 
         // Copy child PV directly without temporary allocation
         if copy_len > 0 {
-            // Copy from child PV table to current ply
-            // Safe because we're copying between different ply levels
+            // We must use unsafe here because we're borrowing different rows of the same 2D array
+            // Safe because debug_assert ensures child_ply != ply (non-overlapping)
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     self.mv[child_ply].as_ptr(),
