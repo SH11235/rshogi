@@ -92,7 +92,7 @@ impl<'a> MoveGenImpl<'a> {
         // Filter out any moves that would capture the enemy king (should not happen)
         let enemy_king_bb = self.pos.board.piece_bb[them as usize][PieceType::King as usize];
         if let Some(enemy_king_sq) = enemy_king_bb.lsb() {
-            self.moves.as_mut_slice().retain(|m| m.to() != enemy_king_sq);
+            self.moves.as_mut_vec().retain(|m| m.to() != enemy_king_sq);
         }
 
         std::mem::take(&mut self.moves)
