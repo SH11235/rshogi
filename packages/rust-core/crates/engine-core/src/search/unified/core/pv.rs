@@ -117,6 +117,13 @@ impl PVTable {
             return;
         }
 
+        // Validate non-overlapping copy precondition
+        debug_assert!(child_ply != ply, "PV copy must be across different rows");
+        debug_assert!(
+            child_ply > ply,
+            "Child ply ({child_ply}) should be greater than parent ply ({ply})"
+        );
+
         // Skip null moves
         if best_move == Move::NULL {
             #[cfg(debug_assertions)]
