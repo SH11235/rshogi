@@ -36,6 +36,11 @@ pub(super) fn generate_king_moves_from(gen: &mut MoveGenImpl, from: Square) {
 
 /// Generate gold moves (also used for promoted silver, knight, lance, pawn)
 pub(super) fn generate_gold_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
+    // Double check - only king moves are legal
+    if gen.checkers.count_ones() >= 2 {
+        return;
+    }
+
     let us = gen.pos.side_to_move;
     let attacks = attacks::gold_attacks(from, us);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
@@ -45,6 +50,11 @@ pub(super) fn generate_gold_moves(gen: &mut MoveGenImpl, from: Square, promoted:
 
 /// Generate silver moves
 pub(super) fn generate_silver_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
+    // Double check - only king moves are legal
+    if gen.checkers.count_ones() >= 2 {
+        return;
+    }
+
     if promoted {
         // Promoted silver moves like gold
         generate_gold_moves(gen, from, promoted);
@@ -164,6 +174,11 @@ pub(super) fn generate_silver_moves(gen: &mut MoveGenImpl, from: Square, promote
 
 /// Generate knight moves
 pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
+    // Double check - only king moves are legal
+    if gen.checkers.count_ones() >= 2 {
+        return;
+    }
+
     if promoted {
         // Promoted knight moves like gold
         generate_gold_moves(gen, from, promoted);
@@ -174,7 +189,7 @@ pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promote
 
     // Check if knight is too close to edge to move
     let rank = from.rank();
-    if (us == Color::Black && rank == 0) || (us == Color::White && rank == 8) {
+    if (us == Color::Black && rank <= 1) || (us == Color::White && rank >= 7) {
         return; // Knight cannot move from these ranks
     }
 
@@ -273,6 +288,11 @@ pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promote
 
 /// Generate pawn moves
 pub(super) fn generate_pawn_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
+    // Double check - only king moves are legal
+    if gen.checkers.count_ones() >= 2 {
+        return;
+    }
+
     if promoted {
         // Promoted pawn (tokin) moves like gold
         generate_gold_moves(gen, from, promoted);
