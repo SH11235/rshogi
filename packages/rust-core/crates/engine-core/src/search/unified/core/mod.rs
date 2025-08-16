@@ -220,6 +220,9 @@ pub(super) fn pv_local_sanity(pos: &Position, pv: &[Move]) {
         match p.piece_at(to) {
             Some(piece) if piece.color == p.side_to_move.opposite() => {
                 // OK - we just moved there
+                // Note: We use p.side_to_move.opposite() because after do_move(),
+                // the side_to_move has already been flipped to the opponent.
+                // So the piece we just moved belongs to the previous side_to_move.
             }
             _ => {
                 #[cfg(debug_assertions)]
@@ -667,7 +670,14 @@ where
     // The test position has deep check sequences that can explode
     if ply >= 16 {
         // Hard stop at reasonable depth
-        return if in_check { -50 } else { 0 };
+        // Return evaluation-based value instead of fixed constants to avoid discontinuity
+        return if in_check {
+            // In check positions, return a value based on evaluation but slightly pessimistic
+            alpha.max(searcher.evaluator.evaluate(pos) - 50)
+        } else {
+            // Not in check, return current evaluation
+            searcher.evaluator.evaluate(pos)
+        };
     }
 
     if in_check {
