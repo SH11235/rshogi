@@ -9,6 +9,18 @@ use smallvec::SmallVec;
 /// Most shogi positions have < 128 legal moves, so this avoids heap allocation
 pub type MoveVec = SmallVec<[Move; 128]>;
 
+/// Type alias for tracking tried moves in history updates
+/// Limited to 16 moves to minimize stack usage (MAX_MOVES_TO_UPDATE)
+pub type TriedMoves = SmallVec<[Move; 16]>;
+
+/// Type alias for capture move lists
+/// Most positions have < 32 capture moves
+pub type CaptureBuf = SmallVec<[Move; 32]>;
+
+/// Type alias for large move buffers when needed
+/// Use sparingly due to stack size (512 bytes)
+pub type BigMoveBuf = SmallVec<[Move; 128]>;
+
 /// Move representation
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Move {

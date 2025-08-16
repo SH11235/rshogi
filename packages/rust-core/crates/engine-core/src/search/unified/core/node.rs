@@ -3,7 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     search::{constants::SEARCH_INF, tt::NodeType, unified::UnifiedSearcher},
-    shogi::{MoveVec, PieceType, Position},
+    shogi::{PieceType, Position, TriedMoves},
 };
 
 /// Search a single node in the tree
@@ -53,8 +53,8 @@ where
     let mut best_move = None;
     let mut best_score = -SEARCH_INF;
     let mut moves_searched = 0;
-    let mut quiet_moves_tried: MoveVec = MoveVec::new();
-    let mut captures_tried: MoveVec = MoveVec::new();
+    let mut quiet_moves_tried: TriedMoves = TriedMoves::new();
+    let mut captures_tried: TriedMoves = TriedMoves::new();
 
     // Check if in check and update search stack
     let in_check = pos.is_in_check();
@@ -159,13 +159,17 @@ where
         None
     };
 
-    // Order moves
-    let ordered_moves: MoveVec = if USE_TT || USE_PRUNING {
+    // Order moves - avoid Vec to SmallVec conversion
+    let (ordered_slice, _owned_moves);
+    if USE_TT || USE_PRUNING {
         let moves_vec =
             searcher.ordering.order_moves(pos, &moves, tt_move, &searcher.search_stack, ply);
-        MoveVec::from_vec(moves_vec)
+        _owned_moves = Some(moves_vec);
+        let vec_ref = _owned_moves.as_ref().unwrap();
+        ordered_slice = &vec_ref[..];
     } else {
-        MoveVec::from_slice(moves.as_slice())
+        ordered_slice = moves.as_slice();
+        _owned_moves = None;
     };
 
     // Skip selective prefetch - let individual moves control their own prefetching
@@ -186,7 +190,7 @@ where
     };
 
     // Search moves
-    for &mv in ordered_moves.iter() {
+    for &mv in ordered_slice.iter() {
         // Check stop flag at the beginning of each move
         if searcher.context.should_stop() {
             break; // Exit move loop immediately

@@ -14,7 +14,7 @@ use crate::{
         constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
         unified::UnifiedSearcher,
     },
-    shogi::{Move, MoveVec, PieceType, Position},
+    shogi::{Move, PieceType, Position},
 };
 
 /// Get event polling mask based on time limit
@@ -256,18 +256,22 @@ where
         }
     }
 
-    // Order moves
-    let ordered_moves: MoveVec = if USE_TT || USE_PRUNING {
+    // Order moves - avoid Vec to SmallVec conversion
+    let (ordered_slice, _owned_moves);
+    if USE_TT || USE_PRUNING {
         let moves_vec = searcher.ordering.order_moves(pos, &moves, None, &searcher.search_stack, 0);
-        MoveVec::from_vec(moves_vec)
+        _owned_moves = Some(moves_vec);
+        let vec_ref = _owned_moves.as_ref().unwrap();
+        ordered_slice = &vec_ref[..];
     } else {
-        MoveVec::from_slice(moves.as_slice())
+        ordered_slice = moves.as_slice();
+        _owned_moves = None;
     };
 
     // Skip prefetching - it has shown negative performance impact
 
     // Search each move
-    for (move_idx, &mv) in ordered_moves.iter().enumerate() {
+    for (move_idx, &mv) in ordered_slice.iter().enumerate() {
         // Validate move before executing (important for TT moves)
         if !pos.is_pseudo_legal(mv) {
             #[cfg(debug_assertions)]
@@ -652,10 +656,9 @@ where
         }
     }
 
-    // Order captures by MVV-LVA if pruning is enabled
-    let mut ordered_captures: MoveVec = MoveVec::from_slice(moves.as_slice());
+    // Order captures by MVV-LVA if pruning is enabled - sort in place to avoid allocation
     if USE_PRUNING {
-        ordered_captures.sort_by_cached_key(|&mv| {
+        moves.as_mut_slice().sort_by_cached_key(|&mv| {
             // Simple MVV-LVA: prioritize capturing more valuable pieces
             if let Some(victim) = mv.captured_piece_type() {
                 -(victim as i32)
@@ -666,7 +669,7 @@ where
     }
 
     // Search captures
-    for &mv in ordered_captures.iter() {
+    for &mv in moves.iter() {
         // Check stop flag at the beginning of each capture move
         if searcher.context.should_stop() {
             return alpha; // Return current alpha value
