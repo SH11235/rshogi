@@ -25,13 +25,15 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
     // Pawn checks
     let enemy_pawns = gen.pos.board.piece_bb[them as usize][PieceType::Pawn as usize]
         & !gen.pos.board.promoted_bb;
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(king_sq, them);
+    // Pawn attacks are asymmetric - we need to check where OUR pawns could attack from
+    let pawn_attacks = ATTACK_TABLES.pawn_attacks(king_sq, us);
     gen.checkers |= enemy_pawns & pawn_attacks;
 
     // Knight checks
     let enemy_knights = gen.pos.board.piece_bb[them as usize][PieceType::Knight as usize]
         & !gen.pos.board.promoted_bb;
-    let knight_attacks = ATTACK_TABLES.knight_attacks(king_sq, them);
+    // Knight attacks are asymmetric - we need to check where OUR knights could attack from
+    let knight_attacks = ATTACK_TABLES.knight_attacks(king_sq, us);
     gen.checkers |= enemy_knights & knight_attacks;
 
     // Gold/promoted pieces checks
@@ -134,6 +136,32 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
             }
         }
     }
+
+    // Calculate check masks based on number of checkers
+    match gen.checkers.count_ones() {
+        0 => {
+            // No check - no restrictions
+            gen.non_king_check_mask = Bitboard::ALL;
+            gen.drop_block_mask = Bitboard::ALL;
+        }
+        1 => {
+            // Single check - can capture checker or block (if sliding piece)
+            let checker_sq = gen.checkers.lsb().unwrap();
+            let capture = gen.checkers;
+            let block = if gen.is_sliding_piece(checker_sq) {
+                attacks::between_bb(checker_sq, king_sq)
+            } else {
+                Bitboard::EMPTY
+            };
+            gen.non_king_check_mask = capture | block;
+            gen.drop_block_mask = block; // Drops can only block, not capture
+        }
+        _ => {
+            // Double check - only king moves allowed
+            gen.non_king_check_mask = Bitboard::EMPTY;
+            gen.drop_block_mask = Bitboard::EMPTY;
+        }
+    }
 }
 
 /// Check if a king move would put the king in check
@@ -151,7 +179,8 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
     // Pawn checks
     let enemy_pawns = gen.pos.board.piece_bb[them as usize][PieceType::Pawn as usize]
         & !gen.pos.board.promoted_bb;
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(to, them);
+    // Pawn attacks are asymmetric - we need to check where OUR pawns could attack from
+    let pawn_attacks = ATTACK_TABLES.pawn_attacks(to, us);
     if !(enemy_pawns & pawn_attacks).is_empty() {
         return true;
     }
@@ -159,7 +188,8 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
     // Knight checks
     let enemy_knights = gen.pos.board.piece_bb[them as usize][PieceType::Knight as usize]
         & !gen.pos.board.promoted_bb;
-    let knight_attacks = ATTACK_TABLES.knight_attacks(to, them);
+    // Knight attacks are asymmetric - we need to check where OUR knights could attack from
+    let knight_attacks = ATTACK_TABLES.knight_attacks(to, us);
     if !(enemy_knights & knight_attacks).is_empty() {
         return true;
     }

@@ -36,11 +36,6 @@ pub(super) fn generate_king_moves_from(gen: &mut MoveGenImpl, from: Square) {
 
 /// Generate gold moves (also used for promoted silver, knight, lance, pawn)
 pub(super) fn generate_gold_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
-    // Double check - only king moves are legal
-    if gen.checkers.count_ones() >= 2 {
-        return;
-    }
-
     let us = gen.pos.side_to_move;
     let attacks = attacks::gold_attacks(from, us);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
@@ -50,11 +45,6 @@ pub(super) fn generate_gold_moves(gen: &mut MoveGenImpl, from: Square, promoted:
 
 /// Generate silver moves
 pub(super) fn generate_silver_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
-    // Double check - only king moves are legal
-    if gen.checkers.count_ones() >= 2 {
-        return;
-    }
-
     if promoted {
         // Promoted silver moves like gold
         generate_gold_moves(gen, from, promoted);
@@ -65,120 +55,11 @@ pub(super) fn generate_silver_moves(gen: &mut MoveGenImpl, from: Square, promote
     let attacks = attacks::silver_attacks(from, us);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
 
-    // Never capture enemy king
-    let them = us.opposite();
-    let enemy_king_bb = gen.pos.board.piece_bb[them as usize][PieceType::King as usize];
-    let valid_targets = targets & !enemy_king_bb;
-
-    // If pinned, can only move along pin ray
-    if gen.pinned.test(from) {
-        let pin_ray = gen.pin_rays[from.index()];
-        let pinned_targets = valid_targets & pin_ray;
-        let mut moves = pinned_targets;
-        while let Some(to) = moves.pop_lsb() {
-            let captured_type = gen.get_captured_type(to);
-            if gen.can_promote(from, to, us) {
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    true,
-                    PieceType::Silver,
-                    captured_type,
-                ));
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    false,
-                    PieceType::Silver,
-                    captured_type,
-                ));
-            } else {
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    false,
-                    PieceType::Silver,
-                    captured_type,
-                ));
-            }
-        }
-        return;
-    }
-
-    // If in check, can only block or capture checker
-    if !gen.checkers.is_empty() {
-        let check_mask =
-            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
-        let check_targets = valid_targets & check_mask;
-        let mut moves = check_targets;
-        while let Some(to) = moves.pop_lsb() {
-            let captured_type = gen.get_captured_type(to);
-            if gen.can_promote(from, to, us) {
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    true,
-                    PieceType::Silver,
-                    captured_type,
-                ));
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    false,
-                    PieceType::Silver,
-                    captured_type,
-                ));
-            } else {
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    false,
-                    PieceType::Silver,
-                    captured_type,
-                ));
-            }
-        }
-        return;
-    }
-
-    // Normal moves
-    let mut moves = valid_targets;
-    while let Some(to) = moves.pop_lsb() {
-        let captured_type = gen.get_captured_type(to);
-        if gen.can_promote(from, to, us) {
-            gen.moves.push(Move::normal_with_piece(
-                from,
-                to,
-                true,
-                PieceType::Silver,
-                captured_type,
-            ));
-            gen.moves.push(Move::normal_with_piece(
-                from,
-                to,
-                false,
-                PieceType::Silver,
-                captured_type,
-            ));
-        } else {
-            gen.moves.push(Move::normal_with_piece(
-                from,
-                to,
-                false,
-                PieceType::Silver,
-                captured_type,
-            ));
-        }
-    }
+    gen.add_moves_with_type(from, targets, PieceType::Silver);
 }
 
 /// Generate knight moves
 pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
-    // Double check - only king moves are legal
-    if gen.checkers.count_ones() >= 2 {
-        return;
-    }
-
     if promoted {
         // Promoted knight moves like gold
         generate_gold_moves(gen, from, promoted);
@@ -201,98 +82,11 @@ pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promote
         return;
     }
 
-    // If in check, can only block or capture checker
-    if !gen.checkers.is_empty() {
-        let check_mask =
-            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
-        let valid_targets = targets & check_mask;
-        let mut moves = valid_targets;
-        while let Some(to) = moves.pop_lsb() {
-            let captured_type = gen.get_captured_type(to);
-            // Knight must promote if it can't move further
-            let must_promote = match us {
-                Color::Black => to.rank() <= 1, // Black can't move from rank 0-1
-                Color::White => to.rank() >= 7, // White can't move from rank 7-8
-            };
-
-            if must_promote {
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    true,
-                    PieceType::Knight,
-                    captured_type,
-                ));
-            } else {
-                let can_promote = gen.can_promote(from, to, us);
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    false,
-                    PieceType::Knight,
-                    captured_type,
-                ));
-                if can_promote {
-                    gen.moves.push(Move::normal_with_piece(
-                        from,
-                        to,
-                        true,
-                        PieceType::Knight,
-                        captured_type,
-                    ));
-                }
-            }
-        }
-        return;
-    }
-
-    // Normal moves
-    let mut moves = targets;
-    while let Some(to) = moves.pop_lsb() {
-        let captured_type = gen.get_captured_type(to);
-        // Knight must promote if it can't move further
-        let must_promote = match us {
-            Color::Black => to.rank() <= 1,
-            Color::White => to.rank() >= 7,
-        };
-
-        if must_promote {
-            gen.moves.push(Move::normal_with_piece(
-                from,
-                to,
-                true,
-                PieceType::Knight,
-                captured_type,
-            ));
-        } else {
-            let can_promote = gen.can_promote(from, to, us);
-            gen.moves.push(Move::normal_with_piece(
-                from,
-                to,
-                false,
-                PieceType::Knight,
-                captured_type,
-            ));
-            if can_promote {
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    true,
-                    PieceType::Knight,
-                    captured_type,
-                ));
-            }
-        }
-    }
+    gen.add_moves_with_type(from, targets, PieceType::Knight);
 }
 
 /// Generate pawn moves
 pub(super) fn generate_pawn_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
-    // Double check - only king moves are legal
-    if gen.checkers.count_ones() >= 2 {
-        return;
-    }
-
     if promoted {
         // Promoted pawn (tokin) moves like gold
         generate_gold_moves(gen, from, promoted);
@@ -323,36 +117,5 @@ pub(super) fn generate_pawn_moves(gen: &mut MoveGenImpl, from: Square, promoted:
         return;
     }
 
-    // If pinned, can only move along pin ray
-    if gen.pinned.test(from) {
-        let pin_ray = gen.pin_rays[from.index()];
-        if !pin_ray.test(to) {
-            return;
-        }
-    }
-
-    // If in check, can only block or capture checker
-    if !gen.checkers.is_empty() {
-        let check_mask =
-            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
-        if !check_mask.test(to) {
-            return;
-        }
-    }
-
-    // Pawn must promote if it reaches the last rank
-    let must_promote = match us {
-        Color::Black => to.rank() == 0,
-        Color::White => to.rank() == 8,
-    };
-
-    if must_promote {
-        gen.moves.push(Move::normal_with_piece(from, to, true, PieceType::Pawn, None));
-    } else {
-        let can_promote = gen.can_promote(from, to, us);
-        gen.moves.push(Move::normal_with_piece(from, to, false, PieceType::Pawn, None));
-        if can_promote {
-            gen.moves.push(Move::normal_with_piece(from, to, true, PieceType::Pawn, None));
-        }
-    }
+    gen.add_single_move(from, to, PieceType::Pawn);
 }

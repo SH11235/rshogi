@@ -11,11 +11,6 @@ pub(super) fn generate_sliding_moves(
     piece_type: PieceType,
     promoted: bool,
 ) {
-    // Double check - only king moves are legal
-    if gen.checkers.count_ones() >= 2 {
-        return;
-    }
-
     let us = gen.pos.side_to_move;
     let targets = !gen.pos.board.occupied_bb[us as usize];
 
@@ -124,18 +119,6 @@ fn generate_ray_moves(
             valid_moves.set(to);
         }
 
-        // Apply constraints
-        if gen.pinned.test(from) {
-            let pin_ray = gen.pin_rays[from.index()];
-            valid_moves &= pin_ray;
-        }
-
-        if !gen.checkers.is_empty() {
-            let check_mask =
-                gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
-            valid_moves &= check_mask;
-        }
-
         // Add moves in order
         for &to in &moves {
             if valid_moves.test(to) {
@@ -157,30 +140,12 @@ fn generate_king_style_moves(
     let king_attacks = ATTACK_TABLES.king_attacks(from);
     let valid_targets = king_attacks & targets;
 
-    // Apply constraints
-    let mut final_targets = valid_targets;
-    if gen.pinned.test(from) {
-        let pin_ray = gen.pin_rays[from.index()];
-        final_targets &= pin_ray;
-    }
-
-    if !gen.checkers.is_empty() {
-        let check_mask =
-            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
-        final_targets &= check_mask;
-    }
-
     // Add moves
-    gen.add_moves_with_type(from, final_targets, piece_type);
+    gen.add_moves_with_type(from, valid_targets, piece_type);
 }
 
 /// Generate lance moves
 pub(super) fn generate_lance_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
-    // Double check - only king moves are legal
-    if gen.checkers.count_ones() >= 2 {
-        return;
-    }
-
     if promoted {
         // Promoted lance moves like gold
         super::pieces::generate_gold_moves(gen, from, promoted);
