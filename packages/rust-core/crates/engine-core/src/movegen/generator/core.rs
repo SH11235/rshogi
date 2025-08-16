@@ -164,15 +164,6 @@ impl<'a> MoveGenImpl<'a> {
         super::checks::calculate_pinned_pieces(self, color)
     }
 
-    // From attacks.rs
-    pub(super) fn attackers_to(&self, sq: Square, color: Color) -> Bitboard {
-        super::attacks::attackers_to(self, sq, color)
-    }
-
-    pub(super) fn attackers_to_except_king_pawn_lance(&self, sq: Square, color: Color) -> Bitboard {
-        super::attacks::attackers_to_except_king_pawn_lance(self, sq, color)
-    }
-
     pub(super) fn attackers_to_with_occupancy(
         &self,
         sq: Square,
