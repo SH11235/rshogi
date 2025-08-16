@@ -13,11 +13,18 @@ pub(super) fn attackers_to_with_occupancy(
 ) -> Bitboard {
     // Only consider pieces that exist in the given occupancy
     let pieces = gen.pos.board.occupied_bb[color as usize] & occupancy;
+
+    // Early return if no pieces exist
+    if pieces.is_empty() {
+        return Bitboard::EMPTY;
+    }
+
     let mut attackers = Bitboard::EMPTY;
 
     // Pawn - Check which pawns can attack sq
     let pawn_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Pawn as usize]
-        & !gen.pos.board.promoted_bb;
+        & !gen.pos.board.promoted_bb
+        & pieces;
     // For each pawn, check if it can attack sq
     let mut pawn_copy = pawn_pieces;
     while let Some(pawn_sq) = pawn_copy.pop_lsb() {
@@ -28,7 +35,7 @@ pub(super) fn attackers_to_with_occupancy(
     }
 
     // Gold - Check which golds can attack sq
-    let gold_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Gold as usize];
+    let gold_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Gold as usize] & pieces;
     let mut gold_copy = gold_pieces;
     while let Some(gold_sq) = gold_copy.pop_lsb() {
         let gold_attacks = ATTACK_TABLES.gold_attacks(gold_sq, color);
@@ -54,7 +61,8 @@ pub(super) fn attackers_to_with_occupancy(
 
     // Silver
     let silver_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Silver as usize]
-        & !gen.pos.board.promoted_bb;
+        & !gen.pos.board.promoted_bb
+        & pieces;
     let mut silver_copy = silver_pieces;
     while let Some(silver_sq) = silver_copy.pop_lsb() {
         let silver_attacks = ATTACK_TABLES.silver_attacks(silver_sq, color);
@@ -65,7 +73,8 @@ pub(super) fn attackers_to_with_occupancy(
 
     // Knight
     let knight_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Knight as usize]
-        & !gen.pos.board.promoted_bb;
+        & !gen.pos.board.promoted_bb
+        & pieces;
     let mut knight_copy = knight_pieces;
     while let Some(knight_sq) = knight_copy.pop_lsb() {
         let knight_attacks = ATTACK_TABLES.knight_attacks(knight_sq, color);
@@ -75,7 +84,7 @@ pub(super) fn attackers_to_with_occupancy(
     }
 
     // King
-    let king_pieces = gen.pos.board.piece_bb[color as usize][PieceType::King as usize];
+    let king_pieces = gen.pos.board.piece_bb[color as usize][PieceType::King as usize] & pieces;
     let mut king_copy = king_pieces;
     while let Some(king_sq) = king_copy.pop_lsb() {
         let king_attacks = ATTACK_TABLES.king_attacks(king_sq);
@@ -86,22 +95,24 @@ pub(super) fn attackers_to_with_occupancy(
 
     // Rook/Dragon
     let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupancy, PieceType::Rook);
-    let rook_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Rook as usize];
+    let rook_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Rook as usize] & pieces;
     attackers |= rook_attacks & rook_pieces;
 
     // Bishop/Horse
     let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupancy, PieceType::Bishop);
-    let bishop_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Bishop as usize];
+    let bishop_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Bishop as usize] & pieces;
     attackers |= bishop_attacks & bishop_pieces;
 
-    // Lance
+    // Lance - Can only attack forward (up for Black, down for White)
     let lance_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Lance as usize]
-        & !gen.pos.board.promoted_bb;
+        & !gen.pos.board.promoted_bb
+        & pieces;
     // Check each lance individually
     let mut lance_attackers = Bitboard::EMPTY;
     let mut lances = lance_pieces;
     while let Some(lance_sq) = lances.pop_lsb() {
         // Check if lance can attack the square based on direction
+        // Black lance attacks upward (higher rank), White lance attacks downward (lower rank)
         let can_attack = match color {
             Color::Black => lance_sq.rank() > sq.rank() && lance_sq.file() == sq.file(),
             Color::White => lance_sq.rank() < sq.rank() && lance_sq.file() == sq.file(),
@@ -117,6 +128,8 @@ pub(super) fn attackers_to_with_occupancy(
     attackers |= lance_attackers;
 
     // Promoted rook/bishop king-like moves
+    // Dragon (promoted rook) and Horse (promoted bishop) have both their original sliding attacks
+    // AND additional king-like (adjacent square) attacks
     let dragons = rook_pieces & gen.pos.board.promoted_bb;
     let horses = bishop_pieces & gen.pos.board.promoted_bb;
     let promoted_rb = dragons | horses;
