@@ -539,6 +539,70 @@ lazy_static! {
     pub static ref ATTACK_TABLES: AttackTables = AttackTables::new();
 }
 
+// ============================================================================
+// Public API functions to avoid direct ATTACK_TABLES access
+// ============================================================================
+
+/// Get king attacks from a square
+#[inline]
+pub fn king_attacks(sq: Square) -> Bitboard {
+    ATTACK_TABLES.king_attacks(sq)
+}
+
+/// Get gold attacks from a square
+#[inline]
+pub fn gold_attacks(sq: Square, color: Color) -> Bitboard {
+    ATTACK_TABLES.gold_attacks(sq, color)
+}
+
+/// Get silver attacks from a square
+#[inline]
+pub fn silver_attacks(sq: Square, color: Color) -> Bitboard {
+    ATTACK_TABLES.silver_attacks(sq, color)
+}
+
+/// Get knight attacks from a square
+#[inline]
+pub fn knight_attacks(sq: Square, color: Color) -> Bitboard {
+    ATTACK_TABLES.knight_attacks(sq, color)
+}
+
+/// Get lance attacks from a square
+#[inline]
+pub fn lance_attacks(sq: Square, color: Color) -> Bitboard {
+    ATTACK_TABLES.lance_attacks(sq, color)
+}
+
+/// Get pawn attacks from a square
+#[inline]
+pub fn pawn_attacks(sq: Square, color: Color) -> Bitboard {
+    ATTACK_TABLES.pawn_attacks(sq, color)
+}
+
+/// Get sliding piece attacks (Rook/Bishop)
+#[inline]
+pub fn sliding_attacks(sq: Square, occupied: Bitboard, piece_type: PieceType) -> Bitboard {
+    ATTACK_TABLES.sliding_attacks(sq, occupied, piece_type)
+}
+
+/// Get file mask for a given file
+#[inline]
+pub fn file_mask(file: u8) -> Bitboard {
+    ATTACK_TABLES.file_mask(file)
+}
+
+/// Get rank mask for a given rank
+#[inline]
+pub fn rank_mask(rank: u8) -> Bitboard {
+    ATTACK_TABLES.rank_mask(rank)
+}
+
+/// Get bitboard of squares between two squares (exclusive)
+#[inline]
+pub fn between_bb(sq1: Square, sq2: Square) -> Bitboard {
+    ATTACK_TABLES.between_bb(sq1, sq2)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::usi::parse_usi_square;
@@ -549,12 +613,12 @@ mod tests {
     fn test_king_attacks() {
         // King in center
         let sq = parse_usi_square("5e").unwrap();
-        let attacks = ATTACK_TABLES.king_attacks(sq);
+        let attacks = king_attacks(sq);
         assert_eq!(attacks.count_ones(), 8); // All 8 adjacent squares
 
         // King in corner
         let sq = parse_usi_square("9a").unwrap();
-        let attacks = ATTACK_TABLES.king_attacks(sq);
+        let attacks = king_attacks(sq);
         assert_eq!(attacks.count_ones(), 3); // Only 3 adjacent squares
     }
 
@@ -562,12 +626,12 @@ mod tests {
     fn test_pawn_attacks() {
         // Black pawn (Sente)
         let sq = parse_usi_square("5e").unwrap();
-        let attacks = ATTACK_TABLES.pawn_attacks(sq, Color::Black);
+        let attacks = pawn_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 1);
         assert!(attacks.test(parse_usi_square("5d").unwrap())); // Black (Sente) moves towards rank 0
 
         // White pawn (Gote)
-        let attacks = ATTACK_TABLES.pawn_attacks(sq, Color::White);
+        let attacks = pawn_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 1);
         assert!(attacks.test(parse_usi_square("5f").unwrap())); // White (Gote) moves towards rank 8
     }
@@ -576,26 +640,26 @@ mod tests {
     fn test_knight_attacks() {
         // Black knight in center
         let sq = parse_usi_square("5e").unwrap();
-        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::Black);
+        let attacks = knight_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 2);
         assert!(attacks.test(parse_usi_square("6c").unwrap())); // 2 forward (towards rank 0), 1 left
         assert!(attacks.test(parse_usi_square("4c").unwrap())); // 2 forward (towards rank 0), 1 right
 
         // Black knight can't move from rank 0 or 1
         let sq = parse_usi_square("5b").unwrap();
-        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::Black);
+        let attacks = knight_attacks(sq, Color::Black);
         assert_eq!(attacks.count_ones(), 0);
 
         // White knight in center
         let sq = parse_usi_square("5e").unwrap();
-        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::White);
+        let attacks = knight_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 2);
         assert!(attacks.test(parse_usi_square("6g").unwrap())); // 2 forward (towards rank 8), 1 left
         assert!(attacks.test(parse_usi_square("4g").unwrap())); // 2 forward (towards rank 8), 1 right
 
         // White knight can't move from rank 7 or 8
         let sq = parse_usi_square("5h").unwrap();
-        let attacks = ATTACK_TABLES.knight_attacks(sq, Color::White);
+        let attacks = knight_attacks(sq, Color::White);
         assert_eq!(attacks.count_ones(), 0);
     }
 
@@ -604,13 +668,13 @@ mod tests {
         // Rook attacks
         let sq = parse_usi_square("5e").unwrap();
         let occupied = Bitboard::EMPTY;
-        let attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        let attacks = sliding_attacks(sq, occupied, PieceType::Rook);
         assert_eq!(attacks.count_ones(), 8 + 8); // 8 vertical + 8 horizontal - 1 (self)
 
         // Rook attacks with blocker
         let mut occupied = Bitboard::EMPTY;
         occupied.set(parse_usi_square("5c").unwrap()); // Block upward
-        let attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        let attacks = sliding_attacks(sq, occupied, PieceType::Rook);
         assert!(attacks.test(parse_usi_square("5d").unwrap()));
         assert!(attacks.test(parse_usi_square("5c").unwrap())); // Can capture blocker
         assert!(!attacks.test(parse_usi_square("5b").unwrap())); // Cannot go past blocker
