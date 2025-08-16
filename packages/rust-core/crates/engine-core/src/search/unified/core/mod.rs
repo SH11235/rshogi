@@ -17,6 +17,22 @@ use crate::{
     shogi::{Move, PieceType, Position},
 };
 
+/// Get victim score for MVV-LVA ordering
+/// Higher value pieces get higher scores
+#[inline]
+fn victim_score(pt: PieceType) -> i32 {
+    match pt {
+        PieceType::Pawn => 100,
+        PieceType::Lance => 300,
+        PieceType::Knight => 400,
+        PieceType::Silver => 500,
+        PieceType::Gold => 600,
+        PieceType::Bishop => 800,
+        PieceType::Rook => 1000,
+        PieceType::King => 10000, // Should never happen
+    }
+}
+
 /// Get event polling mask based on time limit
 ///
 /// Returns a bitmask that determines how frequently to check for events (time limit, stop flag, etc).
@@ -655,22 +671,32 @@ where
     let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
     let all_moves = move_gen_impl.generate_all();
 
-    // Filter to captures only
+    // Filter to captures only - check board state directly instead of relying on metadata
+    let us = pos.side_to_move;
     let mut moves = crate::shogi::MoveList::new();
     for &mv in all_moves.iter() {
-        if mv.is_capture_hint() {
-            moves.push(mv);
+        if mv.is_drop() {
+            continue; // Drops don't capture
+        }
+        // Check if destination square has enemy piece
+        if let Some(piece) = pos.piece_at(mv.to()) {
+            if piece.color == us.opposite() {
+                moves.push(mv);
+            }
         }
     }
 
     // Order captures by MVV-LVA if pruning is enabled - sort in place to avoid allocation
     if USE_PRUNING {
         moves.as_mut_vec().sort_by_cached_key(|&mv| {
-            // Simple MVV-LVA: prioritize capturing more valuable pieces
+            // MVV-LVA: prioritize capturing more valuable pieces
+            // First try metadata, then fall back to board lookup
             if let Some(victim) = mv.captured_piece_type() {
-                -(victim as i32)
+                -victim_score(victim)
+            } else if let Some(piece) = pos.piece_at(mv.to()) {
+                -victim_score(piece.piece_type)
             } else {
-                0
+                0 // Should not happen for captures
             }
         });
     }
@@ -686,17 +712,7 @@ where
         if USE_PRUNING && delta_margin > 0 {
             // Estimate material gain from capture
             let material_gain = if let Some(victim) = mv.captured_piece_type() {
-                // Simple piece values for delta pruning
-                match victim {
-                    PieceType::Pawn => 100,
-                    PieceType::Lance => 300,
-                    PieceType::Knight => 400,
-                    PieceType::Silver => 500,
-                    PieceType::Gold => 600,
-                    PieceType::Bishop => 800,
-                    PieceType::Rook => 1000,
-                    PieceType::King => 10000, // Should never happen
-                }
+                victim_score(victim)
             } else {
                 0
             };
@@ -834,7 +850,8 @@ mod tests {
         let mut check_count = 0;
         for i in 0..100000 {
             searcher.stats.nodes = i;
-            // Check stop flag only every 1024 nodes (0x3FF = 1023)
+            // Simulate periodic checks (this test uses 0x3FF = every 1024 nodes)
+            // Note: Actual implementation uses adaptive intervals via get_event_poll_mask()
             if searcher.stats.nodes & 0x3FF == 0 {
                 check_count += 1;
             }
