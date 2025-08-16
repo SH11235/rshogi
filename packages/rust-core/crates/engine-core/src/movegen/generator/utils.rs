@@ -1,8 +1,23 @@
 //! Utility functions for move generation
 
-use crate::{shogi::Move, Bitboard, Color, PieceType, Square};
+use crate::{
+    shogi::{attacks, Move},
+    Bitboard, Color, PieceType, Square,
+};
 
 use super::core::MoveGenImpl;
+
+/// Check if a piece must promote when moving to a certain square
+#[inline]
+fn must_promote(piece: PieceType, to: Square, color: Color) -> bool {
+    match (color, piece) {
+        (Color::Black, PieceType::Pawn | PieceType::Lance) => to.rank() == 0,
+        (Color::Black, PieceType::Knight) => to.rank() <= 1,
+        (Color::White, PieceType::Pawn | PieceType::Lance) => to.rank() == 8,
+        (Color::White, PieceType::Knight) => to.rank() >= 7,
+        _ => false,
+    }
+}
 
 impl<'a> MoveGenImpl<'a> {
     /// Add moves from a square to target squares
@@ -21,8 +36,11 @@ impl<'a> MoveGenImpl<'a> {
         let us = self.pos.side_to_move;
         let captured_type = self.get_captured_type(to);
 
+        // Check if the piece must promote
+        let must = must_promote(piece_type, to, us);
+
         // Check if the piece can promote (not already promoted and can promote based on rules)
-        let can_promote = !is_promoted
+        let may = !is_promoted
             && self.can_promote(from, to, us)
             && matches!(
                 piece_type,
@@ -34,14 +52,20 @@ impl<'a> MoveGenImpl<'a> {
                     | PieceType::Pawn
             );
 
-        // Always add non-promotion move
-        self.moves
-            .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
-
-        // Add promotion move if piece can promote
-        if can_promote {
+        if must {
+            // Only add promoted move if must promote
             self.moves
                 .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+        } else {
+            // Always add non-promotion move
+            self.moves
+                .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
+
+            // Add promotion move if piece can promote
+            if may {
+                self.moves
+                    .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+            }
         }
     }
 
@@ -53,15 +77,20 @@ impl<'a> MoveGenImpl<'a> {
         piece_type: PieceType,
     ) {
         // If we're in check, only allow moves that block or capture checker
-        if !self.checkers.is_empty() && self.checkers.count_ones() == 1 {
+        if !self.checkers.is_empty() {
+            // Double check - only king moves are legal
+            if self.checkers.count_ones() >= 2 {
+                return; // No non-King moves allowed
+            }
+            // Single check - only allow block/capture
             let checker_sq = self.checkers.lsb().unwrap();
-            let block_squares = self.between_bb(checker_sq, self.king_sq) | self.checkers;
+            let block_squares = attacks::between_bb(checker_sq, self.king_sq) | self.checkers;
             targets &= block_squares;
         }
 
         // If piece is pinned, only allow moves along pin ray
         if self.pinned.test(from) {
-            targets &= self.pin_rays[from.0 as usize];
+            targets &= self.pin_rays[from.index()];
         }
 
         // Never allow capturing enemy king (should not happen in legal shogi)
@@ -77,8 +106,11 @@ impl<'a> MoveGenImpl<'a> {
         while let Some(to) = targets.pop_lsb() {
             let captured_type = self.get_captured_type(to);
 
+            // Check if the piece must promote
+            let must = must_promote(piece_type, to, us);
+
             // Check if the piece can promote (not already promoted and can promote based on rules)
-            let can_promote = !is_promoted
+            let may = !is_promoted
                 && self.can_promote(from, to, us)
                 && matches!(
                     piece_type,
@@ -90,14 +122,30 @@ impl<'a> MoveGenImpl<'a> {
                         | PieceType::Pawn
                 );
 
-            // Always add non-promotion move
-            self.moves
-                .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
-
-            // Add promotion move if piece can promote
-            if can_promote {
+            if must {
+                // Only add promoted move if must promote
                 self.moves
                     .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+            } else {
+                // Always add non-promotion move
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    piece_type,
+                    captured_type,
+                ));
+
+                // Add promotion move if piece can promote
+                if may {
+                    self.moves.push(Move::normal_with_piece(
+                        from,
+                        to,
+                        true,
+                        piece_type,
+                        captured_type,
+                    ));
+                }
             }
         }
     }
@@ -133,62 +181,5 @@ impl<'a> MoveGenImpl<'a> {
         let file_diff = (sq1.file() as i8 - sq2.file() as i8).abs();
         let rank_diff = (sq1.rank() as i8 - sq2.rank() as i8).abs();
         file_diff == rank_diff && file_diff != 0
-    }
-
-    /// Get bitboard of squares between two aligned squares
-    /// Returns empty bitboard if squares are not on same rank, file, or diagonal
-    pub(super) fn between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
-        let mut between = Bitboard::EMPTY;
-
-        let file1 = sq1.file() as i8;
-        let rank1 = sq1.rank() as i8;
-        let file2 = sq2.file() as i8;
-        let rank2 = sq2.rank() as i8;
-
-        // Check if squares are on same rank, file, or diagonal
-        let file_diff = (file2 - file1).abs();
-        let rank_diff = (rank2 - rank1).abs();
-
-        // Not on same rank, file, or diagonal - return empty
-        if file_diff != 0 && rank_diff != 0 && file_diff != rank_diff {
-            return between;
-        }
-
-        // Same square - return empty
-        if file_diff == 0 && rank_diff == 0 {
-            return between;
-        }
-
-        let file_step = if file2 > file1 {
-            1
-        } else if file2 < file1 {
-            -1
-        } else {
-            0
-        };
-        let rank_step = if rank2 > rank1 {
-            1
-        } else if rank2 < rank1 {
-            -1
-        } else {
-            0
-        };
-
-        let mut f = file1 + file_step;
-        let mut r = rank1 + rank_step;
-
-        while f != file2 || r != rank2 {
-            // Bounds check before creating square
-            if (0..9).contains(&f) && (0..9).contains(&r) {
-                between.set(Square::new(f as u8, r as u8));
-                f += file_step;
-                r += rank_step;
-            } else {
-                // Out of bounds - something went wrong, return what we have
-                break;
-            }
-        }
-
-        between
     }
 }
