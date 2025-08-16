@@ -203,29 +203,26 @@ pub(super) fn is_drop_pawn_mate(gen: &MoveGenImpl, to: Square, them: Color) -> b
     let their_pieces = gen.pos.board.occupied_bb[them as usize];
     let our_pieces = gen.pos.board.occupied_bb[us as usize];
 
-    // King can move to squares that are not occupied by own pieces
+    // 自駒マスは除外、敵駒マスは「取り逃げ」も評価する
     let escape_squares = king_attacks & !their_pieces;
-
-    // Note: We don't exclude 'to' here since we already checked king capture safety above
 
     let mut escapes = escape_squares;
     while let Some(escape_sq) = escapes.pop_lsb() {
-        // Skip if the square is occupied by our piece (but 'to' has a pawn we just dropped)
-        if escape_sq != to && our_pieces.test(escape_sq) {
-            continue; // Can't move to a square occupied by enemy piece
-        }
-
-        // Create virtual occupancy after king moves to escape_sq
         let mut occ_after_escape = occupied_after_drop;
         occ_after_escape.clear(their_king_sq);
+
+        // 取りながら移動のシミュレーション：攻撃側の駒がいたら先に取り除く
+        if our_pieces.test(escape_sq) {
+            occ_after_escape.clear(escape_sq);
+        }
+
+        // 王が escape_sq へ
         occ_after_escape.set(escape_sq);
 
-        // If escaping to 'to', the pawn is captured (already handled in step 1)
-
-        // Check if escape square is safe
+        // 安全なら詰みではない
         let attackers = gen.attackers_to_with_occupancy(escape_sq, us, occ_after_escape);
         if attackers.is_empty() {
-            return false; // King can escape
+            return false;
         }
     }
 
