@@ -222,11 +222,27 @@ where
             continue;
         }
 
-        // Track moves for history updates
+        // Track moves for history updates (limited to 16 to avoid heap allocation)
         if mv.is_capture_hint() {
-            captures_tried.push(mv);
+            // Safety: TriedMoves is a SmallVec<[Move; 16]> to ensure stack allocation
+            // We limit to 16 moves to match MAX_MOVES_TO_UPDATE constant used in history updates
+            if captures_tried.len() < 16 {
+                captures_tried.push(mv);
+            }
+
+            // Debug assertion: Verify capture moves have proper metadata
+            #[cfg(debug_assertions)]
+            {
+                debug_assert!(
+                    mv.captured_piece_type().is_some(),
+                    "is_capture_hint() returned true but captured_piece_type() is None"
+                );
+            }
         } else if !mv.is_promote() {
-            quiet_moves_tried.push(mv);
+            // Safety: Same 16-element limit for quiet moves to avoid heap allocation
+            if quiet_moves_tried.len() < 16 {
+                quiet_moves_tried.push(mv);
+            }
         }
 
         // Update current move in search stack
