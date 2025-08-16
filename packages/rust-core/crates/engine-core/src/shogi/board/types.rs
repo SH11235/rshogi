@@ -24,9 +24,7 @@ impl Square {
     /// Consider using `from_usi_chars()` instead for safety.
     #[inline]
     pub const fn new(file: u8, rank: u8) -> Self {
-        debug_assert!(file < 9 && rank < 9);
-        // Add runtime check in release builds to prevent invalid squares
-        assert!(file < 9 && rank < 9, "Square::new called with invalid coordinates");
+        debug_assert!(file < 9 && rank < 9, "Square::new called with invalid coordinates");
         Square(rank * 9 + file)
     }
 

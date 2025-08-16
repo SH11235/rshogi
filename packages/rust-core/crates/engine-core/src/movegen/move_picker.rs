@@ -299,7 +299,6 @@ impl<'a> MovePicker<'a> {
                 let see_value = self.see(mv);
 
                 // Use SEE value as the primary score
-                // Multiply by 100 to make it comparable with history scores
                 self.moves[i].score = see_value;
 
                 // Small promotion bonus (SEE already accounts for promoted piece value)
@@ -469,7 +468,7 @@ impl Position {
         let king_moves = ATTACK_TABLES.king_attacks(king_sq);
 
         // King cannot capture its own pieces (Shogi rule)
-        let friend_blocks = self.board.occupied_bb[defense_color as usize];
+        let friend_blocks = test_pos.board.occupied_bb[defense_color as usize];
         let mut king_escape_candidates = king_moves & !friend_blocks;
 
         // Remove the pawn square (king can't capture it due to support)
