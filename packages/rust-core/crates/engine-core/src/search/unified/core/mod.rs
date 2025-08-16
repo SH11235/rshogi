@@ -420,7 +420,7 @@ pub(super) fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool, const T
 where
     E: Evaluator + Send + Sync + 'static,
 {
-    // Check limits
+    // Increment node count here (not in search_node to avoid double counting)
     searcher.stats.nodes += 1;
 
     // Early stop check
@@ -607,9 +607,9 @@ where
         return alpha;
     }
 
-    // Periodic time check
-    let time_check_mask = searcher.context.get_time_check_mask();
-    if (searcher.stats.nodes & time_check_mask) == 0 {
+    // Periodic time check (unified with alpha_beta and search_node)
+    let time_check_mask = get_event_poll_mask(searcher);
+    if time_check_mask == 0 || (searcher.stats.nodes & time_check_mask) == 0 {
         // Process events
         searcher.context.process_events(&searcher.time_manager);
 
@@ -665,7 +665,7 @@ where
 
     // Order captures by MVV-LVA if pruning is enabled - sort in place to avoid allocation
     if USE_PRUNING {
-        moves.as_mut_slice().sort_by_cached_key(|&mv| {
+        moves.as_mut_vec().sort_by_cached_key(|&mv| {
             // Simple MVV-LVA: prioritize capturing more valuable pieces
             if let Some(victim) = mv.captured_piece_type() {
                 -(victim as i32)
