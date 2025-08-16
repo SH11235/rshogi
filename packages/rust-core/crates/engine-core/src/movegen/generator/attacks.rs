@@ -11,19 +11,31 @@ pub(super) fn attackers_to_with_occupancy(
     color: Color,
     occupancy: Bitboard,
 ) -> Bitboard {
-    let pieces = gen.pos.board.occupied_bb[color as usize];
+    // Only consider pieces that exist in the given occupancy
+    let pieces = gen.pos.board.occupied_bb[color as usize] & occupancy;
     let mut attackers = Bitboard::EMPTY;
 
-    // Pawn
+    // Pawn - Check which pawns can attack sq
     let pawn_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Pawn as usize]
         & !gen.pos.board.promoted_bb;
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, color);
-    attackers |= pawn_pieces & pawn_attacks;
+    // For each pawn, check if it can attack sq
+    let mut pawn_copy = pawn_pieces;
+    while let Some(pawn_sq) = pawn_copy.pop_lsb() {
+        let pawn_attacks = ATTACK_TABLES.pawn_attacks(pawn_sq, color);
+        if pawn_attacks.test(sq) {
+            attackers.set(pawn_sq);
+        }
+    }
 
-    // Gold and promoted pieces
-    let gold_attacks = ATTACK_TABLES.gold_attacks(sq, color);
+    // Gold - Check which golds can attack sq
     let gold_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Gold as usize];
-    attackers |= gold_pieces & gold_attacks;
+    let mut gold_copy = gold_pieces;
+    while let Some(gold_sq) = gold_copy.pop_lsb() {
+        let gold_attacks = ATTACK_TABLES.gold_attacks(gold_sq, color);
+        if gold_attacks.test(sq) {
+            attackers.set(gold_sq);
+        }
+    }
 
     // Promoted pieces that move like gold
     let promoted_pieces = gen.pos.board.promoted_bb & pieces;
@@ -32,24 +44,45 @@ pub(super) fn attackers_to_with_occupancy(
             | gen.pos.board.piece_bb[color as usize][PieceType::Knight as usize]
             | gen.pos.board.piece_bb[color as usize][PieceType::Lance as usize]
             | gen.pos.board.piece_bb[color as usize][PieceType::Pawn as usize]);
-    attackers |= promoted_gold_movers & gold_attacks;
+    let mut promoted_copy = promoted_gold_movers;
+    while let Some(promoted_sq) = promoted_copy.pop_lsb() {
+        let gold_attacks = ATTACK_TABLES.gold_attacks(promoted_sq, color);
+        if gold_attacks.test(sq) {
+            attackers.set(promoted_sq);
+        }
+    }
 
     // Silver
     let silver_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Silver as usize]
         & !gen.pos.board.promoted_bb;
-    let silver_attacks = ATTACK_TABLES.silver_attacks(sq, color);
-    attackers |= silver_pieces & silver_attacks;
+    let mut silver_copy = silver_pieces;
+    while let Some(silver_sq) = silver_copy.pop_lsb() {
+        let silver_attacks = ATTACK_TABLES.silver_attacks(silver_sq, color);
+        if silver_attacks.test(sq) {
+            attackers.set(silver_sq);
+        }
+    }
 
     // Knight
     let knight_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Knight as usize]
         & !gen.pos.board.promoted_bb;
-    let knight_attacks = ATTACK_TABLES.knight_attacks(sq, color);
-    attackers |= knight_pieces & knight_attacks;
+    let mut knight_copy = knight_pieces;
+    while let Some(knight_sq) = knight_copy.pop_lsb() {
+        let knight_attacks = ATTACK_TABLES.knight_attacks(knight_sq, color);
+        if knight_attacks.test(sq) {
+            attackers.set(knight_sq);
+        }
+    }
 
     // King
     let king_pieces = gen.pos.board.piece_bb[color as usize][PieceType::King as usize];
-    let king_attacks = ATTACK_TABLES.king_attacks(sq);
-    attackers |= king_pieces & king_attacks;
+    let mut king_copy = king_pieces;
+    while let Some(king_sq) = king_copy.pop_lsb() {
+        let king_attacks = ATTACK_TABLES.king_attacks(king_sq);
+        if king_attacks.test(sq) {
+            attackers.set(king_sq);
+        }
+    }
 
     // Rook/Dragon
     let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupancy, PieceType::Rook);
@@ -86,7 +119,14 @@ pub(super) fn attackers_to_with_occupancy(
     // Promoted rook/bishop king-like moves
     let dragons = rook_pieces & gen.pos.board.promoted_bb;
     let horses = bishop_pieces & gen.pos.board.promoted_bb;
-    attackers |= (dragons | horses) & king_attacks;
+    let promoted_rb = dragons | horses;
+    let mut promoted_rb_copy = promoted_rb;
+    while let Some(prb_sq) = promoted_rb_copy.pop_lsb() {
+        let king_attacks = ATTACK_TABLES.king_attacks(prb_sq);
+        if king_attacks.test(sq) {
+            attackers.set(prb_sq);
+        }
+    }
 
     attackers
 }
