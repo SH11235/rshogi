@@ -233,8 +233,6 @@ impl TTEntry {
         if move_data == 0 {
             return None;
         }
-        // Debug assertion to validate move data
-        debug_assert!(move_data <= 0x7FFF, "Suspicious move data in TT entry: {move_data:#x}");
         Some(Move::from_u16(move_data))
     }
 

@@ -30,3 +30,5 @@ target/criterion/
 benchmark-result.json
 system-info.json
 complete-result.json
+
+.cargo/config.local.toml
