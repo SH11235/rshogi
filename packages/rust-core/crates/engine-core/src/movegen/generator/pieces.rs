@@ -1,7 +1,7 @@
 //! Piece-specific move generation
 
 use crate::{
-    shogi::{Move, ATTACK_TABLES},
+    shogi::{attacks, Move},
     Color, PieceType, Square,
 };
 
@@ -15,7 +15,7 @@ pub(super) fn generate_king_moves(gen: &mut MoveGenImpl) {
 /// Generate king moves from a specific square
 pub(super) fn generate_king_moves_from(gen: &mut MoveGenImpl, from: Square) {
     let us = gen.pos.side_to_move;
-    let attacks = ATTACK_TABLES.king_attacks(from);
+    let attacks = attacks::king_attacks(from);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
 
     let mut moves = targets;
@@ -37,7 +37,7 @@ pub(super) fn generate_king_moves_from(gen: &mut MoveGenImpl, from: Square) {
 /// Generate gold moves (also used for promoted silver, knight, lance, pawn)
 pub(super) fn generate_gold_moves(gen: &mut MoveGenImpl, from: Square, promoted: bool) {
     let us = gen.pos.side_to_move;
-    let attacks = ATTACK_TABLES.gold_attacks(from, us);
+    let attacks = attacks::gold_attacks(from, us);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
 
     gen.add_moves(from, targets, promoted);
@@ -52,7 +52,7 @@ pub(super) fn generate_silver_moves(gen: &mut MoveGenImpl, from: Square, promote
     }
 
     let us = gen.pos.side_to_move;
-    let attacks = ATTACK_TABLES.silver_attacks(from, us);
+    let attacks = attacks::silver_attacks(from, us);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
 
     // Never capture enemy king
@@ -177,7 +177,7 @@ pub(super) fn generate_knight_moves(gen: &mut MoveGenImpl, from: Square, promote
         return; // Knight cannot move from these ranks
     }
 
-    let attacks = ATTACK_TABLES.knight_attacks(from, us);
+    let attacks = attacks::knight_attacks(from, us);
     let targets = attacks & !gen.pos.board.occupied_bb[us as usize];
 
     // If pinned, knights can't move (they don't move along pin rays)

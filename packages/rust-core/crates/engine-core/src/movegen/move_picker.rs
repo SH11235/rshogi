@@ -8,7 +8,7 @@
 //! 5. Quiet moves (history ordered)
 
 use crate::search::types::SearchStack;
-use crate::shogi::{Move, MoveList, ATTACK_TABLES};
+use crate::shogi::{attacks, Move, MoveList};
 use crate::{Bitboard, Color, History, MoveGen, PieceType, Position, Square};
 
 /// Scored move for ordering
@@ -380,7 +380,7 @@ impl Position {
     /// Check if the specified color has a pawn in the given file
     fn has_pawn_in_file_for_color(&self, file: u8, color: Color) -> bool {
         let pawn_bb = self.board.piece_bb[color as usize][PieceType::Pawn as usize];
-        let file_mask = ATTACK_TABLES.file_mask(file);
+        let file_mask = attacks::file_mask(file);
 
         // Get unpromoted pawns in this file
         let unpromoted_pawns_in_file = pawn_bb & file_mask & !self.board.promoted_bb;
@@ -465,7 +465,7 @@ impl Position {
         }
 
         // Step 3: Check if king can escape
-        let king_moves = ATTACK_TABLES.king_attacks(king_sq);
+        let king_moves = attacks::king_attacks(king_sq);
 
         // King cannot capture its own pieces (Shogi rule)
         let friend_blocks = test_pos.board.occupied_bb[defense_color as usize];
