@@ -239,24 +239,25 @@ fn test_optional_promotion_white_silver() {
 
     // Find silver moves to rank g (entering promotion zone)
     // Silver from 5f can move to: 4g, 5g, 6g
-    for dest in ["4g", "5g", "6g"] {
+    let from_sq = engine_core::shogi::Square::new(4, 5); // 5f
+    for (file, rank) in [(3, 6), (4, 6), (5, 6)] {
+        // 4g, 5g, 6g
+        let to_sq = engine_core::shogi::Square::new(file, rank);
         let moves_to_dest: Vec<Move> = moves
             .iter()
-            .filter(|m| {
-                let usi = engine_core::usi::move_to_usi(m);
-                usi.starts_with("5f") && usi.ends_with(dest)
-            })
+            .filter(|m| m.from() == Some(from_sq) && m.to() == to_sq)
             .copied()
             .collect();
 
         // Silver can move diagonally forward and forward
         // Check if this destination is reachable
         if !moves_to_dest.is_empty() {
-            assert_eq!(moves_to_dest.len(), 2, "Should have 2 moves to {dest}");
+            let dest_str = format!("{}{}", file + 1, (b'a' + rank) as char);
+            assert_eq!(moves_to_dest.len(), 2, "Should have 2 moves to {dest_str}");
             let promoted_count = moves_to_dest.iter().filter(|m| m.is_promote()).count();
             let non_promoted_count = moves_to_dest.iter().filter(|m| !m.is_promote()).count();
-            assert_eq!(promoted_count, 1, "Should have 1 promoted move to {dest}");
-            assert_eq!(non_promoted_count, 1, "Should have 1 non-promoted move to {dest}");
+            assert_eq!(promoted_count, 1, "Should have 1 promoted move to {dest_str}");
+            assert_eq!(non_promoted_count, 1, "Should have 1 non-promoted move to {dest_str}");
         }
     }
 }
