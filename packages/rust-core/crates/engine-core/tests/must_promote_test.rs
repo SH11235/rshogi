@@ -74,7 +74,7 @@ fn test_black_knight_must_promote_to_rank_1() {
         .collect();
 
     // All moves to rank 1 must be promoted
-    assert!(knight_moves.len() > 0, "Knight should have moves to rank 1");
+    assert!(!knight_moves.is_empty(), "Knight should have moves to rank 1");
     for mv in knight_moves {
         assert!(mv.is_promote(), "Knight move to rank 1 must be promoted");
     }
@@ -99,7 +99,7 @@ fn test_black_knight_must_promote_to_rank_2() {
         .collect();
 
     // All moves to rank 2 must be promoted
-    assert!(knight_moves.len() > 0, "Knight should have moves to rank 2");
+    assert!(!knight_moves.is_empty(), "Knight should have moves to rank 2");
     for mv in knight_moves {
         assert!(mv.is_promote(), "Knight move to rank 2 must be promoted");
     }
@@ -170,7 +170,7 @@ fn test_white_knight_must_promote_to_rank_9() {
         .collect();
 
     // All moves to rank 9 must be promoted
-    assert!(knight_moves.len() > 0, "Knight should have moves to rank 9");
+    assert!(!knight_moves.is_empty(), "Knight should have moves to rank 9");
     for mv in knight_moves {
         assert!(mv.is_promote(), "Knight move to rank 9 must be promoted");
     }
@@ -195,7 +195,7 @@ fn test_white_knight_must_promote_to_rank_8() {
         .collect();
 
     // All moves to rank 8 must be promoted
-    assert!(knight_moves.len() > 0, "Knight should have moves to rank 8");
+    assert!(!knight_moves.is_empty(), "Knight should have moves to rank 8");
     for mv in knight_moves {
         assert!(mv.is_promote(), "Knight move to rank 8 must be promoted");
     }
@@ -252,11 +252,11 @@ fn test_optional_promotion_white_silver() {
         // Silver can move diagonally forward and forward
         // Check if this destination is reachable
         if !moves_to_dest.is_empty() {
-            assert_eq!(moves_to_dest.len(), 2, "Should have 2 moves to {}", dest);
+            assert_eq!(moves_to_dest.len(), 2, "Should have 2 moves to {dest}");
             let promoted_count = moves_to_dest.iter().filter(|m| m.is_promote()).count();
             let non_promoted_count = moves_to_dest.iter().filter(|m| !m.is_promote()).count();
-            assert_eq!(promoted_count, 1, "Should have 1 promoted move to {}", dest);
-            assert_eq!(non_promoted_count, 1, "Should have 1 non-promoted move to {}", dest);
+            assert_eq!(promoted_count, 1, "Should have 1 promoted move to {dest}");
+            assert_eq!(non_promoted_count, 1, "Should have 1 non-promoted move to {dest}");
         }
     }
 }
