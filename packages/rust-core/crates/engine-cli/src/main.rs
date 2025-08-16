@@ -10,6 +10,7 @@ use clap::Parser;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::{EngineAdapter, EngineError};
 use engine_core::engine::controller::Engine;
+use engine_core::search::SearchLimits;
 use engine_core::usi::move_to_usi;
 use search_session::SearchSession;
 use std::io::{self, BufRead};
@@ -1575,6 +1576,16 @@ fn search_worker(
 
     // Keep ponder_hit_flag for checking later
     let ponder_hit_flag_ref = ponder_hit_flag.clone();
+
+    // Update limits with ponder_hit_flag if present
+    let limits = if let Some(ref flag) = ponder_hit_flag {
+        SearchLimits {
+            ponder_hit_flag: Some(flag.clone()),
+            ..limits
+        }
+    } else {
+        limits
+    };
 
     // Explicitly drop ponder_hit_flag (it's used internally by the engine)
     drop(ponder_hit_flag);

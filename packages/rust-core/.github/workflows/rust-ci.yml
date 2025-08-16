@@ -1,0 +1,115 @@
+name: Rust CI
+
+on:
+  push:
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/rust-ci.yml'
+  pull_request:
+    paths:
+      - 'packages/rust-core/**'
+      - '.github/workflows/rust-ci.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+
+defaults:
+  run:
+    working-directory: packages/rust-core
+
+jobs:
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  lint:
+    name: Clippy Lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ['', '--features buffered-io']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/rust-core
+      - name: Run Clippy
+        run: cargo clippy ${{ matrix.features }} -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ['', '--features buffered-io']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/rust-core
+      - name: Run tests
+        run: cargo test --release ${{ matrix.features }}
+
+  test-large-stack:
+    name: Test (Large Stack) - Release Mode
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      RUST_MIN_STACK: 8388608
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/rust-core
+          key: rust-cache-large-stack
+      - name: Run ignored tests in release mode
+        run: |
+          echo "Running large stack tests in release mode..."
+          echo "These tests require NNUE or Enhanced engine initialization"
+          cargo test --release -- --ignored --nocapture
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Large Stack Test Summary"
+          echo "Total ignored tests: $(grep -r "#\[ignore\]" --include="*.rs" . | grep -B1 "fn test_" | wc -l)"
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Run security audit
+        run: cargo audit --deny warnings

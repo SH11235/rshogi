@@ -14,17 +14,25 @@ mod tests {
         let sfen = "ln1g1g1nl/1ks4r1/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL b - 17";
         let mut pos = Position::from_sfen(sfen).unwrap();
 
+        // Disable pruning to ensure we search enough nodes for TT prefetching to be relevant
+        // With pruning enabled, MaterialEvaluator results in very few nodes being searched
         let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 32>::new(MaterialEvaluator);
+            UnifiedSearcher::<MaterialEvaluator, true, false, 32>::new(MaterialEvaluator);
 
-        // Search to depth 4
-        let limits = SearchLimitsBuilder::default().depth(4).build();
+        // Search to depth 6 to ensure enough nodes are searched
+        let limits = SearchLimitsBuilder::default().depth(6).build();
         let result = searcher.search(&mut pos, limits);
 
-        assert!(result.best_move.is_some());
-        assert!(result.stats.nodes > 10000); // Should search many nodes
-
         println!("Nodes searched: {}", result.stats.nodes);
+
+        assert!(result.best_move.is_some());
+        // With pruning disabled, we expect to search many more nodes
+        assert!(
+            result.stats.nodes > 1000000,
+            "Expected more than 1000000 nodes, but only searched {}",
+            result.stats.nodes
+        ); // Should search many nodes when pruning is disabled
+
         println!("Time: {}ms", result.stats.elapsed.as_millis());
         let nps = if result.stats.elapsed.as_secs_f64() > 0.0 {
             result.stats.nodes as f64 / result.stats.elapsed.as_secs_f64()

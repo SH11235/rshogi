@@ -82,7 +82,7 @@ impl ZobristTable {
             return 0;
         }
         let color_idx = color as usize;
-        let piece_idx = piece_type as usize - 1; // Skip King (0)
+        let piece_idx = piece_type.hand_index().expect("King has no hand index");
         let count_idx = (count as usize).min(MAX_HAND_COUNT);
         self.hand[color_idx][piece_idx][count_idx]
     }
@@ -142,18 +142,8 @@ impl ZobristHashing for Position {
         // Hash pieces in hand
         for color in [Color::Black, Color::White] {
             let color_idx = color as usize;
-            // Skip King (index 0), iterate through other piece types
-            for piece_idx in 0..7 {
-                let piece_type = match piece_idx {
-                    0 => PieceType::Rook,
-                    1 => PieceType::Bishop,
-                    2 => PieceType::Gold,
-                    3 => PieceType::Silver,
-                    4 => PieceType::Knight,
-                    5 => PieceType::Lance,
-                    6 => PieceType::Pawn,
-                    _ => unreachable!(),
-                };
+            // Skip King (index 0), iterate through other piece types using HAND_ORDER
+            for (piece_idx, &piece_type) in crate::shogi::board::HAND_ORDER.iter().enumerate() {
                 let count = self.hands[color_idx][piece_idx];
                 if count > 0 {
                     hash ^= ZOBRIST.hand_hash(color, piece_type, count);
@@ -184,7 +174,8 @@ impl ZobristHashing for Position {
 
             // Update hand hash (piece goes to hand)
             let color_idx = moving.color as usize;
-            let piece_idx = captured_piece.piece_type as usize - 1; // Skip King
+            let piece_idx =
+                captured_piece.piece_type.hand_index().expect("King is never captured to hand");
             let old_count = self.hands[color_idx][piece_idx];
             let new_count = old_count + 1;
 
@@ -218,7 +209,7 @@ impl ZobristHashing for Position {
 
         // Update hand hash
         let color_idx = color as usize;
-        let piece_idx = piece_type as usize - 1; // Skip King
+        let piece_idx = piece_type.hand_index().expect("King cannot be dropped");
         let old_count = self.hands[color_idx][piece_idx];
         let new_count = old_count - 1;
 

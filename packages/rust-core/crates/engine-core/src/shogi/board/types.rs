@@ -24,8 +24,19 @@ impl Square {
     /// Consider using `from_usi_chars()` instead for safety.
     #[inline]
     pub const fn new(file: u8, rank: u8) -> Self {
-        debug_assert!(file < 9 && rank < 9);
+        debug_assert!(file < 9 && rank < 9, "Square::new called with invalid coordinates");
         Square(rank * 9 + file)
+    }
+
+    /// Create square from file and rank with bounds checking
+    /// Returns None if coordinates are out of bounds
+    #[inline]
+    pub const fn new_safe(file: u8, rank: u8) -> Option<Self> {
+        if file < 9 && rank < 9 {
+            Some(Square(rank * 9 + file))
+        } else {
+            None
+        }
     }
 
     /// Get file (0-8, left to right in internal representation)
@@ -150,6 +161,17 @@ pub enum PieceType {
     Pawn = 7,   // P
 }
 
+// 手駒配列 (Position.hands) の並び順を一元管理（King を除く 7 種）
+pub const HAND_ORDER: [PieceType; 7] = [
+    PieceType::Rook,
+    PieceType::Bishop,
+    PieceType::Gold,
+    PieceType::Silver,
+    PieceType::Knight,
+    PieceType::Lance,
+    PieceType::Pawn,
+];
+
 impl TryFrom<u8> for PieceType {
     type Error = &'static str;
 
@@ -188,6 +210,25 @@ impl PieceType {
             6 => Some(PieceType::Lance),
             7 => Some(PieceType::Pawn),
             _ => None,
+        }
+    }
+
+    /// Position.hands に対応するインデックス（King は None）
+    #[inline]
+    pub const fn hand_index(self) -> Option<usize> {
+        match self {
+            PieceType::King => None,
+            _ => Some(self as usize - 1),
+        }
+    }
+
+    /// hands のインデックスから PieceType を取得（範囲外は None）
+    #[inline]
+    pub const fn from_hand_index(index: usize) -> Option<PieceType> {
+        if index < 7 {
+            Some(HAND_ORDER[index])
+        } else {
+            None
         }
     }
 
@@ -345,6 +386,47 @@ impl Color {
 mod tests {
     use super::*;
     use crate::usi::parse_usi_square;
+    use std::panic;
+
+    #[test]
+    fn test_promotion_zones() {
+        // Test USI rank mapping and promotion zones
+        println!("\nUSI rank mapping test:");
+
+        let test_squares = vec!["2a", "2b", "2c", "2d", "2e", "2f", "2g", "2h", "2i"];
+
+        for sq_str in &test_squares {
+            let sq = parse_usi_square(sq_str).unwrap();
+            println!("{} -> rank = {}", sq_str, sq.rank());
+        }
+
+        println!("\nPromotion zone test:");
+        let from = parse_usi_square("2b").unwrap();
+        let to = parse_usi_square("8h").unwrap();
+
+        println!("2b rank = {}", from.rank());
+        println!("8h rank = {}", to.rank());
+
+        // Check if promotion is possible from 2b to 8h
+        println!("\nFor Black piece moving from 2b to 8h:");
+        println!("from.rank() = {} (is <= 2? {})", from.rank(), from.rank() <= 2);
+        println!("to.rank() = {} (is <= 2? {})", to.rank(), to.rank() <= 2);
+
+        let black_can_promote = from.rank() <= 2 || to.rank() <= 2;
+        println!("Can Black promote? {black_can_promote}");
+        assert!(black_can_promote, "Black should be able to promote when leaving promotion zone");
+
+        println!("\nFor White piece moving from 2b to 8h:");
+        println!("from.rank() = {} (is >= 6? {})", from.rank(), from.rank() >= 6);
+        println!("to.rank() = {} (is >= 6? {})", to.rank(), to.rank() >= 6);
+
+        let white_can_promote = from.rank() >= 6 || to.rank() >= 6;
+        println!("Can White promote? {white_can_promote}");
+        assert!(
+            white_can_promote,
+            "White should be able to promote when entering promotion zone"
+        );
+    }
 
     #[test]
     fn test_square_operations() {
@@ -453,6 +535,38 @@ mod tests {
         let mut promoted_pawn = Piece::new(PieceType::Pawn, Color::Black);
         promoted_pawn.promoted = true;
         assert_eq!(promoted_pawn.to_index(), 15); // 7 + 8
+    }
+
+    #[test]
+    fn test_square_bounds_checking() {
+        // Test valid squares
+        let sq = Square::new(0, 0);
+        assert_eq!(sq.file(), 0);
+        assert_eq!(sq.rank(), 0);
+
+        let sq = Square::new(8, 8);
+        assert_eq!(sq.file(), 8);
+        assert_eq!(sq.rank(), 8);
+
+        // Test new_safe with valid coordinates
+        assert!(Square::new_safe(0, 0).is_some());
+        assert!(Square::new_safe(8, 8).is_some());
+
+        // Test new_safe with invalid coordinates
+        assert!(Square::new_safe(9, 0).is_none());
+        assert!(Square::new_safe(0, 9).is_none());
+        assert!(Square::new_safe(255, 255).is_none());
+
+        // Test that invalid coordinates panic
+        let result = panic::catch_unwind(|| Square::new(9, 0));
+        assert!(result.is_err());
+
+        let result = panic::catch_unwind(|| Square::new(0, 9));
+        assert!(result.is_err());
+
+        // Test u8 underflow case (255)
+        let result = panic::catch_unwind(|| Square::new(255, 0));
+        assert!(result.is_err());
     }
 
     #[test]

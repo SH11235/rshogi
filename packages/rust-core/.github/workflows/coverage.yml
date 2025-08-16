@@ -14,6 +14,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Use mold linker on Linux to speed up linking
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
 
 jobs:
   coverage:
@@ -36,7 +38,10 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y pkg-config libssl-dev
+        # mold and clang for -fuse-ld=mold
+        sudo apt-get install -y pkg-config libssl-dev mold clang
+        mold --version || true
+        clang --version || true
     
     - name: Cache cargo registry
       uses: actions/cache@v3

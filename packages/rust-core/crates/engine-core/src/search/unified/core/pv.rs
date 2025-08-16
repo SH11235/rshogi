@@ -56,6 +56,15 @@ impl PVTable {
             return;
         }
 
+        // Skip null moves in PV
+        if head == Move::NULL {
+            #[cfg(debug_assertions)]
+            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                eprintln!("[WARNING] Attempted to add NULL move to PV at ply {ply}");
+            }
+            return;
+        }
+
         let tail_len = tail.len().min(MAX_PLY - 1);
         self.mv[ply][0] = head;
         if tail_len > 0 {
@@ -170,5 +179,109 @@ mod tests {
         assert_eq!(pv.len[0], 0);
         assert_eq!(pv.len[1], 0);
         assert_eq!(pv.get_pv().len(), 0);
+    }
+
+    #[test]
+    fn test_pv_null_move_handling() {
+        // Test that NULL moves are properly rejected
+        let mut pv = PVTable::new();
+
+        // Try to set a NULL move
+        pv.set_line(0, Move::NULL, &[]);
+
+        // PV should remain empty
+        let (line, len) = pv.line(0);
+        assert_eq!(len, 0, "PV should be empty after NULL move attempt");
+        assert!(line.is_empty(), "PV line should be empty");
+    }
+
+    #[test]
+    fn test_pv_edge_cases() {
+        // Test boundary conditions
+        let mut pv = PVTable::new();
+
+        // Test at MAX_PLY boundary
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        pv.set_line(MAX_PLY - 1, move1, &[]);
+        let (line, len) = pv.line(MAX_PLY - 1);
+        assert_eq!(len, 1);
+        assert_eq!(line[0], move1);
+
+        // Test beyond MAX_PLY (should be ignored)
+        pv.set_line(MAX_PLY, move1, &[]);
+        let (_line, len) = pv.line(MAX_PLY);
+        assert_eq!(len, 0, "Beyond MAX_PLY should return empty");
+
+        // Test very long PV (MAX_PLY - 1 moves)
+        let mut long_tail = Vec::new();
+        for _ in 0..MAX_PLY - 2 {
+            long_tail.push(Move::normal(
+                parse_usi_square("2g").unwrap(),
+                parse_usi_square("2f").unwrap(),
+                false,
+            ));
+        }
+
+        pv.set_line(0, move1, &long_tail);
+        let (_line, len) = pv.line(0);
+        assert_eq!(len, MAX_PLY - 1, "Should handle maximum length PV");
+    }
+
+    #[test]
+    fn test_pv_clear_operations() {
+        // Test clear functionality
+        let mut pv = PVTable::new();
+
+        // Add some moves
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false);
+
+        pv.set_line(0, move1, &[move2]);
+        pv.set_line(1, move2, &[]);
+
+        // Verify they're set
+        assert_eq!(pv.line(0).1, 2);
+        assert_eq!(pv.line(1).1, 1);
+
+        // Clear specific ply
+        pv.clear_len_at(0);
+        assert_eq!(pv.line(0).1, 0, "Ply 0 should be cleared");
+        assert_eq!(pv.line(1).1, 1, "Ply 1 should remain");
+
+        // Clear all
+        pv.clear_all();
+        assert_eq!(pv.line(0).1, 0, "All plies should be cleared");
+        assert_eq!(pv.line(1).1, 0, "All plies should be cleared");
+    }
+
+    #[test]
+    fn test_pv_consistency_after_updates() {
+        // Test that PV remains consistent after multiple updates
+        let mut pv = PVTable::new();
+
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false);
+        let move3 =
+            Move::normal(parse_usi_square("2g").unwrap(), parse_usi_square("2f").unwrap(), false);
+
+        // Initial PV
+        pv.set_line(0, move1, &[move2, move3]);
+        assert_eq!(pv.line(0).1, 3);
+
+        // Update with shorter PV
+        pv.set_line(0, move2, &[move3]);
+        assert_eq!(pv.line(0).1, 2);
+        let (line, _) = pv.line(0);
+        assert_eq!(line[0], move2);
+        assert_eq!(line[1], move3);
+
+        // Update with longer PV
+        pv.set_line(0, move3, &[move1, move2, move3]);
+        assert_eq!(pv.line(0).1, 4);
     }
 }

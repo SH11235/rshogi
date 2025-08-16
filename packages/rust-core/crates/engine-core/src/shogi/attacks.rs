@@ -324,8 +324,13 @@ impl AttackTables {
             Color::White => (rank + 1, 9, 1),   // White (Gote) moves towards rank 8 (down)
         };
 
+        // Check if lance can move at all (not already at the edge)
+        if (color == Color::Black && rank == 0) || (color == Color::White && rank == 8) {
+            return attacks; // Lance at edge cannot move
+        }
+
         let mut r = start;
-        while r != end {
+        while r != end && (0..9).contains(&r) {
             attacks.set(Square::new(file, r as u8));
             r += step;
         }
