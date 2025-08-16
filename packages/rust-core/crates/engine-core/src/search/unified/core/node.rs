@@ -211,11 +211,16 @@ where
             }
         }
 
+        // Calculate capture status once using board state (more reliable than metadata)
+        let us = pos.side_to_move;
+        let is_capture =
+            !mv.is_drop() && pos.piece_at(mv.to()).is_some_and(|pc| pc.color == us.opposite());
+
         // Futility pruning for quiet moves
         if USE_PRUNING
             && can_do_futility
             && moves_searched > 0
-            && !mv.is_capture_hint()
+            && !is_capture
             && !mv.is_promote()
             && static_eval + futility_margin <= alpha
         {
@@ -223,30 +228,11 @@ where
         }
 
         // Track moves for history updates (limited to 16 to avoid heap allocation)
-        if mv.is_capture_hint() {
+        if is_capture {
             // Safety: TriedMoves is a SmallVec<[Move; 16]> to ensure stack allocation
             // We limit to 16 moves to match MAX_MOVES_TO_UPDATE constant used in history updates
             if captures_tried.len() < 16 {
                 captures_tried.push(mv);
-            }
-
-            // Debug assertion: Verify capture moves have metadata OR board state shows enemy piece
-            #[cfg(debug_assertions)]
-            {
-                if mv.captured_piece_type().is_none() {
-                    // If metadata is missing, verify board state has enemy piece
-                    if let Some(piece) = pos.piece_at(mv.to()) {
-                        debug_assert!(
-                            piece.color == pos.side_to_move.opposite(),
-                            "is_capture_hint() returned true but no enemy piece at destination"
-                        );
-                    } else {
-                        debug_assert!(
-                            false,
-                            "is_capture_hint() returned true but no piece at destination"
-                        );
-                    }
-                }
             }
         } else if !mv.is_promote() {
             // Safety: Same 16-element limit for quiet moves to avoid heap allocation
@@ -424,15 +410,25 @@ where
                                     history.counter_moves.update(pos.side_to_move, prev_mv, mv);
                                 }
 
-                                // Update capture history if it's a capture
-                                if mv.is_capture_hint() {
-                                    if let (Some(attacker), Some(victim)) =
-                                        (mv.piece_type(), mv.captured_piece_type())
-                                    {
+                                // Update capture history if the cutoff move is a capture
+                                // Recalculate capture status for the best move
+                                let mv_is_capture = !mv.is_drop()
+                                    && pos
+                                        .piece_at(mv.to())
+                                        .is_some_and(|pc| pc.color == pos.side_to_move.opposite());
+
+                                if mv_is_capture {
+                                    // Try metadata first, fall back to board lookup
+                                    let attacker = mv.piece_type();
+                                    let victim = mv
+                                        .captured_piece_type()
+                                        .or_else(|| pos.piece_at(mv.to()).map(|p| p.piece_type));
+
+                                    if let (Some(att), Some(vic)) = (attacker, victim) {
                                         history.capture.update_good(
                                             pos.side_to_move,
-                                            attacker,
-                                            victim,
+                                            att,
+                                            vic,
                                             depth as i32,
                                         );
                                     }
