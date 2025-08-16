@@ -11,6 +11,10 @@ pub type MoveVec = SmallVec<[Move; 128]>;
 
 /// Type alias for tracking tried moves in history updates
 /// Limited to 16 moves to minimize stack usage (MAX_MOVES_TO_UPDATE)
+///
+/// SAFETY: This MUST remain at 16 elements or less to avoid heap allocation.
+/// SmallVec will allocate on the heap if more than 16 elements are pushed.
+/// The search code enforces this limit before pushing.
 pub type TriedMoves = SmallVec<[Move; 16]>;
 
 /// Type alias for capture move lists
@@ -231,10 +235,14 @@ impl Move {
         }
     }
 
-    /// Check if move is pseudo-legal capture (requires board state for accuracy)
+    /// Check if move has capture metadata (heuristic for ordering)
+    ///
+    /// NOTE: This is a hint based on move metadata set during generation.
+    /// It may not be 100% accurate if moves are created manually.
+    /// For exact capture detection, check the board state at the destination.
     #[inline]
     pub fn is_capture_hint(self) -> bool {
-        // Now we can check if there's a captured piece
+        // Check if there's a captured piece in the move metadata
         self.captured_piece_type().is_some()
     }
 
@@ -310,6 +318,9 @@ impl MoveList {
     }
 
     /// Get mutable slice of moves
+    ///
+    /// Note: Returns &mut Vec<Move> for compatibility with methods like retain()
+    /// that are only available on Vec, not slices.
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut Vec<Move> {
         &mut self.moves

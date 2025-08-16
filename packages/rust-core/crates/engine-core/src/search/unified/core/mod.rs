@@ -18,6 +18,13 @@ use crate::{
 };
 
 /// Get event polling mask based on time limit
+///
+/// Returns a bitmask that determines how frequently to check for events (time limit, stop flag, etc).
+/// Lower values mean more frequent checks:
+/// - 0x0 (0): Check every node (immediate response when already stopped)
+/// - 0x1F (31): Check every 32 nodes (responsive stop handling)
+/// - 0x3F (63): Check every 64 nodes (fixed nodes or ponder mode)
+/// - 0x7F-0x3FF: Check every 128-1024 nodes (time-based controls)
 fn get_event_poll_mask<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
     searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
 ) -> u64
