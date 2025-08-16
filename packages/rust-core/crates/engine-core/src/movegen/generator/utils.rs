@@ -136,6 +136,7 @@ impl<'a> MoveGenImpl<'a> {
     }
 
     /// Get bitboard of squares between two aligned squares
+    /// Returns empty bitboard if squares are not on same rank, file, or diagonal
     pub(super) fn between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
         let mut between = Bitboard::EMPTY;
 
@@ -143,6 +144,20 @@ impl<'a> MoveGenImpl<'a> {
         let rank1 = sq1.rank() as i8;
         let file2 = sq2.file() as i8;
         let rank2 = sq2.rank() as i8;
+
+        // Check if squares are on same rank, file, or diagonal
+        let file_diff = (file2 - file1).abs();
+        let rank_diff = (rank2 - rank1).abs();
+
+        // Not on same rank, file, or diagonal - return empty
+        if file_diff != 0 && rank_diff != 0 && file_diff != rank_diff {
+            return between;
+        }
+
+        // Same square - return empty
+        if file_diff == 0 && rank_diff == 0 {
+            return between;
+        }
 
         let file_step = if file2 > file1 {
             1
@@ -163,9 +178,15 @@ impl<'a> MoveGenImpl<'a> {
         let mut r = rank1 + rank_step;
 
         while f != file2 || r != rank2 {
-            between.set(Square::new(f as u8, r as u8));
-            f += file_step;
-            r += rank_step;
+            // Bounds check before creating square
+            if (0..9).contains(&f) && (0..9).contains(&r) {
+                between.set(Square::new(f as u8, r as u8));
+                f += file_step;
+                r += rank_step;
+            } else {
+                // Out of bounds - something went wrong, return what we have
+                break;
+            }
         }
 
         between
