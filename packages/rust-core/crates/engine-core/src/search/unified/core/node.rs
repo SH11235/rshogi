@@ -149,16 +149,8 @@ where
         let candidate = tt_entry.filter(|e| e.matches(hash)).and_then(|entry| entry.get_move());
         match candidate {
             Some(m) if moves.iter().any(|&lm| lm == m) => Some(m),
-            Some(m) => {
-                // TT move was invalid - log for debugging
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!(
-                        "[DEBUG] TT move {} rejected - not in legal moves",
-                        crate::usi::move_to_usi(&m)
-                    );
-                    eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
-                }
+            Some(_) => {
+                // TT move was invalid
                 None
             }
             _ => None,
@@ -333,17 +325,20 @@ where
 
                 // Update PV safely - need to create temporary slice to avoid borrowing issues
                 {
-                    #[cfg(debug_assertions)]
-                    {
-                        eprintln!(
-                            "[DEBUG] Setting PV move {} at ply {}",
-                            crate::usi::move_to_usi(&mv),
-                            ply
-                        );
-                        eprintln!("  Current position: {}", crate::usi::position_to_sfen(pos));
-                    }
                     let child_pv = searcher.pv_table.get_line((ply + 1) as usize).to_vec();
-                    searcher.pv_table.set_line(ply as usize, mv, &child_pv);
+
+                    // Validate that the move is still pseudo-legal before adding to PV
+                    // This prevents TT pollution from causing invalid PVs
+                    if pos.is_pseudo_legal(mv) {
+                        searcher.pv_table.set_line(ply as usize, mv, &child_pv);
+                    } else {
+                        #[cfg(debug_assertions)]
+                        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                            eprintln!("[WARNING] Skipping invalid move in PV update at ply {ply}");
+                            eprintln!("  Move: {}", crate::usi::move_to_usi(&mv));
+                            eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
+                        }
+                    }
                 }
 
                 // Validate PV immediately in debug builds

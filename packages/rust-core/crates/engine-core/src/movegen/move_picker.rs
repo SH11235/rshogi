@@ -47,8 +47,6 @@ enum MovePickerStage {
     RootPV,
     /// TT move
     TTMove,
-    /// PV move (from previous iteration)
-    PVMove,
     /// Generate captures
     GenerateCaptures,
     /// Good captures (SEE >= 0)
@@ -161,18 +159,11 @@ impl<'a> MovePicker<'a> {
                 }
 
                 MovePickerStage::TTMove => {
-                    self.stage = MovePickerStage::PVMove;
+                    self.stage = MovePickerStage::GenerateCaptures;
                     if let Some(tt_move) = self.tt_move {
                         if self.pos.is_legal_move(tt_move) {
                             return Some(tt_move);
                         }
-                    }
-                }
-
-                MovePickerStage::PVMove => {
-                    self.stage = MovePickerStage::GenerateCaptures;
-                    if let Some(pv_move) = self.pv_move {
-                        return Some(pv_move);
                     }
                 }
 
@@ -184,7 +175,7 @@ impl<'a> MovePicker<'a> {
 
                 MovePickerStage::GoodCaptures => {
                     if let Some(mv) = self.pick_best() {
-                        if Some(mv) != self.tt_move {
+                        if Some(mv) != self.tt_move && Some(mv) != self.pv_move {
                             // Separate good and bad captures
                             let score = self.see(mv);
                             if score >= 0 {
@@ -210,6 +201,7 @@ impl<'a> MovePicker<'a> {
                         if let Some(killer) = self.stack.killers[self.current] {
                             self.current += 1; // Move to next killer slot
                             if Some(killer) != self.tt_move
+                                && Some(killer) != self.pv_move
                                 && !self.is_capture(killer)
                                 && self.pos.is_legal_move(killer)
                             {
@@ -252,7 +244,7 @@ impl<'a> MovePicker<'a> {
                     if self.current < self.bad_captures.len() {
                         let mv = self.bad_captures[self.current].mv;
                         self.current += 1; // Move to next bad capture
-                        if Some(mv) != self.tt_move {
+                        if Some(mv) != self.tt_move && Some(mv) != self.pv_move {
                             return Some(mv);
                         }
                     } else {
@@ -286,9 +278,13 @@ impl<'a> MovePicker<'a> {
         let mut gen = MoveGen::new();
         gen.generate_all(&self.pos, &mut move_list);
 
-        // Add only non-captures that are not killers or TT move
+        // Add only non-captures that are not killers, TT move, or PV move
         for &mv in move_list.as_slice() {
-            if !self.is_capture(mv) && Some(mv) != self.tt_move && !self.is_killer(mv) {
+            if !self.is_capture(mv)
+                && Some(mv) != self.tt_move
+                && Some(mv) != self.pv_move
+                && !self.is_killer(mv)
+            {
                 self.moves.push(ScoredMove::new(mv, 0));
             }
         }
@@ -303,7 +299,6 @@ impl<'a> MovePicker<'a> {
                 let see_value = self.see(mv);
 
                 // Use SEE value as the primary score
-                // Multiply by 100 to make it comparable with history scores
                 self.moves[i].score = see_value;
 
                 // Small promotion bonus (SEE already accounts for promoted piece value)
@@ -421,10 +416,18 @@ impl Position {
         // Black pawn attacks upward (toward rank 0), white pawn attacks downward (toward rank 8)
         let expected_king_sq = if self.side_to_move == Color::Black {
             // Black pawn at rank N attacks rank N-1
-            Square::new(pawn_sq.file(), pawn_sq.rank() - 1)
+            let rank = pawn_sq.rank();
+            if rank == 0 {
+                return false; // Black pawn at rank 0 cannot attack (invalid position)
+            }
+            Square::new(pawn_sq.file(), rank - 1)
         } else {
             // White pawn at rank N attacks rank N+1
-            Square::new(pawn_sq.file(), pawn_sq.rank() + 1)
+            let rank = pawn_sq.rank();
+            if rank == 8 {
+                return false; // White pawn at rank 8 cannot attack (invalid position)
+            }
+            Square::new(pawn_sq.file(), rank + 1)
         };
 
         if king_sq != expected_king_sq {
@@ -465,7 +468,7 @@ impl Position {
         let king_moves = ATTACK_TABLES.king_attacks(king_sq);
 
         // King cannot capture its own pieces (Shogi rule)
-        let friend_blocks = self.board.occupied_bb[defense_color as usize];
+        let friend_blocks = test_pos.board.occupied_bb[defense_color as usize];
         let mut king_escape_candidates = king_moves & !friend_blocks;
 
         // Remove the pawn square (king can't capture it due to support)
@@ -506,15 +509,8 @@ impl Position {
             // Check if we have the piece to drop
             let piece_type = mv.drop_piece_type();
             let color_idx = self.side_to_move as usize;
-            let hand_idx = match piece_type {
-                PieceType::Rook => 0,
-                PieceType::Bishop => 1,
-                PieceType::Gold => 2,
-                PieceType::Silver => 3,
-                PieceType::Knight => 4,
-                PieceType::Lance => 5,
-                PieceType::Pawn => 6,
-                _ => return false, // Can't drop King or promoted pieces
+            let Some(hand_idx) = piece_type.hand_index() else {
+                return false; // Can't drop King or invalid type
             };
 
             if self.hands[color_idx][hand_idx] == 0 {
@@ -644,14 +640,33 @@ mod tests {
 
     #[test]
     fn test_quiescence_picker() {
-        let pos = Position::startpos();
+        // Create a position with no possible captures
+        let mut pos = Position::empty();
+
+        // Add kings (required)
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        // Add some pieces that cannot capture each other
+        pos.board
+            .put_piece(parse_usi_square("7g").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("3c").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+
         let history = History::new();
         let stack = SearchStack::default();
 
         let mut picker = MovePicker::new_quiescence(&pos, None, &history, &stack, 1);
 
-        // In starting position, there should be no captures
-        assert!(picker.next_move().is_none());
+        // In this position, there should be no captures
+        assert!(
+            picker.next_move().is_none(),
+            "Quiescence search should return no moves when no captures are available"
+        );
     }
 
     #[test]
@@ -783,7 +798,7 @@ mod tests {
         );
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // Pawn is index 6
 
         // Try to drop a pawn in the same file
         let illegal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5d").unwrap()); // 5d
@@ -867,7 +882,7 @@ mod tests {
         );
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Update all_bb and occupied_bb
         // Rebuild occupancy bitboards after manual manipulation
@@ -918,7 +933,7 @@ mod tests {
             .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1000,7 +1015,7 @@ mod tests {
             .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1054,7 +1069,7 @@ mod tests {
             .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1106,7 +1121,7 @@ mod tests {
             .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1151,7 +1166,7 @@ mod tests {
             .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1196,7 +1211,7 @@ mod tests {
             .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Give white a pawn in hand
-        pos.hands[Color::White as usize][6] = 1;
+        pos.hands[Color::White as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1237,7 +1252,7 @@ mod tests {
             .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1282,7 +1297,7 @@ mod tests {
             .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1326,7 +1341,7 @@ mod tests {
             .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
         // Give black a pawn in hand
-        pos.hands[Color::Black as usize][6] = 1; // Pawn is index 6
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         // Rebuild occupancy bitboards
         pos.board.rebuild_occupancy_bitboards();
@@ -1354,7 +1369,7 @@ mod tests {
 
         // Test Black pawn drop on rank 0 (last rank for Black)
         pos.side_to_move = Color::Black;
-        pos.hands[Color::Black as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
         pos.board.rebuild_occupancy_bitboards();
 
         let illegal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5a").unwrap()); // 5a
@@ -1365,8 +1380,8 @@ mod tests {
 
         // Test White pawn drop on rank 8 (last rank for White)
         pos.side_to_move = Color::White;
-        pos.hands[Color::Black as usize][6] = 0; // Remove Black's pawn
-        pos.hands[Color::White as usize][6] = 1;
+        pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 0; // Remove Black's pawn
+        pos.hands[Color::White as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
         let illegal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5i").unwrap()); // 5i
         assert!(
@@ -1390,7 +1405,7 @@ mod tests {
 
         // Test Black lance drop on rank 0 (last rank for Black)
         pos.side_to_move = Color::Black;
-        pos.hands[Color::Black as usize][5] = 1; // Lance is index 5
+        pos.hands[Color::Black as usize][PieceType::Lance.hand_index().unwrap()] = 1; // Lance is index 5
         pos.board.rebuild_occupancy_bitboards();
 
         let illegal_drop = Move::drop(PieceType::Lance, parse_usi_square("5a").unwrap()); // 5a
@@ -1401,14 +1416,49 @@ mod tests {
 
         // Test White lance drop on rank 8 (last rank for White)
         pos.side_to_move = Color::White;
-        pos.hands[Color::Black as usize][5] = 0; // Remove Black's lance
-        pos.hands[Color::White as usize][5] = 1;
+        pos.hands[Color::Black as usize][PieceType::Lance.hand_index().unwrap()] = 0; // Remove Black's lance
+        pos.hands[Color::White as usize][PieceType::Lance.hand_index().unwrap()] = 1;
 
         let illegal_drop = Move::drop(PieceType::Lance, parse_usi_square("5i").unwrap()); // 5i
         assert!(
             !pos.is_legal_move(illegal_drop),
             "White should not be able to drop lance on rank 8"
         );
+    }
+
+    #[test]
+    fn test_pv_move_no_duplication() {
+        // Test that PV move is not returned multiple times
+        let pos = Position::startpos();
+        let history = History::new();
+        let stack = SearchStack::default();
+
+        // Create a legal move as PV move
+        let pv_move = Some(Move::normal(
+            parse_usi_square("7g").unwrap(),
+            parse_usi_square("7f").unwrap(),
+            false,
+        ));
+
+        // Create move picker with PV move at root (ply 0)
+        let mut picker = MovePicker::new(&pos, None, pv_move, &history, &stack, 0);
+
+        // Collect all moves and check for duplicates
+        let mut moves = Vec::new();
+        let mut pv_count = 0;
+        while let Some(mv) = picker.next_move() {
+            if Some(mv) == pv_move {
+                pv_count += 1;
+            }
+            moves.push(mv);
+        }
+
+        // PV move should appear exactly once
+        assert_eq!(pv_count, 1, "PV move should be returned exactly once");
+
+        // Check that we got a reasonable number of moves (should be all legal moves)
+        assert!(moves.len() > 20, "Should generate many moves from starting position");
+        assert!(moves.len() < 40, "Should not have duplicate moves");
     }
 
     #[test]
@@ -1426,7 +1476,7 @@ mod tests {
 
         // Test Black knight drop
         pos.side_to_move = Color::Black;
-        pos.hands[Color::Black as usize][4] = 1; // Knight is index 4
+        pos.hands[Color::Black as usize][PieceType::Knight.hand_index().unwrap()] = 1; // Knight is index 4
         pos.board.rebuild_occupancy_bitboards();
 
         // Cannot drop on rank 0 or 1
@@ -1448,8 +1498,8 @@ mod tests {
 
         // Test White knight drop
         pos.side_to_move = Color::White;
-        pos.hands[Color::Black as usize][4] = 0; // Remove Black's knight
-        pos.hands[Color::White as usize][4] = 1;
+        pos.hands[Color::Black as usize][PieceType::Knight.hand_index().unwrap()] = 0; // Remove Black's knight
+        pos.hands[Color::White as usize][PieceType::Knight.hand_index().unwrap()] = 1;
 
         // Cannot drop on rank 8 or 7
         let illegal_drop1 = Move::drop(PieceType::Knight, parse_usi_square("5i").unwrap()); // 5i

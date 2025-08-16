@@ -55,9 +55,9 @@ fn test_count_piece_in_hand() {
     let mut pos = Position::empty();
 
     // Add some pieces to hands
-    pos.hands[Color::Black as usize][0] = 1; // Rook
-    pos.hands[Color::Black as usize][1] = 2; // Bishop
-    pos.hands[Color::White as usize][6] = 5; // Pawn
+    pos.hands[Color::Black as usize][PieceType::Rook.hand_index().unwrap()] = 1; // Rook
+    pos.hands[Color::Black as usize][PieceType::Bishop.hand_index().unwrap()] = 2; // Bishop
+    pos.hands[Color::White as usize][PieceType::Pawn.hand_index().unwrap()] = 5; // Pawn
 
     // Test counts
     assert_eq!(pos.count_piece_in_hand(Color::Black, PieceType::Rook), 1);

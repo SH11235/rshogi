@@ -73,7 +73,8 @@ fn test_do_move_capture() {
     assert_eq!(pos.board.piece_on(to), Some(Piece::new(PieceType::Pawn, Color::Black)));
 
     // 持ち駒が増えていることを確認
-    assert_eq!(pos.hands[Color::Black as usize][6], 1); // 歩のインデックスは6
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1);
+    // 歩のインデックスは6
 }
 
 #[test]
@@ -113,7 +114,7 @@ fn test_do_move_drop() {
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // 持ち駒を設定
-    pos.hands[Color::Black as usize][6] = 1;
+    pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
     // 歩を打つ
     let to = parse_usi_square("5e").unwrap(); // 5e
@@ -125,7 +126,7 @@ fn test_do_move_drop() {
     assert_eq!(pos.board.piece_on(to), Some(Piece::new(PieceType::Pawn, Color::Black)));
 
     // 持ち駒が減っていることを確認
-    assert_eq!(pos.hands[Color::Black as usize][6], 0);
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 0);
 
     // 手番が切り替わっていることを確認
     assert_eq!(pos.side_to_move, Color::White);
@@ -491,14 +492,14 @@ fn test_do_move_undo_move_capture() {
     let undo_info = pos.do_move(capture_move);
 
     // 駒が取れたことを確認
-    assert_eq!(pos.hands[Color::Black as usize][6], 1); // 歩を1枚持っている
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1); // 歩を1枚持っている
 
     // 手を戻す
     pos.undo_move(capture_move, undo_info);
 
     // 完全に元に戻ったことを確認
     assert_eq!(pos.hash, before_capture.hash);
-    assert_eq!(pos.hands[Color::Black as usize][6], 0); // 持ち駒なし
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 0); // 持ち駒なし
     for sq in 0..81 {
         let square = Square(sq);
         assert_eq!(pos.board.piece_on(square), before_capture.board.piece_on(square));
@@ -556,7 +557,7 @@ fn test_do_move_undo_move_drop() {
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // 持ち駒を設定
-    pos.hands[Color::Black as usize][6] = 1; // 歩を1枚
+    pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // 歩を1枚
     pos.hash = ZobristHashing::zobrist_hash(&pos);
     pos.zobrist_hash = pos.hash;
 
@@ -568,7 +569,7 @@ fn test_do_move_undo_move_drop() {
 
     // 打ったことを確認
     assert!(pos.board.piece_on(parse_usi_square("5e").unwrap()).is_some());
-    assert_eq!(pos.hands[Color::Black as usize][6], 0);
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 0);
 
     // 手を戻す
     pos.undo_move(drop_move, undo_info);
@@ -576,7 +577,7 @@ fn test_do_move_undo_move_drop() {
     // 完全に元に戻ったことを確認
     assert_eq!(pos.hash, before_drop.hash);
     assert!(pos.board.piece_on(parse_usi_square("5e").unwrap()).is_none());
-    assert_eq!(pos.hands[Color::Black as usize][6], 1);
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1);
 }
 
 #[test]

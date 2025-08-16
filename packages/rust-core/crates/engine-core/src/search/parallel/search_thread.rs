@@ -224,8 +224,8 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             ..limits
         };
 
-        // Perform the search
-        let result = self.searcher.search(position, depth_limits);
+        // Perform the search (don't reset stats for parallel threads)
+        let result = self.searcher.search_with_options(position, depth_limits, false);
 
         // Update local tables from searcher
         self.local_history = self.searcher.get_history();
@@ -317,8 +317,8 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
 
         // Search from the resulting position
         let result = if depth > 1 {
-            // Search with reduced depth
-            let search_result = self.searcher.search(position, depth_limits);
+            // Search with reduced depth (don't reset stats for parallel threads)
+            let search_result = self.searcher.search_with_options(position, depth_limits, false);
 
             // Negate score (we searched from opponent's perspective)
             SearchResult {
@@ -449,7 +449,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                 ..Default::default()
             };
 
-            let result = self.searcher.search(&mut pos, limits);
+            let result = self.searcher.search_with_options(&mut pos, limits, false);
 
             // Negate score (searched from opponent's perspective)
             let score = -result.score;
@@ -495,7 +495,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             ..Default::default()
         };
 
-        let result = self.searcher.search(&mut pos, limits);
+        let result = self.searcher.search_with_options(&mut pos, limits, false);
 
         // Negate score (searched from opponent's perspective)
         let score = -result.score;
