@@ -23,12 +23,14 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
     // Check attacks from each enemy piece type
 
     // Pawn checks
-    let enemy_pawns = gen.pos.board.piece_bb[them as usize][PieceType::Pawn as usize];
+    let enemy_pawns = gen.pos.board.piece_bb[them as usize][PieceType::Pawn as usize]
+        & !gen.pos.board.promoted_bb;
     let pawn_attacks = ATTACK_TABLES.pawn_attacks(king_sq, them);
     gen.checkers |= enemy_pawns & pawn_attacks;
 
     // Knight checks
-    let enemy_knights = gen.pos.board.piece_bb[them as usize][PieceType::Knight as usize];
+    let enemy_knights = gen.pos.board.piece_bb[them as usize][PieceType::Knight as usize]
+        & !gen.pos.board.promoted_bb;
     let knight_attacks = ATTACK_TABLES.knight_attacks(king_sq, them);
     gen.checkers |= enemy_knights & knight_attacks;
 
@@ -76,7 +78,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
                 let blocker_sq = blockers.lsb().unwrap();
                 if our_pieces.test(blocker_sq) {
                     gen.pinned.set(blocker_sq);
-                    gen.pin_rays[blocker_sq.0 as usize] = between | Bitboard::from_square(lance_sq);
+                    gen.pin_rays[blocker_sq.index()] = between | Bitboard::from_square(lance_sq);
                 }
             }
         }
@@ -108,7 +110,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
                 let blocker_sq = blockers.lsb().unwrap();
                 if our_pieces.test(blocker_sq) {
                     gen.pinned.set(blocker_sq);
-                    gen.pin_rays[blocker_sq.0 as usize] = between | Bitboard::from_square(rook_sq);
+                    gen.pin_rays[blocker_sq.index()] = between | Bitboard::from_square(rook_sq);
                 }
             }
         }
@@ -127,8 +129,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
                 let blocker_sq = blockers.lsb().unwrap();
                 if our_pieces.test(blocker_sq) {
                     gen.pinned.set(blocker_sq);
-                    gen.pin_rays[blocker_sq.0 as usize] =
-                        between | Bitboard::from_square(bishop_sq);
+                    gen.pin_rays[blocker_sq.index()] = between | Bitboard::from_square(bishop_sq);
                 }
             }
         }
@@ -144,12 +145,6 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
     let mut occupancy_after = gen.pos.board.all_bb;
     occupancy_after.clear(from);
     occupancy_after.set(to);
-
-    // Remove captured piece if any
-    if gen.pos.board.piece_on(to).is_some() {
-        occupancy_after.clear(to);
-        occupancy_after.set(to); // Re-set for our king
-    }
 
     // Check all enemy pieces for attacks to the new king position
 

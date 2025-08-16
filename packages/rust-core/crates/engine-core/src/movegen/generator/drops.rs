@@ -215,12 +215,7 @@ pub(super) fn is_drop_pawn_mate(gen: &MoveGenImpl, to: Square, them: Color) -> b
         occ_after_escape.clear(their_king_sq);
         occ_after_escape.set(escape_sq);
 
-        // If escaping to 'to', the pawn is captured
-        if escape_sq == to {
-            // This case was already handled in step 1, but we check again for completeness
-            occ_after_escape.clear(to);
-            occ_after_escape.set(to); // King is now at 'to'
-        }
+        // If escaping to 'to', the pawn is captured (already handled in step 1)
 
         // Check if escape square is safe
         let attackers = gen.attackers_to_with_occupancy(escape_sq, us, occ_after_escape);

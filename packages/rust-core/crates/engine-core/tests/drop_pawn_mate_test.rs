@@ -37,7 +37,7 @@ fn test_drop_pawn_mate_with_support() {
     let mut moves = MoveList::new();
     move_gen.generate_all(&pos, &mut moves);
 
-    // Check that P*2h is not in the move list (illegal drop pawn mate)
+    // Check that P*1b is not in the move list (illegal drop pawn mate)
     for i in 0..moves.len() {
         let mv = &moves[i];
         if mv.is_drop() {
