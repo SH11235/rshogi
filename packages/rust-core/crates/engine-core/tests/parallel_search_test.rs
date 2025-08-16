@@ -70,9 +70,7 @@ fn test_parallel_search_node_counting() {
     // Node counts should be similar (within 2x) for same position/depth
     assert!(
         nodes2 > nodes1 / 2 && nodes2 < nodes1 * 2,
-        "Node counts should be consistent: {} vs {}",
-        nodes1,
-        nodes2
+        "Node counts should be consistent: {nodes1} vs {nodes2}"
     );
 }
 
@@ -108,8 +106,8 @@ fn test_continuous_searches() {
             .build();
 
         let result = engine.search(&mut pos, limits);
-        assert!(result.best_move.is_some(), "Search {} should find a move", i);
-        assert!(result.stats.elapsed.as_millis() <= 20, "Search {} should respect time limit", i);
+        assert!(result.best_move.is_some(), "Search {i} should find a move");
+        assert!(result.stats.elapsed.as_millis() <= 20, "Search {i} should respect time limit");
 
         // Small delay between searches
         thread::sleep(Duration::from_millis(5));
