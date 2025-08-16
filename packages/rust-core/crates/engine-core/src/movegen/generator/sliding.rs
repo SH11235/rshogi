@@ -1,6 +1,6 @@
 //! Sliding piece move generation (rook, bishop, lance)
 
-use crate::{Bitboard, PieceType, Square};
+use crate::{shogi::attacks, Bitboard, PieceType, Square};
 
 use super::core::MoveGenImpl;
 
@@ -127,7 +127,7 @@ fn generate_ray_moves(
 
         if !gen.checkers.is_empty() {
             let check_mask =
-                gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
+                gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
             valid_moves &= check_mask;
         }
 
@@ -160,7 +160,8 @@ fn generate_king_style_moves(
     }
 
     if !gen.checkers.is_empty() {
-        let check_mask = gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
+        let check_mask =
+            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
         final_targets &= check_mask;
     }
 
@@ -234,7 +235,8 @@ pub(super) fn generate_lance_moves(gen: &mut MoveGenImpl, from: Square, promoted
 
     // If in check, can only block or capture checker
     if !gen.checkers.is_empty() {
-        let check_mask = gen.checkers | gen.between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
+        let check_mask =
+            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
         let valid_targets = targets & check_mask;
         generate_lance_moves_to_targets(gen, from, valid_targets, us);
         return;
