@@ -3,7 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     search::{constants::SEARCH_INF, tt::NodeType, unified::UnifiedSearcher},
-    shogi::{Move, PieceType, Position},
+    shogi::{MoveVec, PieceType, Position},
 };
 
 /// Search a single node in the tree
@@ -53,8 +53,8 @@ where
     let mut best_move = None;
     let mut best_score = -SEARCH_INF;
     let mut moves_searched = 0;
-    let mut quiet_moves_tried: Vec<Move> = Vec::new();
-    let mut captures_tried: Vec<Move> = Vec::new();
+    let mut quiet_moves_tried: MoveVec = MoveVec::new();
+    let mut captures_tried: MoveVec = MoveVec::new();
 
     // Check if in check and update search stack
     let in_check = pos.is_in_check();
@@ -160,10 +160,12 @@ where
     };
 
     // Order moves
-    let ordered_moves = if USE_TT || USE_PRUNING {
-        searcher.ordering.order_moves(pos, &moves, tt_move, &searcher.search_stack, ply)
+    let ordered_moves: MoveVec = if USE_TT || USE_PRUNING {
+        let moves_vec =
+            searcher.ordering.order_moves(pos, &moves, tt_move, &searcher.search_stack, ply);
+        MoveVec::from_vec(moves_vec)
     } else {
-        moves.as_slice().to_vec()
+        MoveVec::from_slice(moves.as_slice())
     };
 
     // Skip selective prefetch - let individual moves control their own prefetching
@@ -323,21 +325,17 @@ where
             if score > alpha {
                 alpha = score;
 
-                // Update PV safely - need to create temporary slice to avoid borrowing issues
-                {
-                    let child_pv = searcher.pv_table.get_line((ply + 1) as usize).to_vec();
-
-                    // Validate that the move is still pseudo-legal before adding to PV
-                    // This prevents TT pollution from causing invalid PVs
-                    if pos.is_pseudo_legal(mv) {
-                        searcher.pv_table.set_line(ply as usize, mv, &child_pv);
-                    } else {
-                        #[cfg(debug_assertions)]
-                        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                            eprintln!("[WARNING] Skipping invalid move in PV update at ply {ply}");
-                            eprintln!("  Move: {}", crate::usi::move_to_usi(&mv));
-                            eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
-                        }
+                // Update PV without allocation using the new method
+                // Validate that the move is still pseudo-legal before adding to PV
+                // This prevents TT pollution from causing invalid PVs
+                if pos.is_pseudo_legal(mv) {
+                    searcher.pv_table.update_from_child(ply as usize, mv, (ply + 1) as usize);
+                } else {
+                    #[cfg(debug_assertions)]
+                    if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                        eprintln!("[WARNING] Skipping invalid move in PV update at ply {ply}");
+                        eprintln!("  Move: {}", crate::usi::move_to_usi(&mv));
+                        eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
                     }
                 }
 

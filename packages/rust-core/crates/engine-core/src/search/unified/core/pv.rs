@@ -108,6 +108,46 @@ impl PVTable {
     pub fn get_pv(&self) -> &[Move] {
         self.get_line(0)
     }
+
+    /// Update PV by copying from child ply without allocation
+    /// This method avoids the need to create a temporary vector
+    #[inline]
+    pub fn update_from_child(&mut self, ply: usize, best_move: Move, child_ply: usize) {
+        if ply >= MAX_PLY || child_ply >= MAX_PLY {
+            return;
+        }
+
+        // Skip null moves
+        if best_move == Move::NULL {
+            #[cfg(debug_assertions)]
+            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                eprintln!("[WARNING] Attempted to add NULL move to PV at ply {ply}");
+            }
+            return;
+        }
+
+        // Get child PV length
+        let child_len = self.len[child_ply];
+        let copy_len = child_len.min(MAX_PLY - 1);
+
+        // Set the best move
+        self.mv[ply][0] = best_move;
+
+        // Copy child PV directly without temporary allocation
+        if copy_len > 0 {
+            // Copy from child PV table to current ply
+            // Safe because we're copying between different ply levels
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    self.mv[child_ply].as_ptr(),
+                    self.mv[ply][1..].as_mut_ptr(),
+                    copy_len,
+                );
+            }
+        }
+
+        self.len[ply] = copy_len + 1;
+    }
 }
 
 impl Default for PVTable {
@@ -283,5 +323,45 @@ mod tests {
         // Update with longer PV
         pv.set_line(0, move3, &[move1, move2, move3]);
         assert_eq!(pv.line(0).1, 4);
+    }
+
+    #[test]
+    fn test_update_from_child() {
+        // Test the new update_from_child method
+        let mut pv = PVTable::new();
+
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false);
+        let move3 =
+            Move::normal(parse_usi_square("2g").unwrap(), parse_usi_square("2f").unwrap(), false);
+
+        // Set up child PV at ply 1
+        pv.set_line(1, move2, &[move3]);
+        assert_eq!(pv.line(1).1, 2);
+
+        // Update parent PV from child
+        pv.update_from_child(0, move1, 1);
+
+        // Check that PV was properly updated
+        let (line, len) = pv.line(0);
+        assert_eq!(len, 3);
+        assert_eq!(line[0], move1);
+        assert_eq!(line[1], move2);
+        assert_eq!(line[2], move3);
+
+        // Test with empty child PV
+        pv.clear_len_at(2);
+        pv.update_from_child(1, move1, 2);
+        let (line, len) = pv.line(1);
+        assert_eq!(len, 1);
+        assert_eq!(line[0], move1);
+
+        // Test NULL move handling
+        pv.update_from_child(0, Move::NULL, 1);
+        // Should not update due to NULL move
+        let (_, len) = pv.line(0);
+        assert_eq!(len, 3); // Should remain unchanged
     }
 }

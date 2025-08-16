@@ -14,7 +14,7 @@ use crate::{
         constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
         unified::UnifiedSearcher,
     },
-    shogi::{Move, PieceType, Position},
+    shogi::{Move, MoveVec, PieceType, Position},
 };
 
 /// Get event polling mask based on time limit
@@ -257,10 +257,11 @@ where
     }
 
     // Order moves
-    let ordered_moves = if USE_TT || USE_PRUNING {
-        searcher.ordering.order_moves(pos, &moves, None, &searcher.search_stack, 0)
+    let ordered_moves: MoveVec = if USE_TT || USE_PRUNING {
+        let moves_vec = searcher.ordering.order_moves(pos, &moves, None, &searcher.search_stack, 0);
+        MoveVec::from_vec(moves_vec)
     } else {
-        moves.as_slice().to_vec()
+        MoveVec::from_slice(moves.as_slice())
     };
 
     // Skip prefetching - it has shown negative performance impact
@@ -652,9 +653,9 @@ where
     }
 
     // Order captures by MVV-LVA if pruning is enabled
-    let ordered_captures = if USE_PRUNING {
-        let mut captures_vec: Vec<Move> = moves.as_slice().to_vec();
-        captures_vec.sort_by_cached_key(|&mv| {
+    let mut ordered_captures: MoveVec = MoveVec::from_slice(moves.as_slice());
+    if USE_PRUNING {
+        ordered_captures.sort_by_cached_key(|&mv| {
             // Simple MVV-LVA: prioritize capturing more valuable pieces
             if let Some(victim) = mv.captured_piece_type() {
                 -(victim as i32)
@@ -662,10 +663,7 @@ where
                 0
             }
         });
-        captures_vec
-    } else {
-        moves.as_slice().to_vec()
-    };
+    }
 
     // Search captures
     for &mv in ordered_captures.iter() {
