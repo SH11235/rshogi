@@ -1,6 +1,6 @@
 //! Sliding piece move generation (rook, bishop, lance)
 
-use crate::{shogi::attacks, Bitboard, PieceType, Square};
+use crate::{Bitboard, PieceType, Square};
 
 use super::core::MoveGenImpl;
 
@@ -85,7 +85,6 @@ fn generate_ray_moves(
     rank_delta: i8,
     piece_type: PieceType,
 ) {
-    let mut moves = Vec::new();
     let from_file = from.file() as i8;
     let from_rank = from.rank() as i8;
 
@@ -99,32 +98,17 @@ fn generate_ray_moves(
         if all_pieces.test(to) {
             // Can capture if it's an enemy piece
             if targets.test(to) {
-                moves.push(to);
+                gen.add_single_move(from, to, piece_type);
             }
             break; // Stop at any piece
         }
 
         // Empty square - can move here
-        moves.push(to);
+        gen.add_single_move(from, to, piece_type);
 
         // Continue along the ray
         current_file += file_delta;
         current_rank += rank_delta;
-    }
-
-    // Apply pin and check constraints if needed, then add moves
-    if !moves.is_empty() {
-        let mut valid_moves = Bitboard::EMPTY;
-        for &to in &moves {
-            valid_moves.set(to);
-        }
-
-        // Add moves in order
-        for &to in &moves {
-            if valid_moves.test(to) {
-                gen.add_single_move(from, to, piece_type);
-            }
-        }
     }
 }
 
@@ -200,71 +184,6 @@ pub(super) fn generate_lance_moves(gen: &mut MoveGenImpl, from: Square, promoted
         }
     }
 
-    // If pinned, can only move along pin ray
-    if gen.pinned.test(from) {
-        let pin_ray = gen.pin_rays[from.index()];
-        let valid_targets = targets & pin_ray;
-        generate_lance_moves_to_targets(gen, from, valid_targets, us);
-        return;
-    }
-
-    // If in check, can only block or capture checker
-    if !gen.checkers.is_empty() {
-        let check_mask =
-            gen.checkers | attacks::between_bb(gen.king_sq, gen.checkers.lsb().unwrap());
-        let valid_targets = targets & check_mask;
-        generate_lance_moves_to_targets(gen, from, valid_targets, us);
-        return;
-    }
-
-    // Normal moves
-    generate_lance_moves_to_targets(gen, from, targets, us);
-}
-
-/// Helper function to generate lance moves to specific targets
-fn generate_lance_moves_to_targets(
-    gen: &mut MoveGenImpl,
-    from: Square,
-    targets: crate::Bitboard,
-    us: crate::Color,
-) {
-    use crate::{shogi::Move, PieceType};
-
-    let mut moves = targets;
-    while let Some(to) = moves.pop_lsb() {
-        let captured_type = gen.get_captured_type(to);
-        // Lance must promote if it reaches the last rank
-        let must_promote = match us {
-            crate::Color::Black => to.rank() == 0,
-            crate::Color::White => to.rank() == 8,
-        };
-
-        if must_promote {
-            gen.moves.push(Move::normal_with_piece(
-                from,
-                to,
-                true,
-                PieceType::Lance,
-                captured_type,
-            ));
-        } else {
-            let can_promote = gen.can_promote(from, to, us);
-            gen.moves.push(Move::normal_with_piece(
-                from,
-                to,
-                false,
-                PieceType::Lance,
-                captured_type,
-            ));
-            if can_promote {
-                gen.moves.push(Move::normal_with_piece(
-                    from,
-                    to,
-                    true,
-                    PieceType::Lance,
-                    captured_type,
-                ));
-            }
-        }
-    }
+    // Use unified move generation that handles pin and check constraints
+    gen.add_moves_with_type(from, targets, PieceType::Lance);
 }

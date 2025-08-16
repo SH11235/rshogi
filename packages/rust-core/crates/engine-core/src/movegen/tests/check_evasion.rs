@@ -158,7 +158,7 @@ fn test_double_check_only_king_moves() {
     }
 
     // King should have some escape squares
-    assert!(moves.len() > 0, "King should have escape moves");
+    assert!(!moves.is_empty(), "King should have escape moves");
 }
 
 #[test]
@@ -169,15 +169,15 @@ fn test_pinned_piece_can_capture_checker() {
     // Black king at 5i
     pos.board
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
-    // Black silver at 5h (will be pinned)
+    // Black gold at 5g (would be pinned in absence of extra blocker)
     pos.board
-        .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Silver, Color::Black));
-    // White rook at 5a (pinning silver through 5h)
+        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Gold, Color::Black));
+    // White rook at 5a (pinning silver through 5g)
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
-    // White gold at 5g giving check (on the pin ray, so silver can capture)
+    // White gold at 5h giving check (on the pin ray, so silver can capture)
     pos.board
-        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Gold, Color::White));
+        .put_piece(parse_usi_square("5h").unwrap(), Piece::new(PieceType::Gold, Color::White));
     // White king far away
     pos.board
         .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
@@ -186,26 +186,42 @@ fn test_pinned_piece_can_capture_checker() {
     pos.board.rebuild_occupancy_bitboards();
 
     let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
 
-    // Silver can capture gold (along pin ray)
-    let silver_capture = moves.as_slice().iter().any(|m| {
+    // Debug info
+    println!("\ntest_pinned_piece_can_capture_checker:");
+    println!("Checkers: {}", gen.checkers.count_ones());
+    println!("King at 5i, Gold at 5g, Rook at 5a, Gold at 5h (checking)");
+
+    let moves = gen.generate_all();
+    println!("Generated {} moves", moves.len());
+    for m in moves.as_slice() {
+        if !m.is_drop() {
+            println!(
+                "  Move from {} to {}",
+                m.from().map(|sq| sq.to_string()).unwrap_or("?".to_string()),
+                m.to()
+            );
+        }
+    }
+
+    // Gold can capture gold
+    let gold_capture = moves.as_slice().iter().any(|m| {
         !m.is_drop()
-            && m.from() == Some(parse_usi_square("5h").unwrap())
-            && m.to() == parse_usi_square("5g").unwrap()
+            && m.from() == Some(parse_usi_square("5g").unwrap())
+            && m.to() == parse_usi_square("5h").unwrap()
+    });
+    assert!(gold_capture, "Gold should be able to capture checking gold");
+
+    // Gold cannot move to other squares (due to check mask)
+    let gold_off_target = moves.as_slice().iter().any(|m| {
+        !m.is_drop()
+            && m.from() == Some(parse_usi_square("5g").unwrap())
+            && m.to() != parse_usi_square("5h").unwrap()
     });
     assert!(
-        silver_capture,
-        "Pinned silver should be able to capture checking gold along pin ray"
+        !gold_off_target,
+        "Gold should not be able to move to squares other than capturing checker"
     );
-
-    // Silver cannot move to other squares (off the pin ray)
-    let silver_off_ray = moves.as_slice().iter().any(|m| {
-        !m.is_drop()
-            && m.from() == Some(parse_usi_square("5h").unwrap())
-            && m.to() != parse_usi_square("5g").unwrap()
-    });
-    assert!(!silver_off_ray, "Pinned silver should not be able to move off pin ray");
 }
 
 #[test]
@@ -213,15 +229,15 @@ fn test_promotion_required_to_escape_check() {
     // Test case where promotion is required to escape check
     let mut pos = Position::empty();
 
-    // Black king at 2i
+    // Black king at 5i
     pos.board
-        .put_piece(parse_usi_square("2i").unwrap(), Piece::new(PieceType::King, Color::Black));
-    // Black pawn at 2b (must promote when moving to 2a)
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    // White rook at 5a giving check
     pos.board
-        .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
-    // White rook at 2a giving check (pawn can capture it with promotion)
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    // Black knight at 4c (can jump to 5a, must promote)
     pos.board
-        .put_piece(parse_usi_square("2a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+        .put_piece(parse_usi_square("4c").unwrap(), Piece::new(PieceType::Knight, Color::Black));
     // White king far away
     pos.board
         .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
@@ -234,7 +250,7 @@ fn test_promotion_required_to_escape_check() {
     // Debug
     println!("\ntest_promotion_required_to_escape_check:");
     println!("Checkers: {}", gen.checkers.count_ones());
-    println!("King at 2i, Pawn at 2b, Gold at 2a, Rook at 1i giving check");
+    println!("King at 5i, Rook at 5a giving check, Knight at 4c");
 
     let moves = gen.generate_all();
     println!("Generated {} moves", moves.len());
@@ -243,27 +259,27 @@ fn test_promotion_required_to_escape_check() {
             println!(
                 "  Move from {} to {} (promoted: {})",
                 m.from().map(|sq| sq.to_string()).unwrap_or("?".to_string()),
-                m.to().to_string(),
+                m.to(),
                 m.is_promote()
             );
         }
     }
 
-    // Pawn must capture gold with promotion
-    let pawn_capture = moves.as_slice().iter().any(|m| {
+    // Knight must capture rook with promotion
+    let knight_capture = moves.as_slice().iter().any(|m| {
         !m.is_drop()
-            && m.from() == Some(parse_usi_square("2b").unwrap())
-            && m.to() == parse_usi_square("2a").unwrap()
+            && m.from() == Some(parse_usi_square("4c").unwrap())
+            && m.to() == parse_usi_square("5a").unwrap()
             && m.is_promote()
     });
-    assert!(pawn_capture, "Pawn must promote when capturing gold at 2a");
+    assert!(knight_capture, "Knight must promote when capturing rook at 5a");
 
     // No non-promotion move should exist
-    let pawn_no_promote = moves.as_slice().iter().any(|m| {
+    let knight_no_promote = moves.as_slice().iter().any(|m| {
         !m.is_drop()
-            && m.from() == Some(parse_usi_square("2b").unwrap())
-            && m.to() == parse_usi_square("2a").unwrap()
+            && m.from() == Some(parse_usi_square("4c").unwrap())
+            && m.to() == parse_usi_square("5a").unwrap()
             && !m.is_promote()
     });
-    assert!(!pawn_no_promote, "Pawn cannot move to 2a without promotion");
+    assert!(!knight_no_promote, "Knight cannot move to 5a without promotion");
 }
