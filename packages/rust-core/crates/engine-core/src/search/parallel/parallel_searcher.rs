@@ -104,7 +104,7 @@ struct Queues {
 fn get_job(
     my_worker: &DequeWorker<WorkItem>,
     queues: &Queues,
-    thread_id: usize,
+    my_stealer_index: usize,
     steal_success: &AtomicU64,
     steal_failure: &AtomicU64,
 ) -> Option<WorkItem> {
@@ -133,7 +133,7 @@ fn get_job(
         for _ in 0..steal_attempts {
             // Generate random index excluding self
             let mut idx = rng.random_range(0..num_stealers - 1);
-            if idx >= thread_id {
+            if idx >= my_stealer_index {
                 idx += 1; // Skip self index
             }
 
@@ -408,15 +408,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Replace the placeholder queues
         self.queues = queues.clone();
 
-        // Start worker threads
-        let mut handles = Vec::new();
-        for id in 1..self.num_threads {
-            let worker = workers.pop().unwrap();
-            handles.push(self.start_worker_with(id, worker, limits.clone()));
-        }
+        // Main thread is index 0
+        let main_index = 0;
+        let main_worker = workers.remove(main_index);
 
-        // Keep the main thread's worker
-        let main_worker = workers.pop().unwrap();
+        // Start worker threads with correct stealer indices
+        let mut handles = Vec::new();
+        for (i, worker) in workers.into_iter().enumerate() {
+            let my_stealer_index = i + 1; // Since main thread took index 0
+            let log_id = my_stealer_index; // Use same ID for logging
+            handles.push(self.start_worker_with(log_id, my_stealer_index, worker, limits.clone()));
+        }
 
         // Start time management if needed
         let time_handle = {
@@ -483,7 +485,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     /// Start a worker thread with a pre-created worker
     fn start_worker_with(
         &self,
-        id: usize,
+        log_id: usize,           // ID for logging
+        my_stealer_index: usize, // Index in stealers array
         worker: DequeWorker<WorkItem>,
         limits: SearchLimits,
     ) -> thread::JoinHandle<()> {
@@ -506,16 +509,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             let res = panic::catch_unwind(AssertUnwindSafe(|| {
                 if log::log_enabled!(log::Level::Debug) {
-                    debug!("Worker {id} started");
+                    debug!("Worker {log_id} started");
                 }
 
                 // Create search thread
-                let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
+                let mut search_thread =
+                    SearchThread::new(log_id, evaluator, tt, shared_state.clone());
 
                 // Simple work loop
                 while !shared_state.should_stop() {
                     // Try to get work using truly lock-free work stealing
-                    let work = get_job(&worker, &queues, id, &steal_success, &steal_failure);
+                    let work =
+                        get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure);
 
                     if let Some(work) = work {
                         // Create guard which atomically increments the counter
@@ -534,7 +539,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Skip debug logging in hot path unless explicitly enabled
                                 if log::log_enabled!(log::Level::Debug) {
                                     debug!(
-                                    "Worker {id} processing RootBatch with {} moves starting at #{start_index} (iteration {iteration}, depth {depth})",
+                                    "Worker {log_id} processing RootBatch with {} moves starting at #{start_index} (iteration {iteration}, depth {depth})",
                                     moves.len()
                                 );
                                 }
@@ -568,7 +573,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Skip debug logging in hot path unless explicitly enabled
                                 if log::log_enabled!(log::Level::Debug) {
                                     debug!(
-                                    "Worker {id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
+                                    "Worker {log_id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
                                 );
                                 }
 
@@ -591,7 +596,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Skip debug logging in hot path unless explicitly enabled
                                 if log::log_enabled!(log::Level::Debug) {
                                     debug!(
-                                    "Worker {id} processing FullPosition (iteration {iteration}, depth {depth})"
+                                    "Worker {log_id} processing FullPosition (iteration {iteration}, depth {depth})"
                                 );
                                 }
 
@@ -606,7 +611,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                         // Skip debug logging in hot path unless explicitly enabled
                         if log::log_enabled!(log::Level::Debug) {
-                            debug!("Worker {id} work completed");
+                            debug!("Worker {log_id} work completed");
                         }
 
                         // Decrement pending work counter
@@ -648,13 +653,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // No need for manual node reporting here
 
                 if log::log_enabled!(log::Level::Debug) {
-                    debug!("Worker {id} stopped");
+                    debug!("Worker {log_id} stopped");
                 }
             }));
 
             if res.is_err() {
                 // どれかワーカーが落ちたら全体停止フラグを立てる
-                error!("Worker {id} panicked; requesting graceful stop");
+                error!("Worker {log_id} panicked; requesting graceful stop");
                 shared_state.set_stop();
             }
         })
