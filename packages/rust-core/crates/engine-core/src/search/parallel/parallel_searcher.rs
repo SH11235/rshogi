@@ -1410,11 +1410,14 @@ mod tests {
         let result = searcher.search(&mut pos, limits);
 
         // Verify that the total qnodes doesn't exceed the limit by much
-        // (allow some margin for atomic operations)
+        // With prev-value checking, overshoot should be minimal but can be more than num_threads
+        // due to in-check positions and timing
+        let max_overshoot = 1000; // Allow reasonable overshoot for in-check positions
         assert!(
-            result.stats.qnodes <= 10000 + 1000,
-            "QNodes exceeded limit: {} > 11000",
-            result.stats.qnodes
+            result.stats.qnodes <= 10000 + max_overshoot,
+            "QNodes exceeded limit by too much: {} > {}",
+            result.stats.qnodes,
+            10000 + max_overshoot
         );
 
         // Verify we found a move
@@ -1443,11 +1446,14 @@ mod tests {
             result.stats.qnodes, shared_qnodes
         );
 
-        // For this test, we mainly care about proper aggregation
-        // QNodes might be 0 if no captures are evaluated
-        if result.stats.qnodes > 0 {
-            println!("QNodes recorded: {}", result.stats.qnodes);
-        }
+        // With shared counter always incrementing, we should see qnodes > 0
+        // for any search that enters quiescence (which should happen with captures)
+        assert!(
+            result.stats.qnodes > 0,
+            "Expected qnodes > 0 for capture-heavy position, got {}",
+            result.stats.qnodes
+        );
+        println!("QNodes recorded: {}", result.stats.qnodes);
     }
 
     #[test]
@@ -1467,5 +1473,41 @@ mod tests {
         // Reset should clear it
         searcher.shared_state.reset();
         assert_eq!(counter1.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_parallel_qnodes_overshoot_minimal() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let num_threads = 4;
+        let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
+
+        let mut pos = create_capture_heavy_position();
+
+        // Set a moderate qnodes budget
+        let qnodes_limit = 5000;
+        let limits = SearchLimits::builder().depth(5).qnodes_limit(qnodes_limit).build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // With previous-value checking, overshoot should be minimal
+        // However, due to in-check positions and timing, it can be more than num_threads
+        let overshoot = result.stats.qnodes.saturating_sub(qnodes_limit);
+        // Allow up to 25% overshoot or 1000 nodes, whichever is smaller
+        let max_overshoot = (qnodes_limit / 4).min(1000);
+        assert!(
+            overshoot <= max_overshoot,
+            "QNodes overshoot too large: {} (limit={}, actual={}, threads={}, max_allowed={})",
+            overshoot,
+            qnodes_limit,
+            result.stats.qnodes,
+            num_threads,
+            max_overshoot
+        );
+
+        println!(
+            "QNodes overshoot test: limit={}, actual={}, overshoot={}",
+            qnodes_limit, result.stats.qnodes, overshoot
+        );
     }
 }
