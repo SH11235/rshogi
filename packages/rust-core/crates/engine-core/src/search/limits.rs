@@ -1,7 +1,7 @@
 //! Unified search limits for both basic and enhanced search
 
 use crate::time_management::{TimeControl, TimeParameters};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +22,10 @@ pub struct SearchLimits {
     pub info_callback: Option<InfoCallback>,
     /// Ponder hit flag for converting ponder search to normal search
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
+    /// Internal: Shared qnodes counter for parallel search
+    /// This is set by ParallelSearcher and not exposed in the builder
+    #[doc(hidden)]
+    pub qnodes_counter: Option<Arc<AtomicU64>>,
 }
 
 impl Default for SearchLimits {
@@ -36,6 +40,7 @@ impl Default for SearchLimits {
             stop_flag: None,
             info_callback: None,
             ponder_hit_flag: None,
+            qnodes_counter: None,
         }
     }
 }
@@ -276,6 +281,7 @@ impl SearchLimitsBuilder {
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
             ponder_hit_flag: self.ponder_hit_flag,
+            qnodes_counter: None,
         }
     }
 }
@@ -300,6 +306,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             stop_flag: None,
             info_callback: None,
             ponder_hit_flag: None,
+            qnodes_counter: None,
         }
     }
 }
@@ -343,6 +350,7 @@ impl Clone for SearchLimits {
             stop_flag: self.stop_flag.clone(),
             info_callback: self.info_callback.clone(), // Arc can be cloned
             ponder_hit_flag: self.ponder_hit_flag.clone(),
+            qnodes_counter: self.qnodes_counter.clone(),
         }
     }
 }
@@ -363,6 +371,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
+            .field("qnodes_counter", &self.qnodes_counter.is_some())
             .finish()
     }
 }

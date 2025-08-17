@@ -11,11 +11,12 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         common::mate_score,
-        constants::{MAX_PLY, SEARCH_INF},
+        constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
         unified::UnifiedSearcher,
     },
     shogi::{Move, PieceType, Position},
 };
+use std::sync::atomic::Ordering;
 
 /// Get victim score for MVV-LVA ordering
 /// Higher value pieces get higher scores
@@ -622,6 +623,10 @@ where
     searcher.stats.nodes += 1;
     searcher.stats.qnodes += 1;
 
+    // Extract qnodes limit and shared counter at function start for efficiency
+    let qlimit = searcher.context.limits().qnodes_limit;
+    let qnodes_counter = searcher.context.limits().qnodes_counter.clone();
+
     // Early stop check
     if searcher.context.should_stop() {
         return alpha;
@@ -648,8 +653,18 @@ where
     let in_check = pos.is_in_check();
 
     // QNodes budget check (after in_check determination)
-    if let Some(limit) = searcher.context.limits().qnodes_limit {
-        if searcher.stats.qnodes >= limit {
+    if let Some(limit) = qlimit {
+        // Check global counter if available (parallel search), otherwise use local counter
+        let exceeded = if let Some(ref counter) = qnodes_counter {
+            // Use fetch_add to atomically increment and get the new value
+            let new_count = counter.fetch_add(1, Ordering::Relaxed);
+            new_count >= limit
+        } else {
+            // Single-threaded search, use local counter
+            searcher.stats.qnodes >= limit
+        };
+
+        if exceeded {
             log::trace!("qsearch budget exceeded at qnodes={}", searcher.stats.qnodes);
             if in_check {
                 // In check: cannot use stand pat, conservatively return alpha
@@ -680,17 +695,12 @@ where
         };
     }
 
-    // More aggressive ply limit for quiescence to prevent hangs
-    // This is a safety measure - normal quiescence should not go this deep
-    const QUIESCE_SAFETY_LIMIT: u16 = 100;
-    if ply >= QUIESCE_SAFETY_LIMIT {
-        eprintln!("WARNING: Hit quiescence safety limit at ply {ply}");
-        return searcher.evaluator.evaluate(pos);
-    }
-
-    // Very aggressive ply limiting to fix the hanging issue
-    // The test position has deep check sequences that can explode
-    if ply >= 16 {
+    // Safety limit for quiescence search depth
+    // This prevents explosion in complex positions with many captures
+    if ply >= MAX_QUIESCE_DEPTH {
+        if log::log_enabled!(log::Level::Warn) {
+            log::warn!("Hit quiescence depth limit at ply {ply}");
+        }
         // Hard stop at reasonable depth
         // Return evaluation-based value instead of fixed constants to avoid discontinuity
         return if in_check {
@@ -717,8 +727,14 @@ where
         let mut best = -SEARCH_INF;
         for &mv in moves.iter() {
             // Check QNodes budget before each move (important for strict limit enforcement)
-            if let Some(limit) = searcher.context.limits().qnodes_limit {
-                if searcher.stats.qnodes >= limit {
+            if let Some(limit) = qlimit {
+                let exceeded = if let Some(ref counter) = qnodes_counter {
+                    counter.load(Ordering::Relaxed) >= limit
+                } else {
+                    searcher.stats.qnodes >= limit
+                };
+
+                if exceeded {
                     // If we haven't found any move yet, return alpha
                     // Otherwise return the best score found so far
                     return if best == -SEARCH_INF { alpha } else { best };
@@ -831,8 +847,14 @@ where
         }
 
         // Check QNodes budget before each capture move
-        if let Some(limit) = searcher.context.limits().qnodes_limit {
-            if searcher.stats.qnodes >= limit {
+        if let Some(limit) = qlimit {
+            let exceeded = if let Some(ref counter) = qnodes_counter {
+                counter.load(Ordering::Relaxed) >= limit
+            } else {
+                searcher.stats.qnodes >= limit
+            };
+
+            if exceeded {
                 return alpha; // Return current best bound
             }
         }
