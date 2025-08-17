@@ -245,4 +245,44 @@ impl Position {
             }
         }
     }
+
+    /// Calculate game phase based on material
+    /// Returns a value from 0 (endgame) to 128 (opening)
+    pub fn game_phase(&self) -> u8 {
+        // Phase weights for each piece type (similar to engine controller)
+        const PHASE_WEIGHTS: [(PieceType, u16); 6] = [
+            (PieceType::Rook, 4),
+            (PieceType::Bishop, 4),
+            (PieceType::Gold, 3),
+            (PieceType::Silver, 2),
+            (PieceType::Knight, 2),
+            (PieceType::Lance, 2),
+        ];
+
+        // Initial phase total (same as in engine controller)
+        const INITIAL_PHASE_TOTAL: u16 = 52; // 2*4 + 2*4 + 4*3 + 4*2 + 4*2 + 4*2
+
+        let mut phase_value = 0u16;
+
+        // Count pieces on board and in hands
+        for &(piece_type, weight) in &PHASE_WEIGHTS {
+            let on_board = self.count_piece_on_board(piece_type);
+            let in_hands = self.count_piece_in_hand(Color::Black, piece_type)
+                + self.count_piece_in_hand(Color::White, piece_type);
+            phase_value += (on_board + in_hands) * weight;
+        }
+
+        // Scale to 0-128 range
+        ((phase_value as u32 * 128) / INITIAL_PHASE_TOTAL as u32).min(128) as u8
+    }
+
+    /// Check if position is in endgame phase
+    pub fn is_endgame(&self) -> bool {
+        self.game_phase() < 32 // Same threshold as PHASE_ENDGAME_THRESHOLD
+    }
+
+    /// Check if position is in opening phase
+    pub fn is_opening(&self) -> bool {
+        self.game_phase() > 96 // Same threshold as PHASE_OPENING_THRESHOLD
+    }
 }

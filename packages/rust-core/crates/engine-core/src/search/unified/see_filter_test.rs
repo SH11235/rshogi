@@ -207,4 +207,68 @@ mod tests {
         // Without recapture, SEE returns the rook value
         assert_eq!(pos.see(capture), 900); // Rook value without recapture
     }
+
+    #[test]
+    fn test_horse_one_square_check_skips_see() {
+        // Test that horse (promoted bishop) 1-square orthogonal check is detected
+        // White king at 5a, Black horse at 5b moving to 6b gives check
+        let sfen = "4k4/4+B4/9/9/9/9/9/9/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Horse moves to 6b, giving check to king at 5a (1 square orthogonally)
+        let check_move = parse_usi_move("5b6b").unwrap();
+
+        // Verify it gives check
+        assert!(pos.gives_check(check_move), "Horse to 6b should give check to king at 5a");
+
+        // This should skip SEE pruning since it gives check
+        assert!(
+            crate::search::unified::pruning::should_skip_see_pruning(&pos, check_move),
+            "Horse check move should skip SEE pruning"
+        );
+    }
+
+    #[test]
+    fn test_dragon_one_square_check_skips_see() {
+        // Test that dragon (promoted rook) 1-square diagonal check is detected
+        // White king at 5a, Black dragon at 6b moving to 6a gives diagonal check
+        let sfen = "4k4/3+R5/9/9/9/9/9/9/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Dragon moves to 6a, giving check to king at 5a (1 square diagonally)
+        let check_move = parse_usi_move("6b6a").unwrap();
+
+        // Verify it gives check
+        assert!(pos.gives_check(check_move), "Dragon to 6a should give check to king at 5a");
+
+        // This should skip SEE pruning since it gives check
+        assert!(
+            crate::search::unified::pruning::should_skip_see_pruning(&pos, check_move),
+            "Dragon check move should skip SEE pruning"
+        );
+    }
+
+    #[test]
+    fn test_discovered_check_false_positive() {
+        // Test that moving to a square that still blocks the line doesn't trigger discovered check
+        // Black rook at 5i, Black piece at 5e, White king at 5a
+        // Moving from 5e to 5d still blocks the line, so no discovered check
+        let sfen = "4k4/9/9/9/4P4/9/9/9/4RK3 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Pawn moves from 5e to 5d - still blocks rook's line to king
+        let mv = parse_usi_move("5e5d").unwrap();
+
+        // This should NOT be a discovered check
+        assert!(
+            !pos.gives_check(mv),
+            "Move should not give discovered check when still blocking"
+        );
+
+        // And therefore should not skip SEE pruning
+        assert!(
+            !crate::search::unified::pruning::should_skip_see_pruning(&pos, mv),
+            "Non-checking move should not skip SEE pruning"
+        );
+    }
 }
