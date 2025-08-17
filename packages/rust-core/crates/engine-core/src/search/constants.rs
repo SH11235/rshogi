@@ -67,6 +67,11 @@ pub const TIME_CHECK_MASK_NORMAL: u64 = 0x1FFF; // 8192 nodes - for normal time 
 pub const TIME_CHECK_MASK_BYOYOMI: u64 = 0x7FF; // 2048 nodes - more frequent for byoyomi
 pub const EVENT_CHECK_MASK: u64 = 0x1FFF; // 8192 nodes - for ponder hit events
 
+/// Default quiescence search node limit (1 million nodes)
+/// This prevents explosion in complex positions with many captures.
+/// Can be overridden with SearchLimits::builder().qnodes_limit()
+pub const DEFAULT_QNODES_LIMIT: u64 = 1_000_000;
+
 /// Validate that constants maintain proper relationships
 #[cfg(test)]
 mod tests {
