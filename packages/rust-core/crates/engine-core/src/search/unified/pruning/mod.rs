@@ -53,15 +53,29 @@ impl Default for PruningParams {
 }
 
 /// Check if null move pruning is applicable
+///
+/// Null move pruning is disabled in endgame positions to avoid zugzwang issues
 pub fn can_do_null_move(
-    _pos: &Position,
+    pos: &Position,
     depth: u8,
     in_check: bool,
     _beta: i32,
     _static_eval: i32,
 ) -> bool {
-    !in_check && depth >= 3
-    // Note: static_eval check removed as it's not used in simplified version
+    !in_check && depth >= 3 && !pos.is_endgame() // Avoid null move in endgame due to zugzwang
+}
+
+/// Check if null move pruning is applicable (with PV node support)
+pub fn can_do_null_move_with_pv(
+    pos: &Position,
+    depth: u8,
+    in_check: bool,
+    beta: i32,
+    static_eval: i32,
+    is_pv: bool,
+) -> bool {
+    !is_pv && // Never do null move in PV nodes
+    can_do_null_move(pos, depth, in_check, beta, static_eval)
 }
 
 /// Calculate null move reduction
@@ -70,6 +84,14 @@ pub fn null_move_reduction(depth: u8) -> u8 {
 }
 
 /// Check if futility pruning is applicable
+///
+/// Note: The caller must ensure that the move is not:
+/// - A capture
+/// - A check
+/// - A promotion  
+/// - A drop
+///
+/// These tactical moves should never be pruned by futility.
 pub fn can_do_futility_pruning(
     depth: u8,
     in_check: bool,
@@ -78,6 +100,23 @@ pub fn can_do_futility_pruning(
     _static_eval: i32,
 ) -> bool {
     depth <= 7 && can_prune(in_check, alpha, beta)
+}
+
+/// Check if futility pruning is applicable (with move awareness)
+pub fn can_do_futility_pruning_for_move(
+    depth: u8,
+    in_check: bool,
+    alpha: i32,
+    beta: i32,
+    static_eval: i32,
+    mv: Move,
+    gives_check: bool,
+) -> bool {
+    can_do_futility_pruning(depth, in_check, alpha, beta, static_eval)
+        && !mv.is_capture_hint()
+        && !gives_check
+        && !mv.is_promote()
+        && !mv.is_drop()
 }
 
 /// Get futility margin for given depth - optimized values
@@ -108,9 +147,13 @@ pub fn can_do_lmr(
         && !gives_check
         && !mv.is_capture_hint()
         && !mv.is_promote()
+        && !mv.is_drop() // Drop moves are tactically sharp in shogi
 }
 
 /// Check if we can do razoring (extreme futility pruning at low depths)
+///
+/// Note: Should not be applied in PV nodes or when tactical moves are possible.
+/// The caller should ensure proper conditions before applying razoring.
 pub fn can_do_razoring(depth: u8, in_check: bool, alpha: i32, static_eval: i32) -> bool {
     depth <= 2 && can_prune_alpha(in_check, alpha) && static_eval + RAZORING_BASE_MARGIN < alpha
 }
@@ -211,6 +254,358 @@ pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval
     depth <= 7 // Extended from 6 to 7 for slightly more aggressive static null move
         && can_prune_beta(in_check, beta)
         && static_eval - STATIC_NULL_MOVE_DEPTH_FACTOR * depth as i32 >= beta
+}
+
+/// Check if static null move pruning is applicable (with position awareness)
+pub fn can_do_static_null_move_with_pos(
+    pos: &Position,
+    depth: u8,
+    in_check: bool,
+    beta: i32,
+    static_eval: i32,
+) -> bool {
+    !pos.is_endgame() && // Avoid in endgame positions
+    can_do_static_null_move(depth, in_check, beta, static_eval)
+}
+
+/// Lightweight pre-filter to check if a move might give check
+/// This is much cheaper than full gives_check() calculation
+/// Note: King cannot give check to opponent king (illegal by shogi rules), so we don't handle direct King attacks.
+/// However, King moves can still cause discovered checks, which are handled in the discovered check section.
+fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
+    use crate::shogi::PieceType;
+
+    // Get opponent king position
+    let opponent = pos.side_to_move.opposite();
+    let opp_king_sq = match pos.board.king_square(opponent) {
+        Some(sq) => sq,
+        None => return false,
+    };
+
+    let to = mv.to();
+    let dr = opp_king_sq.rank() as i8 - to.rank() as i8;
+    let dc = opp_king_sq.file() as i8 - to.file() as i8;
+    let dr_abs = dr.abs();
+    let dc_abs = dc.abs();
+
+    // Get piece type and check if it's promoted or will promote
+    let (piece_type, will_be_promoted) = if mv.is_drop() {
+        (mv.drop_piece_type(), false)
+    } else {
+        // For normal moves, get piece type from the board
+        let from = match mv.from() {
+            Some(f) => f,
+            None => return false,
+        };
+        match pos.board.piece_on(from) {
+            Some(piece) => (piece.piece_type, piece.promoted || mv.is_promote()),
+            None => return false,
+        }
+    };
+
+    // 1. Direct check - piece moves to attack the king
+    let direct_check = match piece_type {
+        // Sliding pieces - check if on same line
+        PieceType::Rook => {
+            (dr == 0 || dc == 0) || (will_be_promoted && dr_abs == 1 && dc_abs == 1)
+            // Dragon can move 1 square diagonally
+        }
+        PieceType::Bishop => {
+            (dr_abs == dc_abs && dr_abs > 0)
+                || (will_be_promoted && ((dr_abs == 1 && dc == 0) || (dc_abs == 1 && dr == 0)))
+            // Horse can move 1 square orthogonally
+        }
+        PieceType::Lance => {
+            if will_be_promoted {
+                // Promoted lance moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
+            } else {
+                // Normal lance
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    dc == 0 && dr < 0
+                } else {
+                    dc == 0 && dr > 0
+                }
+            }
+        }
+        // Close range pieces - check if within range
+        PieceType::Knight => {
+            if will_be_promoted {
+                // Promoted knight moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
+            } else {
+                // Normal knight
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    dr == -2 && dc_abs == 1
+                } else {
+                    dr == 2 && dc_abs == 1
+                }
+            }
+        }
+        PieceType::Pawn => {
+            if will_be_promoted {
+                // Tokin moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
+            } else {
+                // Normal pawn
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    dr == -1 && dc == 0
+                } else {
+                    dr == 1 && dc == 0
+                }
+            }
+        }
+        PieceType::Silver => {
+            if will_be_promoted {
+                // Promoted silver moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
+            } else {
+                // Normal silver
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 1 && dc_abs == 1)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == -1 && dc_abs == 1)
+                }
+            }
+        }
+        PieceType::Gold => {
+            // Gold movement pattern
+            if pos.side_to_move == crate::shogi::Color::Black {
+                (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+            } else {
+                (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+            }
+        }
+        PieceType::King => false, // King can't give check
+    };
+
+    if direct_check {
+        // For sliding pieces, do a quick obstruction check
+        match piece_type {
+            PieceType::Rook | PieceType::Bishop | PieceType::Lance => {
+                // Simple path check between to and king
+                let step_r = if dr != 0 { dr / dr_abs } else { 0 };
+                let step_c = if dc != 0 { dc / dc_abs } else { 0 };
+
+                // Check at most 7 squares (max distance on shogi board)
+                for i in 1..dr_abs.max(dc_abs) {
+                    let check_rank = to.rank() as i8 + i * step_r;
+                    let check_file = to.file() as i8 + i * step_c;
+
+                    if let Some(sq) =
+                        crate::shogi::Square::new_safe(check_file as u8, check_rank as u8)
+                    {
+                        if pos.board.piece_on(sq).is_some() {
+                            // Path is blocked
+                            return false;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return true;
+    }
+
+    // 2. Discovered check - moving piece uncovers attack from behind
+    // Only check for non-drop moves (drops can't cause discovered check)
+    if !mv.is_drop() {
+        let from = match mv.from() {
+            Some(f) => f,
+            None => return false,
+        };
+
+        // Check if 'from' square is on a line with the opponent king
+        let dr_from = opp_king_sq.rank() as i8 - from.rank() as i8;
+        let dc_from = opp_king_sq.file() as i8 - from.file() as i8;
+        let dr_from_abs = dr_from.abs();
+        let dc_from_abs = dc_from.abs();
+
+        // Is 'from' on same rank/file/diagonal as king?
+        let on_rank = dr_from == 0;
+        let on_file = dc_from == 0;
+        let on_diagonal = dr_from_abs == dc_from_abs;
+
+        if on_rank || on_file || on_diagonal {
+            // Quick check: look for a sliding piece behind 'from' that could attack the king
+            let step_r = if dr_from != 0 {
+                -dr_from / dr_from_abs
+            } else {
+                0
+            };
+            let step_c = if dc_from != 0 {
+                -dc_from / dc_from_abs
+            } else {
+                0
+            };
+
+            // Check up to 8 squares behind 'from'
+            for i in 1..=8 {
+                let check_rank = from.rank() as i8 + i * step_r;
+                let check_file = from.file() as i8 + i * step_c;
+
+                // Check bounds
+                if !(0..=8).contains(&check_rank) || !(0..=8).contains(&check_file) {
+                    break;
+                }
+
+                if let Some(sq) = crate::shogi::Square::new_safe(check_file as u8, check_rank as u8)
+                {
+                    if let Some(piece) = pos.board.piece_on(sq) {
+                        // Found a piece - check if it's our sliding piece that could attack
+                        if piece.color == pos.side_to_move {
+                            // Check if this is a sliding piece that could attack through the line
+                            let piece_found = match piece.piece_type {
+                                PieceType::Rook if on_rank || on_file => true,
+                                PieceType::Bishop if on_diagonal => true,
+                                PieceType::Lance
+                                    if on_file
+                                        && ((pos.side_to_move == crate::shogi::Color::Black
+                                            && dr_from < 0)
+                                            || (pos.side_to_move
+                                                == crate::shogi::Color::White
+                                                && dr_from > 0)) =>
+                                {
+                                    true
+                                }
+                                _ => false,
+                            };
+
+                            if piece_found {
+                                // Check if 'to' is on the same line and between king and the sliding piece
+                                if is_collinear(opp_king_sq, from, to)
+                                    && is_between(opp_king_sq, to, sq)
+                                {
+                                    // The destination still blocks the line, so no discovered check
+                                    return false;
+                                }
+
+                                // Check if there's already a blocker between 'from' and king
+                                // This prevents false positives where the line is already blocked
+                                let step_r_fwd = if dr_from != 0 {
+                                    dr_from / dr_from_abs
+                                } else {
+                                    0
+                                };
+                                let step_c_fwd = if dc_from != 0 {
+                                    dc_from / dc_from_abs
+                                } else {
+                                    0
+                                };
+
+                                for j in 1..dr_from_abs.max(dc_from_abs) {
+                                    let check_rank = from.rank() as i8 + j * step_r_fwd;
+                                    let check_file = from.file() as i8 + j * step_c_fwd;
+
+                                    if let Some(sq_mid) = crate::shogi::Square::new_safe(
+                                        check_file as u8,
+                                        check_rank as u8,
+                                    ) {
+                                        if pos.board.piece_on(sq_mid).is_some() {
+                                            // There's already a blocker between from and king
+                                            return false;
+                                        }
+                                    }
+                                }
+
+                                return true;
+                            }
+                        }
+                        // Any piece blocks further discovery
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Helper function to check if three squares are collinear
+fn is_collinear(a: crate::shogi::Square, b: crate::shogi::Square, c: crate::shogi::Square) -> bool {
+    let a_rank = a.rank() as i32;
+    let a_file = a.file() as i32;
+    let b_rank = b.rank() as i32;
+    let b_file = b.file() as i32;
+    let c_rank = c.rank() as i32;
+    let c_file = c.file() as i32;
+
+    // Check if the cross product is zero (points are collinear)
+    (b_file - a_file) * (c_rank - a_rank) == (b_rank - a_rank) * (c_file - a_file)
+}
+
+/// Helper function to check if b is between a and c on a line
+fn is_between(a: crate::shogi::Square, b: crate::shogi::Square, c: crate::shogi::Square) -> bool {
+    let a_rank = a.rank() as i32;
+    let a_file = a.file() as i32;
+    let b_rank = b.rank() as i32;
+    let b_file = b.file() as i32;
+    let c_rank = c.rank() as i32;
+    let c_file = c.file() as i32;
+
+    // Check if b is within the bounding box of a and c
+    let min_rank = a_rank.min(c_rank);
+    let max_rank = a_rank.max(c_rank);
+    let min_file = a_file.min(c_file);
+    let max_file = a_file.max(c_file);
+
+    b_rank >= min_rank && b_rank <= max_rank && b_file >= min_file && b_file <= max_file
+}
+
+/// Check if a move should skip SEE pruning (for shogi-specific moves)
+/// Returns true if the move should NOT be pruned by SEE
+pub fn should_skip_see_pruning(pos: &Position, mv: Move) -> bool {
+    // Drop moves are excluded from SEE pruning
+    // (drops have tactical value that SEE cannot evaluate properly)
+    if mv.is_drop() {
+        return true;
+    }
+
+    // King moves in check must be allowed (evasion moves)
+    if pos.is_in_check() {
+        return true;
+    }
+
+    // Promotion moves might be worth considering even with bad SEE
+    // (especially pawn promotions to tokin)
+    if mv.is_promote() && !mv.is_drop() {
+        if let Some(from) = mv.from() {
+            if let Some(piece) = pos.board.piece_on(from) {
+                if piece.piece_type == crate::shogi::PieceType::Pawn {
+                    return true; // Pawn promotion is SEE excluded
+                }
+            }
+        }
+    }
+
+    // Moves that give check are excluded - but use lightweight pre-filter first
+    // (checks often have tactical value beyond material exchange)
+    let likely_check = likely_could_give_check(pos, mv);
+    if likely_check {
+        let actual_check = pos.gives_check(mv);
+        if actual_check {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -431,5 +826,103 @@ mod tests {
     fn test_delta_pruning_margin_optimized() {
         assert_eq!(delta_pruning_margin(), DELTA_PRUNING_MARGIN);
         assert_eq!(delta_pruning_margin(), 150); // verify optimized value
+    }
+
+    #[test]
+    fn test_null_move_endgame_suppression() {
+        use crate::shogi::board::{Color, Piece, PieceType, Square};
+        use crate::shogi::Position;
+
+        // Create an endgame position (only kings and a rook)
+        let mut endgame_pos = Position::empty();
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        endgame_pos.board.put_piece(
+            Square::from_usi_chars('1', 'i').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+        endgame_pos.board.rebuild_occupancy_bitboards();
+
+        // Verify it's detected as endgame
+        assert!(endgame_pos.is_endgame(), "Position should be detected as endgame");
+
+        // Null move should be suppressed in endgame
+        assert!(
+            !can_do_null_move(&endgame_pos, 5, false, 100, 50),
+            "Null move should be suppressed in endgame"
+        );
+
+        // Create an opening position
+        let opening_pos = Position::startpos();
+
+        // Verify it's not endgame
+        assert!(!opening_pos.is_endgame(), "Starting position should not be endgame");
+        assert!(opening_pos.is_opening(), "Starting position should be opening");
+
+        // Null move should be allowed in opening
+        assert!(
+            can_do_null_move(&opening_pos, 5, false, 100, 50),
+            "Null move should be allowed in opening"
+        );
+
+        // Test with PV node
+        assert!(
+            !can_do_null_move_with_pv(&opening_pos, 5, false, 100, 50, true),
+            "Null move should not be allowed in PV nodes"
+        );
+        assert!(
+            can_do_null_move_with_pv(&opening_pos, 5, false, 100, 50, false),
+            "Null move should be allowed in non-PV nodes"
+        );
+    }
+
+    #[test]
+    fn test_lmr_reduction_monotonicity() {
+        // Test that LMR reduction increases monotonically with depth and moves searched
+
+        // Test monotonicity with respect to depth (fixed moves)
+        for moves in [4, 10, 20, 30] {
+            let mut prev_reduction = 0;
+            for depth in 3..=12 {
+                let reduction = lmr_reduction(depth, moves);
+                assert!(
+                    reduction >= prev_reduction,
+                    "LMR reduction should be monotonic in depth: lmr({depth}, {moves}) = {reduction} < {prev_reduction}"
+                );
+                prev_reduction = reduction;
+            }
+        }
+
+        // Test monotonicity with respect to moves searched (fixed depth)
+        for depth in [3, 5, 8, 10] {
+            let mut prev_reduction = 0;
+            for moves in 4..=30 {
+                let reduction = lmr_reduction(depth, moves);
+                assert!(
+                    reduction >= prev_reduction,
+                    "LMR reduction should be monotonic in moves: lmr({depth}, {moves}) = {reduction} < {prev_reduction}"
+                );
+                prev_reduction = reduction;
+            }
+        }
+
+        // Test the formula version as well
+        for depth in 3..=12 {
+            let mut prev_reduction = 0;
+            for moves in 4..=30 {
+                let reduction = lmr_reduction_formula(depth, moves);
+                assert!(
+                    reduction >= prev_reduction,
+                    "LMR formula should be monotonic: lmr_formula({depth}, {moves}) = {reduction} < {prev_reduction}"
+                );
+                prev_reduction = reduction;
+            }
+        }
     }
 }
