@@ -213,6 +213,60 @@ pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval
         && static_eval - STATIC_NULL_MOVE_DEPTH_FACTOR * depth as i32 >= beta
 }
 
+/// Lightweight pre-filter to check if a move might give check
+/// This is much cheaper than full gives_check() calculation
+fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
+    use crate::shogi::PieceType;
+    
+    // Get opponent king position
+    let opponent = pos.side_to_move.opposite();
+    let opp_king_sq = match pos.board.king_square(opponent) {
+        Some(sq) => sq,
+        None => return false,
+    };
+    
+    let to = mv.to();
+    let dr = opp_king_sq.rank() as i8 - to.rank() as i8;
+    let dc = opp_king_sq.file() as i8 - to.file() as i8;
+    let dr_abs = dr.abs();
+    let dc_abs = dc.abs();
+    
+    // Quick check based on piece type and relative position
+    let piece_type = if mv.is_drop() {
+        mv.drop_piece_type()
+    } else {
+        match mv.piece_type() {
+            Some(pt) => pt,
+            None => return false,
+        }
+    };
+    
+    match piece_type {
+        // Sliding pieces - check if on same line
+        PieceType::Rook => dr == 0 || dc == 0,
+        PieceType::Bishop => dr_abs == dc_abs,
+        PieceType::Lance => {
+            if pos.side_to_move == crate::shogi::Color::Black {
+                dc == 0 && dr < 0
+            } else {
+                dc == 0 && dr > 0
+            }
+        },
+        // Close range pieces - check if within range
+        PieceType::Knight => {
+            if pos.side_to_move == crate::shogi::Color::Black {
+                dr == -2 && dc_abs == 1
+            } else {
+                dr == 2 && dc_abs == 1
+            }
+        },
+        PieceType::Pawn | PieceType::Silver | PieceType::Gold => {
+            dr_abs <= 1 && dc_abs <= 1
+        },
+        PieceType::King => false, // King can't give check
+    }
+}
+
 /// Check if a move should skip SEE pruning (for shogi-specific moves)
 /// Returns true if the move should NOT be pruned by SEE
 pub fn should_skip_see_pruning(pos: &Position, mv: Move) -> bool {
@@ -227,16 +281,15 @@ pub fn should_skip_see_pruning(pos: &Position, mv: Move) -> bool {
         return true;
     }
 
-    // TODO: Uncomment when gives_check() is properly implemented
-    // Moves that give check are excluded
-    // (checks often have tactical value beyond material exchange)
-    // if pos.gives_check(mv) {
-    //     return true;
-    // }
-
     // Promotion moves might be worth considering even with bad SEE
     // (especially pawn promotions to tokin)
     if mv.is_promote() && mv.piece_type() == Some(crate::shogi::PieceType::Pawn) {
+        return true;
+    }
+    
+    // Moves that give check are excluded - but use lightweight pre-filter first
+    // (checks often have tactical value beyond material exchange)
+    if likely_could_give_check(pos, mv) && pos.gives_check(mv) {
         return true;
     }
 
