@@ -270,7 +270,8 @@ pub fn can_do_static_null_move_with_pos(
 
 /// Lightweight pre-filter to check if a move might give check
 /// This is much cheaper than full gives_check() calculation
-/// Note: King cannot give check to opponent king (illegal by shogi rules), so we don't handle King moves
+/// Note: King cannot give check to opponent king (illegal by shogi rules), so we don't handle direct King attacks.
+/// However, King moves can still cause discovered checks, which are handled in the discovered check section.
 fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
     use crate::shogi::PieceType;
 
@@ -469,24 +470,7 @@ fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
                     if let Some(piece) = pos.board.piece_on(sq) {
                         // Found a piece - check if it's our sliding piece that could attack
                         if piece.color == pos.side_to_move {
-                            match piece.piece_type {
-                                PieceType::Rook if on_rank || on_file => return true,
-                                PieceType::Bishop if on_diagonal => return true,
-                                PieceType::Lance if on_file => {
-                                    // Check lance direction
-                                    if pos.side_to_move == crate::shogi::Color::Black {
-                                        if dr_from < 0 {
-                                            return true;
-                                        }
-                                    } else if dr_from > 0 {
-                                        return true;
-                                    }
-                                }
-                                _ => {}
-                            }
-
-                            // Found a sliding piece that could attack - but check if 'to' still blocks
-                            // Only return true if the move actually uncovers the attack
+                            // Check if this is a sliding piece that could attack through the line
                             let piece_found = match piece.piece_type {
                                 PieceType::Rook if on_rank || on_file => true,
                                 PieceType::Bishop if on_diagonal => true,

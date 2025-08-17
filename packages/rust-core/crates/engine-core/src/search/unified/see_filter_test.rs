@@ -271,4 +271,49 @@ mod tests {
             "Non-checking move should not skip SEE pruning"
         );
     }
+
+    #[test]
+    fn test_king_move_discovered_check() {
+        // Test that king moving away can cause discovered check
+        // Black rook at 5i, Black king at 5e, White king at 5a
+        // King moves from 5e to 4e, uncovering rook's attack on white king
+        let sfen = "4k4/9/9/9/4K4/9/9/9/4R4 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // King moves from 5e to 4e - uncovers rook's line to white king
+        let mv = parse_usi_move("5e4e").unwrap();
+
+        // This SHOULD be a discovered check
+        assert!(pos.gives_check(mv), "King move should give discovered check by uncovering rook");
+
+        // And therefore should skip SEE pruning
+        assert!(
+            crate::search::unified::pruning::should_skip_see_pruning(&pos, mv),
+            "Discovered check move should skip SEE pruning"
+        );
+    }
+
+    #[test]
+    fn test_discovered_check_with_existing_blocker() {
+        // Test that discovered check lightweight filter works correctly with existing blockers
+        // Black rook at 5i, Black piece at 5e, Black pawn at 5c (our blocker), White king at 5a
+        // Moving from 5e doesn't give discovered check because of our own pawn at 5c
+        let sfen = "4k4/9/4P4/9/4P4/9/9/9/4RK3 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Pawn moves from 5e to 4e - but our pawn at 5c still blocks the line
+        let mv = parse_usi_move("5e4e").unwrap();
+
+        // This should NOT be a discovered check due to existing blocker
+        assert!(
+            !pos.gives_check(mv),
+            "Move should not give discovered check when another piece blocks the line"
+        );
+
+        // The lightweight filter should correctly identify this is not a check
+        assert!(
+            !crate::search::unified::pruning::should_skip_see_pruning(&pos, mv),
+            "Non-checking move should not skip SEE pruning"
+        );
+    }
 }
