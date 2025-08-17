@@ -146,9 +146,9 @@ mod tests {
         let moves = [
             ("5c6c", false), // Can't attack backward diagonal as black gold
             ("5c5b", true),  // Forward - gives check (attacks 6a)
-            ("5c5a", true),  // Forward to 5a - gives check (next to king at 6a)
             ("5c6b", true),  // Forward diagonal - gives check (attacks 6a)
             ("5c4c", false), // Sideways - doesn't give check
+            ("5c4b", false), // Forward diagonal left - doesn't reach king
         ];
 
         for (move_str, should_check) in &moves {
