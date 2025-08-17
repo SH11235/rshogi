@@ -138,10 +138,7 @@ impl Position {
                 None => return false,
             };
 
-            // Remove piece from source
-            tmp.board.remove_piece(from);
-
-            // Handle capture if any
+            // Handle capture if any (before removing from source)
             if let Some(captured) = tmp.board.piece_on(to) {
                 // Add to hand (unpromote captured piece)
                 let unpromoted_type = if captured.promoted {
@@ -165,6 +162,9 @@ impl Position {
                 tmp.hands[tmp.side_to_move as usize][hand_idx] += 1;
             }
 
+            // Remove piece from source
+            tmp.board.remove_piece(from);
+
             // Place piece at destination (with promotion if specified)
             let final_piece = if mv.is_promote() {
                 piece.promote()
@@ -173,6 +173,9 @@ impl Position {
             };
             tmp.board.put_piece(to, final_piece);
         }
+
+        // Rebuild occupancy bitboards after board modifications
+        tmp.board.rebuild_occupancy_bitboards();
 
         // Switch side to move
         tmp.side_to_move = tmp.side_to_move.opposite();
@@ -189,16 +192,16 @@ mod tests {
     #[test]
     fn test_gives_check_normal_move() {
         // Position where Rook move gives check
-        let sfen = "k8/9/9/9/9/9/9/R8/K8 b - 1";
+        let sfen = "8k/9/9/9/9/9/9/R8/K8 b - 1";
         let pos = parse_sfen(sfen).unwrap();
 
         // Rook moves to give check
-        let mv = parse_usi_move("1h1a").unwrap();
+        let mv = parse_usi_move("9h1h").unwrap();
         assert!(pos.gives_check(mv), "Rook move should give check");
 
-        // Rook moves sideways (no check)
-        let mv = parse_usi_move("1h2h").unwrap();
-        assert!(!pos.gives_check(mv), "Sideways rook move should not give check");
+        // Rook moves forward (no check)
+        let mv = parse_usi_move("9h9g").unwrap();
+        assert!(!pos.gives_check(mv), "Forward rook move should not give check");
     }
 
     #[test]
@@ -208,7 +211,7 @@ mod tests {
         let pos = parse_sfen(sfen).unwrap();
 
         // Drop lance to give check
-        let mv = parse_usi_move("L*1b").unwrap();
+        let mv = parse_usi_move("L*9b").unwrap();
         assert!(pos.gives_check(mv), "Lance drop should give check");
 
         // Drop lance elsewhere (no check)
@@ -219,11 +222,11 @@ mod tests {
     #[test]
     fn test_gives_check_promotion() {
         // Position where pawn promotion gives check
-        let sfen = "k8/P8/9/9/9/9/9/9/K8 b - 1";
+        let sfen = "k8/9/P8/9/9/9/9/9/K8 b - 1";
         let pos = parse_sfen(sfen).unwrap();
 
         // Pawn promotes to tokin and gives check
-        let mv = parse_usi_move("1b1a+").unwrap();
+        let mv = parse_usi_move("9c9b+").unwrap();
         assert!(pos.gives_check(mv), "Pawn promotion should give check");
     }
 }
