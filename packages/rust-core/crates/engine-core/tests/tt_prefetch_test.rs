@@ -9,7 +9,7 @@ mod tests {
     };
 
     #[test]
-    fn test_search_with_tt_prefetching() {
+    fn test_search_does_not_hang_and_searches_many_nodes() {
         // Test position that generates many TT accesses
         let sfen = "ln1g1g1nl/1ks4r1/1pppp1bpp/p3spp2/9/P1P1P4/1P1PSPPPP/1BK1GS1R1/LN3G1NL b - 17";
         let mut pos = Position::from_sfen(sfen).unwrap();
@@ -74,6 +74,17 @@ mod tests {
             "Second search: {} nodes in {}ms",
             result2.stats.nodes,
             result2.stats.elapsed.as_millis()
+        );
+
+        // Verify TT effect: either fewer nodes or faster time (CI-friendly condition)
+        assert!(
+            result2.stats.nodes <= result1.stats.nodes.saturating_sub(10_000)
+                || result2.stats.elapsed <= result1.stats.elapsed,
+            "TT effect not visible: nodes1={}, nodes2={}, time1={:?}, time2={:?}",
+            result1.stats.nodes,
+            result2.stats.nodes,
+            result1.stats.elapsed,
+            result2.stats.elapsed
         );
     }
 }
