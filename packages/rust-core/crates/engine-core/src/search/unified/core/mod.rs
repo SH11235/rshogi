@@ -620,6 +620,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     searcher.stats.nodes += 1;
+    searcher.stats.qnodes += 1;
 
     // Early stop check
     if searcher.context.should_stop() {
@@ -645,6 +646,27 @@ where
 
     // Check if in check first - this determines our search strategy
     let in_check = pos.is_in_check();
+
+    // QNodes budget check (after in_check determination)
+    if let Some(limit) = searcher.context.limits().qnodes_limit {
+        if searcher.stats.qnodes >= limit {
+            log::trace!("qsearch budget exceeded at qnodes={}", searcher.stats.qnodes);
+            if in_check {
+                // In check: cannot use stand pat, conservatively return alpha
+                return alpha;
+            } else {
+                // Not in check: return current evaluation clamped to bounds
+                let eval = searcher.evaluator.evaluate(pos);
+                if eval >= beta {
+                    return beta;
+                }
+                if eval > alpha {
+                    return eval;
+                }
+                return alpha;
+            }
+        }
+    }
 
     // Absolute stack guard - always enforce this limit
     if ply >= MAX_PLY as u16 {
@@ -694,6 +716,15 @@ where
         // Search all legal moves to find check evasion
         let mut best = -SEARCH_INF;
         for &mv in moves.iter() {
+            // Check QNodes budget before each move (important for strict limit enforcement)
+            if let Some(limit) = searcher.context.limits().qnodes_limit {
+                if searcher.stats.qnodes >= limit {
+                    // If we haven't found any move yet, return alpha
+                    // Otherwise return the best score found so far
+                    return if best == -SEARCH_INF { alpha } else { best };
+                }
+            }
+
             // Validate move
             if !pos.is_pseudo_legal(mv) {
                 continue;
@@ -797,6 +828,13 @@ where
         // Check stop flag at the beginning of each capture move
         if searcher.context.should_stop() {
             return alpha; // Return current alpha value
+        }
+
+        // Check QNodes budget before each capture move
+        if let Some(limit) = searcher.context.limits().qnodes_limit {
+            if searcher.stats.qnodes >= limit {
+                return alpha; // Return current best bound
+            }
         }
 
         // Delta pruning - skip captures that can't improve position enough
@@ -1291,5 +1329,120 @@ mod tests {
             searcher.stats.nodes >= 1,
             "Should search moves even at depth limit when in check"
         );
+    }
+
+    #[test]
+    fn test_qnodes_limit_basic() {
+        // Test basic QNodes limit functionality
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set a very small qnodes limit
+        let limits = SearchLimits::builder()
+            .depth(5)
+            .qnodes_limit(10) // Very small limit
+            .build();
+        searcher.context.set_limits(limits);
+
+        // Create a position with many captures available
+        // This SFEN has multiple pieces that can capture each other
+        let pos = Position::from_sfen("k8/9/9/3G1G3/2P1P1P2/3B1R3/9/9/K8 b - 1").unwrap();
+
+        let mut test_pos = pos.clone();
+        let _score = quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0);
+
+        // Verify qnodes limit was respected
+        assert!(
+            searcher.stats.qnodes <= 10,
+            "QNodes should not exceed limit, got {}",
+            searcher.stats.qnodes
+        );
+    }
+
+    #[test]
+    fn test_qnodes_limit_in_check() {
+        // Test QNodes limit when in check position
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set a small qnodes limit
+        let limits = SearchLimits::builder()
+            .depth(5)
+            .qnodes_limit(5) // Very small limit
+            .build();
+        searcher.context.set_limits(limits);
+
+        // Position: Black king in check
+        let pos = Position::from_sfen("9/9/9/9/4K3r/9/9/9/9 b - 1").unwrap();
+        assert!(pos.is_in_check(), "Position should be in check");
+
+        let mut test_pos = pos.clone();
+        let score = quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0);
+
+        // Verify qnodes limit was respected
+        assert!(
+            searcher.stats.qnodes <= 5,
+            "QNodes should not exceed limit even in check, got {}",
+            searcher.stats.qnodes
+        );
+
+        // Score should be reasonable (not a mate score)
+        assert!(score.abs() < 30000, "Score should be reasonable, not mate");
+    }
+
+    #[test]
+    fn test_qnodes_limit_performance() {
+        // Test that QNodes limit improves performance in complex positions
+        use std::time::Instant;
+
+        let evaluator = MaterialEvaluator;
+
+        // Position with many possible captures (complex middlegame)
+        let complex_pos = Position::from_sfen(
+            "ln1gkg1nl/1r5s1/p1pppbppp/1p5P1/9/2P6/PP1PPPP1P/1B5R1/LNSGKGSNL b - 1",
+        )
+        .unwrap();
+
+        // Test without qnodes limit
+        let mut searcher1 =
+            UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator.clone());
+        searcher1.context.set_limits(SearchLimits::builder().depth(1).build());
+
+        let start1 = Instant::now();
+        let mut pos1 = complex_pos.clone();
+        let _score1 = quiescence_search(&mut searcher1, &mut pos1, -1000, 1000, 0);
+        let elapsed1 = start1.elapsed();
+        let nodes_without_limit = searcher1.stats.qnodes;
+
+        // Test with qnodes limit
+        let mut searcher2 = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+        searcher2.context.set_limits(
+            SearchLimits::builder()
+                .depth(1)
+                .qnodes_limit(1000) // Reasonable limit
+                .build(),
+        );
+
+        let start2 = Instant::now();
+        let mut pos2 = complex_pos.clone();
+        let _score2 = quiescence_search(&mut searcher2, &mut pos2, -1000, 1000, 0);
+        let elapsed2 = start2.elapsed();
+        let nodes_with_limit = searcher2.stats.qnodes;
+
+        // With limit should explore fewer nodes
+        assert!(
+            nodes_with_limit <= nodes_without_limit,
+            "With limit should explore fewer or equal nodes"
+        );
+
+        // With limit should be faster (or at least not significantly slower)
+        // Note: This might be flaky in CI, so we're lenient
+        if elapsed2 > elapsed1.saturating_mul(2) {
+            eprintln!(
+                "Warning: QNodes limit didn't improve performance as expected. \
+                Without limit: {:?} ({} nodes), With limit: {:?} ({} nodes)",
+                elapsed1, nodes_without_limit, elapsed2, nodes_with_limit
+            );
+        }
     }
 }

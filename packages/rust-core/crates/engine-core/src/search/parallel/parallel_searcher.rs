@@ -691,6 +691,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 moves_to_go: limits.moves_to_go,
                                 depth: limits.depth,
                                 nodes: limits.nodes,
+                                qnodes_limit: limits.qnodes_limit,
                                 time_parameters: limits.time_parameters,
                                 stop_flag: limits.stop_flag.clone(),
                                 info_callback: None, // Don't need callback for TimeManager

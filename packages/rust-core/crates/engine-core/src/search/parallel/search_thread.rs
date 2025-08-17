@@ -334,6 +334,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                 stats: SearchStats {
                     depth: 1,
                     nodes: 1,
+                    qnodes: 0,
                     elapsed: Duration::from_millis(0),
                     pv: vec![root_move],
                     seldepth: None,
