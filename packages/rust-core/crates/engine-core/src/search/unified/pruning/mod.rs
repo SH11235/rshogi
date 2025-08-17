@@ -213,6 +213,36 @@ pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval
         && static_eval - STATIC_NULL_MOVE_DEPTH_FACTOR * depth as i32 >= beta
 }
 
+/// Check if a move should skip SEE pruning (for shogi-specific moves)
+/// Returns true if the move should NOT be pruned by SEE
+pub fn should_skip_see_pruning(pos: &Position, mv: Move) -> bool {
+    // Drop moves are excluded from SEE pruning
+    // (drops have tactical value that SEE cannot evaluate properly)
+    if mv.is_drop() {
+        return true;
+    }
+
+    // King moves in check must be allowed (evasion moves)
+    if pos.is_in_check() {
+        return true;
+    }
+
+    // TODO: Uncomment when gives_check() is properly implemented
+    // Moves that give check are excluded
+    // (checks often have tactical value beyond material exchange)
+    // if pos.gives_check(mv) {
+    //     return true;
+    // }
+
+    // Promotion moves might be worth considering even with bad SEE
+    // (especially pawn promotions to tokin)
+    if mv.is_promote() && mv.piece_type() == Some(crate::shogi::PieceType::Pawn) {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use crate::usi::parse_usi_square;
