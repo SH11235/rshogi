@@ -259,8 +259,12 @@ where
     #[cfg(feature = "hashfull_filter")]
     if USE_TT {
         if let Some(ref tt) = searcher.tt {
-            while tt.should_trigger_gc() {
+            // Limit GC iterations to prevent potential infinite loops
+            const MAX_GC_ITERATIONS: usize = 8;
+            let mut gc_iterations = 0;
+            while tt.should_trigger_gc() && gc_iterations < MAX_GC_ITERATIONS {
                 tt.incremental_gc(512); // Larger batch size before search starts
+                gc_iterations += 1;
             }
         }
     }
@@ -380,35 +384,48 @@ where
             // Get PV from recursive search
             let child_pv = searcher.pv_table.get_line(1);
 
-            // Validate child PV moves before extending
-            // This prevents propagating invalid moves from TT pollution
-            let mut valid_child_pv = Vec::new();
-            let mut temp_pos = pos.clone();
-            let undo_info = temp_pos.do_move(mv);
-            let mut undo_infos = Vec::new();
+            // In release builds, trust the child PV without validation
+            // This avoids expensive cloning and move validation in hot path
+            #[cfg(not(debug_assertions))]
+            {
+                pv.extend_from_slice(&child_pv);
+            }
 
-            for &child_mv in child_pv {
-                if temp_pos.is_pseudo_legal(child_mv) {
-                    valid_child_pv.push(child_mv);
-                    let child_undo = temp_pos.do_move(child_mv);
-                    undo_infos.push((child_mv, child_undo));
-                } else {
-                    #[cfg(debug_assertions)]
-                    if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                        eprintln!("[WARNING] Invalid move in child PV at root, truncating");
-                        eprintln!("  Move: {}", crate::usi::move_to_usi(&child_mv));
-                        eprintln!("  Position: {}", crate::usi::position_to_sfen(&temp_pos));
+            // In debug builds or with SHOGI_DEBUG_PV, validate child PV moves
+            #[cfg(debug_assertions)]
+            {
+                if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                    // Validate child PV moves before extending
+                    // This prevents propagating invalid moves from TT pollution
+                    let mut valid_child_pv = Vec::new();
+                    let mut temp_pos = pos.clone();
+                    let undo_info = temp_pos.do_move(mv);
+                    let mut undo_infos = Vec::new();
+
+                    for &child_mv in child_pv {
+                        if temp_pos.is_pseudo_legal(child_mv) {
+                            valid_child_pv.push(child_mv);
+                            let child_undo = temp_pos.do_move(child_mv);
+                            undo_infos.push((child_mv, child_undo));
+                        } else {
+                            eprintln!("[WARNING] Invalid move in child PV at root, truncating");
+                            eprintln!("  Move: {}", crate::usi::move_to_usi(&child_mv));
+                            eprintln!("  Position: {}", crate::usi::position_to_sfen(&temp_pos));
+                            break;
+                        }
                     }
-                    break;
+
+                    // Undo all child moves in reverse order
+                    for (child_mv, child_undo) in undo_infos.iter().rev() {
+                        temp_pos.undo_move(*child_mv, child_undo.clone());
+                    }
+                    temp_pos.undo_move(mv, undo_info);
+                    pv.extend_from_slice(&valid_child_pv);
+                } else {
+                    // Debug build but no SHOGI_DEBUG_PV - just use child PV as-is
+                    pv.extend_from_slice(child_pv);
                 }
             }
-
-            // Undo all child moves in reverse order
-            for (child_mv, child_undo) in undo_infos.iter().rev() {
-                temp_pos.undo_move(*child_mv, child_undo.clone());
-            }
-            temp_pos.undo_move(mv, undo_info);
-            pv.extend_from_slice(&valid_child_pv);
 
             if score > alpha {
                 alpha = score;
@@ -418,10 +435,14 @@ where
 
     // Validate PV before returning
     if !pv.is_empty() {
-        // First check occupancy invariants (doesn't rely on move generator)
-        pv_local_sanity(pos, &pv);
-        // Then check legal moves
-        assert_pv_legal(pos, &pv);
+        // In release builds, skip PV validation for performance
+        #[cfg(debug_assertions)]
+        {
+            // First check occupancy invariants (doesn't rely on move generator)
+            pv_local_sanity(pos, &pv);
+            // Then check legal moves
+            assert_pv_legal(pos, &pv);
+        }
     }
 
     (best_score, pv)
