@@ -239,6 +239,117 @@ fn test_see_delta_pruning() {
 }
 
 #[test]
+fn test_see_defended_pawn() {
+    // Test capturing a defended pawn - should be negative
+    let mut pos = Position::empty();
+
+    // Black Rook on 5f
+    pos.board
+        .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+
+    // White Pawn on 5d - defended by silver
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+
+    // White Silver on 4c - defending the pawn
+    pos.board
+        .put_piece(parse_usi_square("4c").unwrap(), Piece::new(PieceType::Silver, Color::White));
+
+    // Kings for proper position
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+    pos.board.rebuild_occupancy_bitboards();
+    pos.side_to_move = Color::Black;
+
+    // Rook takes defended pawn
+    let mv = Move::normal(parse_usi_square("5f").unwrap(), parse_usi_square("5d").unwrap(), false);
+
+    // SEE: RxP (+100), SxR (-900)
+    // Total: 100 - 900 = -800
+    assert_eq!(pos.see(mv), -800);
+    assert!(!pos.see_ge(mv, 0));
+}
+
+#[test]
+fn test_see_equal_exchange() {
+    // Test equal exchange (rook vs rook)
+    let mut pos = Position::empty();
+
+    // Black Rook on 5f
+    pos.board
+        .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Rook, Color::Black));
+
+    // White Rook on 5d - defended by another rook
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+    // White Rook on 5a - defending
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+    // Kings for proper position
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+    pos.board.rebuild_occupancy_bitboards();
+    pos.side_to_move = Color::Black;
+
+    // Rook takes rook
+    let mv = Move::normal(parse_usi_square("5f").unwrap(), parse_usi_square("5d").unwrap(), false);
+
+    // SEE: RxR (+900), RxR (-900)
+    // Total: 900 - 900 = 0
+    assert_eq!(pos.see(mv), 0);
+    assert!(pos.see_ge(mv, 0));
+    assert!(!pos.see_ge(mv, 1));
+}
+
+#[test]
+fn test_see_x_ray_with_equal_value() {
+    // Test X-ray attack with equal value pieces
+    let mut pos = Position::empty();
+
+    // Black Bishop on 7g
+    pos.board
+        .put_piece(parse_usi_square("7g").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
+
+    // Black Bishop on 8h - behind first bishop
+    pos.board
+        .put_piece(parse_usi_square("8h").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
+
+    // White Bishop on 5e - defended by bishop
+    pos.board
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Bishop, Color::White));
+
+    // White Bishop on 2b - defending
+    pos.board
+        .put_piece(parse_usi_square("2b").unwrap(), Piece::new(PieceType::Bishop, Color::White));
+
+    // Kings
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+    pos.board.rebuild_occupancy_bitboards();
+    pos.side_to_move = Color::Black;
+
+    // Bishop takes bishop
+    let mv = Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("5e").unwrap(), false);
+
+    // SEE: BxB (+700), BxB (-700), BxB (+700)
+    // Total: 700 (Black wins a bishop)
+    // Note: Bishop value is 700, not 500
+    assert_eq!(pos.see(mv), 700);
+    assert!(pos.see_ge(mv, 0));
+}
+
+#[test]
 fn test_see_ge_early_termination() {
     // Test that see_ge can terminate early when threshold cannot be reached
     let mut pos = Position::empty();
