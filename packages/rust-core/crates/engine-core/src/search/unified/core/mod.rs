@@ -261,8 +261,13 @@ where
         if let Some(ref tt) = searcher.tt {
             // Limit GC iterations to prevent potential infinite loops
             const MAX_GC_ITERATIONS: usize = 8;
+            const MAX_GC_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+            let gc_start = std::time::Instant::now();
             let mut gc_iterations = 0;
-            while tt.should_trigger_gc() && gc_iterations < MAX_GC_ITERATIONS {
+            while tt.should_trigger_gc()
+                && gc_iterations < MAX_GC_ITERATIONS
+                && gc_start.elapsed() < MAX_GC_BUDGET
+            {
                 tt.incremental_gc(512); // Larger batch size before search starts
                 gc_iterations += 1;
             }
@@ -299,7 +304,7 @@ where
         _owned_moves = None;
     };
 
-    // Skip prefetching - it has shown negative performance impact
+    // Note: Prefetching is done selectively inside the move loop below
 
     // Search each move
     for (move_idx, &mv) in ordered_slice.iter().enumerate() {
@@ -435,13 +440,18 @@ where
 
     // Validate PV before returning
     if !pv.is_empty() {
-        // In release builds, skip PV validation for performance
-        #[cfg(debug_assertions)]
-        {
-            // First check occupancy invariants (doesn't rely on move generator)
-            pv_local_sanity(pos, &pv);
-            // Then check legal moves
-            assert_pv_legal(pos, &pv);
+        // Minimal O(1) sanity check even in release builds
+        if pv.contains(&Move::NULL) || pv.len() > MAX_PLY {
+            pv.clear(); // Discard corrupted PV
+        } else {
+            // Full validation only in debug builds
+            #[cfg(debug_assertions)]
+            {
+                // First check occupancy invariants (doesn't rely on move generator)
+                pv_local_sanity(pos, &pv);
+                // Then check legal moves
+                assert_pv_legal(pos, &pv);
+            }
         }
     }
 
