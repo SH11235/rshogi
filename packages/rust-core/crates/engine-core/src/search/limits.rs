@@ -14,6 +14,7 @@ pub struct SearchLimits {
     pub moves_to_go: Option<u32>,
     pub depth: Option<u8>,
     pub nodes: Option<u64>,
+    pub qnodes_limit: Option<u64>,
     pub time_parameters: Option<TimeParameters>,
     /// Stop flag for interrupting search (temporarily kept for compatibility)
     pub stop_flag: Option<Arc<AtomicBool>>,
@@ -30,6 +31,7 @@ impl Default for SearchLimits {
             moves_to_go: None,
             depth: None,
             nodes: None,
+            qnodes_limit: None,
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
@@ -93,6 +95,7 @@ pub struct SearchLimitsBuilder {
     moves_to_go: Option<u32>,
     depth: Option<u8>,
     nodes: Option<u64>,
+    qnodes_limit: Option<u64>,
     time_parameters: Option<TimeParameters>,
     stop_flag: Option<Arc<AtomicBool>>,
     info_callback: Option<InfoCallback>,
@@ -106,6 +109,7 @@ impl Default for SearchLimitsBuilder {
             moves_to_go: None,
             depth: None,
             nodes: None,
+            qnodes_limit: None,
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
@@ -208,6 +212,15 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set quiescence search node limit
+    ///
+    /// This limits the number of nodes explored in quiescence search
+    /// to prevent explosion in complex positions.
+    pub fn qnodes_limit(mut self, limit: u64) -> Self {
+        self.qnodes_limit = Some(limit);
+        self
+    }
+
     /// Set time parameters
     pub fn time_parameters(mut self, params: TimeParameters) -> Self {
         self.time_parameters = Some(params);
@@ -258,6 +271,7 @@ impl SearchLimitsBuilder {
             moves_to_go: self.moves_to_go,
             depth: self.depth,
             nodes: self.nodes,
+            qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
@@ -281,6 +295,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             moves_to_go: tm.moves_to_go,
             depth: tm.depth.map(|d| d as u8),
             nodes: tm.nodes,
+            qnodes_limit: None,
             time_parameters: tm.time_parameters,
             stop_flag: None,
             info_callback: None,
@@ -323,6 +338,7 @@ impl Clone for SearchLimits {
             moves_to_go: self.moves_to_go,
             depth: self.depth,
             nodes: self.nodes,
+            qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag.clone(),
             info_callback: self.info_callback.clone(), // Arc can be cloned
@@ -342,6 +358,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("moves_to_go", &self.moves_to_go)
             .field("depth", &self.depth)
             .field("nodes", &self.nodes)
+            .field("qnodes_limit", &self.qnodes_limit)
             .field("time_parameters", &self.time_parameters)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
