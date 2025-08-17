@@ -8,6 +8,9 @@ pub mod core;
 pub mod ordering;
 pub mod pruning;
 
+#[cfg(test)]
+mod see_filter_test;
+
 use crate::{
     evaluation::evaluate::Evaluator,
     search::{

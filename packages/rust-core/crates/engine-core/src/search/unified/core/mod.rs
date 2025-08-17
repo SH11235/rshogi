@@ -764,8 +764,21 @@ where
         }
     }
 
-    // Order captures by MVV-LVA if pruning is enabled - sort in place to avoid allocation
+    // Apply pruning optimizations if enabled
     if USE_PRUNING {
+        // Apply SEE filtering first to remove bad captures (Phase 1 implementation)
+        // This reduces the number of moves to sort, improving performance
+        moves.as_mut_vec().retain(|&mv| {
+            // Check if this move should skip SEE pruning (drops, checks, etc.)
+            if crate::search::unified::pruning::should_skip_see_pruning(pos, mv) {
+                return true;
+            }
+
+            // Keep captures with SEE >= 0
+            pos.see_ge(mv, 0)
+        });
+
+        // Order remaining captures by MVV-LVA - sort in place to avoid allocation
         moves.as_mut_vec().sort_by_cached_key(|&mv| {
             // MVV-LVA: prioritize capturing more valuable pieces
             // First try metadata, then fall back to board lookup
