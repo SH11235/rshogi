@@ -340,6 +340,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
 
+        // Create limits with shared qnodes counter from shared state
+        let mut limits = limits;
+        limits.qnodes_counter = Some(self.shared_state.get_qnodes_counter());
+
         // Create time manager if needed
         use crate::time_management::{GamePhase, TimeControl, TimeLimits};
 
@@ -696,6 +700,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 stop_flag: limits.stop_flag.clone(),
                                 info_callback: None, // Don't need callback for TimeManager
                                 ponder_hit_flag: None,
+                                qnodes_counter: limits.qnodes_counter.clone(),
                             };
 
                             // Convert to TimeLimits
@@ -1151,6 +1156,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         best_result.stats.nodes = self.shared_state.get_nodes();
+        best_result.stats.qnodes = self.shared_state.get_qnodes();
 
         // Ensure we always have a move (fallback to first legal move if needed)
         if best_result.best_move.is_none() && best_result.stats.nodes > 0 {
@@ -1363,5 +1369,103 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!("Time manager stopped");
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::{SearchLimits, ShardedTranspositionTable},
+        shogi::Position,
+    };
+    use std::sync::atomic::Ordering;
+
+    /// Create a test position with many captures available
+    fn create_capture_heavy_position() -> Position {
+        // Create a position with many mutual captures
+        // This is designed to stress the quiescence search
+        // This position has many pieces that can capture each other
+        Position::from_sfen(
+            "k8/1r1b3g1/p1p1ppp1p/1p1ps2p1/2P6/PP1P1S2P/2SGPPP2/1B5R1/LN1K2GNL b - 1",
+        )
+        .unwrap_or_else(|_| Position::startpos())
+    }
+
+    #[test]
+    fn test_parallel_qnodes_budget() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+        let mut pos = create_capture_heavy_position();
+
+        // Set a small qnodes budget
+        let limits = SearchLimits::builder()
+            .depth(5)
+            .qnodes_limit(10000) // Small limit to ensure it's hit
+            .build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // Verify that the total qnodes doesn't exceed the limit by much
+        // (allow some margin for atomic operations)
+        assert!(
+            result.stats.qnodes <= 10000 + 1000,
+            "QNodes exceeded limit: {} > 11000",
+            result.stats.qnodes
+        );
+
+        // Verify we found a move
+        assert!(result.best_move.is_some());
+    }
+
+    #[test]
+    fn test_parallel_qnodes_aggregation() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+        // Use a position with captures available to ensure quiescence search
+        let mut pos = create_capture_heavy_position();
+
+        // Run search without qnodes limit
+        let limits = SearchLimits::builder().depth(4).build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // Verify that qnodes are properly aggregated
+        let shared_qnodes = searcher.shared_state.get_qnodes();
+        assert_eq!(
+            result.stats.qnodes, shared_qnodes,
+            "QNodes not properly aggregated: stats={} shared={}",
+            result.stats.qnodes, shared_qnodes
+        );
+
+        // For this test, we mainly care about proper aggregation
+        // QNodes might be 0 if no captures are evaluated
+        if result.stats.qnodes > 0 {
+            println!("QNodes recorded: {}", result.stats.qnodes);
+        }
+    }
+
+    #[test]
+    fn test_qnodes_counter_sharing() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+        // Get the qnodes counter
+        let counter1 = searcher.shared_state.get_qnodes_counter();
+        let counter2 = searcher.shared_state.get_qnodes_counter();
+
+        // Both should point to the same atomic counter
+        counter1.store(42, Ordering::Relaxed);
+        assert_eq!(counter2.load(Ordering::Relaxed), 42);
+
+        // Reset should clear it
+        searcher.shared_state.reset();
+        assert_eq!(counter1.load(Ordering::Relaxed), 0);
     }
 }
