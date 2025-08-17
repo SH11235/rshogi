@@ -11,6 +11,8 @@ pub struct MoveGenImpl<'a> {
     pub(super) moves: MoveList,
     pub(super) king_sq: Square,
     pub checkers: Bitboard,
+    pub(super) non_king_check_mask: Bitboard, // 非玉の通常手用
+    pub(super) drop_block_mask: Bitboard,     // 持駒打ち用（ブロックのみ）
     pub(super) pinned: Bitboard,
     pub(super) pin_rays: [Bitboard; 81],
 }
@@ -26,6 +28,8 @@ impl<'a> MoveGenImpl<'a> {
             moves: MoveList::new(),
             king_sq,
             checkers: Bitboard::EMPTY,
+            non_king_check_mask: Bitboard::ALL, // 0チェック時は制約なし
+            drop_block_mask: Bitboard::ALL,     // 0チェック時は制約なし
             pinned: Bitboard::EMPTY,
             pin_rays: [Bitboard::EMPTY; 81],
         };
@@ -40,6 +44,17 @@ impl<'a> MoveGenImpl<'a> {
     #[inline]
     pub(super) fn get_captured_type(&self, to: Square) -> Option<PieceType> {
         self.pos.board.piece_on(to).map(|p| p.piece_type)
+    }
+
+    /// Check if a piece at the given square is a sliding piece
+    /// Dragons and horses are considered sliding pieces for blocking purposes
+    #[inline]
+    pub(super) fn is_sliding_piece(&self, sq: Square) -> bool {
+        if let Some(piece) = self.pos.board.piece_on(sq) {
+            matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop | PieceType::Lance)
+        } else {
+            false
+        }
     }
 
     /// Generate all legal moves
@@ -58,8 +73,14 @@ impl<'a> MoveGenImpl<'a> {
             return std::mem::take(&mut self.moves);
         }
 
-        // Generate moves for each piece type
+        // Generate king moves first (always needed)
+        self.generate_king_moves();
+
+        // Generate moves for other piece types
         for &piece_type_enum in &ALL_PIECE_TYPES {
+            if piece_type_enum == PieceType::King {
+                continue; // Already generated
+            }
             let piece_type = piece_type_enum as usize;
             let mut pieces = self.pos.board.piece_bb[us as usize][piece_type];
 
@@ -69,7 +90,6 @@ impl<'a> MoveGenImpl<'a> {
                 let promoted = piece.map(|p| p.promoted).unwrap_or(false);
 
                 match piece_type_enum {
-                    PieceType::King => self.generate_king_moves_from(from),
                     PieceType::Rook => self.generate_sliding_moves(from, piece_type_enum, promoted),
                     PieceType::Bishop => {
                         self.generate_sliding_moves(from, piece_type_enum, promoted)
@@ -79,6 +99,7 @@ impl<'a> MoveGenImpl<'a> {
                     PieceType::Knight => self.generate_knight_moves(from, promoted),
                     PieceType::Lance => self.generate_lance_moves(from, promoted),
                     PieceType::Pawn => self.generate_pawn_moves(from, promoted),
+                    _ => unreachable!("King moves already generated"),
                 }
             }
         }
@@ -106,6 +127,7 @@ impl<'a> MoveGenImpl<'a> {
         super::pieces::generate_king_moves(self);
     }
 
+    #[allow(dead_code)] // Used in pieces.rs
     pub(super) fn generate_king_moves_from(&mut self, from: Square) {
         super::pieces::generate_king_moves_from(self, from);
     }
@@ -158,19 +180,6 @@ impl<'a> MoveGenImpl<'a> {
 
     pub(super) fn would_be_in_check(&self, from: Square, to: Square) -> bool {
         super::checks::would_be_in_check(self, from, to)
-    }
-
-    pub(super) fn calculate_pinned_pieces(&self, color: Color) -> Bitboard {
-        super::checks::calculate_pinned_pieces(self, color)
-    }
-
-    // From attacks.rs
-    pub(super) fn attackers_to(&self, sq: Square, color: Color) -> Bitboard {
-        super::attacks::attackers_to(self, sq, color)
-    }
-
-    pub(super) fn attackers_to_except_king_pawn_lance(&self, sq: Square, color: Color) -> Bitboard {
-        super::attacks::attackers_to_except_king_pawn_lance(self, sq, color)
     }
 
     pub(super) fn attackers_to_with_occupancy(

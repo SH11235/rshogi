@@ -4,6 +4,18 @@ use crate::{shogi::Move, Bitboard, Color, PieceType, Square};
 
 use super::core::MoveGenImpl;
 
+/// Check if a piece must promote when moving to a certain square
+#[inline]
+fn must_promote(piece: PieceType, to: Square, color: Color) -> bool {
+    match (color, piece) {
+        (Color::Black, PieceType::Pawn | PieceType::Lance) => to.rank() == 0,
+        (Color::Black, PieceType::Knight) => to.rank() <= 1,
+        (Color::White, PieceType::Pawn | PieceType::Lance) => to.rank() == 8,
+        (Color::White, PieceType::Knight) => to.rank() >= 7,
+        _ => false,
+    }
+}
+
 impl<'a> MoveGenImpl<'a> {
     /// Add moves from a square to target squares
     pub(super) fn add_moves(&mut self, from: Square, targets: Bitboard, _promoted: bool) {
@@ -15,14 +27,27 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Add a single move from a square to a target square
     pub(super) fn add_single_move(&mut self, from: Square, to: Square, piece_type: PieceType) {
+        // Apply check mask for non-king pieces
+        if !self.non_king_check_mask.test(to) {
+            return;
+        }
+
+        // If piece is pinned, only allow moves along pin ray
+        if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
+            return;
+        }
+
         // Get the piece to check if it's already promoted
         let piece = self.pos.board.piece_on(from).expect("Piece must exist at from square");
         let is_promoted = piece.promoted;
         let us = self.pos.side_to_move;
         let captured_type = self.get_captured_type(to);
 
+        // Check if the piece must promote
+        let must = must_promote(piece_type, to, us);
+
         // Check if the piece can promote (not already promoted and can promote based on rules)
-        let can_promote = !is_promoted
+        let may = !is_promoted
             && self.can_promote(from, to, us)
             && matches!(
                 piece_type,
@@ -34,14 +59,20 @@ impl<'a> MoveGenImpl<'a> {
                     | PieceType::Pawn
             );
 
-        // Always add non-promotion move
-        self.moves
-            .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
-
-        // Add promotion move if piece can promote
-        if can_promote {
+        if must {
+            // Only add promoted move if must promote
             self.moves
                 .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+        } else {
+            // Always add non-promotion move
+            self.moves
+                .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
+
+            // Add promotion move if piece can promote
+            if may {
+                self.moves
+                    .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+            }
         }
     }
 
@@ -52,16 +83,12 @@ impl<'a> MoveGenImpl<'a> {
         mut targets: Bitboard,
         piece_type: PieceType,
     ) {
-        // If we're in check, only allow moves that block or capture checker
-        if !self.checkers.is_empty() && self.checkers.count_ones() == 1 {
-            let checker_sq = self.checkers.lsb().unwrap();
-            let block_squares = self.between_bb(checker_sq, self.king_sq) | self.checkers;
-            targets &= block_squares;
-        }
+        // Apply non-king check mask first (smaller bitcount usually)
+        targets &= self.non_king_check_mask;
 
         // If piece is pinned, only allow moves along pin ray
         if self.pinned.test(from) {
-            targets &= self.pin_rays[from.0 as usize];
+            targets &= self.pin_rays[from.index()];
         }
 
         // Never allow capturing enemy king (should not happen in legal shogi)
@@ -77,8 +104,11 @@ impl<'a> MoveGenImpl<'a> {
         while let Some(to) = targets.pop_lsb() {
             let captured_type = self.get_captured_type(to);
 
+            // Check if the piece must promote
+            let must = must_promote(piece_type, to, us);
+
             // Check if the piece can promote (not already promoted and can promote based on rules)
-            let can_promote = !is_promoted
+            let may = !is_promoted
                 && self.can_promote(from, to, us)
                 && matches!(
                     piece_type,
@@ -90,14 +120,30 @@ impl<'a> MoveGenImpl<'a> {
                         | PieceType::Pawn
                 );
 
-            // Always add non-promotion move
-            self.moves
-                .push(Move::normal_with_piece(from, to, false, piece_type, captured_type));
-
-            // Add promotion move if piece can promote
-            if can_promote {
+            if must {
+                // Only add promoted move if must promote
                 self.moves
                     .push(Move::normal_with_piece(from, to, true, piece_type, captured_type));
+            } else {
+                // Always add non-promotion move
+                self.moves.push(Move::normal_with_piece(
+                    from,
+                    to,
+                    false,
+                    piece_type,
+                    captured_type,
+                ));
+
+                // Add promotion move if piece can promote
+                if may {
+                    self.moves.push(Move::normal_with_piece(
+                        from,
+                        to,
+                        true,
+                        piece_type,
+                        captured_type,
+                    ));
+                }
             }
         }
     }
@@ -112,17 +158,6 @@ impl<'a> MoveGenImpl<'a> {
         }
     }
 
-    /// Check if a piece at given square is a sliding piece
-    pub(super) fn is_sliding_piece(&self, sq: Square) -> bool {
-        if let Some(piece) = self.pos.board.piece_on(sq) {
-            matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop | PieceType::Lance)
-                || (piece.promoted
-                    && matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop))
-        } else {
-            false
-        }
-    }
-
     /// Check if two squares are aligned for rook movement
     pub(super) fn is_aligned_rook(&self, sq1: Square, sq2: Square) -> bool {
         sq1.file() == sq2.file() || sq1.rank() == sq2.rank()
@@ -133,41 +168,5 @@ impl<'a> MoveGenImpl<'a> {
         let file_diff = (sq1.file() as i8 - sq2.file() as i8).abs();
         let rank_diff = (sq1.rank() as i8 - sq2.rank() as i8).abs();
         file_diff == rank_diff && file_diff != 0
-    }
-
-    /// Get bitboard of squares between two aligned squares
-    pub(super) fn between_bb(&self, sq1: Square, sq2: Square) -> Bitboard {
-        let mut between = Bitboard::EMPTY;
-
-        let file1 = sq1.file() as i8;
-        let rank1 = sq1.rank() as i8;
-        let file2 = sq2.file() as i8;
-        let rank2 = sq2.rank() as i8;
-
-        let file_step = if file2 > file1 {
-            1
-        } else if file2 < file1 {
-            -1
-        } else {
-            0
-        };
-        let rank_step = if rank2 > rank1 {
-            1
-        } else if rank2 < rank1 {
-            -1
-        } else {
-            0
-        };
-
-        let mut f = file1 + file_step;
-        let mut r = rank1 + rank_step;
-
-        while f != file2 || r != rank2 {
-            between.set(Square::new(f as u8, r as u8));
-            f += file_step;
-            r += rank_step;
-        }
-
-        between
     }
 }
