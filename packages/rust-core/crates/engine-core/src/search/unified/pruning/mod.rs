@@ -217,54 +217,220 @@ pub fn can_do_static_null_move(depth: u8, in_check: bool, beta: i32, static_eval
 /// This is much cheaper than full gives_check() calculation
 fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
     use crate::shogi::PieceType;
-    
+
     // Get opponent king position
     let opponent = pos.side_to_move.opposite();
     let opp_king_sq = match pos.board.king_square(opponent) {
         Some(sq) => sq,
         None => return false,
     };
-    
+
     let to = mv.to();
     let dr = opp_king_sq.rank() as i8 - to.rank() as i8;
     let dc = opp_king_sq.file() as i8 - to.file() as i8;
     let dr_abs = dr.abs();
     let dc_abs = dc.abs();
-    
-    // Quick check based on piece type and relative position
-    let piece_type = if mv.is_drop() {
-        mv.drop_piece_type()
+
+    // Get piece type and check if it's promoted or will promote
+    let (piece_type, will_be_promoted) = if mv.is_drop() {
+        (mv.drop_piece_type(), false)
     } else {
-        match mv.piece_type() {
-            Some(pt) => pt,
+        // For normal moves, get piece type from the board
+        let from = match mv.from() {
+            Some(f) => f,
+            None => return false,
+        };
+        match pos.board.piece_on(from) {
+            Some(piece) => (piece.piece_type, piece.promoted || mv.is_promote()),
             None => return false,
         }
     };
-    
-    match piece_type {
+
+    // 1. Direct check - piece moves to attack the king
+    let direct_check = match piece_type {
         // Sliding pieces - check if on same line
         PieceType::Rook => dr == 0 || dc == 0,
         PieceType::Bishop => dr_abs == dc_abs,
         PieceType::Lance => {
-            if pos.side_to_move == crate::shogi::Color::Black {
-                dc == 0 && dr < 0
+            if will_be_promoted {
+                // Promoted lance moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
             } else {
-                dc == 0 && dr > 0
+                // Normal lance
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    dc == 0 && dr < 0
+                } else {
+                    dc == 0 && dr > 0
+                }
             }
-        },
+        }
         // Close range pieces - check if within range
         PieceType::Knight => {
-            if pos.side_to_move == crate::shogi::Color::Black {
-                dr == -2 && dc_abs == 1
+            if will_be_promoted {
+                // Promoted knight moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
             } else {
-                dr == 2 && dc_abs == 1
+                // Normal knight
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    dr == -2 && dc_abs == 1
+                } else {
+                    dr == 2 && dc_abs == 1
+                }
             }
-        },
-        PieceType::Pawn | PieceType::Silver | PieceType::Gold => {
-            dr_abs <= 1 && dc_abs <= 1
-        },
+        }
+        PieceType::Pawn => {
+            if will_be_promoted {
+                // Tokin moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
+            } else {
+                // Normal pawn
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    dr == -1 && dc == 0
+                } else {
+                    dr == 1 && dc == 0
+                }
+            }
+        }
+        PieceType::Silver => {
+            if will_be_promoted {
+                // Promoted silver moves like gold
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                }
+            } else {
+                // Normal silver
+                if pos.side_to_move == crate::shogi::Color::Black {
+                    (dr == -1 && dc_abs <= 1) || (dr == 1 && dc_abs == 1)
+                } else {
+                    (dr == 1 && dc_abs <= 1) || (dr == -1 && dc_abs == 1)
+                }
+            }
+        }
+        PieceType::Gold => {
+            // Gold movement pattern
+            if pos.side_to_move == crate::shogi::Color::Black {
+                (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+            } else {
+                (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+            }
+        }
         PieceType::King => false, // King can't give check
+    };
+
+    if direct_check {
+        // For sliding pieces, do a quick obstruction check
+        match piece_type {
+            PieceType::Rook | PieceType::Bishop | PieceType::Lance => {
+                // Simple path check between to and king
+                let step_r = if dr != 0 { dr / dr_abs } else { 0 };
+                let step_c = if dc != 0 { dc / dc_abs } else { 0 };
+
+                // Check at most 7 squares (max distance on shogi board)
+                for i in 1..dr_abs.max(dc_abs) {
+                    let check_rank = to.rank() as i8 + i * step_r;
+                    let check_file = to.file() as i8 + i * step_c;
+
+                    if let Some(sq) =
+                        crate::shogi::Square::new_safe(check_file as u8, check_rank as u8)
+                    {
+                        if pos.board.piece_on(sq).is_some() {
+                            // Path is blocked
+                            return false;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return true;
     }
+
+    // 2. Discovered check - moving piece uncovers attack from behind
+    // Only check for non-drop moves (drops can't cause discovered check)
+    if !mv.is_drop() {
+        let from = match mv.from() {
+            Some(f) => f,
+            None => return false,
+        };
+
+        // Check if 'from' square is on a line with the opponent king
+        let dr_from = opp_king_sq.rank() as i8 - from.rank() as i8;
+        let dc_from = opp_king_sq.file() as i8 - from.file() as i8;
+        let dr_from_abs = dr_from.abs();
+        let dc_from_abs = dc_from.abs();
+
+        // Is 'from' on same rank/file/diagonal as king?
+        let on_rank = dr_from == 0;
+        let on_file = dc_from == 0;
+        let on_diagonal = dr_from_abs == dc_from_abs;
+
+        if on_rank || on_file || on_diagonal {
+            // Quick check: look for a sliding piece behind 'from' that could attack the king
+            let step_r = if dr_from != 0 {
+                -dr_from / dr_from_abs
+            } else {
+                0
+            };
+            let step_c = if dc_from != 0 {
+                -dc_from / dc_from_abs
+            } else {
+                0
+            };
+
+            // Check up to 8 squares behind 'from'
+            for i in 1..=8 {
+                let check_rank = from.rank() as i8 + i * step_r;
+                let check_file = from.file() as i8 + i * step_c;
+
+                // Check bounds
+                if !(0..=8).contains(&check_rank) || !(0..=8).contains(&check_file) {
+                    break;
+                }
+
+                if let Some(sq) = crate::shogi::Square::new_safe(check_file as u8, check_rank as u8)
+                {
+                    if let Some(piece) = pos.board.piece_on(sq) {
+                        // Found a piece - check if it's our sliding piece that could attack
+                        if piece.color == pos.side_to_move {
+                            match piece.piece_type {
+                                PieceType::Rook if on_rank || on_file => return true,
+                                PieceType::Bishop if on_diagonal => return true,
+                                PieceType::Lance if on_file => {
+                                    // Check lance direction
+                                    if pos.side_to_move == crate::shogi::Color::Black {
+                                        if dr_from < 0 {
+                                            return true;
+                                        }
+                                    } else if dr_from > 0 {
+                                        return true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Any piece blocks further discovery
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if a move should skip SEE pruning (for shogi-specific moves)
@@ -283,14 +449,24 @@ pub fn should_skip_see_pruning(pos: &Position, mv: Move) -> bool {
 
     // Promotion moves might be worth considering even with bad SEE
     // (especially pawn promotions to tokin)
-    if mv.is_promote() && mv.piece_type() == Some(crate::shogi::PieceType::Pawn) {
-        return true;
+    if mv.is_promote() && !mv.is_drop() {
+        if let Some(from) = mv.from() {
+            if let Some(piece) = pos.board.piece_on(from) {
+                if piece.piece_type == crate::shogi::PieceType::Pawn {
+                    return true; // Pawn promotion is SEE excluded
+                }
+            }
+        }
     }
-    
+
     // Moves that give check are excluded - but use lightweight pre-filter first
     // (checks often have tactical value beyond material exchange)
-    if likely_could_give_check(pos, mv) && pos.gives_check(mv) {
-        return true;
+    let likely_check = likely_could_give_check(pos, mv);
+    if likely_check {
+        let actual_check = pos.gives_check(mv);
+        if actual_check {
+            return true;
+        }
     }
 
     false

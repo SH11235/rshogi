@@ -12,26 +12,30 @@ impl Position {
     /// This is slow but correct - doesn't rely on move generator
     pub fn is_square_attacked_by_slow(&self, sq: Square, by: Color) -> bool {
         use crate::shogi::board::PieceType::*;
-        
+
         // Helper to check if attacker at from_sq can reach to_sq
         let can_attack = |from_sq: Square, piece: Piece, to_sq: Square| -> bool {
             let dr = to_sq.rank() as i8 - from_sq.rank() as i8;
             let dc = to_sq.file() as i8 - from_sq.file() as i8;
-            
+
             // Direction from attacker's perspective
             let (dr_abs, dc_abs) = (dr.abs(), dc.abs());
-            
+
             match piece.piece_type {
                 King => dr_abs <= 1 && dc_abs <= 1,
-                
+
                 Pawn => {
                     // Pawn attacks one square forward (different for each color)
                     if piece.promoted {
                         // Promoted pawn (tokin) moves like gold
                         if piece.color == Color::Black {
-                            (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                            (dr == -1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == 1 && dc == 0)
                         } else {
-                            (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                            (dr == 1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == -1 && dc == 0)
                         }
                     } else {
                         // Normal pawn
@@ -41,35 +45,73 @@ impl Position {
                             dr == 1 && dc == 0
                         }
                     }
-                },
-                
+                }
+
                 Lance => {
                     // Lance attacks forward in straight line
                     if piece.promoted {
                         // Promoted lance moves like gold
                         if piece.color == Color::Black {
-                            (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                            (dr == -1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == 1 && dc == 0)
                         } else {
-                            (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                            (dr == 1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == -1 && dc == 0)
                         }
                     } else {
-                        // Normal lance - only forward
+                        // Normal lance - only forward in straight line
                         if piece.color == Color::Black {
-                            dr < 0 && dc == 0
+                            if dr < 0 && dc == 0 {
+                                // Check if path is clear
+                                let dr_sign = -1;
+                                for i in 1..dr_abs {
+                                    let mid_rank = from_sq.rank() as i8 + i * dr_sign;
+                                    if let Some(mid_sq) =
+                                        Square::new_safe(from_sq.file(), mid_rank as u8)
+                                    {
+                                        if self.board.piece_on(mid_sq).is_some() {
+                                            return false; // Path blocked
+                                        }
+                                    }
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        } else if dr > 0 && dc == 0 {
+                            // Check if path is clear
+                            let dr_sign = 1;
+                            for i in 1..dr_abs {
+                                let mid_rank = from_sq.rank() as i8 + i * dr_sign;
+                                if let Some(mid_sq) =
+                                    Square::new_safe(from_sq.file(), mid_rank as u8)
+                                {
+                                    if self.board.piece_on(mid_sq).is_some() {
+                                        return false; // Path blocked
+                                    }
+                                }
+                            }
+                            true
                         } else {
-                            dr > 0 && dc == 0
+                            false
                         }
                     }
-                },
-                
+                }
+
                 Knight => {
                     // Knight has L-shaped jump
                     if piece.promoted {
                         // Promoted knight moves like gold
                         if piece.color == Color::Black {
-                            (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                            (dr == -1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == 1 && dc == 0)
                         } else {
-                            (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                            (dr == 1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == -1 && dc == 0)
                         }
                     } else {
                         // Normal knight
@@ -79,15 +121,19 @@ impl Position {
                             dr == 2 && dc_abs == 1
                         }
                     }
-                },
-                
+                }
+
                 Silver => {
                     if piece.promoted {
                         // Promoted silver moves like gold
                         if piece.color == Color::Black {
-                            (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                            (dr == -1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == 1 && dc == 0)
                         } else {
-                            (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                            (dr == 1 && dc_abs <= 1)
+                                || (dr == 0 && dc_abs == 1)
+                                || (dr == -1 && dc == 0)
                         }
                     } else {
                         // Normal silver - diagonals and forward
@@ -97,24 +143,28 @@ impl Position {
                             (dr == 1 && dc_abs <= 1) || (dr == -1 && dc_abs == 1)
                         }
                     }
-                },
-                
+                }
+
                 Gold => {
                     // Gold general movement
                     if piece.color == Color::Black {
-                        (dr == -1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == 1 && dc == 0)
+                        (dr == -1 && dc_abs <= 1)
+                            || (dr == 0 && dc_abs == 1)
+                            || (dr == 1 && dc == 0)
                     } else {
-                        (dr == 1 && dc_abs <= 1) || (dr == 0 && dc_abs == 1) || (dr == -1 && dc == 0)
+                        (dr == 1 && dc_abs <= 1)
+                            || (dr == 0 && dc_abs == 1)
+                            || (dr == -1 && dc == 0)
                     }
-                },
-                
+                }
+
                 Bishop => {
                     // Bishop - diagonal sliding piece
                     if dr_abs == dc_abs && dr_abs > 0 {
                         // Check if path is clear
                         let dr_sign = if dr > 0 { 1 } else { -1 };
                         let dc_sign = if dc > 0 { 1 } else { -1 };
-                        
+
                         for i in 1..dr_abs {
                             let mid_rank = from_sq.rank() as i8 + i * dr_sign;
                             let mid_file = from_sq.file() as i8 + i * dc_sign;
@@ -131,8 +181,8 @@ impl Position {
                     } else {
                         false
                     }
-                },
-                
+                }
+
                 Rook => {
                     // Rook - orthogonal sliding piece
                     if (dr == 0 && dc != 0) || (dr != 0 && dc == 0) {
@@ -142,7 +192,9 @@ impl Position {
                             let dc_sign = if dc > 0 { 1 } else { -1 };
                             for i in 1..dc_abs {
                                 let mid_file = from_sq.file() as i8 + i * dc_sign;
-                                if let Some(mid_sq) = Square::new_safe(mid_file as u8, from_sq.rank()) {
+                                if let Some(mid_sq) =
+                                    Square::new_safe(mid_file as u8, from_sq.rank())
+                                {
                                     if self.board.piece_on(mid_sq).is_some() {
                                         return false; // Path blocked
                                     }
@@ -153,7 +205,9 @@ impl Position {
                             let dr_sign = if dr > 0 { 1 } else { -1 };
                             for i in 1..dr_abs {
                                 let mid_rank = from_sq.rank() as i8 + i * dr_sign;
-                                if let Some(mid_sq) = Square::new_safe(from_sq.file(), mid_rank as u8) {
+                                if let Some(mid_sq) =
+                                    Square::new_safe(from_sq.file(), mid_rank as u8)
+                                {
                                     if self.board.piece_on(mid_sq).is_some() {
                                         return false; // Path blocked
                                     }
@@ -167,10 +221,10 @@ impl Position {
                     } else {
                         false
                     }
-                },
+                }
             }
         };
-        
+
         // Check all squares for pieces of color 'by' that can attack 'sq'
         for rank in 0..9 {
             for file in 0..9 {
@@ -182,7 +236,7 @@ impl Position {
                 }
             }
         }
-        
+
         false
     }
 
@@ -199,35 +253,33 @@ impl Position {
     pub fn gives_check_slow(&self, mv: Move) -> bool {
         // Clone position and make move
         let mut tmp = self.clone();
-        
+
         // Apply move (simplified - just for testing)
         if mv.is_drop() {
             let to = mv.to();
             let piece_type = mv.drop_piece_type();
             let piece = crate::shogi::board::Piece::new(piece_type, tmp.side_to_move);
             tmp.board.put_piece(to, piece);
-        } else {
-            if let Some(from) = mv.from() {
-                if let Some(piece) = tmp.board.piece_on(from) {
-                    // Handle capture
-                    if tmp.board.piece_on(mv.to()).is_some() {
-                        tmp.board.remove_piece(mv.to());
-                    }
-                    
-                    tmp.board.remove_piece(from);
-                    let final_piece = if mv.is_promote() {
-                        piece.promote()
-                    } else {
-                        piece
-                    };
-                    tmp.board.put_piece(mv.to(), final_piece);
+        } else if let Some(from) = mv.from() {
+            if let Some(piece) = tmp.board.piece_on(from) {
+                // Handle capture
+                if tmp.board.piece_on(mv.to()).is_some() {
+                    tmp.board.remove_piece(mv.to());
                 }
+
+                tmp.board.remove_piece(from);
+                let final_piece = if mv.is_promote() {
+                    piece.promote()
+                } else {
+                    piece
+                };
+                tmp.board.put_piece(mv.to(), final_piece);
             }
         }
-        
+
         // Rebuild occupancy bitboards
         tmp.board.rebuild_occupancy_bitboards();
-        
+
         // Find opponent king and check if attacked
         let opponent = tmp.side_to_move.opposite();
         if let Some(opp_king_sq) = tmp.board.king_square(opponent) {
@@ -327,100 +379,27 @@ impl Position {
     }
 
     /// Check if a move gives check to the opponent
-    /// Note: This is a simple implementation that clones the position
-    /// For performance-critical code, consider caching results
+    /// This implementation uses do_move/undo_move for correctness
+    /// Note: Assumes move comes from move generator (pseudo-legal)
     pub fn gives_check(&self, mv: Move) -> bool {
-        // Validate move first
-        if !self.is_pseudo_legal(mv) {
-            return false;
-        }
-
-        // Make the move and check if opponent is in check
+        // Clone and apply the move using do_move
         let mut tmp = self.clone();
+        let undo_info = tmp.do_move(mv);
 
-        // Apply move without full validation (we already checked pseudo-legal)
-        if mv.is_drop() {
-            // Handle drop moves
-            let to = mv.to();
-            let piece_type = mv.drop_piece_type();
-            let piece = crate::shogi::board::Piece::new(piece_type, tmp.side_to_move);
-            tmp.board.put_piece(to, piece);
+        // Check if the opponent (now current side) is in check
+        let gives = tmp.is_in_check();
 
-            // Update hand count
-            let hand_idx = match piece_type_to_hand_index(piece_type) {
-                Ok(idx) => idx,
-                Err(_) => return false,
-            };
-            tmp.hands[tmp.side_to_move as usize][hand_idx] -= 1;
-        } else {
-            // Handle normal moves
-            let from = match mv.from() {
-                Some(f) => f,
-                None => return false,
-            };
-            let to = mv.to();
+        // Undo the move
+        tmp.undo_move(mv, undo_info);
 
-            // Get piece at from square
-            let piece = match tmp.board.piece_on(from) {
-                Some(p) => p,
-                None => return false,
-            };
-
-            // Handle capture if any (before removing from source)
-            if let Some(captured) = tmp.board.piece_on(to) {
-                // Add to hand (unpromote captured piece)
-                let unpromoted_type = if captured.promoted {
-                    // Manually unpromote the piece type
-                    match captured.piece_type {
-                        PieceType::Pawn
-                        | PieceType::Lance
-                        | PieceType::Knight
-                        | PieceType::Silver => captured.piece_type,
-                        PieceType::Bishop | PieceType::Rook => captured.piece_type,
-                        _ => captured.piece_type, // Gold and King cannot be promoted
-                    }
-                } else {
-                    captured.piece_type
-                };
-
-                let hand_idx = match piece_type_to_hand_index(unpromoted_type) {
-                    Ok(idx) => idx,
-                    Err(_) => return false,
-                };
-                tmp.hands[tmp.side_to_move as usize][hand_idx] += 1;
-            }
-
-            // Explicitly remove piece from destination square if occupied
-            if tmp.board.piece_on(to).is_some() {
-                tmp.board.remove_piece(to);
-            }
-
-            // Remove piece from source
-            tmp.board.remove_piece(from);
-
-            // Place piece at destination (with promotion if specified)
-            let final_piece = if mv.is_promote() {
-                piece.promote()
-            } else {
-                piece
-            };
-            tmp.board.put_piece(to, final_piece);
-        }
-
-        // Rebuild occupancy bitboards after board modifications
-        tmp.board.rebuild_occupancy_bitboards();
-
-        // Switch side to move
-        tmp.side_to_move = tmp.side_to_move.opposite();
-
-        // Check if opponent is in check
-        tmp.is_in_check()
+        gives
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::usi::{parse_sfen, parse_usi_move};
+    use super::*;
+    use crate::usi::{parse_sfen, parse_usi_move, parse_usi_square};
 
     #[test]
     fn test_is_in_check_polarity_smoke() {
@@ -441,12 +420,12 @@ mod tests {
             "k8/9/9/9/9/9/9/9/K8 b - 1", // No check
             "9/9/9/9/9/9/9/9/k7R b - 1", // Black king in check from white rook
         ];
-        
+
         for sfen in &sfens {
             let pos = parse_sfen(sfen).unwrap();
             let fast = pos.is_in_check();
             let slow = pos.is_in_check_slow();
-            assert_eq!(fast, slow, "Mismatch for is_in_check on position: {}", sfen);
+            assert_eq!(fast, slow, "Mismatch for is_in_check on position: {sfen}");
         }
     }
 
@@ -455,20 +434,30 @@ mod tests {
         // Simple position where we know moves that give check
         let sfen = "k8/9/9/9/9/9/9/9/1R6K b - 1";
         let pos = parse_sfen(sfen).unwrap();
+
+        // Debug: Check what's actually at 2i
+        let sq_2i = parse_usi_square("2i").unwrap();
+        eprintln!("Square 2i index: {}", sq_2i.index());
+        eprintln!("Piece at 2i: {:?}", pos.board.piece_on(sq_2i));
         
-        // Test a move that gives check: Rook from 2i to 2a (horizontal check)
-        let check_move = parse_usi_move("2i2a").unwrap();
-        
+        // Also check 8i where we expect the rook
+        let sq_8i = parse_usi_square("8i").unwrap();
+        eprintln!("Square 8i index: {}", sq_8i.index());
+        eprintln!("Piece at 8i: {:?}", pos.board.piece_on(sq_8i));
+
+        // Test a move that gives check: Rook from 8i to 8a (vertical check to king at 9a)
+        let check_move = parse_usi_move("8i8a").unwrap();
+
         let fast = pos.gives_check(check_move);
         let slow = pos.gives_check_slow(check_move);
-        
+
         // Debug output
-        eprintln!("Testing gives_check for move 2i2a");
-        eprintln!("Position: {}", sfen);
-        eprintln!("Fast result: {}", fast);
-        eprintln!("Slow result: {}", slow);
-        
-        assert_eq!(fast, slow, "Mismatch for gives_check on move 2i2a");
+        eprintln!("Testing gives_check for move 8i8a");
+        eprintln!("Position: {sfen}");
+        eprintln!("Fast result: {fast}");
+        eprintln!("Slow result: {slow}");
+
+        assert_eq!(fast, slow, "Mismatch for gives_check on move 8i8a");
     }
 
     #[test]
@@ -510,5 +499,110 @@ mod tests {
         // Pawn promotes to tokin and gives check
         let mv = parse_usi_move("9c9b+").unwrap();
         assert!(pos.gives_check(mv), "Pawn promotion should give check");
+    }
+
+    #[test]
+    fn test_lance_attack_with_obstruction() {
+        // Test that lance cannot attack through pieces
+        let sfen = "k8/9/9/9/9/9/P8/L8/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // White king at 9a, Black lance at 9h, Black pawn at 9g blocks the path
+        // Lance should NOT be able to attack the king
+        assert!(
+            !pos.is_square_attacked_by_slow(parse_usi_square("9a").unwrap(), Color::Black),
+            "Lance should not attack through the blocking pawn"
+        );
+
+        // Test with white lance and black king
+        // Create position manually for debugging
+        let mut pos2 = Position::empty();
+
+        // Place white lance at 5a
+        pos2.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Lance, Color::White));
+
+        // Place white pawn at 5e to block
+        pos2.board
+            .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+
+        // Place black king at 5i
+        pos2.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+
+        pos2.board.rebuild_occupancy_bitboards();
+
+        // White lance at 5a should NOT be able to attack 5i through pawn at 5e
+        let can_attack =
+            pos2.is_square_attacked_by_slow(parse_usi_square("5i").unwrap(), Color::White);
+        assert!(
+            !can_attack,
+            "White lance at 5a should not attack 5i through blocking pawn at 5e"
+        );
+    }
+
+    #[test]
+    fn test_lance_attack_clear_path() {
+        // Test that lance CAN attack when path is clear
+        let sfen = "k8/9/9/9/9/9/9/L8/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // White king at 9a, Black lance at 9h, no obstruction
+        assert!(
+            pos.is_square_attacked_by_slow(parse_usi_square("9a").unwrap(), Color::Black),
+            "Lance should attack when path is clear"
+        );
+
+        // Test with white lance
+        let sfen2 = "K8/l8/9/9/9/9/9/9/k8 w - 1";
+        let pos2 = parse_sfen(sfen2).unwrap();
+
+        // Black king at 9i, White lance at 9b, no obstruction
+        assert!(
+            pos2.is_square_attacked_by_slow(parse_usi_square("9i").unwrap(), Color::White),
+            "White lance should attack when path is clear"
+        );
+    }
+
+    #[test]
+    fn test_promotion_gives_check() {
+        // Test various pieces promoting and giving check
+
+        // Silver promotes to give check (gains gold movement)
+        let sfen = "3k5/9/3S5/9/9/9/9/9/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Silver at 6c promotes to 6b and can now attack king at 6a sideways
+        let mv = parse_usi_move("6c6b+").unwrap();
+        assert!(pos.gives_check(mv), "Silver promotion should give check with new gold movement");
+
+        // Lance promotes and gains sideways movement
+        let sfen2 = "2k6/9/2L6/9/9/9/9/9/K8 b - 1";
+        let pos2 = parse_sfen(sfen2).unwrap();
+
+        // Lance at 7c promotes to 7b and can attack king at 8a diagonally
+        let mv2 = parse_usi_move("7c7b+").unwrap();
+        assert!(pos2.gives_check(mv2), "Lance promotion should give check with gold movement");
+
+        // Knight promotes and gains new movements
+        let sfen3 = "3k5/9/2N6/9/9/9/9/9/K8 b - 1";
+        let pos3 = parse_sfen(sfen3).unwrap();
+
+        // Knight at 7c promotes to 7b and attacks king at 6a
+        let mv3 = parse_usi_move("7c7b+").unwrap();
+        assert!(pos3.gives_check(mv3), "Knight promotion should give check with gold movement");
+    }
+
+    #[test]
+    fn test_promotion_without_check() {
+        // Test promotions that don't result in check
+
+        // Silver promotes but doesn't threaten king
+        let sfen = "k8/9/9/9/4S4/9/9/9/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Silver promotes far from king
+        let mv = parse_usi_move("5e5d+").unwrap();
+        assert!(!pos.gives_check(mv), "Silver promotion far from king should not give check");
     }
 }

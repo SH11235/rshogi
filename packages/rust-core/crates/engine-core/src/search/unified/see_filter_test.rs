@@ -52,51 +52,30 @@ mod tests {
 
     #[test]
     fn test_see_filtering_excludes_checks() {
-        // For now, test that check exclusion is working even without actual check verification
-        // Position where a rook can capture a defended pawn
-        let sfen = "k8/9/9/9/9/4s4/3Rp4/9/K8 b - 1";
+        // Simple position where black rook move gives check
+        // White king on 5a, black rook on 5i - rook to 5a gives check (actually captures king)
+        // Let's use a valid check position: rook to 5b gives check
+        let sfen = "4k4/9/9/9/9/9/9/9/4R4 b - 1";
         let pos = parse_sfen(sfen).unwrap();
 
-        // Rook captures pawn (bad SEE: loses rook for pawn defended by silver)
-        let capture = parse_usi_move("5g4g").unwrap();
-
-        // Verify it gives check using slow implementation  
-        let gives_check = pos.gives_check_slow(capture);
-        eprintln!("Move {} gives check: {}", crate::usi::move_to_usi(&capture), gives_check);
-        
-        // This should pass the SEE filter check if it gives check
-        if gives_check {
-            assert!(crate::search::unified::pruning::should_skip_see_pruning(&pos, capture), 
-                    "Checking moves should skip SEE pruning");
-        }
-
-        // Test a position where we can actually give check
-        // Black rook on 5i, white king on 5a - rook to 5b gives check
-        let check_test_sfen = "4k4/9/9/9/9/9/9/9/4R4 b - 1";
-        let check_test_pos = parse_sfen(check_test_sfen).unwrap();
+        // Rook move that gives check
         let check_move = parse_usi_move("5i5b").unwrap();
-        
-        // Verify this move gives check
-        let gives_check_slow = check_test_pos.gives_check_slow(check_move);
-        let gives_check_fast = check_test_pos.gives_check(check_move);
-        eprintln!("Rook to 5b - gives_check_slow: {}, gives_check_fast: {}", gives_check_slow, gives_check_fast);
-        
-        assert!(gives_check_slow, "Rook to 5b should give check (slow)");
-        
-        // For now, if fast and slow disagree, skip the rest
-        if gives_check_fast != gives_check_slow {
-            eprintln!("WARNING: gives_check fast and slow disagree!");
-            return;
-        }
-        
-        assert!(crate::search::unified::pruning::should_skip_see_pruning(&check_test_pos, check_move),
-                "Moves giving check should skip SEE pruning");
-        
+
+        // Verify it gives check
+        assert!(pos.gives_check(check_move), "Rook to 5b should give check to king on 5a");
+
+        // This should skip SEE pruning since it gives check
+        assert!(
+            crate::search::unified::pruning::should_skip_see_pruning(&pos, check_move),
+            "Checking moves should skip SEE pruning"
+        );
+
         // Also test that in-check positions skip SEE filtering
-        let in_check_sfen = "k8/1r7/9/9/9/9/9/9/K8 b - 1";
+        // Black king on 1i, white rook on 1b giving check
+        let in_check_sfen = "k8/r8/9/9/9/9/9/9/K8 b - 1";
         let in_check_pos = parse_sfen(in_check_sfen).unwrap();
-        assert!(in_check_pos.is_in_check(), "Black should be in check");
-        
+        assert!(in_check_pos.is_in_check(), "Black should be in check from rook on 1b");
+
         // Any move in check position should skip SEE filtering
         let evasion = parse_usi_move("1i2i").unwrap();
         assert!(crate::search::unified::pruning::should_skip_see_pruning(&in_check_pos, evasion));
@@ -123,20 +102,61 @@ mod tests {
         }
     }
 
-    // TODO: Fix is_in_check() test when position check logic is corrected
-    // #[test]
-    // fn test_see_filtering_in_check() {
-    //     // Position where white king is in check from black rook
-    //     let sfen = "9/9/9/9/9/9/r8/9/K8 w - 1";
-    //     let pos = parse_sfen(sfen).unwrap();
-    //
-    //     // Verify white is in check
-    //     assert!(pos.is_in_check(), "White should be in check from black rook at 1g");
-    //
-    //     // Any move in check position should skip SEE filtering
-    //     let evasion = parse_usi_move("1i2i").unwrap();
-    //     assert!(crate::search::unified::pruning::should_skip_see_pruning(&pos, evasion));
-    // }
+    #[test]
+    fn test_likely_could_give_check_false_positives() {
+        // Test that the lightweight check filter reduces false positives
+
+        // Position: White king at 5a, Black silver at 4b (close but not giving check)
+        let sfen = "4k4/5S3/9/9/9/9/9/9/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Silver moves that are close but don't give check
+        let moves = [
+            ("4b3c", false), // Silver moves away from king
+            ("4b5c", false), // Silver moves diagonally away
+            ("4b3b", false), // Silver moves sideways - can't attack king
+        ];
+
+        for (move_str, should_check) in &moves {
+            let mv = parse_usi_move(move_str).unwrap();
+            let gives = pos.gives_check(mv);
+            assert_eq!(gives, *should_check, "Move {move_str} check status mismatch");
+        }
+    }
+
+    #[test]
+    fn test_pawn_near_king_not_check() {
+        // Test pawn moves near king that don't give check
+        let sfen = "4k4/9/5P3/9/9/9/9/9/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Black pawn at 4c, white king at 5a - pawn can't give check by moving forward
+        let mv = parse_usi_move("4c4b").unwrap();
+        assert!(!pos.gives_check(mv), "Pawn moving to 4b should not check king at 5a");
+    }
+
+    #[test]
+    fn test_gold_near_king_direction_matters() {
+        // Test that gold direction-dependent attacks are correctly handled
+        let sfen = "3k5/9/4G4/9/9/9/9/9/K8 b - 1";
+        let pos = parse_sfen(sfen).unwrap();
+
+        // Black gold at 5c, white king at 6a
+        // Gold can attack in 6 directions for black: forward, forward diagonals, sideways, backward (not backward diagonal)
+        let moves = [
+            ("5c6c", false), // Can't attack backward diagonal as black gold
+            ("5c5b", true),  // Forward - gives check (attacks 6a)
+            ("5c5a", true),  // Forward to 5a - gives check (next to king at 6a)
+            ("5c6b", true),  // Forward diagonal - gives check (attacks 6a)
+            ("5c4c", false), // Sideways - doesn't give check
+        ];
+
+        for (move_str, should_check) in &moves {
+            let mv = parse_usi_move(move_str).unwrap();
+            let gives = pos.gives_check(mv);
+            assert_eq!(gives, *should_check, "Gold move {move_str} check expectation mismatch");
+        }
+    }
 
     #[test]
     fn test_good_capture_not_filtered() {
