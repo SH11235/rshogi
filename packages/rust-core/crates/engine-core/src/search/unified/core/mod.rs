@@ -573,6 +573,29 @@ where
 
     // Quiescence search at leaf nodes
     if depth == 0 {
+        // Check QNodes budget before entering quiescence search
+        if let Some(limit) = searcher.context.limits().qnodes_limit {
+            let exceeded = if let Some(ref counter) = searcher.context.limits().qnodes_counter {
+                // Parallel search: check shared counter
+                counter.load(Ordering::Relaxed) >= limit
+            } else {
+                // Single-threaded: check local counter
+                searcher.stats.qnodes >= limit
+            };
+
+            if exceeded {
+                // Return evaluation consistent with quiescence search behavior
+                if pos.is_in_check() {
+                    // In check: return alpha (same as quiescence search)
+                    return alpha;
+                } else {
+                    // Not in check: return clamped evaluation
+                    let eval = searcher.evaluator.evaluate(pos);
+                    return eval.clamp(alpha, beta);
+                }
+            }
+        }
+
         return quiescence_search(searcher, pos, alpha, beta, ply);
     }
 
@@ -627,6 +650,11 @@ where
     let qlimit = searcher.context.limits().qnodes_limit;
     let qnodes_counter = searcher.context.limits().qnodes_counter.clone();
 
+    // Increment shared counter if available (for accurate aggregation)
+    // Returns the previous value before increment
+    let prev_shared_qnodes =
+        qnodes_counter.as_ref().map(|counter| counter.fetch_add(1, Ordering::Relaxed));
+
     // Early stop check
     if searcher.context.should_stop() {
         return alpha;
@@ -654,14 +682,15 @@ where
 
     // QNodes budget check (after in_check determination)
     if let Some(limit) = qlimit {
-        // Check global counter if available (parallel search), otherwise use local counter
-        let exceeded = if let Some(ref counter) = qnodes_counter {
-            // Use fetch_add to atomically increment and get the new value
-            let new_count = counter.fetch_add(1, Ordering::Relaxed);
-            new_count >= limit
+        // Check if we've exceeded the limit using previous value
+        let exceeded = if let Some(prev) = prev_shared_qnodes {
+            // Parallel search: use the previous value from shared counter
+            prev >= limit
         } else {
-            // Single-threaded search, use local counter
-            searcher.stats.qnodes >= limit
+            // Single-threaded search: use previous local counter value
+            // Note: stats.qnodes was already incremented at function start
+            let prev_local = searcher.stats.qnodes.saturating_sub(1);
+            prev_local >= limit
         };
 
         if exceeded {
@@ -729,8 +758,10 @@ where
             // Check QNodes budget before each move (important for strict limit enforcement)
             if let Some(limit) = qlimit {
                 let exceeded = if let Some(ref counter) = qnodes_counter {
+                    // Check current value against limit
                     counter.load(Ordering::Relaxed) >= limit
                 } else {
+                    // Single-threaded: check current local counter
                     searcher.stats.qnodes >= limit
                 };
 
