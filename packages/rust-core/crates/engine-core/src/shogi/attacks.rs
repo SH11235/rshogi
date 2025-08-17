@@ -293,13 +293,13 @@ impl AttackTables {
         let rank = from.rank() as i8;
 
         // Knight moves: two forward, one to the side
-        let (rank_offset, min_rank, max_rank) = match color {
-            Color::Black => (-2, 2, 8), // Black (Sente) moves towards rank 0, can't move from rank 0-1
-            Color::White => (2, 0, 6), // White (Gote) moves towards rank 8, can't move from rank 7-8
+        let rank_offset = match color {
+            Color::Black => -2, // Black (Sente) moves towards rank 0
+            Color::White => 2,  // White (Gote) moves towards rank 8
         };
 
         let new_rank = rank + rank_offset;
-        if new_rank >= min_rank && new_rank <= max_rank {
+        if (0..9).contains(&new_rank) {
             // Left
             if file > 0 {
                 attacks.set(Square::new((file - 1) as u8, new_rank as u8));

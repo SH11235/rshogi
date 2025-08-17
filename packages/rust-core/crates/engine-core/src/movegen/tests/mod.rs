@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod basic;
 #[cfg(test)]
+mod check_evasion;
+#[cfg(test)]
 mod checks;
 #[cfg(test)]
 mod drops;
