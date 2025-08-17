@@ -613,8 +613,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             if let Some(split_point) =
                                 shared_state.split_point_manager.get_available_split_point()
                             {
+                                // Create guard to track active worker count
+                                let _guard = WorkerGuard::new(active_workers.clone());
                                 // Process the split point
                                 search_thread.process_split_point(&split_point);
+                                // guard will be dropped here, decrementing active_workers
                             } else {
                                 // No work or split points available, brief sleep
                                 thread::sleep(Duration::from_micros(50));
@@ -1056,6 +1059,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 };
 
                 let mut wait_time = 0;
+                let mut consecutive_zero = 0;
                 loop {
                     let pending = self.queues.injector.len();
                     let active = self.active_workers.load(Ordering::Acquire);
@@ -1076,8 +1080,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
 
                     if pending == 0 && active == 0 {
-                        debug!("All work completed (0 pending, 0 active)");
-                        break;
+                        consecutive_zero += 1;
+                        if consecutive_zero >= 2 {
+                            debug!("All work completed (0 pending, 0 active) confirmed twice");
+                            break;
+                        }
+                    } else {
+                        consecutive_zero = 0;
                     }
 
                     thread::sleep(Duration::from_millis(10));
