@@ -147,6 +147,7 @@ pub fn can_do_lmr(
         && !gives_check
         && !mv.is_capture_hint()
         && !mv.is_promote()
+        && !mv.is_drop() // Drop moves are tactically sharp in shogi
 }
 
 /// Check if we can do razoring (extreme futility pruning at low depths)
@@ -269,6 +270,7 @@ pub fn can_do_static_null_move_with_pos(
 
 /// Lightweight pre-filter to check if a move might give check
 /// This is much cheaper than full gives_check() calculation
+/// Note: King cannot give check to opponent king (illegal by shogi rules), so we don't handle King moves
 fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
     use crate::shogi::PieceType;
 
@@ -509,6 +511,35 @@ fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
                                     // The destination still blocks the line, so no discovered check
                                     return false;
                                 }
+
+                                // Check if there's already a blocker between 'from' and king
+                                // This prevents false positives where the line is already blocked
+                                let step_r_fwd = if dr_from != 0 {
+                                    dr_from / dr_from_abs
+                                } else {
+                                    0
+                                };
+                                let step_c_fwd = if dc_from != 0 {
+                                    dc_from / dc_from_abs
+                                } else {
+                                    0
+                                };
+
+                                for j in 1..dr_from_abs.max(dc_from_abs) {
+                                    let check_rank = from.rank() as i8 + j * step_r_fwd;
+                                    let check_file = from.file() as i8 + j * step_c_fwd;
+
+                                    if let Some(sq_mid) = crate::shogi::Square::new_safe(
+                                        check_file as u8,
+                                        check_rank as u8,
+                                    ) {
+                                        if pos.board.piece_on(sq_mid).is_some() {
+                                            // There's already a blocker between from and king
+                                            return false;
+                                        }
+                                    }
+                                }
+
                                 return true;
                             }
                         }

@@ -175,7 +175,7 @@ impl Position {
                             }
                         }
                         true
-                    } else if piece.promoted && dr_abs <= 1 && dc_abs <= 1 {
+                    } else if piece.promoted && dr_abs <= 1 && dc_abs <= 1 && (dr != 0 || dc != 0) {
                         // Promoted bishop (horse) can also move one square orthogonally
                         true
                     } else {
@@ -215,7 +215,7 @@ impl Position {
                             }
                         }
                         true
-                    } else if piece.promoted && dr_abs <= 1 && dc_abs <= 1 {
+                    } else if piece.promoted && dr_abs <= 1 && dc_abs <= 1 && (dr != 0 || dc != 0) {
                         // Promoted rook (dragon) can also move one square diagonally
                         true
                     } else {
