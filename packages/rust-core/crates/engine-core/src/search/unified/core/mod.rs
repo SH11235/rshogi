@@ -695,6 +695,14 @@ where
 
         if exceeded {
             log::trace!("qsearch budget exceeded at qnodes={}", searcher.stats.qnodes);
+
+            // Return the token we just took to minimize overshoot
+            if let Some(ref counter) = qnodes_counter {
+                counter.fetch_sub(1, Ordering::Relaxed);
+            }
+            // Also revert local counter to maintain consistency
+            searcher.stats.qnodes = searcher.stats.qnodes.saturating_sub(1);
+
             if in_check {
                 // In check: cannot use stand pat, conservatively return alpha
                 return alpha;
@@ -1458,7 +1466,7 @@ mod tests {
 
         // Test without qnodes limit
         let mut searcher1 =
-            UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator.clone());
+            UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
         searcher1.context.set_limits(SearchLimits::builder().depth(1).build());
 
         let start1 = Instant::now();
@@ -1493,8 +1501,7 @@ mod tests {
         if elapsed2 > elapsed1.saturating_mul(2) {
             eprintln!(
                 "Warning: QNodes limit didn't improve performance as expected. \
-                Without limit: {:?} ({} nodes), With limit: {:?} ({} nodes)",
-                elapsed1, nodes_without_limit, elapsed2, nodes_with_limit
+                Without limit: {elapsed1:?} ({nodes_without_limit} nodes), With limit: {elapsed2:?} ({nodes_with_limit} nodes)"
             );
         }
     }
