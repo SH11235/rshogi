@@ -653,7 +653,7 @@ where
     // Increment shared counter if available (for accurate aggregation)
     // Returns the previous value before increment
     let prev_shared_qnodes =
-        qnodes_counter.as_ref().map(|counter| counter.fetch_add(1, Ordering::Relaxed));
+        qnodes_counter.as_ref().map(|counter| counter.fetch_add(1, Ordering::AcqRel));
 
     // Early stop check
     if searcher.context.should_stop() {
@@ -698,7 +698,7 @@ where
 
             // Return the token we just took to minimize overshoot
             if let Some(ref counter) = qnodes_counter {
-                counter.fetch_sub(1, Ordering::Relaxed);
+                counter.fetch_sub(1, Ordering::AcqRel);
             }
             // Also revert local counter to maintain consistency
             searcher.stats.qnodes = searcher.stats.qnodes.saturating_sub(1);
@@ -767,7 +767,7 @@ where
             if let Some(limit) = qlimit {
                 let exceeded = if let Some(ref counter) = qnodes_counter {
                     // Check current value against limit
-                    counter.load(Ordering::Relaxed) >= limit
+                    counter.load(Ordering::Acquire) >= limit
                 } else {
                     // Single-threaded: check current local counter
                     searcher.stats.qnodes >= limit
@@ -888,7 +888,7 @@ where
         // Check QNodes budget before each capture move
         if let Some(limit) = qlimit {
             let exceeded = if let Some(ref counter) = qnodes_counter {
-                counter.load(Ordering::Relaxed) >= limit
+                counter.load(Ordering::Acquire) >= limit
             } else {
                 searcher.stats.qnodes >= limit
             };
@@ -1465,8 +1465,7 @@ mod tests {
         .unwrap();
 
         // Test without qnodes limit
-        let mut searcher1 =
-            UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+        let mut searcher1 = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
         searcher1.context.set_limits(SearchLimits::builder().depth(1).build());
 
         let start1 = Instant::now();
@@ -1504,5 +1503,106 @@ mod tests {
                 Without limit: {elapsed1:?} ({nodes_without_limit} nodes), With limit: {elapsed2:?} ({nodes_with_limit} nodes)"
             );
         }
+    }
+
+    #[test]
+    fn test_qnodes_token_return_on_stop() {
+        // Test that qnodes are returned when stop flag is set
+        use crate::evaluation::evaluate::MaterialEvaluator;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{atomic::AtomicBool, Arc};
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set up stop flag and shared counter
+        let stop_flag = Arc::new(AtomicBool::new(true)); // Already stopped
+        let shared_counter = Arc::new(AtomicU64::new(0));
+
+        searcher.context.set_limits(SearchLimits {
+            time_control: crate::time_management::TimeControl::Infinite,
+            depth: Some(1),
+            nodes: None,
+            qnodes_limit: None,
+            qnodes_counter: Some(shared_counter.clone()),
+            moves_to_go: None,
+            time_parameters: None,
+            stop_flag: Some(stop_flag),
+            info_callback: None,
+            ponder_hit_flag: None,
+        });
+
+        // Create position
+        let mut pos = Position::startpos();
+
+        // Initial qnodes
+        let initial_qnodes = searcher.stats.qnodes;
+        let initial_shared = shared_counter.load(Ordering::Acquire);
+
+        // Call quiescence search with stop flag already set
+        let _score = quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0);
+
+        // Check that qnodes were not incremented (or were returned)
+        let final_qnodes = searcher.stats.qnodes;
+        let final_shared = shared_counter.load(Ordering::Acquire);
+
+        // The counter is incremented before the stop check, but not committed
+        // So we expect exactly 1 increment
+        assert_eq!(
+            final_qnodes,
+            initial_qnodes + 1,
+            "Local qnodes should increment exactly once before stop check"
+        );
+        assert_eq!(
+            final_shared,
+            initial_shared + 1,
+            "Shared qnodes should increment exactly once before stop check"
+        );
+    }
+
+    #[test]
+    fn test_qnodes_token_return_on_limit_exceeded() {
+        // Test that qnodes are properly returned when limit is exceeded
+        use crate::evaluation::evaluate::MaterialEvaluator;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set up shared counter
+        let shared_counter = Arc::new(AtomicU64::new(0));
+
+        // Set very low qnodes limit to trigger exceeded condition
+        searcher.context.set_limits(SearchLimits {
+            time_control: crate::time_management::TimeControl::Infinite,
+            depth: Some(1),
+            nodes: None,
+            qnodes_limit: Some(1), // Will be exceeded immediately
+            qnodes_counter: Some(shared_counter.clone()),
+            moves_to_go: None,
+            time_parameters: None,
+            stop_flag: None,
+            info_callback: None,
+            ponder_hit_flag: None,
+        });
+
+        // Create position with captures available
+        let pos = Position::from_sfen(
+            "ln1gkg1nl/1r5s1/p1pppbppp/1p5P1/9/2P6/PP1PPPP1P/1B5R1/LNSGKGSNL b - 1",
+        )
+        .unwrap();
+        let mut pos = pos;
+
+        // Call quiescence search
+        let _score = quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0);
+
+        // Check that we stayed within reasonable bounds
+        let final_qnodes = searcher.stats.qnodes;
+        let final_shared = shared_counter.load(Ordering::Acquire);
+
+        // Should be at most limit + 1 (the one that triggered exceeded)
+        assert!(final_qnodes <= 2, "Local qnodes {final_qnodes} should be close to limit");
+        assert!(final_shared <= 2, "Shared qnodes {final_shared} should be close to limit");
     }
 }

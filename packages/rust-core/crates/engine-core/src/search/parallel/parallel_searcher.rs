@@ -228,6 +228,9 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 
     /// Handle for a TimeManager spawned after ponderhit (joined in search)
     post_ponder_tm_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+
+    /// Outstanding work counter for accurate completion detection
+    pending_work_items: Arc<AtomicU64>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
@@ -256,6 +259,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             steal_success: Arc::new(AtomicU64::new(0)),
             steal_failure: Arc::new(AtomicU64::new(0)),
             post_ponder_tm_handle: Arc::new(Mutex::new(None)),
+            pending_work_items: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -339,6 +343,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
+        self.pending_work_items.store(0, Ordering::Release);
 
         // Create limits with shared qnodes counter from shared state
         let mut limits = limits;
@@ -485,6 +490,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let active_workers = self.active_workers.clone();
         let steal_success = self.steal_success.clone();
         let steal_failure = self.steal_failure.clone();
+        let pending_work_items = self.pending_work_items.clone();
 
         // Create worker-specific limits without info_callback to prevent INFO flood
         // USI protocol: Only main thread should output INFO messages
@@ -598,6 +604,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         if log::log_enabled!(log::Level::Debug) {
                             debug!("Worker {id} work completed");
                         }
+
+                        // Decrement pending work counter
+                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
 
                         // Note: WorkerGuard will automatically decrement active_workers when dropped
                         // Note: SearchThread internally handles node counting and reporting to shared_state
@@ -829,6 +838,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 start_index,
                             };
 
+                            // Increment pending work counter
+                            self.pending_work_items.fetch_add(1, Ordering::AcqRel);
                             // Push to global injector (lock-free)
                             self.queues.injector.push(work);
                         }
@@ -851,6 +862,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         position: Arc::new(position.clone()),
                     };
 
+                    // Increment pending work counter
+                    self.pending_work_items.fetch_add(1, Ordering::AcqRel);
                     // Push to global injector (lock-free)
                     self.queues.injector.push(work);
                 }
@@ -1061,7 +1074,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 let mut wait_time = 0;
                 let mut consecutive_zero = 0;
                 loop {
-                    let pending = self.queues.injector.len();
+                    // Use pending_work_items for accurate completion detection
+                    let pending = self.pending_work_items.load(Ordering::Acquire);
                     let active = self.active_workers.load(Ordering::Acquire);
 
                     // Check TimeManager should_stop first
@@ -1517,6 +1531,64 @@ mod tests {
         println!(
             "QNodes overshoot test: limit={}, actual={}, overshoot={}",
             qnodes_limit, result.stats.qnodes, overshoot
+        );
+    }
+
+    #[test]
+    fn test_completion_wait_robustness() {
+        // Test that completion detection properly waits for all work
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let num_threads = 4;
+        let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
+
+        let mut pos = Position::startpos();
+
+        // Set up search with moderate depth
+        let limits = SearchLimits::builder().depth(6).build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // Verify that search completed properly
+        assert!(result.best_move.is_some(), "Should find a best move");
+        assert!(result.stats.nodes > 0, "Should search some nodes");
+
+        // Check that pending work counter is back to zero
+        assert_eq!(
+            searcher.pending_work_items.load(Ordering::Acquire),
+            0,
+            "Pending work items should be zero after search completes"
+        );
+
+        // Check that active workers is zero
+        assert_eq!(
+            searcher.active_workers.load(Ordering::Acquire),
+            0,
+            "Active workers should be zero after search completes"
+        );
+    }
+
+    #[test]
+    fn test_pending_work_counter_accuracy() {
+        // Test that pending_work_items accurately tracks work
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
+
+        // Verify initial state
+        assert_eq!(searcher.pending_work_items.load(Ordering::Acquire), 0);
+
+        let mut pos = Position::startpos();
+
+        // Run a short search
+        let limits = SearchLimits::builder().depth(3).build();
+        let _result = searcher.search(&mut pos, limits);
+
+        // After search, pending work should be zero
+        assert_eq!(
+            searcher.pending_work_items.load(Ordering::Acquire),
+            0,
+            "Pending work counter should return to zero after search"
         );
     }
 }
