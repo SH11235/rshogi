@@ -104,7 +104,7 @@ struct Queues {
 fn get_job(
     my_worker: &DequeWorker<WorkItem>,
     queues: &Queues,
-    _thread_id: usize,
+    thread_id: usize,
     steal_success: &AtomicU64,
     steal_failure: &AtomicU64,
 ) -> Option<WorkItem> {
@@ -121,15 +121,21 @@ fn get_job(
     }
 
     // 2. Then try stealing from other workers (random selection for better scalability)
-    // Instead of scanning all workers (O(T^2)), randomly select a few workers
-    if !queues.stealers.is_empty() {
+    // Only steal from other workers, not from self
+    let num_stealers = queues.stealers.len();
+    if num_stealers > 1 {
+        // Need at least 2 workers for stealing
         use rand::Rng;
         let mut rng = rand::rng();
 
         // Try a few random steals (min of 3 or half the workers)
-        let steal_attempts = 3.min(queues.stealers.len());
+        let steal_attempts = 3.min(num_stealers - 1); // Exclude self
         for _ in 0..steal_attempts {
-            let idx = rng.random_range(0..queues.stealers.len());
+            // Generate random index excluding self
+            let mut idx = rng.random_range(0..num_stealers - 1);
+            if idx >= thread_id {
+                idx += 1; // Skip self index
+            }
 
             // Try to steal from selected worker
             match queues.stealers[idx].steal() {
@@ -150,6 +156,8 @@ fn get_job(
                 }
             }
         }
+
+        steal_failure.fetch_add(1, Ordering::Relaxed);
     }
 
     // 3. Finally try the global injector with batch stealing
@@ -166,8 +174,8 @@ fn get_job(
         }
     }
 
-    // Record failure
-    steal_failure.fetch_add(1, Ordering::Relaxed);
+    // Record failure only if no successful steal from workers
+    // (already recorded above if worker steal failed)
 
     // Apply exponential backoff based on consecutive failures
     CONSECUTIVE_STEAL_FAILS.with(|f| {
@@ -337,10 +345,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Reset state
         self.shared_state.reset();
-        // Clear the injector (best effort)
-        while !self.queues.injector.is_empty() {
-            let _ = self.queues.injector.steal();
-        }
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
         self.pending_work_items.store(0, Ordering::Release);
