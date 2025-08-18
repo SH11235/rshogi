@@ -91,7 +91,7 @@ pub(crate) fn try_update_entry_generic(
     // This makes CAS operations more observable for Phase 5 optimization
     #[cfg(feature = "tt_metrics")]
     if let Some(m) = metrics {
-        m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        record_metric(m, MetricType::CasAttempt);
     }
 
     match entries[idx + 1].compare_exchange_weak(
@@ -104,7 +104,7 @@ pub(crate) fn try_update_entry_generic(
             // CAS succeeded - data updated with proper memory ordering
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
-                m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                record_metric(m, MetricType::CasSuccess);
                 record_metric(m, MetricType::UpdateExisting);
                 record_metric(m, MetricType::AtomicStore(1)); // Only 1 CAS operation
                 record_metric(m, MetricType::EffectiveUpdate);
@@ -142,7 +142,7 @@ fn try_update_with_backoff(
         if extract_depth(current_data) >= new_entry.depth() {
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
-                m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                record_metric(m, MetricType::CasFailure);
             }
             return UpdateResult::Filtered;
         }
@@ -156,6 +156,12 @@ fn try_update_with_backoff(
             std::thread::sleep(std::time::Duration::from_nanos(BASE_BACKOFF_NS << (attempt - 2)));
         }
 
+        // Record CAS attempt for retry
+        #[cfg(feature = "tt_metrics")]
+        if let Some(m) = metrics {
+            record_metric(m, MetricType::CasAttempt);
+        }
+
         // Attempt CAS with fresh current value
         match entries[idx + 1].compare_exchange_weak(
             current_data,
@@ -166,7 +172,7 @@ fn try_update_with_backoff(
             Ok(_) => {
                 #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
-                    m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    record_metric(m, MetricType::CasSuccess);
                     record_metric(m, MetricType::UpdateExisting);
                     record_metric(m, MetricType::AtomicStore(attempt as u32));
                     record_metric(m, MetricType::EffectiveUpdate);
@@ -177,7 +183,7 @@ fn try_update_with_backoff(
                 current_data = new_current;
                 #[cfg(feature = "tt_metrics")]
                 if let Some(m) = metrics {
-                    m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    record_metric(m, MetricType::CasFailure);
                 }
             }
         }

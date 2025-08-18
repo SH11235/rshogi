@@ -1,5 +1,5 @@
 use engine_core::{
-    engine::controller::{Engine, EngineType},
+    // engine::controller::{Engine, EngineType},
     OpeningBookReader,
 };
 use wasm_bindgen::prelude::*;
@@ -7,26 +7,26 @@ use wasm_bindgen::prelude::*;
 /// エンジンを保持するハンドル
 #[wasm_bindgen]
 pub struct WasmEngine {
-    #[allow(dead_code)]
-    inner: Engine,
+    // #[allow(dead_code)]
+    // inner: Engine,
 }
 
 // TODO: Web向けのインターフェースを設計・実装
-impl Default for WasmEngine {
-    fn default() -> Self {
-        WasmEngine {
-            inner: Engine::new(EngineType::Nnue),
-        }
-    }
-}
+// impl Default for WasmEngine {
+//     fn default() -> Self {
+//         WasmEngine {
+//             inner: Engine::new(EngineType::Nnue),
+//         }
+//     }
+// }
 
-#[wasm_bindgen]
-impl WasmEngine {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> WasmEngine {
-        WasmEngine::default()
-    }
-}
+// #[wasm_bindgen]
+// impl WasmEngine {
+//     #[wasm_bindgen(constructor)]
+//     pub fn new() -> WasmEngine {
+//         WasmEngine::default()
+//     }
+// }
 
 // WebAssembly bindings
 #[wasm_bindgen]

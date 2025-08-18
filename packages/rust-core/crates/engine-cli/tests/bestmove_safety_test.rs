@@ -37,8 +37,6 @@ impl SearchState {
 /// Mock worker message types for unit testing
 #[derive(Debug)]
 enum MockWorkerMessage {
-    #[allow(dead_code)]
-    Info(String),
     BestMove {
         _best_move: String,
         _ponder: Option<String>,
@@ -51,8 +49,6 @@ enum MockWorkerMessage {
     Finished {
         _from_guard: bool,
     },
-    #[allow(dead_code)]
-    Error(String),
 }
 
 /// Test that simulates the exact message ordering scenarios
