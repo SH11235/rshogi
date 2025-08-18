@@ -66,8 +66,27 @@ impl EngineAdapter {
         self.search_start_position_hash = Some(position.hash);
         self.search_start_side_to_move = Some(position.side_to_move);
 
-        // Use general overhead - byoyomi-specific safety margin is handled separately
-        let overhead_ms = self.overhead_ms as u32;
+        // Detect if this is byoyomi time control to determine overhead
+        let is_byoyomi = match params {
+            GoParams {
+                byoyomi: Some(byo), ..
+            } if *byo > 0 => {
+                // Check if it's not Fischer disguised as byoyomi
+                !crate::engine_adapter::time_control::is_fischer_disguised_as_byoyomi(
+                    *byo,
+                    params.binc,
+                    params.winc,
+                )
+            }
+            _ => false,
+        };
+
+        // Use appropriate overhead based on time control
+        let overhead_ms = if is_byoyomi {
+            self.byoyomi_overhead_ms as u32
+        } else {
+            self.overhead_ms as u32
+        };
 
         // Apply go parameters to get search limits
         let limits = crate::engine_adapter::time_control::apply_go_params(
@@ -317,5 +336,49 @@ mod tests {
             !adapter.last_search_is_byoyomi(),
             "Ponder with inner Fischer should not be detected as byoyomi"
         );
+    }
+
+    #[test]
+    fn test_byoyomi_overhead_application() {
+        let mut adapter = make_test_adapter();
+        adapter.set_position(true, None, &[]).unwrap();
+
+        // Set custom overhead values
+        adapter.overhead_ms = 100;
+        adapter.byoyomi_overhead_ms = 1500;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Test 1: Normal time control should use regular overhead
+        let mut params = make_go_params();
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Verify that regular overhead was used (100ms)
+        // The time parameters should include the regular overhead
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+
+        // Test 2: Byoyomi should use byoyomi overhead
+        let mut params = make_go_params();
+        params.byoyomi = Some(5000);
+        params.btime = Some(0);
+        params.wtime = Some(0);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Verify that byoyomi overhead was used (1500ms)
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 1500);
+
+        // Test 3: Fischer disguised as byoyomi should use regular overhead
+        let mut params = make_go_params();
+        params.byoyomi = Some(1000);
+        params.binc = Some(1000);
+        params.winc = Some(1000);
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Should use regular overhead (not byoyomi)
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
     }
 }
