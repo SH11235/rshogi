@@ -218,7 +218,7 @@ pub fn infer_time_control_mode(
 ///
 /// This pattern indicates Fischer time control where the increment is added
 /// after each move, not traditional byoyomi with periods.
-fn is_fischer_disguised_as_byoyomi(byoyomi: u64, binc: Option<u64>, winc: Option<u64>) -> bool {
+pub fn is_fischer_disguised_as_byoyomi(byoyomi: u64, binc: Option<u64>, winc: Option<u64>) -> bool {
     match (binc, winc) {
         (Some(b), Some(w)) => b == byoyomi && w == byoyomi,
         _ => false,
