@@ -11,9 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use crate::usi::EngineOption;
-use engine_core::time_management::constants::{
-    DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
-};
+use engine_core::time_management::constants::{DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS};
 
 // Submodules
 pub mod error;
@@ -69,10 +67,10 @@ pub struct EngineAdapter {
     last_overhead_ms: AtomicU64,
     /// Time management overhead in milliseconds
     overhead_ms: u64,
-    /// Byoyomi-specific overhead in milliseconds
-    byoyomi_overhead_ms: u64,
     /// Byoyomi hard limit additional safety margin in milliseconds
     byoyomi_safety_ms: u64,
+    /// Whether the last search was using byoyomi time control
+    is_last_search_byoyomi: bool,
 }
 
 impl Default for EngineAdapter {
@@ -104,8 +102,8 @@ impl EngineAdapter {
             search_start_side_to_move: None,
             last_overhead_ms: AtomicU64::new(DEFAULT_OVERHEAD_MS),
             overhead_ms: DEFAULT_OVERHEAD_MS,
-            byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
+            is_last_search_byoyomi: false,
         };
 
         // Initialize options

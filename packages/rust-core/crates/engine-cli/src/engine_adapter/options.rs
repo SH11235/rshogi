@@ -245,12 +245,12 @@ impl EngineAdapter {
             }
             OPT_BYOYOMI_OVERHEAD_MS => {
                 if let Some(val) = value {
-                    self.byoyomi_overhead_ms = Self::parse_u64_in_range(
-                        OPT_BYOYOMI_OVERHEAD_MS,
-                        val,
-                        MIN_OVERHEAD_MS,
-                        MAX_OVERHEAD_MS,
+                    send_info_string(
+                        "ByoyomiOverheadMs is deprecated; use ByoyomiSafetyMs instead.",
                     )?;
+                    // For compatibility, redirect to byoyomi_safety_ms
+                    self.byoyomi_safety_ms =
+                        Self::parse_u64_in_range(OPT_BYOYOMI_SAFETY_MS, val, 0, 2000)?;
                 }
             }
             OPT_BYOYOMI_SAFETY_MS => {

@@ -65,17 +65,19 @@ impl EngineAdapter {
         self.search_start_position_hash = Some(position.hash);
         self.search_start_side_to_move = Some(position.side_to_move);
 
-        // Calculate overhead
-        let overhead_ms = if let Some(byoyomi) = params.byoyomi {
+        // Calculate overhead and detect byoyomi mode
+        let (overhead_ms, is_byoyomi) = if let Some(byoyomi) = params.byoyomi {
             if byoyomi > 0 {
-                self.byoyomi_overhead_ms as u32
+                // Use byoyomi_safety_ms as the effective overhead for byoyomi
+                (self.byoyomi_safety_ms as u32, true)
             } else {
-                self.overhead_ms as u32
+                (self.overhead_ms as u32, false)
             }
         } else {
-            self.overhead_ms as u32
+            (self.overhead_ms as u32, false)
         };
         self.last_overhead_ms.store(overhead_ms as u64, Ordering::Relaxed);
+        self.is_last_search_byoyomi = is_byoyomi;
 
         // Apply go parameters to get search limits
         let limits = crate::engine_adapter::time_control::apply_go_params(
@@ -221,8 +223,8 @@ impl EngineAdapter {
         info!("Engine state forcefully reset");
     }
 
-    /// Get the last calculated overhead in milliseconds
-    pub fn get_last_overhead_ms(&self) -> u64 {
-        self.last_overhead_ms.load(Ordering::Relaxed)
+    /// Check if the last search was using byoyomi time control
+    pub fn is_last_search_byoyomi(&self) -> bool {
+        self.is_last_search_byoyomi
     }
 }

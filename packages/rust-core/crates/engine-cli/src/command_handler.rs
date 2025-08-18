@@ -9,7 +9,6 @@ use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiRespo
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender};
-use engine_core::time_management::constants::DEFAULT_BYOYOMI_OVERHEAD_MS;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -275,19 +274,19 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // Get overhead from adapter to determine timeouts
-        let overhead_ms = {
+        // Check if the last search was using byoyomi time control
+        let is_byoyomi = {
             let adapter = lock_or_recover_adapter(ctx.engine);
-            adapter.get_last_overhead_ms()
+            adapter.is_last_search_byoyomi()
         };
 
         // Use longer timeouts for byoyomi mode
-        let stage1_timeout = if overhead_ms >= DEFAULT_BYOYOMI_OVERHEAD_MS {
+        let stage1_timeout = if is_byoyomi {
             Duration::from_millis(500) // Byoyomi mode: wait longer for in-flight messages
         } else {
             Duration::from_millis(100) // Normal mode: quick wait
         };
-        let total_timeout = if overhead_ms >= DEFAULT_BYOYOMI_OVERHEAD_MS {
+        let total_timeout = if is_byoyomi {
             Duration::from_millis(1000) // Byoyomi mode: up to 1 second total
         } else {
             Duration::from_millis(150) // Normal mode: quick fallback
