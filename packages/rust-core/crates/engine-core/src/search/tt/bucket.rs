@@ -1,10 +1,11 @@
 //! Bucket implementations for transposition table
 
-use super::entry::{NodeType, TTEntry, AGE_MASK, GENERATION_CYCLE};
+use super::constants::{AGE_MASK, GENERATION_CYCLE};
+use super::entry::{NodeType, TTEntry};
 #[cfg(feature = "tt_metrics")]
 use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
 use super::utils::{try_update_entry_generic, UpdateResult};
-use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
+use crate::search::tt_simd::simd_enabled;
 use crate::util::sync_compat::{AtomicU64, Ordering};
 
 /// Number of entries per bucket (default for backward compatibility)
@@ -157,7 +158,7 @@ impl TTBucket {
     }
 
     /// Store entry in bucket with metrics tracking
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn store_with_metrics(
         &self,
         new_entry: TTEntry,
@@ -369,13 +370,6 @@ impl TTBucket {
     #[inline]
     fn store_simd_available(&self) -> bool {
         simd_enabled()
-    }
-
-    /// Get SIMD kind for choosing optimal implementation
-    #[inline]
-    #[allow(dead_code)]
-    fn store_simd_kind(&self) -> SimdKind {
-        simd_kind()
     }
 
     /// Find worst entry using SIMD priority calculation
@@ -629,7 +623,7 @@ impl FlexibleTTBucket {
     }
 
     /// Store entry with metrics tracking
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn store_with_metrics(
         &self,
         new_entry: TTEntry,

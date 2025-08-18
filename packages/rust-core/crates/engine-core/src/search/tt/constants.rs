@@ -3,8 +3,6 @@
 //! This module contains all the constants related to bit packing and
 //! configuration for the transposition table implementation.
 
-use crate::util::sync_compat::AtomicU8;
-
 // Bit layout constants for TTEntry data field
 // Optimized layout (64 bits total) - Version 2.1:
 // [63-48]: move (16 bits)
@@ -34,11 +32,6 @@ pub const SCORE_MASK: u64 = (1 << SCORE_BITS) - 1;
 pub const SCORE_MAX: i16 = (1 << (SCORE_BITS - 1)) - 1; // 8191
 pub const SCORE_MIN: i16 = -(1 << (SCORE_BITS - 1)); // -8192
 
-// Extended flags (new)
-#[allow(dead_code)]
-pub const EXTENDED_FLAGS_SHIFT: u8 = 32;
-#[allow(dead_code)]
-pub const EXTENDED_FLAGS_BITS: u8 = 2;
 pub const SINGULAR_EXTENSION_FLAG: u64 = 1 << 33;
 pub const NULL_MOVE_FLAG: u64 = 1 << 32;
 
@@ -54,11 +47,6 @@ pub const AGE_MASK: u8 = (1 << AGE_BITS) - 1;
 pub const PV_FLAG_SHIFT: u8 = 19;
 pub const PV_FLAG_MASK: u64 = 1;
 
-// Search flags (expanded)
-#[allow(dead_code)]
-pub const SEARCH_FLAGS_SHIFT: u8 = 16;
-#[allow(dead_code)]
-pub const SEARCH_FLAGS_BITS: u8 = 3;
 pub const TT_MOVE_TRIED_FLAG: u64 = 1 << 18;
 pub const MATE_THREAT_FLAG: u64 = 1 << 17;
 
@@ -69,13 +57,7 @@ pub const EVAL_MASK: u64 = (1 << EVAL_BITS) - 1;
 pub const EVAL_MAX: i16 = (1 << (EVAL_BITS - 1)) - 1; // 8191
 pub const EVAL_MIN: i16 = -(1 << (EVAL_BITS - 1)); // -8192
 
-// Reserved for future
-#[allow(dead_code)]
-pub const RESERVED_BITS: u8 = 2;
-#[allow(dead_code)]
-pub const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
-
-// ABDADA flag for duplicate detection (Phase 3 optimization)
+// ABDADA flag for duplicate detection
 pub const ABDADA_CUT_FLAG: u64 = 1 << 0; // Use bit 0 from reserved bits
 
 // Apery-style generation cycle constants

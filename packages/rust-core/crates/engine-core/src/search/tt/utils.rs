@@ -12,7 +12,8 @@
 //! - Release/Relaxed ordering for optimal performance on x86/ARM
 //! - Atomic operations are carefully minimized for game engine requirements
 
-use super::entry::{TTEntry, DEPTH_MASK, DEPTH_SHIFT};
+use super::constants::{DEPTH_MASK, DEPTH_SHIFT};
+use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
 use crate::util::sync_compat::{AtomicU64, Ordering};
