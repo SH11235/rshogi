@@ -3,18 +3,6 @@
 use super::constants::*;
 use crate::shogi::Move;
 
-// Search flags (not in constants.rs)
-#[allow(dead_code)]
-pub(crate) const SEARCH_FLAGS_SHIFT: u8 = 16;
-#[allow(dead_code)]
-pub(crate) const SEARCH_FLAGS_BITS: u8 = 3;
-
-// Reserved for future (not in constants.rs)
-#[allow(dead_code)]
-pub(crate) const RESERVED_BITS: u8 = 2;
-#[allow(dead_code)]
-pub(crate) const RESERVED_MASK: u64 = (1 << RESERVED_BITS) - 1;
-
 /// Type of node in the search tree
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

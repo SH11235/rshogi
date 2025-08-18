@@ -55,11 +55,7 @@ pub use test_utils::{mock_advance_time, mock_current_ms, mock_now, mock_set_time
 
 /// Internal state shared between threads
 struct TimeManagerInner {
-    // === Immutable after initialization ===
-    #[allow(dead_code)]
-    time_control: TimeControl, // Initial time control (kept for reference)
     side_to_move: Color,
-    #[allow(dead_code)] // May be used in future for advanced time management
     start_ply: u32,
     params: TimeParameters,
     game_phase: GamePhase, // Game phase at creation time
@@ -134,7 +130,6 @@ impl TimeManager {
         };
 
         let inner = Arc::new(TimeManagerInner {
-            time_control: limits.time_control.clone(),
             side_to_move: side,
             start_ply: ply,
             params,
