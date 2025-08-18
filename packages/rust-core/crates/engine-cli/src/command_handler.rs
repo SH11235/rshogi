@@ -5,9 +5,7 @@ use crate::helpers::{
 };
 use crate::search_session::{self, SearchSession};
 use crate::state::SearchState;
-use crate::usi::{
-    send_info_string, send_response, GoParams, UsiCommand, UsiResponse, DEFAULT_BYOYOMI_OVERHEAD_MS,
-};
+use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender};
@@ -276,20 +274,22 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // Get overhead from adapter to determine timeouts
-        let overhead_ms = {
+        // Check if the last search was using byoyomi time control and get safety ms
+        let (is_byoyomi, safety_ms) = {
             let adapter = lock_or_recover_adapter(ctx.engine);
-            adapter.get_last_overhead_ms()
+            (adapter.last_search_is_byoyomi(), adapter.byoyomi_safety_ms())
         };
 
-        // Use longer timeouts for byoyomi mode
-        let stage1_timeout = if overhead_ms >= DEFAULT_BYOYOMI_OVERHEAD_MS {
-            Duration::from_millis(500) // Byoyomi mode: wait longer for in-flight messages
+        // Use adaptive timeouts based on byoyomi safety settings
+        let stage1_timeout = if is_byoyomi {
+            // Use half of safety margin for stage 1, clamped to reasonable range
+            Duration::from_millis((safety_ms / 2).clamp(200, 800))
         } else {
             Duration::from_millis(100) // Normal mode: quick wait
         };
-        let total_timeout = if overhead_ms >= DEFAULT_BYOYOMI_OVERHEAD_MS {
-            Duration::from_millis(1000) // Byoyomi mode: up to 1 second total
+        let total_timeout = if is_byoyomi {
+            // Use full safety margin for total timeout, clamped to reasonable range
+            Duration::from_millis(safety_ms.clamp(600, 1500))
         } else {
             Duration::from_millis(150) // Normal mode: quick fallback
         };

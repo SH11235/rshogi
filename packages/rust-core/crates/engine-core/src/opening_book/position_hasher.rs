@@ -19,11 +19,10 @@ pub struct HashStatistics {
 pub struct PositionHasher {
     /// Zobrist hash tables for pieces at each square
     zobrist_pieces: [[u64; 32]; 81], // 81 squares, 32 piece types (including promoted)
-    /// Zobrist hash for turn (future use)
+    /// Zobrist hash for turn (future use - see docs/opening_book_future_improvements.md)
     #[allow(dead_code)]
     zobrist_turn: u64,
-    /// Zobrist hash for hand pieces (future use)
-    #[allow(dead_code)]
+    /// Zobrist hash for hand pieces
     zobrist_hand: [u64; 14], // 7 piece types * 2 players
     /// Tracked positions for collision detection
     position_tracker: HashMap<String, u64>,

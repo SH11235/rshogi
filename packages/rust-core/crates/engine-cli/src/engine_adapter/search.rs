@@ -9,10 +9,11 @@ use engine_core::{
     movegen::MoveGen,
     search::limits::SearchLimits,
     shogi::{MoveList, Position},
+    time_management::TimeControl,
     usi::move_to_usi,
 };
 use log::{info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::engine_adapter::{EngineAdapter, EngineError};
@@ -65,17 +66,30 @@ impl EngineAdapter {
         self.search_start_position_hash = Some(position.hash);
         self.search_start_side_to_move = Some(position.side_to_move);
 
-        // Calculate overhead
-        let overhead_ms = if let Some(byoyomi) = params.byoyomi {
-            if byoyomi > 0 {
-                self.byoyomi_overhead_ms as u32
-            } else {
-                self.overhead_ms as u32
+        // Detect if this is byoyomi time control to determine overhead
+        let is_byoyomi = match params {
+            GoParams {
+                byoyomi: Some(byo), ..
+            } if *byo > 0 => {
+                // Check if it's not Fischer disguised as byoyomi
+                !crate::engine_adapter::time_control::is_fischer_disguised_as_byoyomi(
+                    *byo,
+                    params.binc,
+                    params.winc,
+                )
             }
+            _ => false,
+        };
+
+        // Use appropriate overhead based on time control
+        // Ponder doesn't consume real time, so no additional byoyomi overhead needed
+        let use_byoyomi_overhead = is_byoyomi && !params.ponder;
+
+        let overhead_ms = if use_byoyomi_overhead {
+            (self.overhead_ms + self.byoyomi_overhead_ms) as u32
         } else {
             self.overhead_ms as u32
         };
-        self.last_overhead_ms.store(overhead_ms as u64, Ordering::Relaxed);
 
         // Apply go parameters to get search limits
         let limits = crate::engine_adapter::time_control::apply_go_params(
@@ -88,6 +102,13 @@ impl EngineAdapter {
             self.pv_stability_base,
             self.pv_stability_slope,
         )?;
+
+        // Detect if this is actually byoyomi time control by looking at the real TimeControl
+        self.last_search_is_byoyomi = match &limits.time_control {
+            TimeControl::Byoyomi { .. } => true,
+            TimeControl::Ponder(inner) => matches!(**inner, TimeControl::Byoyomi { .. }),
+            _ => false,
+        };
 
         // Setup ponder state if applicable
         let ponder_hit_flag = if params.ponder {
@@ -221,8 +242,157 @@ impl EngineAdapter {
         info!("Engine state forcefully reset");
     }
 
-    /// Get the last calculated overhead in milliseconds
-    pub fn get_last_overhead_ms(&self) -> u64 {
-        self.last_overhead_ms.load(Ordering::Relaxed)
+    /// Check if the last search was using byoyomi time control
+    pub fn last_search_is_byoyomi(&self) -> bool {
+        self.last_search_is_byoyomi
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usi::GoParams;
+
+    fn make_test_adapter() -> EngineAdapter {
+        EngineAdapter::new()
+    }
+
+    fn make_go_params() -> GoParams {
+        GoParams {
+            depth: None,
+            nodes: None,
+            movetime: None,
+            infinite: false,
+            ponder: false,
+            btime: None,
+            wtime: None,
+            binc: None,
+            winc: None,
+            byoyomi: None,
+            periods: None,
+            moves_to_go: None,
+        }
+    }
+
+    #[test]
+    fn test_last_search_is_byoyomi_detection() {
+        let mut adapter = make_test_adapter();
+        adapter.set_position(true, None, &[]).unwrap();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Test 1: Pure byoyomi - should detect as byoyomi
+        let mut params = make_go_params();
+        params.byoyomi = Some(5000);
+        params.btime = Some(0);
+        params.wtime = Some(0);
+
+        let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        assert!(adapter.last_search_is_byoyomi(), "Pure byoyomi should be detected");
+
+        // Test 2: Regular Fischer - should NOT detect as byoyomi
+        let mut params = make_go_params();
+        params.binc = Some(1000);
+        params.winc = Some(2000);
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        assert!(!adapter.last_search_is_byoyomi(), "Fischer should not be detected as byoyomi");
+
+        // Test 3: Fischer disguised as byoyomi - should NOT detect as byoyomi
+        let mut params = make_go_params();
+        params.byoyomi = Some(1000);
+        params.binc = Some(1000);
+        params.winc = Some(1000);
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        assert!(
+            !adapter.last_search_is_byoyomi(),
+            "Disguised Fischer should not be detected as byoyomi"
+        );
+
+        // Test 4: Ponder with inner byoyomi - should detect as byoyomi
+        let mut params = make_go_params();
+        params.ponder = true;
+        params.byoyomi = Some(3000);
+        params.btime = Some(30000);
+        params.wtime = Some(30000);
+
+        let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        assert!(
+            adapter.last_search_is_byoyomi(),
+            "Ponder with inner byoyomi should be detected as byoyomi"
+        );
+
+        // Test 5: Ponder with inner Fischer - should NOT detect as byoyomi
+        let mut params = make_go_params();
+        params.ponder = true;
+        params.binc = Some(1000);
+        params.winc = Some(1000);
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        assert!(
+            !adapter.last_search_is_byoyomi(),
+            "Ponder with inner Fischer should not be detected as byoyomi"
+        );
+    }
+
+    #[test]
+    fn test_byoyomi_overhead_application() {
+        let mut adapter = make_test_adapter();
+        adapter.set_position(true, None, &[]).unwrap();
+
+        // Set custom overhead values
+        adapter.overhead_ms = 100;
+        adapter.byoyomi_overhead_ms = 1500;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Test 1: Normal time control should use regular overhead
+        let mut params = make_go_params();
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Verify that regular overhead was used (100ms)
+        // The time parameters should include the regular overhead
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+
+        // Test 2: Byoyomi should use byoyomi overhead
+        let mut params = make_go_params();
+        params.byoyomi = Some(5000);
+        params.btime = Some(0);
+        params.wtime = Some(0);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Verify that byoyomi overhead was added (100 + 1500 = 1600ms)
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 1600);
+
+        // Test 3: Fischer disguised as byoyomi should use regular overhead
+        let mut params = make_go_params();
+        params.byoyomi = Some(1000);
+        params.binc = Some(1000);
+        params.winc = Some(1000);
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Should use regular overhead (not byoyomi)
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+
+        // Test 4: Ponder with byoyomi should NOT add byoyomi overhead
+        let mut params = make_go_params();
+        params.ponder = true;
+        params.byoyomi = Some(5000);
+        params.btime = Some(0);
+        params.wtime = Some(0);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Ponder should use only regular overhead, even in byoyomi
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
     }
 }

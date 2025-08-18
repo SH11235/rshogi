@@ -123,7 +123,6 @@ impl DetailedTTMetrics {
 /// Metrics update types
 #[cfg(feature = "tt_metrics")]
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) enum MetricType {
     AtomicLoad,
     AtomicStore(u32), // Parameter: number of stores
