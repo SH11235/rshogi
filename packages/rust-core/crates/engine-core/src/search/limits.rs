@@ -1,7 +1,7 @@
 //! Unified search limits for both basic and enhanced search
 
 use crate::time_management::{TimeControl, TimeParameters};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ pub struct SearchLimits {
     pub moves_to_go: Option<u32>,
     pub depth: Option<u8>,
     pub nodes: Option<u64>,
+    pub qnodes_limit: Option<u64>,
     pub time_parameters: Option<TimeParameters>,
     /// Stop flag for interrupting search (temporarily kept for compatibility)
     pub stop_flag: Option<Arc<AtomicBool>>,
@@ -21,6 +22,10 @@ pub struct SearchLimits {
     pub info_callback: Option<InfoCallback>,
     /// Ponder hit flag for converting ponder search to normal search
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
+    /// Internal: Shared qnodes counter for parallel search
+    /// This is set by ParallelSearcher and not exposed in the builder
+    #[doc(hidden)]
+    pub qnodes_counter: Option<Arc<AtomicU64>>,
 }
 
 impl Default for SearchLimits {
@@ -30,10 +35,12 @@ impl Default for SearchLimits {
             moves_to_go: None,
             depth: None,
             nodes: None,
+            qnodes_limit: None,
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
             ponder_hit_flag: None,
+            qnodes_counter: None,
         }
     }
 }
@@ -93,6 +100,7 @@ pub struct SearchLimitsBuilder {
     moves_to_go: Option<u32>,
     depth: Option<u8>,
     nodes: Option<u64>,
+    qnodes_limit: Option<u64>,
     time_parameters: Option<TimeParameters>,
     stop_flag: Option<Arc<AtomicBool>>,
     info_callback: Option<InfoCallback>,
@@ -106,6 +114,7 @@ impl Default for SearchLimitsBuilder {
             moves_to_go: None,
             depth: None,
             nodes: None,
+            qnodes_limit: None,
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
@@ -208,6 +217,15 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set quiescence search node limit
+    ///
+    /// This limits the number of nodes explored in quiescence search
+    /// to prevent explosion in complex positions.
+    pub fn qnodes_limit(mut self, limit: u64) -> Self {
+        self.qnodes_limit = Some(limit);
+        self
+    }
+
     /// Set time parameters
     pub fn time_parameters(mut self, params: TimeParameters) -> Self {
         self.time_parameters = Some(params);
@@ -258,10 +276,12 @@ impl SearchLimitsBuilder {
             moves_to_go: self.moves_to_go,
             depth: self.depth,
             nodes: self.nodes,
+            qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
             ponder_hit_flag: self.ponder_hit_flag,
+            qnodes_counter: None,
         }
     }
 }
@@ -281,10 +301,12 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             moves_to_go: tm.moves_to_go,
             depth: tm.depth.map(|d| d as u8),
             nodes: tm.nodes,
+            qnodes_limit: None,
             time_parameters: tm.time_parameters,
             stop_flag: None,
             info_callback: None,
             ponder_hit_flag: None,
+            qnodes_counter: None,
         }
     }
 }
@@ -323,10 +345,12 @@ impl Clone for SearchLimits {
             moves_to_go: self.moves_to_go,
             depth: self.depth,
             nodes: self.nodes,
+            qnodes_limit: self.qnodes_limit,
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag.clone(),
             info_callback: self.info_callback.clone(), // Arc can be cloned
             ponder_hit_flag: self.ponder_hit_flag.clone(),
+            qnodes_counter: self.qnodes_counter.clone(),
         }
     }
 }
@@ -342,10 +366,12 @@ impl std::fmt::Debug for SearchLimits {
             .field("moves_to_go", &self.moves_to_go)
             .field("depth", &self.depth)
             .field("nodes", &self.nodes)
+            .field("qnodes_limit", &self.qnodes_limit)
             .field("time_parameters", &self.time_parameters)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
+            .field("qnodes_counter", &self.qnodes_counter.is_some())
             .finish()
     }
 }

@@ -104,7 +104,7 @@ struct Queues {
 fn get_job(
     my_worker: &DequeWorker<WorkItem>,
     queues: &Queues,
-    _thread_id: usize,
+    my_stealer_index: usize,
     steal_success: &AtomicU64,
     steal_failure: &AtomicU64,
 ) -> Option<WorkItem> {
@@ -121,15 +121,21 @@ fn get_job(
     }
 
     // 2. Then try stealing from other workers (random selection for better scalability)
-    // Instead of scanning all workers (O(T^2)), randomly select a few workers
-    if !queues.stealers.is_empty() {
+    // Only steal from other workers, not from self
+    let num_stealers = queues.stealers.len();
+    if num_stealers > 1 {
+        // Need at least 2 workers for stealing
         use rand::Rng;
         let mut rng = rand::rng();
 
         // Try a few random steals (min of 3 or half the workers)
-        let steal_attempts = 3.min(queues.stealers.len());
+        let steal_attempts = 3.min(num_stealers - 1); // Exclude self
         for _ in 0..steal_attempts {
-            let idx = rng.random_range(0..queues.stealers.len());
+            // Generate random index excluding self
+            let mut idx = rng.random_range(0..num_stealers - 1);
+            if idx >= my_stealer_index {
+                idx += 1; // Skip self index
+            }
 
             // Try to steal from selected worker
             match queues.stealers[idx].steal() {
@@ -150,6 +156,8 @@ fn get_job(
                 }
             }
         }
+
+        steal_failure.fetch_add(1, Ordering::Relaxed);
     }
 
     // 3. Finally try the global injector with batch stealing
@@ -166,8 +174,8 @@ fn get_job(
         }
     }
 
-    // Record failure
-    steal_failure.fetch_add(1, Ordering::Relaxed);
+    // Record failure only if no successful steal from workers
+    // (already recorded above if worker steal failed)
 
     // Apply exponential backoff based on consecutive failures
     CONSECUTIVE_STEAL_FAILS.with(|f| {
@@ -228,6 +236,9 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
 
     /// Handle for a TimeManager spawned after ponderhit (joined in search)
     post_ponder_tm_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+
+    /// Outstanding work counter for accurate completion detection
+    pending_work_items: Arc<AtomicU64>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
@@ -256,6 +267,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             steal_success: Arc::new(AtomicU64::new(0)),
             steal_failure: Arc::new(AtomicU64::new(0)),
             post_ponder_tm_handle: Arc::new(Mutex::new(None)),
+            pending_work_items: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -333,12 +345,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
         // Reset state
         self.shared_state.reset();
-        // Clear the injector (best effort)
-        while !self.queues.injector.is_empty() {
-            let _ = self.queues.injector.steal();
-        }
         self.steal_success.store(0, Ordering::Release);
         self.steal_failure.store(0, Ordering::Release);
+        self.pending_work_items.store(0, Ordering::Release);
+
+        // Create limits with shared qnodes counter from shared state
+        let mut limits = limits;
+        limits.qnodes_counter = Some(self.shared_state.get_qnodes_counter());
 
         // Create time manager if needed
         use crate::time_management::{GamePhase, TimeControl, TimeLimits};
@@ -395,15 +408,17 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Replace the placeholder queues
         self.queues = queues.clone();
 
-        // Start worker threads
-        let mut handles = Vec::new();
-        for id in 1..self.num_threads {
-            let worker = workers.pop().unwrap();
-            handles.push(self.start_worker_with(id, worker, limits.clone()));
-        }
+        // Main thread is index 0
+        let main_index = 0;
+        let main_worker = workers.remove(main_index);
 
-        // Keep the main thread's worker
-        let main_worker = workers.pop().unwrap();
+        // Start worker threads with correct stealer indices
+        let mut handles = Vec::new();
+        for (i, worker) in workers.into_iter().enumerate() {
+            let my_stealer_index = i + 1; // Since main thread took index 0
+            let log_id = my_stealer_index; // Use same ID for logging
+            handles.push(self.start_worker_with(log_id, my_stealer_index, worker, limits.clone()));
+        }
 
         // Start time management if needed
         let time_handle = {
@@ -470,7 +485,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     /// Start a worker thread with a pre-created worker
     fn start_worker_with(
         &self,
-        id: usize,
+        log_id: usize,           // ID for logging
+        my_stealer_index: usize, // Index in stealers array
         worker: DequeWorker<WorkItem>,
         limits: SearchLimits,
     ) -> thread::JoinHandle<()> {
@@ -481,6 +497,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let active_workers = self.active_workers.clone();
         let steal_success = self.steal_success.clone();
         let steal_failure = self.steal_failure.clone();
+        let pending_work_items = self.pending_work_items.clone();
 
         // Create worker-specific limits without info_callback to prevent INFO flood
         // USI protocol: Only main thread should output INFO messages
@@ -492,16 +509,18 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
             let res = panic::catch_unwind(AssertUnwindSafe(|| {
                 if log::log_enabled!(log::Level::Debug) {
-                    debug!("Worker {id} started");
+                    debug!("Worker {log_id} started");
                 }
 
                 // Create search thread
-                let mut search_thread = SearchThread::new(id, evaluator, tt, shared_state.clone());
+                let mut search_thread =
+                    SearchThread::new(log_id, evaluator, tt, shared_state.clone());
 
                 // Simple work loop
                 while !shared_state.should_stop() {
                     // Try to get work using truly lock-free work stealing
-                    let work = get_job(&worker, &queues, id, &steal_success, &steal_failure);
+                    let work =
+                        get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure);
 
                     if let Some(work) = work {
                         // Create guard which atomically increments the counter
@@ -520,7 +539,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Skip debug logging in hot path unless explicitly enabled
                                 if log::log_enabled!(log::Level::Debug) {
                                     debug!(
-                                    "Worker {id} processing RootBatch with {} moves starting at #{start_index} (iteration {iteration}, depth {depth})",
+                                    "Worker {log_id} processing RootBatch with {} moves starting at #{start_index} (iteration {iteration}, depth {depth})",
                                     moves.len()
                                 );
                                 }
@@ -554,7 +573,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Skip debug logging in hot path unless explicitly enabled
                                 if log::log_enabled!(log::Level::Debug) {
                                     debug!(
-                                    "Worker {id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
+                                    "Worker {log_id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
                                 );
                                 }
 
@@ -577,7 +596,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 // Skip debug logging in hot path unless explicitly enabled
                                 if log::log_enabled!(log::Level::Debug) {
                                     debug!(
-                                    "Worker {id} processing FullPosition (iteration {iteration}, depth {depth})"
+                                    "Worker {log_id} processing FullPosition (iteration {iteration}, depth {depth})"
                                 );
                                 }
 
@@ -592,8 +611,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                         // Skip debug logging in hot path unless explicitly enabled
                         if log::log_enabled!(log::Level::Debug) {
-                            debug!("Worker {id} work completed");
+                            debug!("Worker {log_id} work completed");
                         }
+
+                        // Decrement pending work counter
+                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
 
                         // Note: WorkerGuard will automatically decrement active_workers when dropped
                         // Note: SearchThread internally handles node counting and reporting to shared_state
@@ -609,8 +631,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             if let Some(split_point) =
                                 shared_state.split_point_manager.get_available_split_point()
                             {
+                                // Create guard to track active worker count
+                                let _guard = WorkerGuard::new(active_workers.clone());
                                 // Process the split point
                                 search_thread.process_split_point(&split_point);
+                                // guard will be dropped here, decrementing active_workers
                             } else {
                                 // No work or split points available, brief sleep
                                 thread::sleep(Duration::from_micros(50));
@@ -628,13 +653,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // No need for manual node reporting here
 
                 if log::log_enabled!(log::Level::Debug) {
-                    debug!("Worker {id} stopped");
+                    debug!("Worker {log_id} stopped");
                 }
             }));
 
             if res.is_err() {
                 // どれかワーカーが落ちたら全体停止フラグを立てる
-                error!("Worker {id} panicked; requesting graceful stop");
+                error!("Worker {log_id} panicked; requesting graceful stop");
                 shared_state.set_stop();
             }
         })
@@ -691,10 +716,12 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 moves_to_go: limits.moves_to_go,
                                 depth: limits.depth,
                                 nodes: limits.nodes,
+                                qnodes_limit: limits.qnodes_limit,
                                 time_parameters: limits.time_parameters,
                                 stop_flag: limits.stop_flag.clone(),
                                 info_callback: None, // Don't need callback for TimeManager
                                 ponder_hit_flag: None,
+                                qnodes_counter: limits.qnodes_counter.clone(),
                             };
 
                             // Convert to TimeLimits
@@ -820,6 +847,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 start_index,
                             };
 
+                            // Increment pending work counter
+                            self.pending_work_items.fetch_add(1, Ordering::AcqRel);
                             // Push to global injector (lock-free)
                             self.queues.injector.push(work);
                         }
@@ -842,6 +871,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         position: Arc::new(position.clone()),
                     };
 
+                    // Increment pending work counter
+                    self.pending_work_items.fetch_add(1, Ordering::AcqRel);
                     // Push to global injector (lock-free)
                     self.queues.injector.push(work);
                 }
@@ -1050,8 +1081,10 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 };
 
                 let mut wait_time = 0;
+                let mut consecutive_zero = 0;
                 loop {
-                    let pending = self.queues.injector.len();
+                    // Use pending_work_items for accurate completion detection
+                    let pending = self.pending_work_items.load(Ordering::Acquire);
                     let active = self.active_workers.load(Ordering::Acquire);
 
                     // Check TimeManager should_stop first
@@ -1070,8 +1103,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     }
 
                     if pending == 0 && active == 0 {
-                        debug!("All work completed (0 pending, 0 active)");
-                        break;
+                        consecutive_zero += 1;
+                        if consecutive_zero >= 2 {
+                            debug!("All work completed (0 pending, 0 active) confirmed twice");
+                            break;
+                        }
+                    } else {
+                        consecutive_zero = 0;
                     }
 
                     thread::sleep(Duration::from_millis(10));
@@ -1150,6 +1188,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         best_result.stats.nodes = self.shared_state.get_nodes();
+        best_result.stats.qnodes = self.shared_state.get_qnodes();
 
         // Ensure we always have a move (fallback to first legal move if needed)
         if best_result.best_move.is_none() && best_result.stats.nodes > 0 {
@@ -1362,5 +1401,203 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!("Time manager stopped");
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        evaluation::evaluate::MaterialEvaluator,
+        search::{SearchLimits, ShardedTranspositionTable},
+        shogi::Position,
+    };
+    use std::sync::atomic::Ordering;
+
+    /// Create a test position with many captures available
+    fn create_capture_heavy_position() -> Position {
+        // Create a position with many mutual captures
+        // This is designed to stress the quiescence search
+        // This position has many pieces that can capture each other
+        Position::from_sfen(
+            "k8/1r1b3g1/p1p1ppp1p/1p1ps2p1/2P6/PP1P1S2P/2SGPPP2/1B5R1/LN1K2GNL b - 1",
+        )
+        .unwrap_or_else(|_| Position::startpos())
+    }
+
+    #[test]
+    fn test_parallel_qnodes_budget() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+        let mut pos = create_capture_heavy_position();
+
+        // Set a small qnodes budget
+        let limits = SearchLimits::builder()
+            .depth(5)
+            .qnodes_limit(10000) // Small limit to ensure it's hit
+            .build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // Verify that the total qnodes doesn't exceed the limit by much
+        // With prev-value checking, overshoot should be minimal but can be more than num_threads
+        // due to in-check positions and timing
+        let max_overshoot = 1000; // Allow reasonable overshoot for in-check positions
+        assert!(
+            result.stats.qnodes <= 10000 + max_overshoot,
+            "QNodes exceeded limit by too much: {} > {}",
+            result.stats.qnodes,
+            10000 + max_overshoot
+        );
+
+        // Verify we found a move
+        assert!(result.best_move.is_some());
+    }
+
+    #[test]
+    fn test_parallel_qnodes_aggregation() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+        // Use a position with captures available to ensure quiescence search
+        let mut pos = create_capture_heavy_position();
+
+        // Run search without qnodes limit
+        let limits = SearchLimits::builder().depth(4).build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // Verify that qnodes are properly aggregated
+        let shared_qnodes = searcher.shared_state.get_qnodes();
+        assert_eq!(
+            result.stats.qnodes, shared_qnodes,
+            "QNodes not properly aggregated: stats={} shared={}",
+            result.stats.qnodes, shared_qnodes
+        );
+
+        // With shared counter always incrementing, we should see qnodes > 0
+        // for any search that enters quiescence (which should happen with captures)
+        assert!(
+            result.stats.qnodes > 0,
+            "Expected qnodes > 0 for capture-heavy position, got {}",
+            result.stats.qnodes
+        );
+        println!("QNodes recorded: {}", result.stats.qnodes);
+    }
+
+    #[test]
+    fn test_qnodes_counter_sharing() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+        // Get the qnodes counter
+        let counter1 = searcher.shared_state.get_qnodes_counter();
+        let counter2 = searcher.shared_state.get_qnodes_counter();
+
+        // Both should point to the same atomic counter
+        counter1.store(42, Ordering::Relaxed);
+        assert_eq!(counter2.load(Ordering::Relaxed), 42);
+
+        // Reset should clear it
+        searcher.shared_state.reset();
+        assert_eq!(counter1.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_parallel_qnodes_overshoot_minimal() {
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let num_threads = 4;
+        let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
+
+        let mut pos = create_capture_heavy_position();
+
+        // Set a moderate qnodes budget
+        let qnodes_limit = 5000;
+        let limits = SearchLimits::builder().depth(5).qnodes_limit(qnodes_limit).build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // With previous-value checking, overshoot should be minimal
+        // However, due to in-check positions and timing, it can be more than num_threads
+        let overshoot = result.stats.qnodes.saturating_sub(qnodes_limit);
+        // Allow up to 25% overshoot or 1000 nodes, whichever is smaller
+        let max_overshoot = (qnodes_limit / 4).min(1000);
+        assert!(
+            overshoot <= max_overshoot,
+            "QNodes overshoot too large: {} (limit={}, actual={}, threads={}, max_allowed={})",
+            overshoot,
+            qnodes_limit,
+            result.stats.qnodes,
+            num_threads,
+            max_overshoot
+        );
+
+        println!(
+            "QNodes overshoot test: limit={}, actual={}, overshoot={}",
+            qnodes_limit, result.stats.qnodes, overshoot
+        );
+    }
+
+    #[test]
+    fn test_completion_wait_robustness() {
+        // Test that completion detection properly waits for all work
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let num_threads = 4;
+        let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
+
+        let mut pos = Position::startpos();
+
+        // Set up search with moderate depth
+        let limits = SearchLimits::builder().depth(6).build();
+
+        let result = searcher.search(&mut pos, limits);
+
+        // Verify that search completed properly
+        assert!(result.best_move.is_some(), "Should find a best move");
+        assert!(result.stats.nodes > 0, "Should search some nodes");
+
+        // Check that pending work counter is back to zero
+        assert_eq!(
+            searcher.pending_work_items.load(Ordering::Acquire),
+            0,
+            "Pending work items should be zero after search completes"
+        );
+
+        // Check that active workers is zero
+        assert_eq!(
+            searcher.active_workers.load(Ordering::Acquire),
+            0,
+            "Active workers should be zero after search completes"
+        );
+    }
+
+    #[test]
+    fn test_pending_work_counter_accuracy() {
+        // Test that pending_work_items accurately tracks work
+        let evaluator = Arc::new(MaterialEvaluator);
+        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
+
+        // Verify initial state
+        assert_eq!(searcher.pending_work_items.load(Ordering::Acquire), 0);
+
+        let mut pos = Position::startpos();
+
+        // Run a short search
+        let limits = SearchLimits::builder().depth(3).build();
+        let _result = searcher.search(&mut pos, limits);
+
+        // After search, pending work should be zero
+        assert_eq!(
+            searcher.pending_work_items.load(Ordering::Acquire),
+            0,
+            "Pending work counter should return to zero after search"
+        );
     }
 }

@@ -456,6 +456,9 @@ pub struct SharedSearchState {
     /// Total nodes searched by all threads
     nodes_searched: AtomicU64,
 
+    /// Total quiescence nodes searched by all threads
+    qnodes_searched: Arc<AtomicU64>,
+
     /// Stop flag for all threads
     pub stop_flag: Arc<AtomicBool>,
 
@@ -490,6 +493,7 @@ impl SharedSearchState {
             best_depth: AtomicU8::new(0),
             current_generation: AtomicU64::new(0),
             nodes_searched: AtomicU64::new(0),
+            qnodes_searched: Arc::new(AtomicU64::new(0)),
             stop_flag,
             history: Arc::new(SharedHistory::new()),
             duplication_stats: Arc::new(DuplicationStats::new()),
@@ -507,6 +511,7 @@ impl SharedSearchState {
         self.best_depth.store(0, Ordering::Relaxed);
         self.current_generation.fetch_add(1, Ordering::Relaxed);
         self.nodes_searched.store(0, Ordering::Relaxed);
+        self.qnodes_searched.store(0, Ordering::Relaxed);
         self.stop_flag.store(false, Ordering::Release); // IMPORTANT: Reset stop flag for new search
         self.history.clear();
         self.duplication_stats.reset();
@@ -581,6 +586,21 @@ impl SharedSearchState {
     /// Get total nodes searched
     pub fn get_nodes(&self) -> u64 {
         self.nodes_searched.load(Ordering::Relaxed)
+    }
+
+    /// Add to quiescence node count
+    pub fn add_qnodes(&self, qnodes: u64) {
+        self.qnodes_searched.fetch_add(qnodes, Ordering::Relaxed);
+    }
+
+    /// Get total quiescence nodes searched
+    pub fn get_qnodes(&self) -> u64 {
+        self.qnodes_searched.load(Ordering::Relaxed)
+    }
+
+    /// Get Arc reference to qnodes counter for sharing with SearchLimits
+    pub fn get_qnodes_counter(&self) -> Arc<AtomicU64> {
+        self.qnodes_searched.clone()
     }
 
     /// Check if search should stop
