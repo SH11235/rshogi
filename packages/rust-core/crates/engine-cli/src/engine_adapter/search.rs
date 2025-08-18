@@ -82,8 +82,11 @@ impl EngineAdapter {
         };
 
         // Use appropriate overhead based on time control
-        let overhead_ms = if is_byoyomi {
-            self.byoyomi_overhead_ms as u32
+        // Ponder doesn't consume real time, so no additional byoyomi overhead needed
+        let use_byoyomi_overhead = is_byoyomi && !params.ponder;
+
+        let overhead_ms = if use_byoyomi_overhead {
+            (self.overhead_ms + self.byoyomi_overhead_ms) as u32
         } else {
             self.overhead_ms as u32
         };
@@ -366,8 +369,8 @@ mod tests {
         params.wtime = Some(0);
 
         let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
-        // Verify that byoyomi overhead was used (1500ms)
-        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 1500);
+        // Verify that byoyomi overhead was added (100 + 1500 = 1600ms)
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 1600);
 
         // Test 3: Fischer disguised as byoyomi should use regular overhead
         let mut params = make_go_params();
@@ -379,6 +382,17 @@ mod tests {
 
         let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         // Should use regular overhead (not byoyomi)
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+
+        // Test 4: Ponder with byoyomi should NOT add byoyomi overhead
+        let mut params = make_go_params();
+        params.ponder = true;
+        params.byoyomi = Some(5000);
+        params.btime = Some(0);
+        params.wtime = Some(0);
+
+        let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
+        // Ponder should use only regular overhead, even in byoyomi
         assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
     }
 }
