@@ -5,12 +5,11 @@ use crate::helpers::{
 };
 use crate::search_session::{self, SearchSession};
 use crate::state::SearchState;
-use crate::usi::{
-    send_info_string, send_response, GoParams, UsiCommand, UsiResponse, DEFAULT_BYOYOMI_OVERHEAD_MS,
-};
+use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender};
+use engine_core::time_management::constants::DEFAULT_BYOYOMI_OVERHEAD_MS;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
