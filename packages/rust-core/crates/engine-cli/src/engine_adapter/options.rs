@@ -11,12 +11,10 @@ use log::{debug, info, warn};
 use crate::engine_adapter::EngineAdapter;
 use crate::usi::{
     clamp_periods, send_info_string, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS,
-    OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_OVERHEAD_MS,
-    OPT_USI_BYOYOMI_PERIODS,
+    OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_OVERHEAD_MS, OPT_USI_BYOYOMI_PERIODS,
 };
 use engine_core::time_management::constants::{
-    DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS, MAX_OVERHEAD_MS,
-    MIN_OVERHEAD_MS,
+    DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS, MAX_OVERHEAD_MS, MIN_OVERHEAD_MS,
 };
 
 impl EngineAdapter {
@@ -49,12 +47,6 @@ impl EngineAdapter {
             EngineOption::spin(
                 OPT_OVERHEAD_MS,
                 DEFAULT_OVERHEAD_MS as i64,
-                MIN_OVERHEAD_MS as i64,
-                MAX_OVERHEAD_MS as i64,
-            ),
-            EngineOption::spin(
-                OPT_BYOYOMI_OVERHEAD_MS,
-                DEFAULT_BYOYOMI_OVERHEAD_MS as i64,
                 MIN_OVERHEAD_MS as i64,
                 MAX_OVERHEAD_MS as i64,
             ),
@@ -241,22 +233,6 @@ impl EngineAdapter {
                         MIN_OVERHEAD_MS,
                         MAX_OVERHEAD_MS,
                     )?;
-                }
-            }
-            OPT_BYOYOMI_OVERHEAD_MS => {
-                // TODO: This option is deprecated and will be removed in a future version.
-                // It remains here for compatibility with existing GUIs.
-                // Plan:
-                // - Keep for 1-2 more releases with deprecation warning
-                // - Move to hidden/advanced options
-                // - Eventually remove entirely
-                if let Some(val) = value {
-                    send_info_string(
-                        "ByoyomiOverheadMs is deprecated; use ByoyomiSafetyMs instead.",
-                    )?;
-                    // For compatibility, redirect to byoyomi_safety_ms
-                    self.byoyomi_safety_ms =
-                        Self::parse_u64_in_range(OPT_BYOYOMI_SAFETY_MS, val, 0, 2000)?;
                 }
             }
             OPT_BYOYOMI_SAFETY_MS => {
