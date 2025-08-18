@@ -66,17 +66,8 @@ impl EngineAdapter {
         self.search_start_position_hash = Some(position.hash);
         self.search_start_side_to_move = Some(position.side_to_move);
 
-        // Calculate overhead (use byoyomi safety for byoyomi time control)
-        let overhead_ms = if let Some(byoyomi) = params.byoyomi {
-            if byoyomi > 0 {
-                // Use byoyomi_safety_ms as the effective overhead for byoyomi
-                self.byoyomi_safety_ms as u32
-            } else {
-                self.overhead_ms as u32
-            }
-        } else {
-            self.overhead_ms as u32
-        };
+        // Use general overhead - byoyomi-specific safety margin is handled separately
+        let overhead_ms = self.overhead_ms as u32;
 
         // Apply go parameters to get search limits
         let limits = crate::engine_adapter::time_control::apply_go_params(
@@ -91,7 +82,7 @@ impl EngineAdapter {
         )?;
 
         // Detect if this is actually byoyomi time control by looking at the real TimeControl
-        self.is_last_search_byoyomi = match &limits.time_control {
+        self.last_search_is_byoyomi = match &limits.time_control {
             TimeControl::Byoyomi { .. } => true,
             TimeControl::Ponder(inner) => matches!(**inner, TimeControl::Byoyomi { .. }),
             _ => false,
@@ -230,8 +221,8 @@ impl EngineAdapter {
     }
 
     /// Check if the last search was using byoyomi time control
-    pub fn is_last_search_byoyomi(&self) -> bool {
-        self.is_last_search_byoyomi
+    pub fn last_search_is_byoyomi(&self) -> bool {
+        self.last_search_is_byoyomi
     }
 }
 
@@ -262,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_last_search_byoyomi_detection() {
+    fn test_last_search_is_byoyomi_detection() {
         let mut adapter = make_test_adapter();
         adapter.set_position(true, None, &[]).unwrap();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -274,7 +265,7 @@ mod tests {
         params.wtime = Some(0);
 
         let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
-        assert!(adapter.is_last_search_byoyomi(), "Pure byoyomi should be detected");
+        assert!(adapter.last_search_is_byoyomi(), "Pure byoyomi should be detected");
 
         // Test 2: Regular Fischer - should NOT detect as byoyomi
         let mut params = make_go_params();
@@ -284,7 +275,7 @@ mod tests {
         params.wtime = Some(60000);
 
         let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
-        assert!(!adapter.is_last_search_byoyomi(), "Fischer should not be detected as byoyomi");
+        assert!(!adapter.last_search_is_byoyomi(), "Fischer should not be detected as byoyomi");
 
         // Test 3: Fischer disguised as byoyomi - should NOT detect as byoyomi
         let mut params = make_go_params();
@@ -296,7 +287,7 @@ mod tests {
 
         let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         assert!(
-            !adapter.is_last_search_byoyomi(),
+            !adapter.last_search_is_byoyomi(),
             "Disguised Fischer should not be detected as byoyomi"
         );
 
@@ -309,7 +300,7 @@ mod tests {
 
         let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         assert!(
-            adapter.is_last_search_byoyomi(),
+            adapter.last_search_is_byoyomi(),
             "Ponder with inner byoyomi should be detected as byoyomi"
         );
 
@@ -323,7 +314,7 @@ mod tests {
 
         let (_pos, _limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         assert!(
-            !adapter.is_last_search_byoyomi(),
+            !adapter.last_search_is_byoyomi(),
             "Ponder with inner Fischer should not be detected as byoyomi"
         );
     }

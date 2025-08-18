@@ -68,7 +68,7 @@ pub struct EngineAdapter {
     /// Byoyomi hard limit additional safety margin in milliseconds
     byoyomi_safety_ms: u64,
     /// Whether the last search was using byoyomi time control
-    is_last_search_byoyomi: bool,
+    last_search_is_byoyomi: bool,
 }
 
 impl Default for EngineAdapter {
@@ -100,11 +100,16 @@ impl EngineAdapter {
             search_start_side_to_move: None,
             overhead_ms: DEFAULT_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
-            is_last_search_byoyomi: false,
+            last_search_is_byoyomi: false,
         };
 
         // Initialize options
         adapter.init_options();
         adapter
+    }
+
+    /// Get the byoyomi safety milliseconds setting
+    pub fn byoyomi_safety_ms(&self) -> u64 {
+        self.byoyomi_safety_ms
     }
 }

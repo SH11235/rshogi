@@ -274,20 +274,22 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // Check if the last search was using byoyomi time control
-        let is_byoyomi = {
+        // Check if the last search was using byoyomi time control and get safety ms
+        let (is_byoyomi, safety_ms) = {
             let adapter = lock_or_recover_adapter(ctx.engine);
-            adapter.is_last_search_byoyomi()
+            (adapter.last_search_is_byoyomi(), adapter.byoyomi_safety_ms())
         };
 
-        // Use longer timeouts for byoyomi mode
+        // Use adaptive timeouts based on byoyomi safety settings
         let stage1_timeout = if is_byoyomi {
-            Duration::from_millis(500) // Byoyomi mode: wait longer for in-flight messages
+            // Use half of safety margin for stage 1, clamped to reasonable range
+            Duration::from_millis((safety_ms / 2).clamp(200, 800))
         } else {
             Duration::from_millis(100) // Normal mode: quick wait
         };
         let total_timeout = if is_byoyomi {
-            Duration::from_millis(1000) // Byoyomi mode: up to 1 second total
+            // Use full safety margin for total timeout, clamped to reasonable range
+            Duration::from_millis(safety_ms.clamp(600, 1500))
         } else {
             Duration::from_millis(150) // Normal mode: quick fallback
         };

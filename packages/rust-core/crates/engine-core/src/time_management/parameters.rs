@@ -11,7 +11,7 @@ use std::fmt;
 pub struct TimeParameters {
     // Overhead
     pub overhead_ms: u64,             // Default: 50
-    pub network_overhead_factor: f64, // Default: 0.5
+    pub network_overhead_factor: f64, // Default: 0.5 (currently unused - reserved for future network play)
 
     // PV stability
     pub pv_base_threshold_ms: u64, // Default: 80
@@ -28,7 +28,7 @@ pub struct TimeParameters {
 
     // Byoyomi specific
     pub byoyomi_soft_ratio: f64, // Default: 0.8 (80% of byoyomi time)
-    pub byoyomi_hard_limit_reduction_ms: u64, // Default: 300 (additional safety margin for byoyomi hard limit)
+    pub byoyomi_hard_limit_reduction_ms: u64, // Default: 500 (additional safety margin for byoyomi hard limit)
 
     // Game phase factors
     pub opening_factor: f64, // Default: 1.2
