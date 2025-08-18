@@ -23,9 +23,6 @@ pub enum EngineOption {
         options: Vec<String>,
     },
 
-    /// Button option (triggers an action)
-    Button { name: String },
-
     /// Filename option
     Filename { name: String, default: String },
 }
@@ -56,11 +53,6 @@ impl EngineOption {
             default,
             options,
         }
-    }
-
-    /// Create a button option
-    pub fn button(name: impl Into<String>) -> Self {
-        EngineOption::Button { name: name.into() }
     }
 
     /// Create a filename option
@@ -96,9 +88,6 @@ impl fmt::Display for EngineOption {
                     write!(f, " var {opt}")?;
                 }
                 Ok(())
-            }
-            EngineOption::Button { name } => {
-                write!(f, "option name {name} type button")
             }
             EngineOption::Filename { name, default } => {
                 write!(f, "option name {name} type filename default {default}")

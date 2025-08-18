@@ -42,7 +42,7 @@ mod types;
 mod test_utils;
 
 pub use allocation::calculate_time_allocation;
-pub use parameters::TimeParameters;
+pub use parameters::{constants, TimeParameterError, TimeParameters, TimeParametersBuilder};
 pub use types::{ByoyomiInfo, TimeControl, TimeInfo, TimeLimits, TimeState};
 
 /// Time manager coordinating all time-related decisions
@@ -55,11 +55,7 @@ pub use test_utils::{mock_advance_time, mock_current_ms, mock_now, mock_set_time
 
 /// Internal state shared between threads
 struct TimeManagerInner {
-    // === Immutable after initialization ===
-    #[allow(dead_code)]
-    time_control: TimeControl, // Initial time control (kept for reference)
     side_to_move: Color,
-    #[allow(dead_code)] // May be used in future for advanced time management
     start_ply: u32,
     params: TimeParameters,
     game_phase: GamePhase, // Game phase at creation time
@@ -75,8 +71,6 @@ struct TimeManagerInner {
     // Limits (Atomic for lock-free access)
     soft_limit_ms: AtomicU64,
     hard_limit_ms: AtomicU64,
-    #[allow(dead_code)] // Reserved for dynamic overhead adjustment
-    overhead_ms: AtomicU64,
 
     // Search state
     nodes_searched: AtomicU64,
@@ -134,7 +128,6 @@ impl TimeManager {
         };
 
         let inner = Arc::new(TimeManagerInner {
-            time_control: limits.time_control.clone(),
             side_to_move: side,
             start_ply: ply,
             params,
@@ -143,7 +136,6 @@ impl TimeManager {
             start_time: Mutex::new(Instant::now()),
             soft_limit_ms: AtomicU64::new(soft_ms),
             hard_limit_ms: AtomicU64::new(hard_ms),
-            overhead_ms: AtomicU64::new(params.overhead_ms),
             nodes_searched: AtomicU64::new(0),
             stop_flag: AtomicBool::new(false),
             last_pv_change_ms: AtomicU64::new(0),
@@ -341,8 +333,7 @@ impl TimeManager {
     ///
     /// # Example
     /// ```
-    /// use engine_core::time_management::{TimeManager, TimeState, TimeLimits, TimeControl};
-    /// use engine_core::search::GamePhase;
+    /// use engine_core::time_management::{TimeManager, TimeState, TimeLimits, TimeControl, GamePhase};
     /// use engine_core::Color;
     ///
     /// let limits = TimeLimits {

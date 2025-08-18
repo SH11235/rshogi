@@ -38,17 +38,12 @@ pub struct BinaryEntry {
 }
 
 /// Binary converter for opening book data
-pub struct BinaryConverter {
-    #[allow(dead_code)]
-    hasher: PositionHasher,
-}
+pub struct BinaryConverter {}
 
 impl BinaryConverter {
     /// Create a new binary converter
     pub fn new() -> Self {
-        Self {
-            hasher: PositionHasher::new(),
-        }
+        Self {}
     }
 
     /// Convert a single SFEN entry to binary format

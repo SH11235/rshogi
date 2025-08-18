@@ -206,7 +206,7 @@ pub fn lmr_reduction(depth: u8, moves_searched: u32) -> u8 {
 /// Calculate LMR reduction with logarithmic formula (alternative implementation)
 /// Optimized formula for shogi with adjusted parameters
 /// Can be enabled by switching the function call in node.rs for A/B testing
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn lmr_reduction_formula(depth: u8, moves_searched: u32) -> u8 {
     if depth < 3 || moves_searched < 4 {
         return 0;

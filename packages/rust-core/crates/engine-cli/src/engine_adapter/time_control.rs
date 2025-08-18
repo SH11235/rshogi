@@ -7,24 +7,12 @@
 use anyhow::Result;
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
 use engine_core::shogi::{Color, Position};
-use engine_core::time_management::TimeParameters as CoreTimeParameters;
+use engine_core::time_management::{TimeParameters as CoreTimeParameters, TimeParametersBuilder};
 use log::{debug, warn};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::usi::{clamp_periods, GoParams};
-
-/// Time control mode inferred from USI go parameters
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TimeControlMode {
-    Ponder,
-    Infinite,
-    FixedTime(u64),
-    Byoyomi,
-    Fischer,
-    Default,
-}
 
 /// Helper: build TimeParameters from adapter-level overheads
 fn build_time_parameters(
@@ -33,15 +21,20 @@ fn build_time_parameters(
     byoyomi_early_finish_ratio: u8,
     pv_base_ms: u64,
     pv_slope_ms: u64,
-) -> CoreTimeParameters {
-    CoreTimeParameters {
-        overhead_ms: overhead_ms as u64,
-        byoyomi_hard_limit_reduction_ms: byoyomi_safety_ms as u64,
-        byoyomi_soft_ratio: (byoyomi_early_finish_ratio as f64 / 100.0).clamp(0.5, 0.95),
-        pv_base_threshold_ms: pv_base_ms,
-        pv_depth_slope_ms: pv_slope_ms,
-        ..CoreTimeParameters::default()
-    }
+) -> Result<CoreTimeParameters> {
+    let builder = TimeParametersBuilder::new()
+        .overhead_ms(overhead_ms as u64)
+        .map_err(|e| anyhow::anyhow!("Failed to set overhead_ms: {e}"))?
+        .byoyomi_safety_ms(byoyomi_safety_ms as u64)
+        .map_err(|e| anyhow::anyhow!("Failed to set byoyomi_safety_ms: {e}"))?
+        .byoyomi_early_finish_ratio(byoyomi_early_finish_ratio)
+        .map_err(|e| anyhow::anyhow!("Failed to set byoyomi_early_finish_ratio: {e}"))?
+        .pv_stability_base(pv_base_ms)
+        .map_err(|e| anyhow::anyhow!("Failed to set pv_stability_base: {e}"))?
+        .pv_stability_slope(pv_slope_ms)
+        .map_err(|e| anyhow::anyhow!("Failed to set pv_stability_slope: {e}"))?;
+
+    Ok(builder.build())
 }
 
 /// Helper: configure builder's time control from USI params and current position
@@ -98,111 +91,6 @@ fn configure_builder_time_control(
     builder.infinite()
 }
 
-/// Infer time control mode from USI go parameters
-///
-/// Priority order (highest to lowest):
-/// 1. Ponder mode (`ponder` flag)
-/// 2. Infinite analysis mode (`infinite` flag)
-/// 3. Fixed time per move (`movetime` parameter)
-/// 4. Byoyomi (Japanese time control with fixed time periods)
-/// 5. Fischer/Increment (time added after each move)
-/// 6. Default time management (sudden death or remaining time)
-///
-/// # Special Cases
-///
-/// ## Fischer Disguised as Byoyomi
-/// Some GUIs (e.g., Shogidokoro, certain versions of ShogiGUI) send Fischer
-/// time control disguised as byoyomi with binc=winc. This function detects
-/// and handles this case appropriately.
-///
-/// ## Asymmetric Fischer
-/// Properly handles cases where black and white have different increments,
-/// which can occur in handicap games or special tournament formats.
-#[allow(dead_code)]
-pub fn infer_time_control_mode(
-    params: &GoParams,
-    has_time_info: bool,
-    overhead_ms: u32,
-    _byoyomi_overhead_ms: u32,
-) -> (TimeControlMode, Option<CoreTimeParameters>) {
-    // 1. Check for ponder mode first
-    if params.ponder {
-        debug!("Time control mode: Ponder");
-        return (TimeControlMode::Ponder, None);
-    }
-
-    // 2. Check for infinite analysis mode
-    if params.infinite {
-        debug!("Time control mode: Infinite");
-        return (TimeControlMode::Infinite, None);
-    }
-
-    // 3. Check for fixed time per move
-    if let Some(movetime) = params.movetime {
-        debug!("Time control mode: Fixed time {movetime}ms");
-        return (
-            TimeControlMode::FixedTime(movetime),
-            Some(build_time_parameters(
-                overhead_ms,
-                /*safety*/ 0,
-                /*ratio*/ 80,
-                /*pv_base*/ 80,
-                /*pv_slope*/ 5,
-            )),
-        );
-    }
-
-    // No time information available
-    if !has_time_info {
-        debug!("Time control mode: Default (no time info)");
-        return (
-            TimeControlMode::Default,
-            Some(build_time_parameters(
-                overhead_ms,
-                /*safety*/ 0,
-                /*ratio*/ 80,
-                /*pv_base*/ 80,
-                /*pv_slope*/ 5,
-            )),
-        );
-    }
-
-    // 4. Check for byoyomi
-    let byoyomi_params = (params.byoyomi, params.binc, params.winc);
-    match byoyomi_params {
-        (Some(byoyomi), binc, winc) if byoyomi > 0 => {
-            // Special case: Fischer disguised as byoyomi
-            if is_fischer_disguised_as_byoyomi(byoyomi, binc, winc) {
-                let increment_ms = binc.or(winc).unwrap_or(0);
-                debug!("Time control mode: Fischer (disguised as byoyomi) with increment {increment_ms}ms");
-                let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-                return (TimeControlMode::Fischer, Some(time_params));
-            }
-
-            // Regular byoyomi
-            debug!("Time control mode: Byoyomi {byoyomi}ms");
-            let _periods = params.periods.map(|p| clamp_periods(p, false));
-            let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-            return (TimeControlMode::Byoyomi, Some(time_params));
-        }
-        _ => {}
-    }
-
-    // 5. Check for Fischer/Increment
-    if params.binc.is_some() || params.winc.is_some() {
-        let binc = params.binc.unwrap_or(0);
-        let winc = params.winc.unwrap_or(0);
-        debug!("Time control mode: Fischer with increments B:{binc}ms W:{winc}ms");
-        let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-        return (TimeControlMode::Fischer, Some(time_params));
-    }
-
-    // 6. Default time management (sudden death)
-    debug!("Time control mode: Default");
-    let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-    (TimeControlMode::Default, Some(time_params))
-}
-
 /// Check if this is Fischer time control disguised as byoyomi
 ///
 /// Some GUIs (like Shogidokoro) send Fischer time control in a non-standard way:
@@ -212,26 +100,24 @@ pub fn infer_time_control_mode(
 ///
 /// This pattern indicates Fischer time control where the increment is added
 /// after each move, not traditional byoyomi with periods.
-fn is_fischer_disguised_as_byoyomi(byoyomi: u64, binc: Option<u64>, winc: Option<u64>) -> bool {
+pub fn is_fischer_disguised_as_byoyomi(byoyomi: u64, binc: Option<u64>, winc: Option<u64>) -> bool {
     match (binc, winc) {
         (Some(b), Some(w)) => b == byoyomi && w == byoyomi,
         _ => false,
     }
 }
 
-/// Validate and clamp search depth to prevent out-of-bounds access
+/// Clamp search depth to prevent out-of-bounds access
 ///
 /// USI protocol allows arbitrary depth values, but the engine has internal
 /// limits to prevent array bounds violations and excessive memory usage.
-pub fn validate_and_clamp_depth(depth: Option<u8>) -> Option<u8> {
-    depth.map(|d| {
-        if d > 127 {
-            warn!("Requested depth {d} exceeds maximum 127, clamping to maximum");
-            127
-        } else {
-            d
-        }
-    })
+pub fn clamp_depth(depth: u32) -> u8 {
+    if depth > 127 {
+        warn!("Requested depth {depth} exceeds maximum 127, clamping to maximum");
+        127
+    } else {
+        depth as u8
+    }
 }
 
 /// Main entry point: Apply go parameters to search limits
@@ -253,11 +139,9 @@ pub fn apply_go_params(
 
     // Apply depth limit if specified
     if let Some(d) = params.depth {
-        let clamped = validate_and_clamp_depth(Some(d as u8));
-        if let Some(depth_u8) = clamped {
-            builder = builder.depth(depth_u8);
-            debug!("Search depth limit: {depth_u8}");
-        }
+        let depth_u8 = clamp_depth(d);
+        builder = builder.depth(depth_u8);
+        debug!("Search depth limit: {depth_u8}");
     }
 
     // Apply node limit if specified
@@ -286,7 +170,7 @@ pub fn apply_go_params(
         byoyomi_early_finish_ratio,
         pv_stability_base_ms,
         pv_stability_slope_ms,
-    );
+    )?;
     builder = builder.time_parameters(tp);
 
     // Apply stop flag if available
@@ -316,55 +200,6 @@ mod tests {
             periods: None,
             moves_to_go: None,
         }
-    }
-
-    #[test]
-    fn test_infer_time_control_mode_priority() {
-        // Test ponder has highest priority
-        let mut params = make_go_params();
-        params.ponder = true;
-        params.infinite = true;
-        params.movetime = Some(1000);
-
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
-        assert_eq!(mode, TimeControlMode::Ponder);
-
-        // Test infinite has second priority
-        params.ponder = false;
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
-        assert_eq!(mode, TimeControlMode::Infinite);
-
-        // Test fixed time has third priority
-        params.infinite = false;
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
-        assert_eq!(mode, TimeControlMode::FixedTime(1000));
-    }
-
-    #[test]
-    fn test_fischer_disguised_as_byoyomi() {
-        // Test case: Fischer disguised as byoyomi
-        // byoyomi=1000, binc=1000, winc=1000
-        let mut params = make_go_params();
-        params.byoyomi = Some(1000);
-        params.binc = Some(1000);
-        params.winc = Some(1000);
-        params.btime = Some(60000);
-        params.wtime = Some(60000);
-
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
-        assert_eq!(mode, TimeControlMode::Fischer);
-    }
-
-    #[test]
-    fn test_regular_byoyomi() {
-        // Test case: Regular byoyomi
-        let mut params = make_go_params();
-        params.byoyomi = Some(10000);
-        params.btime = Some(0);
-        params.wtime = Some(0);
-
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
-        assert_eq!(mode, TimeControlMode::Byoyomi);
     }
 
     #[test]
@@ -544,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_and_clamp_depth_caps_at_127() {
+    fn test_clamp_depth_caps_at_127() {
         let params = GoParams {
             depth: Some(200),
             ..make_go_params()
@@ -552,5 +387,44 @@ mod tests {
         let position = Position::startpos();
         let limits = apply_go_params(&params, &position, 50, None, 300, 80, 80, 5).unwrap();
         assert_eq!(limits.depth, Some(127));
+    }
+
+    #[test]
+    fn test_clamp_depth_direct() {
+        assert_eq!(clamp_depth(10), 10);
+        assert_eq!(clamp_depth(127), 127);
+        assert_eq!(clamp_depth(128), 127);
+        assert_eq!(clamp_depth(200), 127);
+        assert_eq!(clamp_depth(u32::MAX), 127);
+    }
+
+    #[test]
+    fn test_apply_go_params_ponder_with_disguised_fischer() {
+        let mut params = make_go_params();
+        params.ponder = true;
+        params.byoyomi = Some(1000);
+        params.binc = Some(1000);
+        params.winc = Some(1000);
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let position = Position::startpos();
+        let limits = apply_go_params(&params, &position, 50, None, 300, 80, 80, 5).unwrap();
+
+        match limits.time_control {
+            engine_core::TimeControl::Ponder(inner) => match *inner {
+                engine_core::TimeControl::Fischer {
+                    white_ms,
+                    black_ms,
+                    increment_ms,
+                } => {
+                    assert_eq!(white_ms, 60000);
+                    assert_eq!(black_ms, 60000);
+                    assert_eq!(increment_ms, 1000);
+                }
+                other => panic!("Expected inner Fischer, got: {other:?}"),
+            },
+            other => panic!("Expected Ponder, got: {other:?}"),
+        }
     }
 }

@@ -1,5 +1,6 @@
 //! Test modules for transposition table
 
+use super::constants::{AGE_MASK, GENERATION_CYCLE};
 use super::*;
 use crate::shogi::Position;
 use std::sync::Arc;
@@ -455,8 +456,7 @@ mod tt_tests {
         // Test various age combinations
         let current_age = 5;
         let calculate_age_distance = |age: u8| -> u8 {
-            ((entry::GENERATION_CYCLE + current_age as u16 - age as u16) & (entry::AGE_MASK as u16))
-                as u8
+            ((GENERATION_CYCLE + current_age as u16 - age as u16) & (AGE_MASK as u16)) as u8
         };
 
         assert_eq!(calculate_age_distance(5), 0); // Same age
@@ -467,8 +467,7 @@ mod tt_tests {
         // Test wraparound
         let current_age = 1;
         let calculate_age_distance = |age: u8| -> u8 {
-            ((entry::GENERATION_CYCLE + current_age as u16 - age as u16) & (entry::AGE_MASK as u16))
-                as u8
+            ((GENERATION_CYCLE + current_age as u16 - age as u16) & (AGE_MASK as u16)) as u8
         };
         assert_eq!(calculate_age_distance(7), 2); // Wrapped around
         assert_eq!(calculate_age_distance(6), 3); // Wrapped around
@@ -551,8 +550,41 @@ mod tt_tests {
 
     // Test depth filter functionality
     #[test]
-    #[cfg(feature = "tt_metrics")]
     fn test_tt_depth_filter() {
+        let bucket = bucket::TTBucket::new();
+
+        // Store an entry with depth 10
+        let key = 0x1234567890ABCDEF;
+        let entry1 = TTEntry::new(key, None, 100, 50, 10, NodeType::Exact, 0);
+        bucket.store(entry1, 0);
+
+        // Try to update with a shallower entry (depth 5)
+        let entry2 = TTEntry::new(key, None, 200, 60, 5, NodeType::Exact, 0);
+        bucket.store(entry2, 0);
+
+        // Verify the original entry is still there (depth filter should prevent update)
+        let result = bucket.probe(key);
+        assert!(result.is_some());
+        let stored_entry = result.unwrap();
+        assert_eq!(stored_entry.depth(), 10);
+        assert_eq!(stored_entry.score(), 100);
+
+        // Try to update with a deeper entry (depth 15)
+        let entry3 = TTEntry::new(key, None, 300, 70, 15, NodeType::Exact, 0);
+        bucket.store(entry3, 0);
+
+        // Verify the new entry replaced the old one
+        let result = bucket.probe(key);
+        assert!(result.is_some());
+        let stored_entry = result.unwrap();
+        assert_eq!(stored_entry.depth(), 15);
+        assert_eq!(stored_entry.score(), 300);
+    }
+
+    // Test depth filter functionality with metrics
+    #[test]
+    #[cfg(feature = "tt_metrics")]
+    fn test_tt_depth_filter_with_metrics() {
         let bucket = bucket::TTBucket::new();
         let metrics = metrics::DetailedTTMetrics::new();
 
