@@ -36,14 +36,3 @@ pub fn clamp_periods(periods: u32, warn_on_clamp: bool) -> u32 {
     }
     clamped
 }
-
-/// Standard engine options
-#[allow(dead_code)]
-pub fn default_options() -> Vec<EngineOption> {
-    vec![
-        EngineOption::spin("USI_Hash", 16, 1, 1024),
-        EngineOption::check("USI_Ponder", true),
-        EngineOption::spin("Threads", 1, 1, 128),
-        EngineOption::button("Clear Hash"),
-    ]
-}

@@ -120,6 +120,8 @@ pub mod constants {
     // Validation ranges
     pub const MIN_OVERHEAD_MS: u64 = 0;
     pub const MAX_OVERHEAD_MS: u64 = 5000;
+    pub const MIN_BYOYOMI_SAFETY_MS: u64 = 0;
+    pub const MAX_BYOYOMI_SAFETY_MS: u64 = 2000;
     pub const MIN_BYOYOMI_EARLY_FINISH_RATIO: u8 = 50;
     pub const MAX_BYOYOMI_EARLY_FINISH_RATIO: u8 = 95;
     pub const MIN_PV_STABILITY_BASE: u64 = 10;
@@ -151,11 +153,11 @@ impl TimeParametersBuilder {
 
     /// Set byoyomi safety margin (also mapped to byoyomi_hard_limit_reduction_ms)
     pub fn byoyomi_safety_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
-        if ms > 2000 {
+        if ms > constants::MAX_BYOYOMI_SAFETY_MS {
             return Err(TimeParameterError::ByoyomiSafety {
                 value: ms,
-                min: 0,
-                max: 2000,
+                min: constants::MIN_BYOYOMI_SAFETY_MS,
+                max: constants::MAX_BYOYOMI_SAFETY_MS,
             });
         }
         self.params.byoyomi_hard_limit_reduction_ms = ms;
@@ -332,8 +334,8 @@ mod tests {
         match result {
             Err(TimeParameterError::ByoyomiSafety { value, min, max }) => {
                 assert_eq!(value, 3000);
-                assert_eq!(min, 0);
-                assert_eq!(max, 2000);
+                assert_eq!(min, constants::MIN_BYOYOMI_SAFETY_MS);
+                assert_eq!(max, constants::MAX_BYOYOMI_SAFETY_MS);
             }
             _ => panic!("Expected ByoyomiSafety error"),
         }
