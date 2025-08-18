@@ -52,7 +52,6 @@ pub struct TranspositionTable {
     /// Current age (generation counter)
     age: u8,
     /// Bucket size configuration
-    #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
     /// Adaptive prefetcher
     prefetcher: Option<AdaptivePrefetcher>,
