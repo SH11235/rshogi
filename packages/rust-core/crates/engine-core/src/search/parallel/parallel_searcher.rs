@@ -226,7 +226,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         last_heartbeat_nodes: &mut u64,
         best_result: &SearchResult,
     ) {
-        const HEARTBEAT_INTERVAL_MS: u64 = 3000;
+        const HEARTBEAT_INTERVAL_MS: u64 = 1500;
         const HEARTBEAT_NODE_THRESHOLD: u64 = 1_000_000;
 
         if let Some(ref callback) = limits.info_callback {
@@ -278,6 +278,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         last_heartbeat: &mut Instant,
         best_result: &SearchResult,
     ) -> u64 {
+        // Track last heartbeat nodes for this wait loop
+        let mut wait_loop_last_nodes: u64 = 0;
+
         // Calculate dynamic timeout based on remaining soft limit
         let max_wait_ms = {
             let tm_opt = { self.time_manager.lock().unwrap().clone() };
@@ -341,7 +344,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     limits,
                     search_start,
                     last_heartbeat,
-                    &mut 0, // Don't track nodes here
+                    &mut wait_loop_last_nodes,
                     best_result,
                 );
             }
@@ -616,7 +619,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         &self,
         position: &mut Position,
         limits: SearchLimits,
-        _main_worker: DequeWorker<WorkItem>,
+        _main_worker: DequeWorker<WorkItem>, // TODO: Consider using main worker for work stealing optimization in the future
     ) -> SearchResult {
         // Record search start time for info callback
         let search_start = Instant::now();
@@ -873,13 +876,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         best_result.stats.qnodes = self.shared_state.get_qnodes();
 
         // Ensure we always have a move (fallback to first legal move if needed)
-        if best_result.best_move.is_none() && best_result.stats.nodes > 0 {
+        if best_result.best_move.is_none() {
             warn!(
                 "No best move found despite searching {} nodes, using fallback",
                 best_result.stats.nodes
             );
-            // SearchThread should have found at least one move
-            // This is a safety fallback that shouldn't normally happen
+            // Generate legal moves and use the first one as fallback
+            let mut mg = crate::movegen::generator::MoveGenImpl::new(position);
+            let moves = mg.generate_all();
+            if !moves.is_empty() {
+                let fallback_move = moves[0];
+                best_result.best_move = Some(fallback_move);
+                best_result.stats.depth = best_result.stats.depth.max(1);
+                best_result.stats.pv = vec![fallback_move];
+                warn!("Fallback bestmove used: {fallback_move}");
+            }
         }
 
         best_result
