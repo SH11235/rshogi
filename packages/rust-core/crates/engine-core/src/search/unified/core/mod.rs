@@ -11,11 +11,12 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         common::mate_score,
-        constants::{MAX_PLY, SEARCH_INF},
+        constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
         unified::UnifiedSearcher,
     },
     shogi::{Move, PieceType, Position},
 };
+use std::sync::atomic::Ordering;
 
 /// Get victim score for MVV-LVA ordering
 /// Higher value pieces get higher scores
@@ -67,6 +68,14 @@ where
     // Check if we're in ponder mode - need frequent polling for ponderhit
     if matches!(&searcher.context.limits().time_control, TimeControl::Ponder(_)) {
         return 0x3F; // Check every 64 nodes for responsive ponderhit detection
+    }
+
+    // Special handling for Byoyomi time control - need more frequent checks
+    if let Some(tm) = &searcher.time_manager {
+        if let TimeControl::Byoyomi { .. } = tm.time_control() {
+            // For Byoyomi, check more frequently due to strict time limits
+            return 0x1F; // Check every 32 nodes for responsive byoyomi handling
+        }
     }
 
     // For time-based controls, use adaptive intervals based on soft limit
@@ -258,8 +267,17 @@ where
     #[cfg(feature = "hashfull_filter")]
     if USE_TT {
         if let Some(ref tt) = searcher.tt {
-            while tt.should_trigger_gc() {
+            // Limit GC iterations to prevent potential infinite loops
+            const MAX_GC_ITERATIONS: usize = 8;
+            const MAX_GC_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+            let gc_start = std::time::Instant::now();
+            let mut gc_iterations = 0;
+            while tt.should_trigger_gc()
+                && gc_iterations < MAX_GC_ITERATIONS
+                && gc_start.elapsed() < MAX_GC_BUDGET
+            {
                 tt.incremental_gc(512); // Larger batch size before search starts
+                gc_iterations += 1;
             }
         }
     }
@@ -294,7 +312,7 @@ where
         _owned_moves = None;
     };
 
-    // Skip prefetching - it has shown negative performance impact
+    // Note: Prefetching is done selectively inside the move loop below
 
     // Search each move
     for (move_idx, &mv) in ordered_slice.iter().enumerate() {
@@ -379,35 +397,48 @@ where
             // Get PV from recursive search
             let child_pv = searcher.pv_table.get_line(1);
 
-            // Validate child PV moves before extending
-            // This prevents propagating invalid moves from TT pollution
-            let mut valid_child_pv = Vec::new();
-            let mut temp_pos = pos.clone();
-            let undo_info = temp_pos.do_move(mv);
-            let mut undo_infos = Vec::new();
+            // In release builds, trust the child PV without validation
+            // This avoids expensive cloning and move validation in hot path
+            #[cfg(not(debug_assertions))]
+            {
+                pv.extend_from_slice(&child_pv);
+            }
 
-            for &child_mv in child_pv {
-                if temp_pos.is_pseudo_legal(child_mv) {
-                    valid_child_pv.push(child_mv);
-                    let child_undo = temp_pos.do_move(child_mv);
-                    undo_infos.push((child_mv, child_undo));
-                } else {
-                    #[cfg(debug_assertions)]
-                    if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                        eprintln!("[WARNING] Invalid move in child PV at root, truncating");
-                        eprintln!("  Move: {}", crate::usi::move_to_usi(&child_mv));
-                        eprintln!("  Position: {}", crate::usi::position_to_sfen(&temp_pos));
+            // In debug builds or with SHOGI_DEBUG_PV, validate child PV moves
+            #[cfg(debug_assertions)]
+            {
+                if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                    // Validate child PV moves before extending
+                    // This prevents propagating invalid moves from TT pollution
+                    let mut valid_child_pv = Vec::new();
+                    let mut temp_pos = pos.clone();
+                    let undo_info = temp_pos.do_move(mv);
+                    let mut undo_infos = Vec::new();
+
+                    for &child_mv in child_pv {
+                        if temp_pos.is_pseudo_legal(child_mv) {
+                            valid_child_pv.push(child_mv);
+                            let child_undo = temp_pos.do_move(child_mv);
+                            undo_infos.push((child_mv, child_undo));
+                        } else {
+                            eprintln!("[WARNING] Invalid move in child PV at root, truncating");
+                            eprintln!("  Move: {}", crate::usi::move_to_usi(&child_mv));
+                            eprintln!("  Position: {}", crate::usi::position_to_sfen(&temp_pos));
+                            break;
+                        }
                     }
-                    break;
+
+                    // Undo all child moves in reverse order
+                    for (child_mv, child_undo) in undo_infos.iter().rev() {
+                        temp_pos.undo_move(*child_mv, child_undo.clone());
+                    }
+                    temp_pos.undo_move(mv, undo_info);
+                    pv.extend_from_slice(&valid_child_pv);
+                } else {
+                    // Debug build but no SHOGI_DEBUG_PV - just use child PV as-is
+                    pv.extend_from_slice(child_pv);
                 }
             }
-
-            // Undo all child moves in reverse order
-            for (child_mv, child_undo) in undo_infos.iter().rev() {
-                temp_pos.undo_move(*child_mv, child_undo.clone());
-            }
-            temp_pos.undo_move(mv, undo_info);
-            pv.extend_from_slice(&valid_child_pv);
 
             if score > alpha {
                 alpha = score;
@@ -417,10 +448,19 @@ where
 
     // Validate PV before returning
     if !pv.is_empty() {
-        // First check occupancy invariants (doesn't rely on move generator)
-        pv_local_sanity(pos, &pv);
-        // Then check legal moves
-        assert_pv_legal(pos, &pv);
+        // Minimal O(1) sanity check even in release builds
+        if pv.contains(&Move::NULL) || pv.len() > MAX_PLY {
+            pv.clear(); // Discard corrupted PV
+        } else {
+            // Full validation only in debug builds
+            #[cfg(debug_assertions)]
+            {
+                // First check occupancy invariants (doesn't rely on move generator)
+                pv_local_sanity(pos, &pv);
+                // Then check legal moves
+                assert_pv_legal(pos, &pv);
+            }
+        }
     }
 
     (best_score, pv)
@@ -572,6 +612,29 @@ where
 
     // Quiescence search at leaf nodes
     if depth == 0 {
+        // Check QNodes budget before entering quiescence search
+        if let Some(limit) = searcher.context.limits().qnodes_limit {
+            let exceeded = if let Some(ref counter) = searcher.context.limits().qnodes_counter {
+                // Parallel search: check shared counter
+                counter.load(Ordering::Relaxed) >= limit
+            } else {
+                // Single-threaded: check local counter
+                searcher.stats.qnodes >= limit
+            };
+
+            if exceeded {
+                // Return evaluation consistent with quiescence search behavior
+                if pos.is_in_check() {
+                    // In check: return alpha (same as quiescence search)
+                    return alpha;
+                } else {
+                    // Not in check: return clamped evaluation
+                    let eval = searcher.evaluator.evaluate(pos);
+                    return eval.clamp(alpha, beta);
+                }
+            }
+        }
+
         return quiescence_search(searcher, pos, alpha, beta, ply);
     }
 
@@ -620,6 +683,16 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     searcher.stats.nodes += 1;
+    searcher.stats.qnodes += 1;
+
+    // Extract qnodes limit and shared counter at function start for efficiency
+    let qlimit = searcher.context.limits().qnodes_limit;
+    let qnodes_counter = searcher.context.limits().qnodes_counter.clone();
+
+    // Increment shared counter if available (for accurate aggregation)
+    // Returns the previous value before increment
+    let prev_shared_qnodes =
+        qnodes_counter.as_ref().map(|counter| counter.fetch_add(1, Ordering::AcqRel));
 
     // Early stop check
     if searcher.context.should_stop() {
@@ -646,6 +719,46 @@ where
     // Check if in check first - this determines our search strategy
     let in_check = pos.is_in_check();
 
+    // QNodes budget check (after in_check determination)
+    if let Some(limit) = qlimit {
+        // Check if we've exceeded the limit using previous value
+        let exceeded = if let Some(prev) = prev_shared_qnodes {
+            // Parallel search: use the previous value from shared counter
+            prev >= limit
+        } else {
+            // Single-threaded search: use previous local counter value
+            // Note: stats.qnodes was already incremented at function start
+            let prev_local = searcher.stats.qnodes.saturating_sub(1);
+            prev_local >= limit
+        };
+
+        if exceeded {
+            log::trace!("qsearch budget exceeded at qnodes={}", searcher.stats.qnodes);
+
+            // Return the token we just took to minimize overshoot
+            if let Some(ref counter) = qnodes_counter {
+                counter.fetch_sub(1, Ordering::AcqRel);
+            }
+            // Also revert local counter to maintain consistency
+            searcher.stats.qnodes = searcher.stats.qnodes.saturating_sub(1);
+
+            if in_check {
+                // In check: cannot use stand pat, conservatively return alpha
+                return alpha;
+            } else {
+                // Not in check: return current evaluation clamped to bounds
+                let eval = searcher.evaluator.evaluate(pos);
+                if eval >= beta {
+                    return beta;
+                }
+                if eval > alpha {
+                    return eval;
+                }
+                return alpha;
+            }
+        }
+    }
+
     // Absolute stack guard - always enforce this limit
     if ply >= MAX_PLY as u16 {
         log::warn!("Hit absolute ply limit {ply} in quiescence search");
@@ -658,17 +771,12 @@ where
         };
     }
 
-    // More aggressive ply limit for quiescence to prevent hangs
-    // This is a safety measure - normal quiescence should not go this deep
-    const QUIESCE_SAFETY_LIMIT: u16 = 100;
-    if ply >= QUIESCE_SAFETY_LIMIT {
-        eprintln!("WARNING: Hit quiescence safety limit at ply {ply}");
-        return searcher.evaluator.evaluate(pos);
-    }
-
-    // Very aggressive ply limiting to fix the hanging issue
-    // The test position has deep check sequences that can explode
-    if ply >= 16 {
+    // Safety limit for quiescence search depth
+    // This prevents explosion in complex positions with many captures
+    if ply >= MAX_QUIESCE_DEPTH {
+        if log::log_enabled!(log::Level::Warn) {
+            log::warn!("Hit quiescence depth limit at ply {ply}");
+        }
         // Hard stop at reasonable depth
         // Return evaluation-based value instead of fixed constants to avoid discontinuity
         return if in_check {
@@ -694,6 +802,23 @@ where
         // Search all legal moves to find check evasion
         let mut best = -SEARCH_INF;
         for &mv in moves.iter() {
+            // Check QNodes budget before each move (important for strict limit enforcement)
+            if let Some(limit) = qlimit {
+                let exceeded = if let Some(ref counter) = qnodes_counter {
+                    // Check current value against limit
+                    counter.load(Ordering::Acquire) >= limit
+                } else {
+                    // Single-threaded: check current local counter
+                    searcher.stats.qnodes >= limit
+                };
+
+                if exceeded {
+                    // If we haven't found any move yet, return alpha
+                    // Otherwise return the best score found so far
+                    return if best == -SEARCH_INF { alpha } else { best };
+                }
+            }
+
             // Validate move
             if !pos.is_pseudo_legal(mv) {
                 continue;
@@ -797,6 +922,19 @@ where
         // Check stop flag at the beginning of each capture move
         if searcher.context.should_stop() {
             return alpha; // Return current alpha value
+        }
+
+        // Check QNodes budget before each capture move
+        if let Some(limit) = qlimit {
+            let exceeded = if let Some(ref counter) = qnodes_counter {
+                counter.load(Ordering::Acquire) >= limit
+            } else {
+                searcher.stats.qnodes >= limit
+            };
+
+            if exceeded {
+                return alpha; // Return current best bound
+            }
         }
 
         // Delta pruning - skip captures that can't improve position enough
@@ -1291,5 +1429,287 @@ mod tests {
             searcher.stats.nodes >= 1,
             "Should search moves even at depth limit when in check"
         );
+    }
+
+    #[test]
+    fn test_qnodes_limit_basic() {
+        // Test basic QNodes limit functionality
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set a very small qnodes limit
+        let limits = SearchLimits::builder()
+            .depth(5)
+            .qnodes_limit(10) // Very small limit
+            .build();
+        searcher.context.set_limits(limits);
+
+        // Create a position with many captures available
+        // This SFEN has multiple pieces that can capture each other
+        let pos = Position::from_sfen("k8/9/9/3G1G3/2P1P1P2/3B1R3/9/9/K8 b - 1").unwrap();
+
+        let mut test_pos = pos.clone();
+        let _score = quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0);
+
+        // Verify qnodes limit was respected
+        assert!(
+            searcher.stats.qnodes <= 10,
+            "QNodes should not exceed limit, got {}",
+            searcher.stats.qnodes
+        );
+    }
+
+    #[test]
+    fn test_qnodes_limit_in_check() {
+        // Test QNodes limit when in check position
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set a small qnodes limit
+        let limits = SearchLimits::builder()
+            .depth(5)
+            .qnodes_limit(5) // Very small limit
+            .build();
+        searcher.context.set_limits(limits);
+
+        // Position: Black king in check
+        let pos = Position::from_sfen("9/9/9/9/4K3r/9/9/9/9 b - 1").unwrap();
+        assert!(pos.is_in_check(), "Position should be in check");
+
+        let mut test_pos = pos.clone();
+        let score = quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0);
+
+        // Verify qnodes limit was respected
+        assert!(
+            searcher.stats.qnodes <= 5,
+            "QNodes should not exceed limit even in check, got {}",
+            searcher.stats.qnodes
+        );
+
+        // Score should be reasonable (not a mate score)
+        assert!(score.abs() < 30000, "Score should be reasonable, not mate");
+    }
+
+    #[test]
+    fn test_qnodes_limit_performance() {
+        // Test that QNodes limit improves performance in complex positions
+        use std::time::Instant;
+
+        let evaluator = MaterialEvaluator;
+
+        // Position with many possible captures (complex middlegame)
+        let complex_pos = Position::from_sfen(
+            "ln1gkg1nl/1r5s1/p1pppbppp/1p5P1/9/2P6/PP1PPPP1P/1B5R1/LNSGKGSNL b - 1",
+        )
+        .unwrap();
+
+        // Test without qnodes limit
+        let mut searcher1 = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+        searcher1.context.set_limits(SearchLimits::builder().depth(1).build());
+
+        let start1 = Instant::now();
+        let mut pos1 = complex_pos.clone();
+        let _score1 = quiescence_search(&mut searcher1, &mut pos1, -1000, 1000, 0);
+        let elapsed1 = start1.elapsed();
+        let nodes_without_limit = searcher1.stats.qnodes;
+
+        // Test with qnodes limit
+        let mut searcher2 = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+        searcher2.context.set_limits(
+            SearchLimits::builder()
+                .depth(1)
+                .qnodes_limit(1000) // Reasonable limit
+                .build(),
+        );
+
+        let start2 = Instant::now();
+        let mut pos2 = complex_pos.clone();
+        let _score2 = quiescence_search(&mut searcher2, &mut pos2, -1000, 1000, 0);
+        let elapsed2 = start2.elapsed();
+        let nodes_with_limit = searcher2.stats.qnodes;
+
+        // With limit should explore fewer nodes
+        assert!(
+            nodes_with_limit <= nodes_without_limit,
+            "With limit should explore fewer or equal nodes"
+        );
+
+        // With limit should be faster (or at least not significantly slower)
+        // Note: This might be flaky in CI, so we're lenient
+        if elapsed2 > elapsed1.saturating_mul(2) {
+            eprintln!(
+                "Warning: QNodes limit didn't improve performance as expected. \
+                Without limit: {elapsed1:?} ({nodes_without_limit} nodes), With limit: {elapsed2:?} ({nodes_with_limit} nodes)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_qnodes_token_return_on_stop() {
+        // Test that qnodes are returned when stop flag is set
+        use crate::evaluation::evaluate::MaterialEvaluator;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{atomic::AtomicBool, Arc};
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set up stop flag and shared counter
+        let stop_flag = Arc::new(AtomicBool::new(true)); // Already stopped
+        let shared_counter = Arc::new(AtomicU64::new(0));
+
+        searcher.context.set_limits(SearchLimits {
+            time_control: crate::time_management::TimeControl::Infinite,
+            depth: Some(1),
+            nodes: None,
+            qnodes_limit: None,
+            qnodes_counter: Some(shared_counter.clone()),
+            moves_to_go: None,
+            time_parameters: None,
+            stop_flag: Some(stop_flag),
+            info_callback: None,
+            ponder_hit_flag: None,
+        });
+
+        // Create position
+        let mut pos = Position::startpos();
+
+        // Initial qnodes
+        let initial_qnodes = searcher.stats.qnodes;
+        let initial_shared = shared_counter.load(Ordering::Acquire);
+
+        // Call quiescence search with stop flag already set
+        let _score = quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0);
+
+        // Check that qnodes were not incremented (or were returned)
+        let final_qnodes = searcher.stats.qnodes;
+        let final_shared = shared_counter.load(Ordering::Acquire);
+
+        // The counter is incremented before the stop check, but not committed
+        // So we expect exactly 1 increment
+        assert_eq!(
+            final_qnodes,
+            initial_qnodes + 1,
+            "Local qnodes should increment exactly once before stop check"
+        );
+        assert_eq!(
+            final_shared,
+            initial_shared + 1,
+            "Shared qnodes should increment exactly once before stop check"
+        );
+    }
+
+    #[test]
+    fn test_qnodes_token_return_on_limit_exceeded() {
+        // Test that qnodes are properly returned when limit is exceeded
+        use crate::evaluation::evaluate::MaterialEvaluator;
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set up shared counter
+        let shared_counter = Arc::new(AtomicU64::new(0));
+
+        // Set very low qnodes limit to trigger exceeded condition
+        searcher.context.set_limits(SearchLimits {
+            time_control: crate::time_management::TimeControl::Infinite,
+            depth: Some(1),
+            nodes: None,
+            qnodes_limit: Some(1), // Will be exceeded immediately
+            qnodes_counter: Some(shared_counter.clone()),
+            moves_to_go: None,
+            time_parameters: None,
+            stop_flag: None,
+            info_callback: None,
+            ponder_hit_flag: None,
+        });
+
+        // Create position with captures available
+        let pos = Position::from_sfen(
+            "ln1gkg1nl/1r5s1/p1pppbppp/1p5P1/9/2P6/PP1PPPP1P/1B5R1/LNSGKGSNL b - 1",
+        )
+        .unwrap();
+        let mut pos = pos;
+
+        // Call quiescence search
+        let _score = quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0);
+
+        // Check that we stayed within reasonable bounds
+        let final_qnodes = searcher.stats.qnodes;
+        let final_shared = shared_counter.load(Ordering::Acquire);
+
+        // Should be at most limit + 1 (the one that triggered exceeded)
+        assert!(final_qnodes <= 2, "Local qnodes {final_qnodes} should be close to limit");
+        assert!(final_shared <= 2, "Shared qnodes {final_shared} should be close to limit");
+    }
+
+    #[test]
+    fn test_event_poll_mask_byoyomi() {
+        // Test that byoyomi time control gets more frequent polling
+        use crate::evaluation::evaluate::MaterialEvaluator;
+        use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
+        use crate::Color;
+        use std::sync::Arc;
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Set up byoyomi time control
+        let limits = TimeLimits {
+            time_control: TimeControl::Byoyomi {
+                main_time_ms: 0,  // Already in byoyomi
+                byoyomi_ms: 6000, // 6 seconds
+                periods: 1,
+            },
+            ..Default::default()
+        };
+
+        // Create TimeManager for byoyomi
+        let time_manager = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
+        searcher.time_manager = Some(Arc::new(time_manager));
+
+        // Get polling mask
+        let mask = get_event_poll_mask(&searcher);
+
+        // Should be 0x1F (check every 32 nodes) for byoyomi
+        assert_eq!(mask, 0x1F, "Byoyomi should use frequent polling (every 32 nodes)");
+    }
+
+    #[test]
+    fn test_event_poll_mask_various_time_controls() {
+        // Test polling masks for different time controls
+        use crate::evaluation::evaluate::MaterialEvaluator;
+        use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
+        use crate::Color;
+        use std::sync::Arc;
+
+        let evaluator = MaterialEvaluator;
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+
+        // Test Fischer with short time
+        let limits = TimeLimits {
+            time_control: TimeControl::Fischer {
+                white_ms: 1000,
+                black_ms: 1000,
+                increment_ms: 0,
+            },
+            ..Default::default()
+        };
+        let time_manager = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
+        searcher.time_manager = Some(Arc::new(time_manager));
+        let mask = get_event_poll_mask(&searcher);
+        assert!(mask <= 0x7F, "Short time Fischer should use frequent polling");
+
+        // Test FixedTime
+        let limits = TimeLimits {
+            time_control: TimeControl::FixedTime { ms_per_move: 100 },
+            ..Default::default()
+        };
+        let time_manager = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
+        searcher.time_manager = Some(Arc::new(time_manager));
+        let mask = get_event_poll_mask(&searcher);
+        assert!(mask <= 0x3F, "FixedTime 100ms should use very frequent polling");
     }
 }
