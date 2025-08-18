@@ -8,6 +8,11 @@ pub mod search_thread;
 pub mod shared;
 
 mod parallel_searcher;
+#[cfg(test)]
+mod tests;
+mod time_manager;
+mod work_queue;
+mod worker;
 
 pub use lazy_smp::LazySmpSearcher;
 pub use parallel_searcher::ParallelSearcher;
