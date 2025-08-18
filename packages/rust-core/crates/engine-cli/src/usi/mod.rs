@@ -26,15 +26,6 @@ pub const OPT_OVERHEAD_MS: &str = "OverheadMs";
 pub const OPT_BYOYOMI_OVERHEAD_MS: &str = "ByoyomiOverheadMs";
 pub const OPT_BYOYOMI_SAFETY_MS: &str = "ByoyomiSafetyMs";
 
-/// Time management default values
-pub const DEFAULT_OVERHEAD_MS: u64 = 50;
-pub const DEFAULT_BYOYOMI_OVERHEAD_MS: u64 = 1000; // Conservative for GUI compatibility
-pub const DEFAULT_BYOYOMI_SAFETY_MS: u64 = 500;
-
-/// Time management limits
-pub const MIN_OVERHEAD_MS: u64 = 0;
-pub const MAX_OVERHEAD_MS: u64 = 5000;
-
 /// Clamp periods value to valid range with optional warning
 pub fn clamp_periods(periods: u32, warn_on_clamp: bool) -> u32 {
     let clamped = periods.clamp(MIN_BYOYOMI_PERIODS, MAX_BYOYOMI_PERIODS);

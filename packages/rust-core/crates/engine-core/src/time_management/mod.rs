@@ -42,7 +42,7 @@ mod types;
 mod test_utils;
 
 pub use allocation::calculate_time_allocation;
-pub use parameters::TimeParameters;
+pub use parameters::{constants, TimeParameterError, TimeParameters, TimeParametersBuilder};
 pub use types::{ByoyomiInfo, TimeControl, TimeInfo, TimeLimits, TimeState};
 
 /// Time manager coordinating all time-related decisions

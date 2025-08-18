@@ -7,7 +7,7 @@
 use anyhow::Result;
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
 use engine_core::shogi::{Color, Position};
-use engine_core::time_management::TimeParameters as CoreTimeParameters;
+use engine_core::time_management::{TimeParameters as CoreTimeParameters, TimeParametersBuilder};
 use log::{debug, warn};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -33,15 +33,20 @@ fn build_time_parameters(
     byoyomi_early_finish_ratio: u8,
     pv_base_ms: u64,
     pv_slope_ms: u64,
-) -> CoreTimeParameters {
-    CoreTimeParameters {
-        overhead_ms: overhead_ms as u64,
-        byoyomi_hard_limit_reduction_ms: byoyomi_safety_ms as u64,
-        byoyomi_soft_ratio: (byoyomi_early_finish_ratio as f64 / 100.0).clamp(0.5, 0.95),
-        pv_base_threshold_ms: pv_base_ms,
-        pv_depth_slope_ms: pv_slope_ms,
-        ..CoreTimeParameters::default()
-    }
+) -> Result<CoreTimeParameters> {
+    let builder = TimeParametersBuilder::new()
+        .overhead_ms(overhead_ms as u64)
+        .map_err(|e| anyhow::anyhow!("Failed to set overhead_ms: {e}"))?
+        .byoyomi_safety_ms(byoyomi_safety_ms as u64)
+        .map_err(|e| anyhow::anyhow!("Failed to set byoyomi_safety_ms: {e}"))?
+        .byoyomi_early_finish_ratio(byoyomi_early_finish_ratio)
+        .map_err(|e| anyhow::anyhow!("Failed to set byoyomi_early_finish_ratio: {e}"))?
+        .pv_stability_base(pv_base_ms)
+        .map_err(|e| anyhow::anyhow!("Failed to set pv_stability_base: {e}"))?
+        .pv_stability_slope(pv_slope_ms)
+        .map_err(|e| anyhow::anyhow!("Failed to set pv_stability_slope: {e}"))?;
+
+    Ok(builder.build())
 }
 
 /// Helper: configure builder's time control from USI params and current position
@@ -142,13 +147,14 @@ pub fn infer_time_control_mode(
         debug!("Time control mode: Fixed time {movetime}ms");
         return (
             TimeControlMode::FixedTime(movetime),
-            Some(build_time_parameters(
+            build_time_parameters(
                 overhead_ms,
                 /*safety*/ 0,
                 /*ratio*/ 80,
                 /*pv_base*/ 80,
                 /*pv_slope*/ 5,
-            )),
+            )
+            .ok(),
         );
     }
 
@@ -157,13 +163,14 @@ pub fn infer_time_control_mode(
         debug!("Time control mode: Default (no time info)");
         return (
             TimeControlMode::Default,
-            Some(build_time_parameters(
+            build_time_parameters(
                 overhead_ms,
                 /*safety*/ 0,
                 /*ratio*/ 80,
                 /*pv_base*/ 80,
                 /*pv_slope*/ 5,
-            )),
+            )
+            .ok(),
         );
     }
 
@@ -175,15 +182,15 @@ pub fn infer_time_control_mode(
             if is_fischer_disguised_as_byoyomi(byoyomi, binc, winc) {
                 let increment_ms = binc.or(winc).unwrap_or(0);
                 debug!("Time control mode: Fischer (disguised as byoyomi) with increment {increment_ms}ms");
-                let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-                return (TimeControlMode::Fischer, Some(time_params));
+                let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
+                return (TimeControlMode::Fischer, time_params);
             }
 
             // Regular byoyomi
             debug!("Time control mode: Byoyomi {byoyomi}ms");
             let _periods = params.periods.map(|p| clamp_periods(p, false));
-            let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-            return (TimeControlMode::Byoyomi, Some(time_params));
+            let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
+            return (TimeControlMode::Byoyomi, time_params);
         }
         _ => {}
     }
@@ -193,14 +200,14 @@ pub fn infer_time_control_mode(
         let binc = params.binc.unwrap_or(0);
         let winc = params.winc.unwrap_or(0);
         debug!("Time control mode: Fischer with increments B:{binc}ms W:{winc}ms");
-        let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-        return (TimeControlMode::Fischer, Some(time_params));
+        let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
+        return (TimeControlMode::Fischer, time_params);
     }
 
     // 6. Default time management (sudden death)
     debug!("Time control mode: Default");
-    let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5);
-    (TimeControlMode::Default, Some(time_params))
+    let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
+    (TimeControlMode::Default, time_params)
 }
 
 /// Check if this is Fischer time control disguised as byoyomi
@@ -286,7 +293,7 @@ pub fn apply_go_params(
         byoyomi_early_finish_ratio,
         pv_stability_base_ms,
         pv_stability_slope_ms,
-    );
+    )?;
     builder = builder.time_parameters(tp);
 
     // Apply stop flag if available

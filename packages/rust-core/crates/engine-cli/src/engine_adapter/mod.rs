@@ -10,8 +10,9 @@ use engine_core::{
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
-use crate::usi::{
-    EngineOption, DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
+use crate::usi::EngineOption;
+use engine_core::time_management::constants::{
+    DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
 };
 
 // Submodules
