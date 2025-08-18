@@ -58,11 +58,6 @@ impl EngineOption {
         }
     }
 
-    /// Create a button option
-    pub fn button(name: impl Into<String>) -> Self {
-        EngineOption::Button { name: name.into() }
-    }
-
     /// Create a filename option
     pub fn filename(name: impl Into<String>, default: String) -> Self {
         EngineOption::Filename {
