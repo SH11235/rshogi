@@ -15,8 +15,8 @@ use crate::usi::{
     OPT_USI_BYOYOMI_PERIODS,
 };
 use engine_core::time_management::constants::{
-    DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS, MAX_OVERHEAD_MS,
-    MIN_OVERHEAD_MS,
+    DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
+    MAX_BYOYOMI_SAFETY_MS, MAX_OVERHEAD_MS, MIN_BYOYOMI_SAFETY_MS, MIN_OVERHEAD_MS,
 };
 
 impl EngineAdapter {
@@ -58,7 +58,12 @@ impl EngineAdapter {
                 MIN_OVERHEAD_MS as i64,
                 MAX_OVERHEAD_MS as i64,
             ),
-            EngineOption::spin(OPT_BYOYOMI_SAFETY_MS, DEFAULT_BYOYOMI_SAFETY_MS as i64, 0, 2000),
+            EngineOption::spin(
+                OPT_BYOYOMI_SAFETY_MS,
+                DEFAULT_BYOYOMI_SAFETY_MS as i64,
+                MIN_BYOYOMI_SAFETY_MS as i64,
+                MAX_BYOYOMI_SAFETY_MS as i64,
+            ),
         ];
     }
 
@@ -255,8 +260,12 @@ impl EngineAdapter {
             }
             OPT_BYOYOMI_SAFETY_MS => {
                 if let Some(val) = value {
-                    self.byoyomi_safety_ms =
-                        Self::parse_u64_in_range(OPT_BYOYOMI_SAFETY_MS, val, 0, 2000)?;
+                    self.byoyomi_safety_ms = Self::parse_u64_in_range(
+                        OPT_BYOYOMI_SAFETY_MS,
+                        val,
+                        MIN_BYOYOMI_SAFETY_MS,
+                        MAX_BYOYOMI_SAFETY_MS,
+                    )?;
                 }
             }
             _ => {

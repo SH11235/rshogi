@@ -14,18 +14,6 @@ use std::sync::Arc;
 
 use crate::usi::{clamp_periods, GoParams};
 
-/// Time control mode inferred from USI go parameters
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TimeControlMode {
-    Ponder,
-    Infinite,
-    FixedTime(u64),
-    Byoyomi,
-    Fischer,
-    Default,
-}
-
 /// Helper: build TimeParameters from adapter-level overheads
 fn build_time_parameters(
     overhead_ms: u32,
@@ -101,112 +89,6 @@ fn configure_builder_time_control(
 
     // Fallback: infinite
     builder.infinite()
-}
-
-/// Infer time control mode from USI go parameters
-///
-/// Priority order (highest to lowest):
-/// 1. Ponder mode (`ponder` flag)
-/// 2. Infinite analysis mode (`infinite` flag)
-/// 3. Fixed time per move (`movetime` parameter)
-/// 4. Byoyomi (Japanese time control with fixed time periods)
-/// 5. Fischer/Increment (time added after each move)
-/// 6. Default time management (sudden death or remaining time)
-///
-/// # Special Cases
-///
-/// ## Fischer Disguised as Byoyomi
-/// Some GUIs (e.g., Shogidokoro, certain versions of ShogiGUI) send Fischer
-/// time control disguised as byoyomi with binc=winc. This function detects
-/// and handles this case appropriately.
-///
-/// ## Asymmetric Fischer
-/// Properly handles cases where black and white have different increments,
-/// which can occur in handicap games or special tournament formats.
-#[allow(dead_code)]
-pub fn infer_time_control_mode(
-    params: &GoParams,
-    has_time_info: bool,
-    overhead_ms: u32,
-) -> (TimeControlMode, Option<CoreTimeParameters>) {
-    // 1. Check for ponder mode first
-    if params.ponder {
-        debug!("Time control mode: Ponder");
-        return (TimeControlMode::Ponder, None);
-    }
-
-    // 2. Check for infinite analysis mode
-    if params.infinite {
-        debug!("Time control mode: Infinite");
-        return (TimeControlMode::Infinite, None);
-    }
-
-    // 3. Check for fixed time per move
-    if let Some(movetime) = params.movetime {
-        debug!("Time control mode: Fixed time {movetime}ms");
-        return (
-            TimeControlMode::FixedTime(movetime),
-            build_time_parameters(
-                overhead_ms,
-                /*safety*/ 0,
-                /*ratio*/ 80,
-                /*pv_base*/ 80,
-                /*pv_slope*/ 5,
-            )
-            .ok(),
-        );
-    }
-
-    // No time information available
-    if !has_time_info {
-        debug!("Time control mode: Default (no time info)");
-        return (
-            TimeControlMode::Default,
-            build_time_parameters(
-                overhead_ms,
-                /*safety*/ 0,
-                /*ratio*/ 80,
-                /*pv_base*/ 80,
-                /*pv_slope*/ 5,
-            )
-            .ok(),
-        );
-    }
-
-    // 4. Check for byoyomi
-    let byoyomi_params = (params.byoyomi, params.binc, params.winc);
-    match byoyomi_params {
-        (Some(byoyomi), binc, winc) if byoyomi > 0 => {
-            // Special case: Fischer disguised as byoyomi
-            if is_fischer_disguised_as_byoyomi(byoyomi, binc, winc) {
-                let increment_ms = binc.or(winc).unwrap_or(0);
-                debug!("Time control mode: Fischer (disguised as byoyomi) with increment {increment_ms}ms");
-                let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
-                return (TimeControlMode::Fischer, time_params);
-            }
-
-            // Regular byoyomi
-            debug!("Time control mode: Byoyomi {byoyomi}ms");
-            let _periods = params.periods.map(|p| clamp_periods(p, false));
-            let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
-            return (TimeControlMode::Byoyomi, time_params);
-        }
-        _ => {}
-    }
-
-    // 5. Check for Fischer/Increment
-    if params.binc.is_some() || params.winc.is_some() {
-        let binc = params.binc.unwrap_or(0);
-        let winc = params.winc.unwrap_or(0);
-        debug!("Time control mode: Fischer with increments B:{binc}ms W:{winc}ms");
-        let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
-        return (TimeControlMode::Fischer, time_params);
-    }
-
-    // 6. Default time management (sudden death)
-    debug!("Time control mode: Default");
-    let time_params = build_time_parameters(overhead_ms, 0, 80, 80, 5).ok();
-    (TimeControlMode::Default, time_params)
 }
 
 /// Check if this is Fischer time control disguised as byoyomi
@@ -318,55 +200,6 @@ mod tests {
             periods: None,
             moves_to_go: None,
         }
-    }
-
-    #[test]
-    fn test_infer_time_control_mode_priority() {
-        // Test ponder has highest priority
-        let mut params = make_go_params();
-        params.ponder = true;
-        params.infinite = true;
-        params.movetime = Some(1000);
-
-        let (mode, _) = infer_time_control_mode(&params, true, 100);
-        assert_eq!(mode, TimeControlMode::Ponder);
-
-        // Test infinite has second priority
-        params.ponder = false;
-        let (mode, _) = infer_time_control_mode(&params, true, 100);
-        assert_eq!(mode, TimeControlMode::Infinite);
-
-        // Test fixed time has third priority
-        params.infinite = false;
-        let (mode, _) = infer_time_control_mode(&params, true, 100);
-        assert_eq!(mode, TimeControlMode::FixedTime(1000));
-    }
-
-    #[test]
-    fn test_fischer_disguised_as_byoyomi() {
-        // Test case: Fischer disguised as byoyomi
-        // byoyomi=1000, binc=1000, winc=1000
-        let mut params = make_go_params();
-        params.byoyomi = Some(1000);
-        params.binc = Some(1000);
-        params.winc = Some(1000);
-        params.btime = Some(60000);
-        params.wtime = Some(60000);
-
-        let (mode, _) = infer_time_control_mode(&params, true, 100);
-        assert_eq!(mode, TimeControlMode::Fischer);
-    }
-
-    #[test]
-    fn test_regular_byoyomi() {
-        // Test case: Regular byoyomi
-        let mut params = make_go_params();
-        params.byoyomi = Some(10000);
-        params.btime = Some(0);
-        params.wtime = Some(0);
-
-        let (mode, _) = infer_time_control_mode(&params, true, 100);
-        assert_eq!(mode, TimeControlMode::Byoyomi);
     }
 
     #[test]
@@ -563,13 +396,6 @@ mod tests {
         assert_eq!(clamp_depth(128), 127);
         assert_eq!(clamp_depth(200), 127);
         assert_eq!(clamp_depth(u32::MAX), 127);
-    }
-
-    #[test]
-    fn test_infer_time_control_mode_no_time_info() {
-        let params = make_go_params();
-        let (mode, _) = infer_time_control_mode(&params, false, 100);
-        assert_eq!(mode, TimeControlMode::Default);
     }
 
     #[test]
