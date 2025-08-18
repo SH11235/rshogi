@@ -26,6 +26,12 @@ use super::worker::{start_worker_with, WorkerConfig};
 use super::SplitPoint;
 use super::{SearchThread, SharedSearchState};
 
+/// Initial seed strategy parameters for parallel search work distribution
+/// These control how many work items are initially pushed to the global injector
+/// for better work stealing distribution across threads
+const INITIAL_SEED_BATCHES: usize = 2;
+const INITIAL_SEED_HELPERS: usize = 2;
+
 /// Simplified parallel searcher
 pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Shared transposition table
@@ -129,6 +135,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         iteration: usize,
         main_depth: u8,
         max_depth: u8,
+        main_worker: Option<&DequeWorker<WorkItem>>,
     ) {
         // Generate root moves for the first half of iterations to distribute work
         // (at least 3 iterations, but up to half of max_depth)
@@ -159,6 +166,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // Create batches of root moves manually
                 let mut i = 0;
+                let mut batch_idx = 0;
                 while i < moves.len() {
                     let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
                     let start_index = i;
@@ -187,8 +195,24 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                         // Increment pending work counter
                         self.pending_work_items.fetch_add(1, Ordering::AcqRel);
-                        // Push to global injector (lock-free)
-                        self.queues.injector.push(work);
+
+                        // Use main worker's local queue when available, with initial seeding to injector
+                        if let Some(worker) = main_worker {
+                            // Initial seeding: push first few batches to injector for better distribution
+                            let seed_batches = INITIAL_SEED_BATCHES.min(self.num_threads);
+                            if batch_idx < seed_batches {
+                                self.queues.injector.push(work);
+                            } else {
+                                // NOTE: DequeWorker::push はオーナースレッド（=メイン）からのみ呼ぶこと。
+                                // 他スレッドからは Stealer で盗む運用に統一する。
+                                worker.push(work);
+                            }
+                        } else {
+                            // Fallback to injector if no main worker
+                            self.queues.injector.push(work);
+                        }
+
+                        batch_idx += 1;
                     }
                 }
             }
@@ -199,6 +223,9 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     "Using FullPosition mode for iteration {iteration} (beyond limit {root_move_limit})"
                 );
             }
+            // Calculate how many helpers to seed to injector for initial distribution
+            let seed_helpers = (self.num_threads.saturating_sub(1)).min(INITIAL_SEED_HELPERS);
+
             for helper_id in 1..self.num_threads {
                 let helper_depth =
                     self.calculate_helper_depth(main_depth, helper_id, iteration, max_depth);
@@ -211,8 +238,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 // Increment pending work counter
                 self.pending_work_items.fetch_add(1, Ordering::AcqRel);
-                // Push to global injector (lock-free)
-                self.queues.injector.push(work);
+
+                // Use main worker's local queue when available, with initial seeding to injector
+                if let Some(worker) = main_worker {
+                    // For FullPosition mode, also use initial seeding strategy
+                    if helper_id <= seed_helpers {
+                        self.queues.injector.push(work);
+                    } else {
+                        // NOTE: DequeWorker::push はオーナースレッド（=メイン）からのみ呼ぶこと。
+                        // 他スレッドからは Stealer で盗む運用に統一する。
+                        worker.push(work);
+                    }
+                } else {
+                    // Fallback to injector if no main worker
+                    self.queues.injector.push(work);
+                }
             }
         }
     }
@@ -619,7 +659,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         &self,
         position: &mut Position,
         limits: SearchLimits,
-        _main_worker: DequeWorker<WorkItem>, // TODO: Consider using main worker for work stealing optimization in the future
+        main_worker: DequeWorker<WorkItem>,
     ) -> SearchResult {
         // Record search start time for info callback
         let search_start = Instant::now();
@@ -685,7 +725,13 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             // Distribute work to helper threads
-            self.distribute_work_to_helpers(position, iteration, main_depth, max_depth);
+            self.distribute_work_to_helpers(
+                position,
+                iteration,
+                main_depth,
+                max_depth,
+                Some(&main_worker),
+            );
 
             // Main thread searches
             #[cfg(feature = "ybwc")]
