@@ -316,7 +316,8 @@ impl TTBucket {
             // Record CAS attempt
             #[cfg(feature = "tt_metrics")]
             if let Some(m) = metrics {
-                m.cas_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                use super::metrics::{record_metric, MetricType};
+                record_metric(m, MetricType::CasAttempt);
             }
 
             // Attempt atomic update of the key
@@ -334,9 +335,10 @@ impl TTBucket {
                     // Record metrics
                     #[cfg(feature = "tt_metrics")]
                     if let Some(m) = metrics {
-                        m.cas_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        m.atomic_stores.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
-                        m.replace_worst.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        use super::metrics::{record_metric, MetricType};
+                        record_metric(m, MetricType::CasSuccess);
+                        record_metric(m, MetricType::AtomicStore(2));
+                        record_metric(m, MetricType::ReplaceWorst);
                     }
                 }
                 Err(current) => {
@@ -356,7 +358,8 @@ impl TTBucket {
                         // CAS failed with different key
                         #[cfg(feature = "tt_metrics")]
                         if let Some(m) = metrics {
-                            m.cas_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            use super::metrics::{record_metric, MetricType};
+                            record_metric(m, MetricType::CasFailure);
                         }
                     }
                     // If CAS failed, another thread updated this entry - we accept this race
