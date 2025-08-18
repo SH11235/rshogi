@@ -10,8 +10,7 @@ use std::fmt;
 #[serde(default)]
 pub struct TimeParameters {
     // Overhead
-    pub overhead_ms: u64,             // Default: 50
-    pub network_overhead_factor: f64, // Default: 0.5 (currently unused - reserved for future network play)
+    pub overhead_ms: u64, // Default: 50
 
     // PV stability
     pub pv_base_threshold_ms: u64, // Default: 80
@@ -39,7 +38,6 @@ impl Default for TimeParameters {
     fn default() -> Self {
         Self {
             overhead_ms: 50,
-            network_overhead_factor: 0.5,
             pv_base_threshold_ms: 80,
             pv_depth_slope_ms: 5,
             critical_fischer_ms: 300,
@@ -68,7 +66,6 @@ pub enum TimeParameterError {
     ByoyomiEarlyFinishRatio { value: u8, min: u8, max: u8 },
     PVStabilityBase { value: u64, min: u64, max: u64 },
     PVStabilitySlope { value: u64, min: u64, max: u64 },
-    NetworkOverheadFactor { value: f64, min: f64, max: f64 },
     SoftMultiplier { value: f64, min: f64, max: f64 },
     HardMultiplier { value: f64, min: f64, max: f64 },
     IncrementUsage { value: f64, min: f64, max: f64 },
@@ -91,9 +88,6 @@ impl fmt::Display for TimeParameterError {
             }
             Self::PVStabilitySlope { value, min, max } => {
                 write!(f, "PV stability slope must be between {min} and {max}, got {value}")
-            }
-            Self::NetworkOverheadFactor { value, min, max } => {
-                write!(f, "Network overhead factor must be between {min} and {max}, got {value}")
             }
             Self::SoftMultiplier { value, min, max } => {
                 write!(f, "Soft multiplier must be between {min} and {max}, got {value}")
@@ -202,19 +196,6 @@ impl TimeParametersBuilder {
             });
         }
         self.params.pv_depth_slope_ms = ms;
-        Ok(self)
-    }
-
-    /// Set network overhead factor (0.0 - 1.0)
-    pub fn network_overhead_factor(mut self, factor: f64) -> Result<Self, TimeParameterError> {
-        if !(0.0..=1.0).contains(&factor) {
-            return Err(TimeParameterError::NetworkOverheadFactor {
-                value: factor,
-                min: 0.0,
-                max: 1.0,
-            });
-        }
-        self.params.network_overhead_factor = factor;
         Ok(self)
     }
 
