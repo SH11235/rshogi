@@ -12,6 +12,8 @@ pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send + Syn
 pub struct SearchStats {
     /// Nodes searched
     pub nodes: u64,
+    /// Nodes searched in quiescence search
+    pub qnodes: u64,
     /// Time elapsed
     pub elapsed: Duration,
     /// Principal variation
@@ -70,6 +72,7 @@ impl SearchResult {
             score: move_score.1,
             stats: SearchStats {
                 nodes,
+                qnodes: 0,
                 elapsed,
                 pv,
                 depth,
