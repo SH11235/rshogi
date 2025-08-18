@@ -52,6 +52,7 @@ pub struct TranspositionTable {
     /// Current age (generation counter)
     age: u8,
     /// Bucket size configuration
+    #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
     /// Adaptive prefetcher
     prefetcher: Option<AdaptivePrefetcher>,
@@ -420,14 +421,33 @@ impl TranspositionTable {
                         let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
                         let new_data = old_data & !ABDADA_CUT_FLAG;
 
+                        // Record CAS attempt
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(ref m) = self.metrics {
+                            use metrics::{record_metric, MetricType};
+                            record_metric(m, MetricType::CasAttempt);
+                        }
+
                         match bucket.entries[data_idx].compare_exchange_weak(
                             old_data,
                             new_data,
                             Ordering::Release,
                             Ordering::Acquire,
                         ) {
-                            Ok(_) => return true,
+                            Ok(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(ref m) = self.metrics {
+                                    use metrics::{record_metric, MetricType};
+                                    record_metric(m, MetricType::CasSuccess);
+                                }
+                                return true;
+                            }
                             Err(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(ref m) = self.metrics {
+                                    use metrics::{record_metric, MetricType};
+                                    record_metric(m, MetricType::CasFailure);
+                                }
                                 // In high contention, yield to OS scheduler
                                 std::hint::spin_loop();
                             }
@@ -452,14 +472,33 @@ impl TranspositionTable {
                         let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
                         let new_data = old_data & !ABDADA_CUT_FLAG;
 
+                        // Record CAS attempt
+                        #[cfg(feature = "tt_metrics")]
+                        if let Some(ref m) = self.metrics {
+                            use metrics::{record_metric, MetricType};
+                            record_metric(m, MetricType::CasAttempt);
+                        }
+
                         match bucket.entries[data_idx].compare_exchange_weak(
                             old_data,
                             new_data,
                             Ordering::Release,
                             Ordering::Acquire,
                         ) {
-                            Ok(_) => return true,
+                            Ok(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(ref m) = self.metrics {
+                                    use metrics::{record_metric, MetricType};
+                                    record_metric(m, MetricType::CasSuccess);
+                                }
+                                return true;
+                            }
                             Err(_) => {
+                                #[cfg(feature = "tt_metrics")]
+                                if let Some(ref m) = self.metrics {
+                                    use metrics::{record_metric, MetricType};
+                                    record_metric(m, MetricType::CasFailure);
+                                }
                                 // In high contention, yield to OS scheduler
                                 std::hint::spin_loop();
                             }

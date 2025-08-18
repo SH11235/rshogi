@@ -127,8 +127,6 @@ fn run_benchmark(config: &BenchConfig) -> (Duration, u64, Option<DetailedMetrics
         cas_failures: m.cas_failures.load(Ordering::Relaxed),
         cas_key_match: m.cas_key_match.load(Ordering::Relaxed),
         update_existing: m.update_existing.load(Ordering::Relaxed),
-        replace_empty: m.replace_empty.load(Ordering::Relaxed),
-        replace_worst: m.replace_worst.load(Ordering::Relaxed),
         depth_filtered: m.depth_filtered.load(Ordering::Relaxed),
         hashfull: tt.hashfull() as f32 / 10.0,
     });
@@ -145,10 +143,6 @@ struct DetailedMetrics {
     update_existing: u64,
     depth_filtered: u64,
     hashfull: f32,
-    #[allow(dead_code)]
-    replace_empty: u64,
-    #[allow(dead_code)]
-    replace_worst: u64,
 }
 
 fn main() {

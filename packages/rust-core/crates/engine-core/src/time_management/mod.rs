@@ -71,8 +71,6 @@ struct TimeManagerInner {
     // Limits (Atomic for lock-free access)
     soft_limit_ms: AtomicU64,
     hard_limit_ms: AtomicU64,
-    #[allow(dead_code)] // Reserved for dynamic overhead adjustment
-    overhead_ms: AtomicU64,
 
     // Search state
     nodes_searched: AtomicU64,
@@ -138,7 +136,6 @@ impl TimeManager {
             start_time: Mutex::new(Instant::now()),
             soft_limit_ms: AtomicU64::new(soft_ms),
             hard_limit_ms: AtomicU64::new(hard_ms),
-            overhead_ms: AtomicU64::new(params.overhead_ms),
             nodes_searched: AtomicU64::new(0),
             stop_flag: AtomicBool::new(false),
             last_pv_change_ms: AtomicU64::new(0),
