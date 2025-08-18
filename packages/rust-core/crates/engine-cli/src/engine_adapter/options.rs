@@ -244,6 +244,12 @@ impl EngineAdapter {
                 }
             }
             OPT_BYOYOMI_OVERHEAD_MS => {
+                // TODO: This option is deprecated and will be removed in a future version.
+                // It remains here for compatibility with existing GUIs.
+                // Plan:
+                // - Keep for 1-2 more releases with deprecation warning
+                // - Move to hidden/advanced options
+                // - Eventually remove entirely
                 if let Some(val) = value {
                     send_info_string(
                         "ByoyomiOverheadMs is deprecated; use ByoyomiSafetyMs instead.",

@@ -7,7 +7,7 @@ use engine_core::{
     engine::controller::{Engine, EngineType},
     shogi::Position,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::usi::EngineOption;
@@ -63,8 +63,6 @@ pub struct EngineAdapter {
     search_start_position_hash: Option<u64>,
     /// Side to move at the start of search
     search_start_side_to_move: Option<engine_core::shogi::Color>,
-    /// Last calculated overhead in milliseconds (for stop handler)
-    last_overhead_ms: AtomicU64,
     /// Time management overhead in milliseconds
     overhead_ms: u64,
     /// Byoyomi hard limit additional safety margin in milliseconds
@@ -100,7 +98,6 @@ impl EngineAdapter {
             current_stop_flag: None,
             search_start_position_hash: None,
             search_start_side_to_move: None,
-            last_overhead_ms: AtomicU64::new(DEFAULT_OVERHEAD_MS),
             overhead_ms: DEFAULT_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
             is_last_search_byoyomi: false,
