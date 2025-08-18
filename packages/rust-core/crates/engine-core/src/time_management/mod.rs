@@ -341,8 +341,7 @@ impl TimeManager {
     ///
     /// # Example
     /// ```
-    /// use engine_core::time_management::{TimeManager, TimeState, TimeLimits, TimeControl};
-    /// use engine_core::search::GamePhase;
+    /// use engine_core::time_management::{TimeManager, TimeState, TimeLimits, TimeControl, GamePhase};
     /// use engine_core::Color;
     ///
     /// let limits = TimeLimits {
