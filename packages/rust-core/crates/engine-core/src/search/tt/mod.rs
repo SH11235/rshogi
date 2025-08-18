@@ -6,6 +6,7 @@
 //! - Better memory locality
 
 pub mod bucket;
+pub mod constants;
 pub mod entry;
 pub mod gc;
 pub mod metrics;
@@ -18,6 +19,7 @@ mod tests;
 use crate::shogi::Move;
 use crate::util;
 use bucket::{FlexibleTTBucket, TTBucket};
+use constants::ABDADA_CUT_FLAG;
 use prefetch::AdaptivePrefetcher;
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
@@ -28,7 +30,8 @@ use utils::*;
 
 // Re-export main types for backward compatibility
 pub use bucket::BucketSize;
-pub use entry::{NodeType, TTEntry, TTEntryParams, AGE_MASK, GENERATION_CYCLE};
+pub use constants::{AGE_MASK, GENERATION_CYCLE};
+pub use entry::{NodeType, TTEntry, TTEntryParams};
 #[cfg(feature = "tt_metrics")]
 pub use metrics::DetailedTTMetrics;
 
@@ -329,7 +332,7 @@ impl TranspositionTable {
 
     /// Increment age (called at the start of each search)
     pub fn increment_age(&mut self) {
-        self.age = self.age.wrapping_add(1) & entry::AGE_MASK;
+        self.age = self.age.wrapping_add(1) & AGE_MASK;
 
         // Reset GC state for new search
         self.need_gc.store(false, Ordering::Relaxed);
@@ -372,7 +375,7 @@ impl TranspositionTable {
                 let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
                 if stored_key == hash {
                     // Entry found, set ABDADA flag
-                    bucket.entries[data_idx].fetch_or(entry::ABDADA_CUT_FLAG, Ordering::Release);
+                    bucket.entries[data_idx].fetch_or(ABDADA_CUT_FLAG, Ordering::Release);
                     return true;
                 }
             }
@@ -388,7 +391,7 @@ impl TranspositionTable {
                 let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
                 if stored_key == hash {
                     // Entry found, set ABDADA flag
-                    bucket.entries[data_idx].fetch_or(entry::ABDADA_CUT_FLAG, Ordering::Release);
+                    bucket.entries[data_idx].fetch_or(ABDADA_CUT_FLAG, Ordering::Release);
                     return true;
                 }
             }
@@ -416,7 +419,7 @@ impl TranspositionTable {
                     // This is a rare path (only on exact hash match), so spinning is acceptable
                     loop {
                         let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
-                        let new_data = old_data & !entry::ABDADA_CUT_FLAG;
+                        let new_data = old_data & !ABDADA_CUT_FLAG;
 
                         match bucket.entries[data_idx].compare_exchange_weak(
                             old_data,
@@ -448,7 +451,7 @@ impl TranspositionTable {
                     // This is a rare path (only on exact hash match), so spinning is acceptable
                     loop {
                         let old_data = bucket.entries[data_idx].load(Ordering::Acquire);
-                        let new_data = old_data & !entry::ABDADA_CUT_FLAG;
+                        let new_data = old_data & !ABDADA_CUT_FLAG;
 
                         match bucket.entries[data_idx].compare_exchange_weak(
                             old_data,

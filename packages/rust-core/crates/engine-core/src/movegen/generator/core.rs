@@ -127,11 +127,6 @@ impl<'a> MoveGenImpl<'a> {
         super::pieces::generate_king_moves(self);
     }
 
-    #[allow(dead_code)] // Used in pieces.rs
-    pub(super) fn generate_king_moves_from(&mut self, from: Square) {
-        super::pieces::generate_king_moves_from(self, from);
-    }
-
     pub(super) fn generate_gold_moves(&mut self, from: Square, promoted: bool) {
         super::pieces::generate_gold_moves(self, from, promoted);
     }

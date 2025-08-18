@@ -52,7 +52,6 @@ impl Drop for WorkerGuard {
 
 /// Work item for threads to process
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 enum WorkItem {
     /// Batch of root moves to search (8-16 moves)
     RootBatch {
@@ -66,19 +65,6 @@ enum WorkItem {
         moves: SmallVec<[Move; 16]>,
         /// Starting index of the batch (for debugging)
         start_index: usize,
-    },
-    /// Search a specific root move (legacy, for single moves)
-    RootMove {
-        /// Iteration number
-        iteration: usize,
-        /// Depth to search at
-        depth: u8,
-        /// Position to search from (shared via Arc to avoid cloning)
-        position: Arc<Position>,
-        /// Specific move to search first
-        move_to_search: Move,
-        /// Index of the move (for debugging)
-        move_index: usize,
     },
     /// Search full position (traditional mode)
     FullPosition {
@@ -562,31 +548,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                         break;
                                     }
                                 }
-                            }
-                            WorkItem::RootMove {
-                                iteration,
-                                depth,
-                                position,
-                                move_to_search,
-                                move_index,
-                            } => {
-                                // Skip debug logging in hot path unless explicitly enabled
-                                if log::log_enabled!(log::Level::Debug) {
-                                    debug!(
-                                    "Worker {log_id} processing RootMove #{move_index} (iteration {iteration}, depth {depth})"
-                                );
-                                }
-
-                                // Clone position from Arc for this search
-                                let mut pos = (*position).clone();
-
-                                // Search the specific root move
-                                let _result = search_thread.search_root_move(
-                                    &mut pos,
-                                    &worker_limits,
-                                    depth,
-                                    move_to_search,
-                                );
                             }
                             WorkItem::FullPosition {
                                 iteration,
