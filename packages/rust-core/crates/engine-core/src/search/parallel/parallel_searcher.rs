@@ -7,7 +7,7 @@ use crate::{
     time_management::{GamePhase, TimeManager},
 };
 use crossbeam_deque::{Injector, Stealer, Worker as DequeWorker};
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, warn};
 use smallvec::SmallVec;
 use std::{
     sync::{
@@ -18,178 +18,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::time_manager::{start_fail_safe_guard, start_time_manager};
+use super::work_queue::{Queues, WorkItem};
+use super::worker::{start_worker_with, WorkerConfig};
+
 #[cfg(feature = "ybwc")]
 use super::SplitPoint;
 use super::{SearchThread, SharedSearchState};
-
-/// RAII guard to ensure active worker count is decremented
-struct WorkerGuard {
-    counter: Arc<AtomicUsize>,
-}
-
-impl WorkerGuard {
-    /// Create a new guard and atomically increment the counter
-    fn new(counter: Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
-        let count = counter.load(Ordering::Acquire);
-        // Only log in debug builds or when debug logging is explicitly enabled
-        if log::log_enabled!(log::Level::Debug) {
-            debug!("Worker becoming active (active count: {count})");
-        }
-        Self { counter }
-    }
-}
-
-impl Drop for WorkerGuard {
-    fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
-        // Use trace level to reduce noise during benchmarks
-        if log::log_enabled!(log::Level::Trace) {
-            trace!("WorkerGuard: active worker count decremented");
-        }
-    }
-}
-
-/// Work item for threads to process
-#[derive(Clone, Debug)]
-enum WorkItem {
-    /// Batch of root moves to search (8-16 moves)
-    RootBatch {
-        /// Iteration number
-        iteration: usize,
-        /// Depth to search at
-        depth: u8,
-        /// Position to search from (shared via Arc to avoid cloning)
-        position: Arc<Position>,
-        /// Batch of moves to search
-        moves: SmallVec<[Move; 16]>,
-        /// Starting index of the batch (for debugging)
-        start_index: usize,
-    },
-    /// Search full position (traditional mode)
-    FullPosition {
-        /// Iteration number
-        iteration: usize,
-        /// Depth to search at
-        depth: u8,
-        /// Position to search (shared via Arc to avoid cloning)
-        position: Arc<Position>,
-    },
-}
-
-/// Truly lock-free work queue structure
-#[derive(Clone)]
-struct Queues {
-    /// Global injector (Arc for sharing)
-    injector: Arc<Injector<WorkItem>>,
-    /// Stealers for work stealing (immutable after creation)
-    stealers: Arc<[Stealer<WorkItem>]>,
-}
-
-/// Get work with 3-layer priority (truly lock-free with exponential backoff)
-fn get_job(
-    my_worker: &DequeWorker<WorkItem>,
-    queues: &Queues,
-    my_stealer_index: usize,
-    steal_success: &AtomicU64,
-    steal_failure: &AtomicU64,
-) -> Option<WorkItem> {
-    // Thread-local steal failure counter for exponential backoff
-    thread_local! {
-        static CONSECUTIVE_STEAL_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    }
-
-    // 1. Try local worker queue first (LIFO for DFS)
-    if let Some(item) = my_worker.pop() {
-        // Reset failure counter on success
-        CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
-        return Some(item);
-    }
-
-    // 2. Then try stealing from other workers (random selection for better scalability)
-    // Only steal from other workers, not from self
-    let num_stealers = queues.stealers.len();
-    if num_stealers > 1 {
-        // Need at least 2 workers for stealing
-        use rand::Rng;
-        let mut rng = rand::rng();
-
-        // Try a few random steals (min of 3 or half the workers)
-        let steal_attempts = 3.min(num_stealers - 1); // Exclude self
-        for _ in 0..steal_attempts {
-            // Generate random index excluding self
-            let mut idx = rng.random_range(0..num_stealers - 1);
-            if idx >= my_stealer_index {
-                idx += 1; // Skip self index
-            }
-
-            // Try to steal from selected worker
-            match queues.stealers[idx].steal() {
-                crossbeam_deque::Steal::Success(item) => {
-                    // Reset failure counter on success
-                    CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
-                    steal_success.fetch_add(1, Ordering::Relaxed);
-                    return Some(item);
-                }
-                crossbeam_deque::Steal::Empty => continue,
-                crossbeam_deque::Steal::Retry => {
-                    // Try once more on retry
-                    if let crossbeam_deque::Steal::Success(item) = queues.stealers[idx].steal() {
-                        CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
-                        steal_success.fetch_add(1, Ordering::Relaxed);
-                        return Some(item);
-                    }
-                }
-            }
-        }
-
-        steal_failure.fetch_add(1, Ordering::Relaxed);
-    }
-
-    // 3. Finally try the global injector with batch stealing
-    loop {
-        match queues.injector.steal_batch_and_pop(my_worker) {
-            crossbeam_deque::Steal::Success(item) => {
-                // Reset failure counter on success
-                CONSECUTIVE_STEAL_FAILS.with(|f| f.set(0));
-                steal_success.fetch_add(1, Ordering::Relaxed);
-                return Some(item);
-            }
-            crossbeam_deque::Steal::Empty => break,
-            crossbeam_deque::Steal::Retry => continue,
-        }
-    }
-
-    // Record failure only if no successful steal from workers
-    // (already recorded above if worker steal failed)
-
-    // Apply exponential backoff based on consecutive failures
-    CONSECUTIVE_STEAL_FAILS.with(|f| {
-        let fails = f.get() + 1;
-        f.set(fails);
-
-        // Exponential backoff strategy
-        match fails {
-            1..=5 => {
-                // Spin for first few attempts (hot loop)
-            }
-            6..=15 => {
-                // Yield to OS scheduler for medium failures
-                std::thread::yield_now();
-            }
-            16..=25 => {
-                // Brief sleep for many failures
-                std::thread::sleep(Duration::from_micros(10));
-            }
-            _ => {
-                // Longer sleep for persistent failures
-                std::thread::sleep(Duration::from_micros(100));
-            }
-        }
-    });
-
-    None
-}
 
 /// Simplified parallel searcher
 pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
@@ -203,7 +38,7 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     time_manager: Arc<Mutex<Option<Arc<TimeManager>>>>,
 
     /// Shared search state
-    shared_state: Arc<SharedSearchState>,
+    pub(super) shared_state: Arc<SharedSearchState>,
 
     /// Number of threads
     num_threads: usize,
@@ -212,7 +47,7 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     queues: Arc<Queues>,
 
     /// Active worker count for proper synchronization
-    active_workers: Arc<AtomicUsize>,
+    pub(super) active_workers: Arc<AtomicUsize>,
 
     /// Metrics: successful steal operations
     steal_success: Arc<AtomicU64>,
@@ -224,10 +59,303 @@ pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     post_ponder_tm_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 
     /// Outstanding work counter for accurate completion detection
-    pending_work_items: Arc<AtomicU64>,
+    pub(super) pending_work_items: Arc<AtomicU64>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
+    /// Handle ponderhit time management setup
+    fn handle_ponderhit_time_management(&self, position: &Position, limits: &SearchLimits) {
+        if let crate::time_management::TimeControl::Ponder(ref inner) = limits.time_control {
+            if let Some(ref flag) = limits.ponder_hit_flag {
+                if flag.load(Ordering::Acquire) {
+                    let mut tm_guard = self.time_manager.lock().unwrap();
+                    if tm_guard.is_none() {
+                        // Create TimeManager from inner time control
+                        let game_phase = if position.ply <= 40 {
+                            GamePhase::Opening
+                        } else if position.ply <= 120 {
+                            GamePhase::MiddleGame
+                        } else {
+                            GamePhase::EndGame
+                        };
+
+                        // Convert inner TimeControl to SearchLimits for TimeManager creation
+                        let inner_limits = SearchLimits {
+                            time_control: (**inner).clone(),
+                            moves_to_go: limits.moves_to_go,
+                            depth: limits.depth,
+                            nodes: limits.nodes,
+                            qnodes_limit: limits.qnodes_limit,
+                            time_parameters: limits.time_parameters,
+                            stop_flag: limits.stop_flag.clone(),
+                            info_callback: None, // Don't need callback for TimeManager
+                            ponder_hit_flag: None,
+                            qnodes_counter: limits.qnodes_counter.clone(),
+                        };
+
+                        // Convert to TimeLimits
+                        let time_limits: crate::time_management::TimeLimits = inner_limits.into();
+
+                        // Create new TimeManager
+                        let tm = Arc::new(TimeManager::new(
+                            &time_limits,
+                            position.side_to_move,
+                            position.ply.into(),
+                            game_phase,
+                        ));
+
+                        let soft_limit = tm.soft_limit_ms();
+                        debug!("TimeManager created on ponderhit (soft limit: {soft_limit}ms)");
+
+                        // Start time manager thread and remember its handle to join later
+                        let tm_handle = start_time_manager(tm.clone(), self.shared_state.clone());
+                        {
+                            let mut h = self.post_ponder_tm_handle.lock().unwrap();
+                            // If somehow already set, overwrite (shouldn't happen with is_none() guard)
+                            *h = Some(tm_handle);
+                        }
+
+                        *tm_guard = Some(tm);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Distribute work to helper threads
+    fn distribute_work_to_helpers(
+        &self,
+        position: &Position,
+        iteration: usize,
+        main_depth: u8,
+        max_depth: u8,
+    ) {
+        // Generate root moves for the first half of iterations to distribute work
+        // (at least 3 iterations, but up to half of max_depth)
+        let root_move_limit = (max_depth as usize / 2).max(3);
+        if iteration <= root_move_limit && self.num_threads > 1 {
+            // Generate all legal moves at root
+            let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
+            let moves = move_gen.generate_all();
+
+            if !moves.is_empty() {
+                if log::log_enabled!(log::Level::Debug) {
+                    debug!(
+                        "Distributing {} root moves to {} helper threads (iteration {})",
+                        moves.len(),
+                        self.num_threads - 1,
+                        iteration
+                    );
+                }
+
+                // Use RootBatch for better efficiency (8-16 moves per batch)
+                let batch_size = if moves.len() > 100 {
+                    16 // Large batches for many moves
+                } else if moves.len() > 40 {
+                    12 // Medium batches
+                } else {
+                    8 // Smaller batches for fewer moves
+                };
+
+                // Create batches of root moves manually
+                let mut i = 0;
+                while i < moves.len() {
+                    let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
+                    let start_index = i;
+
+                    // Collect up to batch_size moves
+                    for _ in 0..batch_size {
+                        if i >= moves.len() {
+                            break;
+                        }
+                        batch_moves.push(moves[i]);
+                        i += 1;
+                    }
+
+                    if !batch_moves.is_empty() {
+                        // For root moves, use slightly shallower depth to avoid long-running tasks
+                        let helper_depth = main_depth.saturating_sub(1).max(1);
+
+                        // Create batch work item (wrap position in Arc for efficient sharing)
+                        let work = WorkItem::RootBatch {
+                            iteration,
+                            depth: helper_depth,
+                            position: Arc::new(position.clone()),
+                            moves: batch_moves,
+                            start_index,
+                        };
+
+                        // Increment pending work counter
+                        self.pending_work_items.fetch_add(1, Ordering::AcqRel);
+                        // Push to global injector (lock-free)
+                        self.queues.injector.push(work);
+                    }
+                }
+            }
+        } else {
+            // Fall back to traditional full position search for deeper iterations
+            if log::log_enabled!(log::Level::Debug) {
+                debug!(
+                    "Using FullPosition mode for iteration {iteration} (beyond limit {root_move_limit})"
+                );
+            }
+            for helper_id in 1..self.num_threads {
+                let helper_depth =
+                    self.calculate_helper_depth(main_depth, helper_id, iteration, max_depth);
+
+                let work = WorkItem::FullPosition {
+                    iteration,
+                    depth: helper_depth,
+                    position: Arc::new(position.clone()),
+                };
+
+                // Increment pending work counter
+                self.pending_work_items.fetch_add(1, Ordering::AcqRel);
+                // Push to global injector (lock-free)
+                self.queues.injector.push(work);
+            }
+        }
+    }
+
+    /// Send heartbeat info if enough time or nodes have passed
+    fn send_heartbeat_if_needed(
+        &self,
+        limits: &SearchLimits,
+        search_start: Instant,
+        last_heartbeat: &mut Instant,
+        last_heartbeat_nodes: &mut u64,
+        best_result: &SearchResult,
+    ) {
+        const HEARTBEAT_INTERVAL_MS: u64 = 3000;
+        const HEARTBEAT_NODE_THRESHOLD: u64 = 1_000_000;
+
+        if let Some(ref callback) = limits.info_callback {
+            let total_nodes = self.shared_state.get_nodes();
+            let elapsed_since_heartbeat = last_heartbeat.elapsed();
+            let nodes_since_heartbeat = total_nodes.saturating_sub(*last_heartbeat_nodes);
+
+            if elapsed_since_heartbeat >= Duration::from_millis(HEARTBEAT_INTERVAL_MS)
+                || nodes_since_heartbeat >= HEARTBEAT_NODE_THRESHOLD
+            {
+                // Send heartbeat with current best result
+                let elapsed = search_start.elapsed();
+                debug!(
+                    "Sending heartbeat (elapsed: {elapsed_since_heartbeat:?}, nodes: {total_nodes})"
+                );
+                // Ensure PV is not empty for heartbeat
+                let pv_to_send = if best_result.stats.pv.is_empty() {
+                    // Use best move if available, otherwise skip heartbeat
+                    if let Some(best_move) = best_result.best_move {
+                        vec![best_move]
+                    } else {
+                        // Skip heartbeat if no PV available
+                        Vec::new()
+                    }
+                } else {
+                    best_result.stats.pv.clone()
+                };
+
+                if !pv_to_send.is_empty() {
+                    callback(
+                        best_result.stats.depth.max(1),
+                        best_result.score,
+                        total_nodes,
+                        elapsed,
+                        &pv_to_send,
+                    );
+                }
+                *last_heartbeat = Instant::now();
+                *last_heartbeat_nodes = total_nodes;
+            }
+        }
+    }
+
+    /// Wait for workers to complete their work
+    fn wait_for_workers_completion(
+        &self,
+        search_start: Instant,
+        limits: &SearchLimits,
+        last_heartbeat: &mut Instant,
+        best_result: &SearchResult,
+    ) -> u64 {
+        // Calculate dynamic timeout based on remaining soft limit
+        let max_wait_ms = {
+            let tm_opt = { self.time_manager.lock().unwrap().clone() };
+            if let Some(ref tm) = tm_opt {
+                let elapsed_ms = search_start.elapsed().as_millis() as u64;
+                let soft_limit = tm.soft_limit_ms();
+                if soft_limit > elapsed_ms {
+                    let remaining = soft_limit - elapsed_ms;
+                    // Use 1/10 of remaining time or 300ms, whichever is smaller
+                    (remaining / 10).min(300)
+                } else {
+                    100 // Minimal wait if already past soft limit
+                }
+            } else {
+                2000 // Longer wait for depth-only searches
+            }
+        };
+
+        let mut wait_time = 0;
+        let mut consecutive_zero = 0;
+        loop {
+            // Use pending_work_items for accurate completion detection
+            let pending = self.pending_work_items.load(Ordering::Acquire);
+            let active = self.active_workers.load(Ordering::Acquire);
+
+            // Check TimeManager should_stop first
+            {
+                let tm_opt = { self.time_manager.lock().unwrap().clone() };
+                if let Some(ref tm) = tm_opt {
+                    let nodes = self.shared_state.get_nodes();
+                    if tm.should_stop(nodes) {
+                        debug!(
+                            "TimeManager triggered stop during wait (pending: {pending}, active: {active})"
+                        );
+                        self.shared_state.set_stop();
+                        break;
+                    }
+                }
+            }
+
+            if pending == 0 && active == 0 {
+                consecutive_zero += 1;
+                if consecutive_zero >= 2 {
+                    debug!("All work completed (0 pending, 0 active) confirmed twice");
+                    break;
+                }
+            } else {
+                consecutive_zero = 0;
+            }
+
+            thread::sleep(Duration::from_millis(10));
+            wait_time += 10;
+
+            if wait_time % 100 == 0 {
+                debug!(
+                    "Waiting for work to complete: {pending} pending items, {active} active workers"
+                );
+
+                // Send heartbeat during wait
+                self.send_heartbeat_if_needed(
+                    limits,
+                    search_start,
+                    last_heartbeat,
+                    &mut 0, // Don't track nodes here
+                    best_result,
+                );
+            }
+
+            // Safety: don't wait forever
+            if wait_time > max_wait_ms {
+                debug!("Timeout after {wait_time}ms waiting for workers: {pending} items pending, {active} workers active");
+                break;
+            }
+        }
+
+        wait_time
+    }
+
     /// Create new parallel searcher
     pub fn new(evaluator: Arc<E>, tt: Arc<ShardedTranspositionTable>, num_threads: usize) -> Self {
         assert!(num_threads > 0, "Need at least one thread");
@@ -403,7 +531,21 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         for (i, worker) in workers.into_iter().enumerate() {
             let my_stealer_index = i + 1; // Since main thread took index 0
             let log_id = my_stealer_index; // Use same ID for logging
-            handles.push(self.start_worker_with(log_id, my_stealer_index, worker, limits.clone()));
+            let config = WorkerConfig {
+                log_id,
+                my_stealer_index,
+                worker,
+                limits: limits.clone(),
+                evaluator: self.evaluator.clone(),
+                tt: self.tt.clone(),
+                shared_state: self.shared_state.clone(),
+                queues: self.queues.clone(),
+                active_workers: self.active_workers.clone(),
+                steal_success: self.steal_success.clone(),
+                steal_failure: self.steal_failure.clone(),
+                pending_work_items: self.pending_work_items.clone(),
+            };
+            handles.push(start_worker_with(config));
         }
 
         // Start time management if needed
@@ -413,7 +555,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 // Start time manager if we have any time limit
                 // Even for short searches, we need time control to work properly
                 if tm.soft_limit_ms() > 0 {
-                    Some(self.start_time_manager(tm.clone()))
+                    Some(start_time_manager(tm.clone(), self.shared_state.clone()))
                 } else {
                     debug!("Skipping time manager (soft_limit: 0ms)");
                     None
@@ -424,7 +566,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         };
 
         // Start fail-safe guard thread
-        let fail_safe_handle = self.start_fail_safe_guard(search_start, limits.clone());
+        let fail_safe_handle =
+            start_fail_safe_guard(search_start, limits.clone(), self.shared_state.clone());
 
         // Main thread does iterative deepening and generates work
         let result = self.run_main_thread(position, limits, main_worker);
@@ -468,164 +611,6 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         result
     }
 
-    /// Start a worker thread with a pre-created worker
-    fn start_worker_with(
-        &self,
-        log_id: usize,           // ID for logging
-        my_stealer_index: usize, // Index in stealers array
-        worker: DequeWorker<WorkItem>,
-        limits: SearchLimits,
-    ) -> thread::JoinHandle<()> {
-        let evaluator = self.evaluator.clone();
-        let tt = self.tt.clone();
-        let shared_state = self.shared_state.clone();
-        let queues = self.queues.clone();
-        let active_workers = self.active_workers.clone();
-        let steal_success = self.steal_success.clone();
-        let steal_failure = self.steal_failure.clone();
-        let pending_work_items = self.pending_work_items.clone();
-
-        // Create worker-specific limits without info_callback to prevent INFO flood
-        // USI protocol: Only main thread should output INFO messages
-        let mut worker_limits = limits.clone();
-        worker_limits.info_callback = None;
-
-        thread::spawn(move || {
-            use std::panic::{self, AssertUnwindSafe};
-
-            let res = panic::catch_unwind(AssertUnwindSafe(|| {
-                if log::log_enabled!(log::Level::Debug) {
-                    debug!("Worker {log_id} started");
-                }
-
-                // Create search thread
-                let mut search_thread =
-                    SearchThread::new(log_id, evaluator, tt, shared_state.clone());
-
-                // Simple work loop
-                while !shared_state.should_stop() {
-                    // Try to get work using truly lock-free work stealing
-                    let work =
-                        get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure);
-
-                    if let Some(work) = work {
-                        // Create guard which atomically increments the counter
-                        // IMPORTANT: Guard must be created here (after work is obtained, before processing)
-                        // to ensure proper active worker count even with early returns or panics
-                        let _guard = WorkerGuard::new(active_workers.clone());
-
-                        match work {
-                            WorkItem::RootBatch {
-                                iteration,
-                                depth,
-                                position,
-                                moves,
-                                start_index,
-                            } => {
-                                // Skip debug logging in hot path unless explicitly enabled
-                                if log::log_enabled!(log::Level::Debug) {
-                                    debug!(
-                                    "Worker {log_id} processing RootBatch with {} moves starting at #{start_index} (iteration {iteration}, depth {depth})",
-                                    moves.len()
-                                );
-                                }
-
-                                // Clone position only once per batch (not per move)
-                                let mut pos = (*position).clone();
-
-                                // Process all moves in the batch
-                                for move_to_search in moves.iter() {
-                                    // Search the specific root move (reusing the same position)
-                                    let _result = search_thread.search_root_move(
-                                        &mut pos,
-                                        &worker_limits,
-                                        depth,
-                                        *move_to_search,
-                                    );
-
-                                    // Check stop flag between moves
-                                    if shared_state.should_stop() {
-                                        break;
-                                    }
-                                }
-                            }
-                            WorkItem::FullPosition {
-                                iteration,
-                                depth,
-                                position,
-                            } => {
-                                // Skip debug logging in hot path unless explicitly enabled
-                                if log::log_enabled!(log::Level::Debug) {
-                                    debug!(
-                                    "Worker {log_id} processing FullPosition (iteration {iteration}, depth {depth})"
-                                );
-                                }
-
-                                // Clone position from Arc for this search
-                                let mut pos = (*position).clone();
-
-                                // Do the search
-                                let _result =
-                                    search_thread.search_iteration(&mut pos, &worker_limits, depth);
-                            }
-                        }
-
-                        // Skip debug logging in hot path unless explicitly enabled
-                        if log::log_enabled!(log::Level::Debug) {
-                            debug!("Worker {log_id} work completed");
-                        }
-
-                        // Decrement pending work counter
-                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
-
-                        // Note: WorkerGuard will automatically decrement active_workers when dropped
-                        // Note: SearchThread internally handles node counting and reporting to shared_state
-
-                        // Check stop every work item
-                        if shared_state.should_stop() {
-                            break;
-                        }
-                    } else {
-                        // No work available, check for split points (YBWC)
-                        #[cfg(feature = "ybwc")]
-                        {
-                            if let Some(split_point) =
-                                shared_state.split_point_manager.get_available_split_point()
-                            {
-                                // Create guard to track active worker count
-                                let _guard = WorkerGuard::new(active_workers.clone());
-                                // Process the split point
-                                search_thread.process_split_point(&split_point);
-                                // guard will be dropped here, decrementing active_workers
-                            } else {
-                                // No work or split points available, brief sleep
-                                thread::sleep(Duration::from_micros(50));
-                            }
-                        }
-                        #[cfg(not(feature = "ybwc"))]
-                        {
-                            // No work available, brief sleep
-                            thread::sleep(Duration::from_micros(100));
-                        }
-                    }
-                }
-
-                // SearchThread automatically flushes nodes when work is completed
-                // No need for manual node reporting here
-
-                if log::log_enabled!(log::Level::Debug) {
-                    debug!("Worker {log_id} stopped");
-                }
-            }));
-
-            if res.is_err() {
-                // どれかワーカーが落ちたら全体停止フラグを立てる
-                error!("Worker {log_id} panicked; requesting graceful stop");
-                shared_state.set_stop();
-            }
-        })
-    }
-
     /// Run main thread with iterative deepening
     fn run_main_thread(
         &self,
@@ -651,68 +636,11 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         // Heartbeat tracking for periodic info callbacks
         let mut last_heartbeat = Instant::now();
         let mut last_heartbeat_nodes = 0u64;
-        const HEARTBEAT_INTERVAL_MS: u64 = 200;
-        const HEARTBEAT_NODE_THRESHOLD: u64 = 1_000_000;
 
         // Iterative deepening
         for iteration in 1.. {
             // Check for ponderhit and create TimeManager dynamically if needed
-            if let crate::time_management::TimeControl::Ponder(ref inner) = limits.time_control {
-                if let Some(ref flag) = limits.ponder_hit_flag {
-                    if flag.load(Ordering::Acquire) {
-                        let mut tm_guard = self.time_manager.lock().unwrap();
-                        if tm_guard.is_none() {
-                            // Create TimeManager from inner time control
-                            let game_phase = if position.ply <= 40 {
-                                GamePhase::Opening
-                            } else if position.ply <= 120 {
-                                GamePhase::MiddleGame
-                            } else {
-                                GamePhase::EndGame
-                            };
-
-                            // Convert inner TimeControl to SearchLimits for TimeManager creation
-                            let inner_limits = SearchLimits {
-                                time_control: (**inner).clone(),
-                                moves_to_go: limits.moves_to_go,
-                                depth: limits.depth,
-                                nodes: limits.nodes,
-                                qnodes_limit: limits.qnodes_limit,
-                                time_parameters: limits.time_parameters,
-                                stop_flag: limits.stop_flag.clone(),
-                                info_callback: None, // Don't need callback for TimeManager
-                                ponder_hit_flag: None,
-                                qnodes_counter: limits.qnodes_counter.clone(),
-                            };
-
-                            // Convert to TimeLimits
-                            let time_limits: crate::time_management::TimeLimits =
-                                inner_limits.into();
-
-                            // Create new TimeManager
-                            let tm = Arc::new(TimeManager::new(
-                                &time_limits,
-                                position.side_to_move,
-                                position.ply.into(),
-                                game_phase,
-                            ));
-
-                            let soft_limit = tm.soft_limit_ms();
-                            debug!("TimeManager created on ponderhit (soft limit: {soft_limit}ms)");
-
-                            // Start time manager thread and remember its handle to join later
-                            let tm_handle = self.start_time_manager(tm.clone());
-                            {
-                                let mut h = self.post_ponder_tm_handle.lock().unwrap();
-                                // If somehow already set, overwrite (shouldn't happen with is_none() guard)
-                                *h = Some(tm_handle);
-                            }
-
-                            *tm_guard = Some(tm);
-                        }
-                    }
-                }
-            }
+            self.handle_ponderhit_time_management(position, &limits);
 
             // Skip stop check on first iteration to ensure we get at least one result
             if iteration > 1 && self.shared_state.should_stop() {
@@ -753,91 +681,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 debug!("Starting iteration {iteration} (depth {main_depth})");
             }
 
-            // Generate root moves for the first half of iterations to distribute work
-            // (at least 3 iterations, but up to half of max_depth)
-            let root_move_limit = (max_depth as usize / 2).max(3);
-            if iteration <= root_move_limit && self.num_threads > 1 {
-                // Generate all legal moves at root
-                let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
-                let moves = move_gen.generate_all();
-
-                if !moves.is_empty() {
-                    if log::log_enabled!(log::Level::Debug) {
-                        debug!(
-                            "Distributing {} root moves to {} helper threads (iteration {})",
-                            moves.len(),
-                            self.num_threads - 1,
-                            iteration
-                        );
-                    }
-
-                    // Use RootBatch for better efficiency (8-16 moves per batch)
-                    let batch_size = if moves.len() > 100 {
-                        16 // Large batches for many moves
-                    } else if moves.len() > 40 {
-                        12 // Medium batches
-                    } else {
-                        8 // Smaller batches for fewer moves
-                    };
-
-                    // Create batches of root moves manually
-                    let mut i = 0;
-                    while i < moves.len() {
-                        let mut batch_moves: SmallVec<[Move; 16]> = SmallVec::new();
-                        let start_index = i;
-
-                        // Collect up to batch_size moves
-                        for _ in 0..batch_size {
-                            if i >= moves.len() {
-                                break;
-                            }
-                            batch_moves.push(moves[i]);
-                            i += 1;
-                        }
-
-                        if !batch_moves.is_empty() {
-                            // For root moves, use slightly shallower depth to avoid long-running tasks
-                            let helper_depth = main_depth.saturating_sub(1).max(1);
-
-                            // Create batch work item (wrap position in Arc for efficient sharing)
-                            let work = WorkItem::RootBatch {
-                                iteration,
-                                depth: helper_depth,
-                                position: Arc::new(position.clone()),
-                                moves: batch_moves,
-                                start_index,
-                            };
-
-                            // Increment pending work counter
-                            self.pending_work_items.fetch_add(1, Ordering::AcqRel);
-                            // Push to global injector (lock-free)
-                            self.queues.injector.push(work);
-                        }
-                    }
-                }
-            } else {
-                // Fall back to traditional full position search for deeper iterations
-                if log::log_enabled!(log::Level::Debug) {
-                    debug!(
-                        "Using FullPosition mode for iteration {iteration} (beyond limit {root_move_limit})"
-                    );
-                }
-                for helper_id in 1..self.num_threads {
-                    let helper_depth =
-                        self.calculate_helper_depth(main_depth, helper_id, iteration, max_depth);
-
-                    let work = WorkItem::FullPosition {
-                        iteration,
-                        depth: helper_depth,
-                        position: Arc::new(position.clone()),
-                    };
-
-                    // Increment pending work counter
-                    self.pending_work_items.fetch_add(1, Ordering::AcqRel);
-                    // Push to global injector (lock-free)
-                    self.queues.injector.push(work);
-                }
-            }
+            // Distribute work to helper threads
+            self.distribute_work_to_helpers(position, iteration, main_depth, max_depth);
 
             // Main thread searches
             #[cfg(feature = "ybwc")]
@@ -977,154 +822,30 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
             }
 
             // Send heartbeat info if enough time or nodes have passed
-            if let Some(ref callback) = limits.info_callback {
-                let total_nodes = self.shared_state.get_nodes();
-                let elapsed_since_heartbeat = last_heartbeat.elapsed();
-                let nodes_since_heartbeat = total_nodes.saturating_sub(last_heartbeat_nodes);
-
-                if elapsed_since_heartbeat >= Duration::from_millis(HEARTBEAT_INTERVAL_MS)
-                    || nodes_since_heartbeat >= HEARTBEAT_NODE_THRESHOLD
-                {
-                    // Send heartbeat with current best result
-                    let elapsed = search_start.elapsed();
-                    debug!(
-                        "Sending heartbeat (elapsed: {elapsed_since_heartbeat:?}, nodes: {total_nodes})"
-                    );
-                    // Ensure PV is not empty for heartbeat
-                    let pv_to_send = if best_result.stats.pv.is_empty() {
-                        // Use best move if available, otherwise skip heartbeat
-                        if let Some(best_move) = best_result.best_move {
-                            vec![best_move]
-                        } else {
-                            // Skip heartbeat if no PV available
-                            Vec::new()
-                        }
-                    } else {
-                        best_result.stats.pv.clone()
-                    };
-
-                    if !pv_to_send.is_empty() {
-                        callback(
-                            best_result.stats.depth.max(1),
-                            best_result.score,
-                            total_nodes,
-                            elapsed,
-                            &pv_to_send,
-                        );
-                    }
-                    last_heartbeat = Instant::now();
-                    last_heartbeat_nodes = total_nodes;
-                }
-            }
+            self.send_heartbeat_if_needed(
+                &limits,
+                search_start,
+                &mut last_heartbeat,
+                &mut last_heartbeat_nodes,
+                &best_result,
+            );
 
             // Check depth limit
             if main_depth >= max_depth {
                 info!("Main thread reached maximum depth {max_depth}, waiting for workers to complete...");
 
                 // Wait for workers to complete their work
-                // Check both pending queue items AND active workers
-                // Calculate dynamic timeout based on remaining soft limit
-                let max_wait_ms = {
-                    let tm_opt = { self.time_manager.lock().unwrap().clone() };
-                    if let Some(ref tm) = tm_opt {
-                        let elapsed_ms = search_start.elapsed().as_millis() as u64;
-                        let soft_limit = tm.soft_limit_ms();
-                        if soft_limit > elapsed_ms {
-                            let remaining = soft_limit - elapsed_ms;
-                            // Use 1/10 of remaining time or 300ms, whichever is smaller
-                            (remaining / 10).min(300)
-                        } else {
-                            100 // Minimal wait if already past soft limit
-                        }
-                    } else {
-                        2000 // Longer wait for depth-only searches
-                    }
-                };
-
-                let mut wait_time = 0;
-                let mut consecutive_zero = 0;
-                loop {
-                    // Use pending_work_items for accurate completion detection
-                    let pending = self.pending_work_items.load(Ordering::Acquire);
-                    let active = self.active_workers.load(Ordering::Acquire);
-
-                    // Check TimeManager should_stop first
-                    {
-                        let tm_opt = { self.time_manager.lock().unwrap().clone() };
-                        if let Some(ref tm) = tm_opt {
-                            let nodes = self.shared_state.get_nodes();
-                            if tm.should_stop(nodes) {
-                                debug!(
-                                    "TimeManager triggered stop during wait (pending: {pending}, active: {active})"
-                                );
-                                self.shared_state.set_stop();
-                                break;
-                            }
-                        }
-                    }
-
-                    if pending == 0 && active == 0 {
-                        consecutive_zero += 1;
-                        if consecutive_zero >= 2 {
-                            debug!("All work completed (0 pending, 0 active) confirmed twice");
-                            break;
-                        }
-                    } else {
-                        consecutive_zero = 0;
-                    }
-
-                    thread::sleep(Duration::from_millis(10));
-                    wait_time += 10;
-
-                    if wait_time % 100 == 0 {
-                        debug!(
-                            "Waiting for work to complete: {pending} pending items, {active} active workers"
-                        );
-
-                        // Send heartbeat during wait
-                        if let Some(ref callback) = limits.info_callback {
-                            let total_nodes = self.shared_state.get_nodes();
-                            let elapsed_since_heartbeat = last_heartbeat.elapsed();
-
-                            if elapsed_since_heartbeat
-                                >= Duration::from_millis(HEARTBEAT_INTERVAL_MS)
-                            {
-                                let elapsed = search_start.elapsed();
-                                debug!("Sending heartbeat during wait (nodes: {total_nodes})");
-                                // Ensure PV is not empty for heartbeat
-                                let pv_to_send = if best_result.stats.pv.is_empty() {
-                                    if let Some(best_move) = best_result.best_move {
-                                        vec![best_move]
-                                    } else {
-                                        Vec::new()
-                                    }
-                                } else {
-                                    best_result.stats.pv.clone()
-                                };
-
-                                if !pv_to_send.is_empty() {
-                                    callback(
-                                        best_result.stats.depth.max(1),
-                                        best_result.score,
-                                        total_nodes,
-                                        elapsed,
-                                        &pv_to_send,
-                                    );
-                                }
-                                last_heartbeat = Instant::now();
-                            }
-                        }
-                    }
-
-                    // Safety: don't wait forever
-                    if wait_time > max_wait_ms {
-                        debug!("Timeout after {wait_time}ms waiting for workers: {pending} items pending, {active} workers active");
-                        break;
-                    }
-                }
+                let wait_time = self.wait_for_workers_completion(
+                    search_start,
+                    &limits,
+                    &mut last_heartbeat,
+                    &best_result,
+                );
 
                 // Give workers a bit more time to update shared state
-                thread::sleep(Duration::from_millis(50));
+                if wait_time < 2000 {
+                    thread::sleep(Duration::from_millis(50));
+                }
 
                 info!("All workers completed, stopping search");
                 self.shared_state.set_stop();
@@ -1162,403 +883,5 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         }
 
         best_result
-    }
-
-    /// Start fail-safe guard thread
-    /// This thread will abort the process if search exceeds hard timeout
-    fn start_fail_safe_guard(
-        &self,
-        search_start: Instant,
-        limits: SearchLimits,
-    ) -> thread::JoinHandle<()> {
-        let shared_state = self.shared_state.clone();
-
-        thread::spawn(move || {
-            // Calculate hard timeout
-            use crate::time_management::TimeControl;
-
-            // Initial hard timeout calculation
-            let mut hard_timeout_ms = match &limits.time_control {
-                TimeControl::FixedTime { ms_per_move } => ms_per_move * 3, // 3x safety margin
-                TimeControl::Fischer {
-                    white_ms,
-                    black_ms,
-                    increment_ms: _,
-                } => {
-                    // Use 90% of remaining time as absolute maximum
-                    let time_ms = white_ms.max(black_ms);
-                    (time_ms * 9) / 10
-                }
-                TimeControl::Byoyomi {
-                    main_time_ms,
-                    byoyomi_ms,
-                    periods: _,
-                } => {
-                    // Safety margin for I/O and network latency
-                    const SAFETY_MARGIN_MS: u64 = 300;
-
-                    if *main_time_ms > 0 {
-                        // In main time: use main time + one byoyomi period
-                        main_time_ms + byoyomi_ms
-                    } else {
-                        // In byoyomi: use byoyomi time minus safety margin
-                        // This prevents timeout losses due to I/O delays
-                        byoyomi_ms.saturating_sub(SAFETY_MARGIN_MS).max(100)
-                    }
-                }
-                TimeControl::FixedNodes { .. } => {
-                    // For node-limited search, use 1 hour as safety limit
-                    3_600_000
-                }
-                TimeControl::Infinite => {
-                    // For infinite search, use 1 hour as safety limit
-                    3_600_000
-                }
-                TimeControl::Ponder(ref _inner) => {
-                    // For pondering, initially use 1 hour as safety limit
-                    // Will switch to inner time control after ponderhit
-                    3_600_000
-                }
-            };
-
-            // Store inner time control for ponderhit switching
-            let ponder_inner = match &limits.time_control {
-                TimeControl::Ponder(ref inner) => Some((**inner).clone()),
-                _ => None,
-            };
-            let mut switched_after_hit = false;
-
-            // Add extra safety margin for depth-limited searches
-            // But keep it reasonable when time control is also specified
-            hard_timeout_ms =
-                if limits.depth.is_some() && matches!(limits.time_control, TimeControl::Infinite) {
-                    hard_timeout_ms.max(10_000) // 10 seconds for depth-only searches (reduced from 60s)
-                } else {
-                    hard_timeout_ms.max(1000) // At least 1 second for time-controlled searches
-                };
-
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("Fail-safe guard started with hard timeout: {hard_timeout_ms}ms");
-            }
-
-            // Check periodically
-            loop {
-                thread::sleep(Duration::from_millis(100));
-
-                // Check if search stopped normally
-                if shared_state.should_stop() {
-                    if log::log_enabled!(log::Level::Debug) {
-                        debug!("Fail-safe guard: Search stopped normally");
-                    }
-                    break;
-                }
-
-                // Check for ponderhit and switch to inner time control if needed
-                if !switched_after_hit {
-                    if let (Some(ref flag), Some(ref inner)) =
-                        (&limits.ponder_hit_flag, &ponder_inner)
-                    {
-                        if flag.load(Ordering::Acquire) {
-                            // Recalculate hard timeout based on inner time control
-                            hard_timeout_ms = match inner {
-                                TimeControl::FixedTime { ms_per_move } => ms_per_move * 3,
-                                TimeControl::Fischer {
-                                    white_ms,
-                                    black_ms,
-                                    increment_ms: _,
-                                } => {
-                                    let time_ms = white_ms.max(black_ms);
-                                    (time_ms * 9) / 10
-                                }
-                                TimeControl::Byoyomi {
-                                    main_time_ms,
-                                    byoyomi_ms,
-                                    periods: _,
-                                } => {
-                                    const SAFETY_MARGIN_MS: u64 = 300;
-                                    if *main_time_ms > 0 {
-                                        main_time_ms + byoyomi_ms
-                                    } else {
-                                        byoyomi_ms.saturating_sub(SAFETY_MARGIN_MS).max(100)
-                                    }
-                                }
-                                TimeControl::FixedNodes { .. } => 3_600_000,
-                                TimeControl::Infinite => 3_600_000,
-                                TimeControl::Ponder(_) => 3_600_000, // Shouldn't happen
-                            }
-                            .max(1000); // At least 1 second
-
-                            switched_after_hit = true;
-                            if log::log_enabled!(log::Level::Debug) {
-                                debug!("Fail-safe switched to inner time control after ponderhit: {hard_timeout_ms}ms");
-                            }
-                        }
-                    }
-                }
-
-                // Check if hard timeout exceeded
-                let elapsed = search_start.elapsed();
-                if elapsed.as_millis() > hard_timeout_ms as u128 {
-                    error!(
-                        "FAIL-SAFE: Search exceeded hard timeout of {}ms (elapsed: {}ms)",
-                        hard_timeout_ms,
-                        elapsed.as_millis()
-                    );
-
-                    // Try to stop gracefully first
-                    shared_state.set_stop();
-
-                    // Give 500ms for graceful shutdown
-                    thread::sleep(Duration::from_millis(500));
-
-                    // If still not stopped, abort
-                    if !shared_state.should_stop() {
-                        error!("FAIL-SAFE: Forced abort due to unresponsive search!");
-                        std::process::abort();
-                    }
-                }
-            }
-
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("Fail-safe guard stopped");
-            }
-        })
-    }
-
-    /// Start time management thread
-    fn start_time_manager(&self, time_manager: Arc<TimeManager>) -> thread::JoinHandle<()> {
-        let shared_state = self.shared_state.clone();
-
-        thread::spawn(move || {
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("Time manager started");
-            }
-
-            loop {
-                // Poll interval based on time control
-                let poll_interval = match time_manager.soft_limit_ms() {
-                    0..=50 => Duration::from_millis(2),
-                    51..=100 => Duration::from_millis(5),
-                    101..=500 => Duration::from_millis(10),
-                    _ => Duration::from_millis(20),
-                };
-
-                thread::sleep(poll_interval);
-
-                if shared_state.should_stop() {
-                    break;
-                }
-
-                let nodes = shared_state.get_nodes();
-                // Don't stop if we haven't done any real work yet
-                if nodes > 100 && time_manager.should_stop(nodes) {
-                    info!("Time limit reached after {nodes} nodes, stopping search");
-                    shared_state.set_stop();
-                    break;
-                }
-            }
-
-            if log::log_enabled!(log::Level::Debug) {
-                debug!("Time manager stopped");
-            }
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        evaluation::evaluate::MaterialEvaluator,
-        search::{SearchLimits, ShardedTranspositionTable},
-        shogi::Position,
-    };
-    use std::sync::atomic::Ordering;
-
-    /// Create a test position with many captures available
-    fn create_capture_heavy_position() -> Position {
-        // Create a position with many mutual captures
-        // This is designed to stress the quiescence search
-        // This position has many pieces that can capture each other
-        Position::from_sfen(
-            "k8/1r1b3g1/p1p1ppp1p/1p1ps2p1/2P6/PP1P1S2P/2SGPPP2/1B5R1/LN1K2GNL b - 1",
-        )
-        .unwrap_or_else(|_| Position::startpos())
-    }
-
-    #[test]
-    fn test_parallel_qnodes_budget() {
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(ShardedTranspositionTable::new(16));
-        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
-
-        let mut pos = create_capture_heavy_position();
-
-        // Set a small qnodes budget
-        let limits = SearchLimits::builder()
-            .depth(5)
-            .qnodes_limit(10000) // Small limit to ensure it's hit
-            .build();
-
-        let result = searcher.search(&mut pos, limits);
-
-        // Verify that the total qnodes doesn't exceed the limit by much
-        // With prev-value checking, overshoot should be minimal but can be more than num_threads
-        // due to in-check positions and timing
-        let max_overshoot = 1000; // Allow reasonable overshoot for in-check positions
-        assert!(
-            result.stats.qnodes <= 10000 + max_overshoot,
-            "QNodes exceeded limit by too much: {} > {}",
-            result.stats.qnodes,
-            10000 + max_overshoot
-        );
-
-        // Verify we found a move
-        assert!(result.best_move.is_some());
-    }
-
-    #[test]
-    fn test_parallel_qnodes_aggregation() {
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(ShardedTranspositionTable::new(16));
-        let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
-
-        // Use a position with captures available to ensure quiescence search
-        let mut pos = create_capture_heavy_position();
-
-        // Run search without qnodes limit
-        let limits = SearchLimits::builder().depth(4).build();
-
-        let result = searcher.search(&mut pos, limits);
-
-        // Verify that qnodes are properly aggregated
-        let shared_qnodes = searcher.shared_state.get_qnodes();
-        assert_eq!(
-            result.stats.qnodes, shared_qnodes,
-            "QNodes not properly aggregated: stats={} shared={}",
-            result.stats.qnodes, shared_qnodes
-        );
-
-        // With shared counter always incrementing, we should see qnodes > 0
-        // for any search that enters quiescence (which should happen with captures)
-        assert!(
-            result.stats.qnodes > 0,
-            "Expected qnodes > 0 for capture-heavy position, got {}",
-            result.stats.qnodes
-        );
-        println!("QNodes recorded: {}", result.stats.qnodes);
-    }
-
-    #[test]
-    fn test_qnodes_counter_sharing() {
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(ShardedTranspositionTable::new(16));
-        let searcher = ParallelSearcher::new(evaluator, tt, 4);
-
-        // Get the qnodes counter
-        let counter1 = searcher.shared_state.get_qnodes_counter();
-        let counter2 = searcher.shared_state.get_qnodes_counter();
-
-        // Both should point to the same atomic counter
-        counter1.store(42, Ordering::Relaxed);
-        assert_eq!(counter2.load(Ordering::Relaxed), 42);
-
-        // Reset should clear it
-        searcher.shared_state.reset();
-        assert_eq!(counter1.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn test_parallel_qnodes_overshoot_minimal() {
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(ShardedTranspositionTable::new(16));
-        let num_threads = 4;
-        let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
-
-        let mut pos = create_capture_heavy_position();
-
-        // Set a moderate qnodes budget
-        let qnodes_limit = 5000;
-        let limits = SearchLimits::builder().depth(5).qnodes_limit(qnodes_limit).build();
-
-        let result = searcher.search(&mut pos, limits);
-
-        // With previous-value checking, overshoot should be minimal
-        // However, due to in-check positions and timing, it can be more than num_threads
-        let overshoot = result.stats.qnodes.saturating_sub(qnodes_limit);
-        // Allow up to 25% overshoot or 1000 nodes, whichever is smaller
-        let max_overshoot = (qnodes_limit / 4).min(1000);
-        assert!(
-            overshoot <= max_overshoot,
-            "QNodes overshoot too large: {} (limit={}, actual={}, threads={}, max_allowed={})",
-            overshoot,
-            qnodes_limit,
-            result.stats.qnodes,
-            num_threads,
-            max_overshoot
-        );
-
-        println!(
-            "QNodes overshoot test: limit={}, actual={}, overshoot={}",
-            qnodes_limit, result.stats.qnodes, overshoot
-        );
-    }
-
-    #[test]
-    fn test_completion_wait_robustness() {
-        // Test that completion detection properly waits for all work
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(ShardedTranspositionTable::new(16));
-        let num_threads = 4;
-        let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
-
-        let mut pos = Position::startpos();
-
-        // Set up search with moderate depth
-        let limits = SearchLimits::builder().depth(6).build();
-
-        let result = searcher.search(&mut pos, limits);
-
-        // Verify that search completed properly
-        assert!(result.best_move.is_some(), "Should find a best move");
-        assert!(result.stats.nodes > 0, "Should search some nodes");
-
-        // Check that pending work counter is back to zero
-        assert_eq!(
-            searcher.pending_work_items.load(Ordering::Acquire),
-            0,
-            "Pending work items should be zero after search completes"
-        );
-
-        // Check that active workers is zero
-        assert_eq!(
-            searcher.active_workers.load(Ordering::Acquire),
-            0,
-            "Active workers should be zero after search completes"
-        );
-    }
-
-    #[test]
-    fn test_pending_work_counter_accuracy() {
-        // Test that pending_work_items accurately tracks work
-        let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(ShardedTranspositionTable::new(16));
-        let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
-
-        // Verify initial state
-        assert_eq!(searcher.pending_work_items.load(Ordering::Acquire), 0);
-
-        let mut pos = Position::startpos();
-
-        // Run a short search
-        let limits = SearchLimits::builder().depth(3).build();
-        let _result = searcher.search(&mut pos, limits);
-
-        // After search, pending work should be zero
-        assert_eq!(
-            searcher.pending_work_items.load(Ordering::Acquire),
-            0,
-            "Pending work counter should return to zero after search"
-        );
     }
 }
