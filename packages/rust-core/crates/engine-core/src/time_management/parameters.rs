@@ -64,11 +64,14 @@ pub struct TimeParametersBuilder {
 #[derive(Debug, Clone)]
 pub enum TimeParameterError {
     Overhead { value: u64, min: u64, max: u64 },
-    ByoyomiOverhead { value: u64, min: u64, max: u64 },
     ByoyomiSafety { value: u64, min: u64, max: u64 },
     ByoyomiEarlyFinishRatio { value: u8, min: u8, max: u8 },
     PVStabilityBase { value: u64, min: u64, max: u64 },
     PVStabilitySlope { value: u64, min: u64, max: u64 },
+    NetworkOverheadFactor { value: f64, min: f64, max: f64 },
+    SoftMultiplier { value: f64, min: f64, max: f64 },
+    HardMultiplier { value: f64, min: f64, max: f64 },
+    IncrementUsage { value: f64, min: f64, max: f64 },
 }
 
 impl fmt::Display for TimeParameterError {
@@ -76,9 +79,6 @@ impl fmt::Display for TimeParameterError {
         match self {
             Self::Overhead { value, min, max } => {
                 write!(f, "Overhead must be between {min} and {max}, got {value}")
-            }
-            Self::ByoyomiOverhead { value, min, max } => {
-                write!(f, "Byoyomi overhead must be between {min} and {max}, got {value}")
             }
             Self::ByoyomiSafety { value, min, max } => {
                 write!(f, "Byoyomi safety must be between {min} and {max}, got {value}")
@@ -91,6 +91,18 @@ impl fmt::Display for TimeParameterError {
             }
             Self::PVStabilitySlope { value, min, max } => {
                 write!(f, "PV stability slope must be between {min} and {max}, got {value}")
+            }
+            Self::NetworkOverheadFactor { value, min, max } => {
+                write!(f, "Network overhead factor must be between {min} and {max}, got {value}")
+            }
+            Self::SoftMultiplier { value, min, max } => {
+                write!(f, "Soft multiplier must be between {min} and {max}, got {value}")
+            }
+            Self::HardMultiplier { value, min, max } => {
+                write!(f, "Hard multiplier must be between {min} and {max}, got {value}")
+            }
+            Self::IncrementUsage { value, min, max } => {
+                write!(f, "Increment usage must be between {min} and {max}, got {value}")
             }
         }
     }
@@ -134,21 +146,6 @@ impl TimeParametersBuilder {
             });
         }
         self.params.overhead_ms = ms;
-        Ok(self)
-    }
-
-    /// Set byoyomi-specific overhead (mapped to byoyomi_hard_limit_reduction_ms)
-    pub fn byoyomi_overhead_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
-        if ms > constants::MAX_OVERHEAD_MS {
-            return Err(TimeParameterError::ByoyomiOverhead {
-                value: ms,
-                min: constants::MIN_OVERHEAD_MS,
-                max: constants::MAX_OVERHEAD_MS,
-            });
-        }
-        // Note: This is mapped to byoyomi_hard_limit_reduction_ms
-        // The actual overhead calculation will consider both overhead_ms and this value
-        self.params.byoyomi_hard_limit_reduction_ms = ms;
         Ok(self)
     }
 
@@ -203,6 +200,58 @@ impl TimeParametersBuilder {
             });
         }
         self.params.pv_depth_slope_ms = ms;
+        Ok(self)
+    }
+
+    /// Set network overhead factor (0.0 - 1.0)
+    pub fn network_overhead_factor(mut self, factor: f64) -> Result<Self, TimeParameterError> {
+        if !(0.0..=1.0).contains(&factor) {
+            return Err(TimeParameterError::NetworkOverheadFactor {
+                value: factor,
+                min: 0.0,
+                max: 1.0,
+            });
+        }
+        self.params.network_overhead_factor = factor;
+        Ok(self)
+    }
+
+    /// Set soft time multiplier (0.5 - 2.0)
+    pub fn soft_multiplier(mut self, multiplier: f64) -> Result<Self, TimeParameterError> {
+        if !(0.5..=2.0).contains(&multiplier) {
+            return Err(TimeParameterError::SoftMultiplier {
+                value: multiplier,
+                min: 0.5,
+                max: 2.0,
+            });
+        }
+        self.params.soft_multiplier = multiplier;
+        Ok(self)
+    }
+
+    /// Set hard time multiplier (2.0 - 8.0)
+    pub fn hard_multiplier(mut self, multiplier: f64) -> Result<Self, TimeParameterError> {
+        if !(2.0..=8.0).contains(&multiplier) {
+            return Err(TimeParameterError::HardMultiplier {
+                value: multiplier,
+                min: 2.0,
+                max: 8.0,
+            });
+        }
+        self.params.hard_multiplier = multiplier;
+        Ok(self)
+    }
+
+    /// Set increment usage factor (0.0 - 1.0)
+    pub fn increment_usage(mut self, usage: f64) -> Result<Self, TimeParameterError> {
+        if !(0.0..=1.0).contains(&usage) {
+            return Err(TimeParameterError::IncrementUsage {
+                value: usage,
+                min: 0.0,
+                max: 1.0,
+            });
+        }
+        self.params.increment_usage = usage;
         Ok(self)
     }
 

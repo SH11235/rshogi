@@ -128,7 +128,6 @@ pub fn infer_time_control_mode(
     params: &GoParams,
     has_time_info: bool,
     overhead_ms: u32,
-    _byoyomi_overhead_ms: u32,
 ) -> (TimeControlMode, Option<CoreTimeParameters>) {
     // 1. Check for ponder mode first
     if params.ponder {
@@ -226,19 +225,17 @@ fn is_fischer_disguised_as_byoyomi(byoyomi: u64, binc: Option<u64>, winc: Option
     }
 }
 
-/// Validate and clamp search depth to prevent out-of-bounds access
+/// Clamp search depth to prevent out-of-bounds access
 ///
 /// USI protocol allows arbitrary depth values, but the engine has internal
 /// limits to prevent array bounds violations and excessive memory usage.
-pub fn validate_and_clamp_depth(depth: Option<u8>) -> Option<u8> {
-    depth.map(|d| {
-        if d > 127 {
-            warn!("Requested depth {d} exceeds maximum 127, clamping to maximum");
-            127
-        } else {
-            d
-        }
-    })
+pub fn clamp_depth(depth: u32) -> u8 {
+    if depth > 127 {
+        warn!("Requested depth {depth} exceeds maximum 127, clamping to maximum");
+        127
+    } else {
+        depth as u8
+    }
 }
 
 /// Main entry point: Apply go parameters to search limits
@@ -260,11 +257,9 @@ pub fn apply_go_params(
 
     // Apply depth limit if specified
     if let Some(d) = params.depth {
-        let clamped = validate_and_clamp_depth(Some(d as u8));
-        if let Some(depth_u8) = clamped {
-            builder = builder.depth(depth_u8);
-            debug!("Search depth limit: {depth_u8}");
-        }
+        let depth_u8 = clamp_depth(d);
+        builder = builder.depth(depth_u8);
+        debug!("Search depth limit: {depth_u8}");
     }
 
     // Apply node limit if specified
@@ -333,17 +328,17 @@ mod tests {
         params.infinite = true;
         params.movetime = Some(1000);
 
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
+        let (mode, _) = infer_time_control_mode(&params, true, 100);
         assert_eq!(mode, TimeControlMode::Ponder);
 
         // Test infinite has second priority
         params.ponder = false;
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
+        let (mode, _) = infer_time_control_mode(&params, true, 100);
         assert_eq!(mode, TimeControlMode::Infinite);
 
         // Test fixed time has third priority
         params.infinite = false;
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
+        let (mode, _) = infer_time_control_mode(&params, true, 100);
         assert_eq!(mode, TimeControlMode::FixedTime(1000));
     }
 
@@ -358,7 +353,7 @@ mod tests {
         params.btime = Some(60000);
         params.wtime = Some(60000);
 
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
+        let (mode, _) = infer_time_control_mode(&params, true, 100);
         assert_eq!(mode, TimeControlMode::Fischer);
     }
 
@@ -370,7 +365,7 @@ mod tests {
         params.btime = Some(0);
         params.wtime = Some(0);
 
-        let (mode, _) = infer_time_control_mode(&params, true, 100, 200);
+        let (mode, _) = infer_time_control_mode(&params, true, 100);
         assert_eq!(mode, TimeControlMode::Byoyomi);
     }
 
@@ -551,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_and_clamp_depth_caps_at_127() {
+    fn test_clamp_depth_caps_at_127() {
         let params = GoParams {
             depth: Some(200),
             ..make_go_params()
@@ -559,5 +554,51 @@ mod tests {
         let position = Position::startpos();
         let limits = apply_go_params(&params, &position, 50, None, 300, 80, 80, 5).unwrap();
         assert_eq!(limits.depth, Some(127));
+    }
+
+    #[test]
+    fn test_clamp_depth_direct() {
+        assert_eq!(clamp_depth(10), 10);
+        assert_eq!(clamp_depth(127), 127);
+        assert_eq!(clamp_depth(128), 127);
+        assert_eq!(clamp_depth(200), 127);
+        assert_eq!(clamp_depth(u32::MAX), 127);
+    }
+
+    #[test]
+    fn test_infer_time_control_mode_no_time_info() {
+        let params = make_go_params();
+        let (mode, _) = infer_time_control_mode(&params, false, 100);
+        assert_eq!(mode, TimeControlMode::Default);
+    }
+
+    #[test]
+    fn test_apply_go_params_ponder_with_disguised_fischer() {
+        let mut params = make_go_params();
+        params.ponder = true;
+        params.byoyomi = Some(1000);
+        params.binc = Some(1000);
+        params.winc = Some(1000);
+        params.btime = Some(60000);
+        params.wtime = Some(60000);
+
+        let position = Position::startpos();
+        let limits = apply_go_params(&params, &position, 50, None, 300, 80, 80, 5).unwrap();
+
+        match limits.time_control {
+            engine_core::TimeControl::Ponder(inner) => match *inner {
+                engine_core::TimeControl::Fischer {
+                    white_ms,
+                    black_ms,
+                    increment_ms,
+                } => {
+                    assert_eq!(white_ms, 60000);
+                    assert_eq!(black_ms, 60000);
+                    assert_eq!(increment_ms, 1000);
+                }
+                other => panic!("Expected inner Fischer, got: {other:?}"),
+            },
+            other => panic!("Expected Ponder, got: {other:?}"),
+        }
     }
 }
