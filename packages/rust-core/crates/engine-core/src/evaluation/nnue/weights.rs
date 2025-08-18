@@ -15,8 +15,7 @@ use log::debug;
 /// NNUE file header
 #[derive(Debug, Clone, Copy)]
 pub struct NNUEHeader {
-    #[allow(dead_code)]
-    magic: [u8; 4], // "NNUE"
+    magic: [u8; 4],    // "NNUE"
     version: u32,      // Version number
     architecture: u32, // Architecture ID
     size: u32,         // File size

@@ -1,5 +1,6 @@
 //! Garbage collection methods for TranspositionTable
 
+use super::constants::{AGE_MASK, GENERATION_CYCLE};
 use super::*;
 use crate::util::sync_compat::Ordering;
 
@@ -55,9 +56,8 @@ impl TranspositionTable {
 
                 // Calculate age distance
                 let entry_age = entry.age();
-                let age_distance = ((entry::GENERATION_CYCLE + current_age as u16
-                    - entry_age as u16)
-                    & (entry::AGE_MASK as u16)) as u8;
+                let age_distance = ((GENERATION_CYCLE + current_age as u16 - entry_age as u16)
+                    & (AGE_MASK as u16)) as u8;
 
                 // Clear if too old
                 if age_distance >= threshold_age_distance {
@@ -88,9 +88,8 @@ impl TranspositionTable {
 
                 // Calculate age distance
                 let entry_age = entry.age();
-                let age_distance = ((entry::GENERATION_CYCLE + current_age as u16
-                    - entry_age as u16)
-                    & (entry::AGE_MASK as u16)) as u8;
+                let age_distance = ((GENERATION_CYCLE + current_age as u16 - entry_age as u16)
+                    & (AGE_MASK as u16)) as u8;
 
                 // Clear if too old
                 if age_distance >= threshold_age_distance {
@@ -168,7 +167,7 @@ impl TranspositionTable {
 
     /// Set the age distance threshold for GC
     pub fn set_gc_threshold(&mut self, threshold: u8) {
-        self.gc_threshold_age_distance = threshold.min(entry::AGE_MASK);
+        self.gc_threshold_age_distance = threshold.min(AGE_MASK);
     }
 
     /// Get current GC progress (bucket index)

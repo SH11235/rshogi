@@ -7,11 +7,12 @@ use engine_core::{
     engine::controller::{Engine, EngineType},
     shogi::Position,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use crate::usi::{
-    EngineOption, DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
+use crate::usi::EngineOption;
+use engine_core::time_management::constants::{
+    DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
 };
 
 // Submodules
@@ -64,14 +65,14 @@ pub struct EngineAdapter {
     search_start_position_hash: Option<u64>,
     /// Side to move at the start of search
     search_start_side_to_move: Option<engine_core::shogi::Color>,
-    /// Last calculated overhead in milliseconds (for stop handler)
-    last_overhead_ms: AtomicU64,
     /// Time management overhead in milliseconds
     overhead_ms: u64,
     /// Byoyomi-specific overhead in milliseconds
     byoyomi_overhead_ms: u64,
     /// Byoyomi hard limit additional safety margin in milliseconds
     byoyomi_safety_ms: u64,
+    /// Whether the last search was using byoyomi time control
+    last_search_is_byoyomi: bool,
 }
 
 impl Default for EngineAdapter {
@@ -101,14 +102,19 @@ impl EngineAdapter {
             current_stop_flag: None,
             search_start_position_hash: None,
             search_start_side_to_move: None,
-            last_overhead_ms: AtomicU64::new(DEFAULT_OVERHEAD_MS),
             overhead_ms: DEFAULT_OVERHEAD_MS,
             byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
+            last_search_is_byoyomi: false,
         };
 
         // Initialize options
         adapter.init_options();
         adapter
+    }
+
+    /// Get the byoyomi safety milliseconds setting
+    pub fn byoyomi_safety_ms(&self) -> u64 {
+        self.byoyomi_safety_ms
     }
 }
