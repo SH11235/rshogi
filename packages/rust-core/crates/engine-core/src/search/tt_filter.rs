@@ -67,16 +67,16 @@ mod tests {
     #[test]
     fn tt_store_keeps_pv_even_at_shallow_depth() {
         // PV nodes should always be stored, regardless of depth
-        assert_eq!(should_skip_tt_store(0, true), false);
-        assert_eq!(should_skip_tt_store(1, true), false);
+        assert!(!should_skip_tt_store(0, true));
+        assert!(!should_skip_tt_store(1, true));
 
         // Non-PV shallow nodes should be skipped
-        assert_eq!(should_skip_tt_store(0, false), true);
-        assert_eq!(should_skip_tt_store(1, false), true);
+        assert!(should_skip_tt_store(0, false));
+        assert!(should_skip_tt_store(1, false));
 
         // Non-PV deeper nodes should be stored
-        assert_eq!(should_skip_tt_store(2, false), false);
-        assert_eq!(should_skip_tt_store(3, false), false);
+        assert!(!should_skip_tt_store(2, false));
+        assert!(!should_skip_tt_store(3, false));
     }
 
     #[test]
