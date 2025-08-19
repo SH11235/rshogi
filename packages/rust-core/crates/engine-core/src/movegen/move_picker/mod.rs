@@ -3,7 +3,6 @@
 mod move_generation;
 mod move_scoring;
 mod picker;
-mod position_ext;
 mod types;
 
 // Re-export public types
