@@ -1,21 +1,17 @@
 //! Position extensions for move legality checking
-//!
-//! NOTE: This is a temporary location for Position extension methods.
-//! These methods should ideally be moved to the shogi module (e.g., shogi/position_ext.rs)
-//! to maintain proper layering and dependency direction.
 
-use crate::shogi::attacks;
-use crate::shogi::{Bitboard, Color, Move, PieceType, Position, Square};
+use super::attacks;
+use super::{Bitboard, Color, Move, PieceType, Position, Square};
 
 // Extension for Position to check legal moves
 impl Position {
     /// Check if the current player has a pawn in the given file
-    pub(super) fn has_pawn_in_file(&self, file: u8) -> bool {
+    pub(crate) fn has_pawn_in_file(&self, file: u8) -> bool {
         self.has_pawn_in_file_for_color(file, self.side_to_move)
     }
 
     /// Check if the specified color has a pawn in the given file
-    pub(super) fn has_pawn_in_file_for_color(&self, file: u8, color: Color) -> bool {
+    pub(crate) fn has_pawn_in_file_for_color(&self, file: u8, color: Color) -> bool {
         let pawn_bb = self.board.piece_bb[color as usize][PieceType::Pawn as usize];
         let file_mask = attacks::file_mask(file);
 
@@ -26,7 +22,7 @@ impl Position {
     }
 
     /// Check if dropping a pawn would result in checkmate
-    pub(super) fn is_checkmate_by_pawn_drop(&self, pawn_drop: Move) -> bool {
+    pub(crate) fn is_checkmate_by_pawn_drop(&self, pawn_drop: Move) -> bool {
         // The pawn must give check to the opponent's king
         let defense_color = self.side_to_move.opposite();
         let king_sq = match self.board.king_square(defense_color) {
