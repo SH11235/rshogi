@@ -89,7 +89,7 @@ impl Position {
 
         // Check for pinned pieces
         let pinned = test_pos.get_blockers_for_king(defense_color);
-        let pawn_file_mask = Bitboard::file_mask(pawn_sq.file());
+        let pawn_file_mask = attacks::file_mask(pawn_sq.file());
         let not_pinned_for_capture = !pinned | pawn_file_mask;
 
         let can_capture = valid_capture_candidates & not_pinned_for_capture;
