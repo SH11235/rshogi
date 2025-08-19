@@ -2,6 +2,7 @@ pub mod attacks;
 pub mod board;
 pub mod moves;
 pub mod piece_constants;
+pub mod position_ext;
 
 #[cfg(test)]
 mod tests;
