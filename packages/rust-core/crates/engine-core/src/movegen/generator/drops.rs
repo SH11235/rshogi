@@ -1,7 +1,7 @@
 //! Drop move generation
 
 use crate::{
-    shogi::{Move, ATTACK_TABLES},
+    shogi::{attacks, Move, ATTACK_TABLES},
     Bitboard, Color, PieceType, Square,
 };
 
@@ -52,7 +52,7 @@ fn get_valid_drop_squares(
             let pawns = gen.pos.board.piece_bb[us as usize][PieceType::Pawn as usize]
                 & !gen.pos.board.promoted_bb;
             for file in 0..9u8 {
-                let file_mask = ATTACK_TABLES.file_mask(file);
+                let file_mask = attacks::file_mask(file);
                 if !(pawns & file_mask).is_empty() {
                     valid &= !file_mask; // 一括でその筋を禁止
                 }

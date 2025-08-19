@@ -75,17 +75,6 @@ impl Bitboard {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
-
-    /// Get a bitboard with all squares in a file set
-    #[inline]
-    pub fn file_mask(file: u8) -> Self {
-        debug_assert!(file < 9);
-        let mut mask = 0u128;
-        for rank in 0..9 {
-            mask |= 1u128 << (rank * 9 + file);
-        }
-        Bitboard(mask)
-    }
 }
 
 impl std::ops::BitOr for Bitboard {
@@ -179,18 +168,20 @@ mod tests {
     }
 
     #[test]
-    fn test_bitboard_file_mask() {
-        // 各筋のマスクをテスト
-        for file in 0..9 {
-            let mask = Bitboard::file_mask(file);
+    fn test_attacks_file_mask() {
+        use crate::shogi::attacks;
 
-            // その筋の全ての升がセットされているか確認
+        // Test the attacks::file_mask function
+        for file in 0..9 {
+            let mask = attacks::file_mask(file);
+
+            // Verify that all squares in the file are set
             for rank in 0..9 {
                 let sq = Square(file + rank * 9);
                 assert!(mask.test(sq), "file {file} rank {rank} should be set");
             }
 
-            // 他の筋の升はセットされていないか確認
+            // Verify that squares in other files are not set
             for other_file in 0..9 {
                 if other_file != file {
                     for rank in 0..9 {

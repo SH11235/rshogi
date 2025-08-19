@@ -2,7 +2,10 @@
 //!
 //! Simple material-based evaluation
 
-use crate::{shogi::ALL_PIECE_TYPES, Bitboard, Color, PieceType, Position, Square};
+use crate::{
+    shogi::{attacks, ALL_PIECE_TYPES},
+    Color, PieceType, Position, Square,
+};
 
 /// Trait for position evaluation
 pub trait Evaluator {
@@ -289,7 +292,7 @@ fn evaluate_pawn_structure(pos: &Position, color: Color) -> i32 {
 
     // Penalty for doubled pawns (two pawns on same file)
     for file in 0..9 {
-        let file_mask = Bitboard::file_mask(file);
+        let file_mask = attacks::file_mask(file);
         let pawns_on_file = (pawn_bb & file_mask).count_ones();
         if pawns_on_file > 1 {
             score -= 20 * (pawns_on_file as i32 - 1);
