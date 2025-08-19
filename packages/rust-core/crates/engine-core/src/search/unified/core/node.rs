@@ -139,7 +139,7 @@ where
                     }
                     // Even without a good score, stop searching this node
                     // to avoid duplication with sibling threads
-                    // Return alpha to maintain fail-soft consistency
+                    // Return alpha to keep a safe fail-low bound under negamax
                     return alpha;
                 }
             }
@@ -511,9 +511,15 @@ where
             NodeType::Exact
         };
 
+        // Determine if this is a PV node
+        // A node is a PV node if the score improved alpha but didn't exceed beta
+        let is_pv = best_score > original_alpha && best_score < beta;
+
         // Simple optimization: skip shallow nodes
-        if !crate::search::tt_filter::should_skip_tt_store(depth, false) {
-            let boosted_depth = crate::search::tt_filter::boost_tt_depth(depth, node_type);
+        if !crate::search::tt_filter::should_skip_tt_store(depth, is_pv) {
+            let mut boosted_depth = crate::search::tt_filter::boost_tt_depth(depth, node_type);
+            // Apply additional boost for PV nodes
+            boosted_depth = crate::search::tt_filter::boost_pv_depth(boosted_depth, is_pv);
             searcher.store_tt(hash, boosted_depth, best_score, node_type, best_move);
         }
     }
