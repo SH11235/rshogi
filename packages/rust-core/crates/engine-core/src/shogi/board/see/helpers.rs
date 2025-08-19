@@ -5,7 +5,7 @@
 
 use crate::shogi::board::{Bitboard, Color, Piece, PieceType, Position, Square};
 use crate::shogi::piece_constants::SEE_PIECE_VALUES;
-use crate::shogi::ATTACK_TABLES;
+use crate::shogi::{attacks, ATTACK_TABLES};
 
 use super::pin_info::SeePinInfo;
 
@@ -102,7 +102,7 @@ impl Position {
         }
 
         // 香車による縦のピン（特殊処理）
-        let file_mask = ATTACK_TABLES.file_masks[king_sq.file() as usize];
+        let file_mask = attacks::file_mask(king_sq.file());
         let lances_in_file = enemy_lances & file_mask;
 
         if !lances_in_file.is_empty() {
@@ -218,7 +218,7 @@ impl Position {
         let file = sq.file();
 
         // Get all lances in the same file
-        let file_mask = ATTACK_TABLES.file_masks[file as usize];
+        let file_mask = attacks::file_mask(file);
         let lances_in_file = lance_bb & file_mask;
 
         if lances_in_file.is_empty() {
