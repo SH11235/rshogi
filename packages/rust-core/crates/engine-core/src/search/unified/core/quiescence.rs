@@ -16,7 +16,24 @@ use std::sync::atomic::Ordering;
 // Import victim_score from move_ordering module
 use super::move_ordering::victim_score;
 
-/// Quiescence search to handle captures
+/// Quiescence search to resolve tactical exchanges and avoid horizon effects
+///
+/// This function searches capture moves (and check evasions when in check) to ensure
+/// the evaluation is based on a quiet position. It prevents the search from stopping
+/// in the middle of a capture sequence which could lead to incorrect evaluations.
+///
+/// # Parameters
+/// - `searcher`: The search context containing evaluation, TT, and statistics
+/// - `pos`: Current position to search
+/// - `alpha`: Lower bound of the search window
+/// - `beta`: Upper bound of the search window
+/// - `ply`: Absolute depth from root position (for mate distance calculation)
+/// - `qply`: Relative quiescence depth (incremented from 0 at qsearch entry)
+///   Used to limit qsearch depth independently of main search depth
+///   Not applied in check positions to ensure proper check evasion
+///
+/// # Returns
+/// The evaluation score of the position after resolving captures
 pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
     pos: &mut Position,
@@ -81,7 +98,9 @@ where
         if exceeded {
             log::trace!("qsearch budget exceeded at qnodes={}", searcher.stats.qnodes);
 
-            // Return the token we just took to minimize overshoot
+            // Token return policy: We only return tokens at function entry to minimize overshoot
+            // In loops below, we don't return tokens because actual search work has already begun
+            // This provides more accurate statistics about nodes actually searched
             if let Some(ref counter) = qnodes_counter {
                 counter.fetch_sub(1, Ordering::AcqRel);
             }
@@ -198,6 +217,7 @@ where
                 if exceeded {
                     // If we haven't found any move yet, return alpha
                     // Otherwise return the best score found so far
+                    // Note: We don't return tokens here as search has already progressed
                     return if best == -SEARCH_INF { alpha } else { best };
                 }
             }
@@ -317,6 +337,7 @@ where
             };
 
             if exceeded {
+                // Note: We don't return tokens here as search has already progressed
                 return alpha; // Return current best bound
             }
         }
