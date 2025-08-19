@@ -5,8 +5,8 @@
 //! - Bishop (and Horse)
 //! - Lance
 
+use crate::shogi::attacks;
 use crate::shogi::board::{Bitboard, Color, PieceType, Position, Square};
-use crate::shogi::{attacks, ATTACK_TABLES};
 
 impl Position {
     /// Get lance attackers to a square using optimized bitboard operations
@@ -31,16 +31,14 @@ impl Position {
         // Get potential lance attackers using pre-computed rays
         // Note: We use the opposite color because lance_rays[color][sq] gives squares a lance can ATTACK from sq,
         // but we want squares that can attack sq
-        let lance_ray = ATTACK_TABLES.lance_rays[by_color.opposite() as usize][sq.index()];
+        let lance_ray = attacks::lance_ray_from(sq, by_color.opposite());
         let potential_attackers = lances_in_file & lance_ray;
 
         // Check each potential attacker for blockers
         let mut lances = potential_attackers;
-        while !lances.is_empty() {
-            let from = lances.pop_lsb().expect("Lance bitboard should not be empty");
-
+        while let Some(from) = lances.pop_lsb() {
             // Use pre-computed between bitboard
-            let between = ATTACK_TABLES.between_bb(from, sq);
+            let between = attacks::between_bb(from, sq);
             if (between & occupied).is_empty() {
                 // Path is clear, lance can attack
                 attackers.set(from);
@@ -62,14 +60,14 @@ pub fn check_sliding_attacks(
 ) -> bool {
     // Rook attacks
     let rook_bb = piece_bb[by_color as usize][PieceType::Rook as usize];
-    let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+    let rook_attacks = attacks::sliding_attacks(sq, occupied, PieceType::Rook);
     if !(rook_bb & rook_attacks).is_empty() {
         return true;
     }
 
     // Bishop attacks
     let bishop_bb = piece_bb[by_color as usize][PieceType::Bishop as usize];
-    let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+    let bishop_attacks = attacks::sliding_attacks(sq, occupied, PieceType::Bishop);
     if !(bishop_bb & bishop_attacks).is_empty() {
         return true;
     }
@@ -94,11 +92,11 @@ pub fn get_sliding_attackers(
     get_lance_attackers: impl Fn(Square, Color, Bitboard, Bitboard) -> Bitboard,
 ) -> Bitboard {
     let mut attackers = Bitboard::EMPTY;
-    let king_attacks = ATTACK_TABLES.king_attacks(sq);
+    let king_attacks = attacks::king_attacks(sq);
 
     // Rook attacks (including dragon)
     let rook_bb = piece_bb[by_color as usize][PieceType::Rook as usize];
-    let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+    let rook_attacks = attacks::sliding_attacks(sq, occupied, PieceType::Rook);
     attackers |= rook_bb & rook_attacks;
 
     // Dragon (promoted rook) also has king moves
@@ -107,7 +105,7 @@ pub fn get_sliding_attackers(
 
     // Bishop attacks (including horse)
     let bishop_bb = piece_bb[by_color as usize][PieceType::Bishop as usize];
-    let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+    let bishop_attacks = attacks::sliding_attacks(sq, occupied, PieceType::Bishop);
     attackers |= bishop_bb & bishop_attacks;
 
     // Horse (promoted bishop) also has king moves
