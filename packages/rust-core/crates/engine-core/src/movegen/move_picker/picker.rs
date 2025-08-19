@@ -123,10 +123,9 @@ impl<'a> MovePicker<'a> {
                 }
 
                 MovePickerStage::GoodCaptures => {
-                    if let Some(mv) = self.pick_best() {
+                    if let Some((mv, score)) = self.pick_best_scored() {
                         if Some(mv) != self.tt_move && Some(mv) != self.pv_move {
-                            // Separate good and bad captures
-                            let score = self.see(mv);
+                            // Use the already computed SEE score
                             if score >= 0 {
                                 return Some(mv);
                             } else {
