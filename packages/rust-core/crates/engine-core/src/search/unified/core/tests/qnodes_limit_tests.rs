@@ -156,12 +156,12 @@ fn test_qnodes_token_return_on_stop() {
     // Call quiescence search with stop flag already set
     let _score = quiescence::quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0, 0);
 
-    // Check that qnodes were not incremented (or were returned)
+    // Check that qnodes were incremented before stop check
     let final_qnodes = searcher.stats.qnodes;
     let final_shared = shared_counter.load(Ordering::Acquire);
 
-    // The counter is incremented before the stop check, but not committed
-    // So we expect exactly 1 increment
+    // The counter is incremented before the stop check, and remains incremented
+    // This is the expected behavior - we don't "return" the token on stop
     assert_eq!(
         final_qnodes,
         initial_qnodes + 1,
