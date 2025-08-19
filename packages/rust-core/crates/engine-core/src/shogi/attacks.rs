@@ -588,12 +588,14 @@ pub fn sliding_attacks(sq: Square, occupied: Bitboard, piece_type: PieceType) ->
 /// Get file mask for a given file
 #[inline]
 pub fn file_mask(file: u8) -> Bitboard {
+    debug_assert!(file < 9);
     ATTACK_TABLES.file_mask(file)
 }
 
 /// Get rank mask for a given rank
 #[inline]
 pub fn rank_mask(rank: u8) -> Bitboard {
+    debug_assert!(rank < 9);
     ATTACK_TABLES.rank_mask(rank)
 }
 
@@ -601,6 +603,15 @@ pub fn rank_mask(rank: u8) -> Bitboard {
 #[inline]
 pub fn between_bb(sq1: Square, sq2: Square) -> Bitboard {
     ATTACK_TABLES.between_bb(sq1, sq2)
+}
+
+/// Returns the forward ray squares a lance of `color` could reach if it stood on `sq`.
+///
+/// NOTE: To find squares that can ATTACK `sq` by a lance of `by_color`,
+///       call with the opposite color: `lance_ray_from(sq, by_color.opposite())`.
+#[inline]
+pub fn lance_ray_from(sq: Square, color: Color) -> Bitboard {
+    ATTACK_TABLES.lance_rays[color as usize][sq.index()]
 }
 
 #[cfg(test)]
@@ -678,5 +689,26 @@ mod tests {
         assert!(attacks.test(parse_usi_square("5d").unwrap()));
         assert!(attacks.test(parse_usi_square("5c").unwrap())); // Can capture blocker
         assert!(!attacks.test(parse_usi_square("5b").unwrap())); // Cannot go past blocker
+    }
+
+    #[test]
+    fn test_lance_ray_equivalence() {
+        let sq = parse_usi_square("5e").unwrap();
+
+        // lance_ray_from(sq, color) は「その色の香が sq にいるときのレイ」
+        // = precomputed な lance_attacks(sq, color) と一致するはず
+        let from_black = lance_ray_from(sq, Color::Black);
+        let from_white = lance_ray_from(sq, Color::White);
+        assert_eq!(from_black, lance_attacks(sq, Color::Black));
+        assert_eq!(from_white, lance_attacks(sq, Color::White));
+
+        // Test the "opposite" pattern used throughout the codebase
+        // To find squares that can attack sq, we use opposite color
+        let can_attack_from_black = lance_ray_from(sq, Color::White); // White lance ray = where black lances can be to attack sq
+        let can_attack_from_white = lance_ray_from(sq, Color::Black); // Black lance ray = where white lances can be to attack sq
+
+        // Verify specific squares
+        assert!(can_attack_from_black.test(parse_usi_square("5f").unwrap())); // Black lance at 5f can attack 5e
+        assert!(can_attack_from_white.test(parse_usi_square("5d").unwrap())); // White lance at 5d can attack 5e
     }
 }
