@@ -38,6 +38,11 @@ impl<'a> MovePicker<'a> {
 
     /// Pick best move from current list
     pub(super) fn pick_best(&mut self) -> Option<Move> {
+        self.pick_best_scored().map(|(mv, _)| mv)
+    }
+
+    /// Pick best move from current list with its score
+    pub(super) fn pick_best_scored(&mut self) -> Option<(Move, i32)> {
         if self.current >= self.moves.len() {
             return None;
         }
@@ -52,10 +57,10 @@ impl<'a> MovePicker<'a> {
 
         // Swap with current position
         self.moves.swap(self.current, best_idx);
-        let result = self.moves[self.current].mv;
+        let scored_move = self.moves[self.current];
         self.current += 1;
 
-        Some(result)
+        Some((scored_move.mv, scored_move.score))
     }
 
     /// Static Exchange Evaluation
