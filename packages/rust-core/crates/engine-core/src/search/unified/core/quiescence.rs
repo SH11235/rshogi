@@ -6,7 +6,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         common::mate_score,
-        constants::{MAX_PLY, MAX_QUIESCE_DEPTH, SEARCH_INF},
+        constants::{MAX_PLY, SEARCH_INF},
         unified::UnifiedSearcher,
     },
     shogi::Position,
@@ -23,6 +23,7 @@ pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool, const T
     mut alpha: i32,
     beta: i32,
     ply: u16,
+    qply: u8,
 ) -> i32
 where
     E: Evaluator + Send + Sync + 'static,
@@ -104,7 +105,28 @@ where
         }
     }
 
-    // Absolute stack guard - always enforce this limit
+    // Primary limit: relative qsearch depth
+    // This ensures consistent qsearch behavior regardless of main search depth
+    // Note: In check positions, we skip this limit to ensure proper check evasion
+    if !in_check {
+        let qply_limit = crate::search::constants::MAX_QPLY;
+
+        if qply >= qply_limit {
+            // Use rate limiter to avoid log spam
+            if log::log_enabled!(log::Level::Warn)
+                && super::log_rate_limiter::QUIESCE_DEPTH_LIMITER.should_log()
+            {
+                log::warn!("Hit relative quiescence depth limit qply={qply} (limit={qply_limit})");
+            }
+            // Not in check, return stand pat evaluation (will be computed below)
+            // For now, we need to compute it here since we're returning early
+            let stand_pat = searcher.evaluator.evaluate(pos);
+            return stand_pat;
+        }
+    }
+
+    // Secondary safeguard: absolute ply limit
+    // This is a safety net to prevent stack overflow in extreme cases
     if ply >= MAX_PLY as u16 {
         // Use rate limiter for this warning too
         if log::log_enabled!(log::Level::Warn)
@@ -121,14 +143,14 @@ where
         };
     }
 
-    // Safety limit for quiescence search depth
+    // Tertiary safeguard: absolute quiescence depth (relaxed to 96)
     // This prevents explosion in complex positions with many captures
-    if ply >= MAX_QUIESCE_DEPTH {
+    if ply >= crate::search::constants::MAX_QUIESCE_DEPTH {
         // Use rate limiter to avoid log spam
         if log::log_enabled!(log::Level::Warn)
             && super::log_rate_limiter::QUIESCE_DEPTH_LIMITER.should_log()
         {
-            log::warn!("Hit quiescence depth limit at ply {ply}");
+            log::warn!("Hit absolute quiescence depth limit at ply {ply}");
         }
         // Hard stop at reasonable depth
         // Return evaluation-based value instead of fixed constants to avoid discontinuity
@@ -159,7 +181,7 @@ where
         let mut best = -SEARCH_INF;
         for &mv in moves.iter() {
             // Check QNodes budget before each move (important for strict limit enforcement)
-            if let Some(limit) = qlimit {
+            if let Some(limit) = searcher.context.limits().qnodes_limit {
                 let exceeded = if let Some(ref counter) = qnodes_counter {
                     // Check current value against limit
                     counter.load(Ordering::Acquire) >= limit
@@ -183,8 +205,9 @@ where
             // Make move
             let undo_info = pos.do_move(mv);
 
-            // Recursive search
-            let score = -quiescence_search(searcher, pos, -beta, -alpha, ply + 1);
+            // Recursive search (increment both ply and qply)
+            let score =
+                -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
 
             // Undo move
             pos.undo_move(mv, undo_info);
@@ -281,7 +304,7 @@ where
         }
 
         // Check QNodes budget before each capture move
-        if let Some(limit) = qlimit {
+        if let Some(limit) = searcher.context.limits().qnodes_limit {
             let exceeded = if let Some(ref counter) = qnodes_counter {
                 counter.load(Ordering::Acquire) >= limit
             } else {
@@ -325,8 +348,9 @@ where
         // Skip prefetch in quiescence - adds overhead with minimal benefit
         // (Controlled by tt_filter module)
 
-        // Recursive search
-        let score = -quiescence_search(searcher, pos, -beta, -alpha, ply + 1);
+        // Recursive search (increment both ply and qply)
+        let score =
+            -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
 
         // Undo move
         pos.undo_move(mv, undo_info);

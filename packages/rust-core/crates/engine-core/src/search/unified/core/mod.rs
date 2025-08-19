@@ -199,7 +199,7 @@ where
             }
         }
 
-        return quiescence::quiescence_search(searcher, pos, alpha, beta, ply);
+        return quiescence::quiescence_search(searcher, pos, alpha, beta, ply, 0);
     }
 
     // Null move pruning

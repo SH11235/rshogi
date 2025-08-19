@@ -28,7 +28,7 @@ fn test_qnodes_limit_basic() {
     let pos = Position::from_sfen("k8/9/9/3G1G3/2P1P1P2/3B1R3/9/9/K8 b - 1").unwrap();
 
     let mut test_pos = pos.clone();
-    let _score = quiescence::quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0);
+    let _score = quiescence::quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0, 0);
 
     // Verify qnodes limit was respected
     assert!(
@@ -56,7 +56,7 @@ fn test_qnodes_limit_in_check() {
     assert!(pos.is_in_check(), "Position should be in check");
 
     let mut test_pos = pos.clone();
-    let score = quiescence::quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0);
+    let score = quiescence::quiescence_search(&mut searcher, &mut test_pos, -1000, 1000, 0, 0);
 
     // Verify qnodes limit was respected
     assert!(
@@ -87,7 +87,7 @@ fn test_qnodes_limit_performance() {
 
     let start1 = Instant::now();
     let mut pos1 = complex_pos.clone();
-    let _score1 = quiescence::quiescence_search(&mut searcher1, &mut pos1, -1000, 1000, 0);
+    let _score1 = quiescence::quiescence_search(&mut searcher1, &mut pos1, -1000, 1000, 0, 0);
     let elapsed1 = start1.elapsed();
     let nodes_without_limit = searcher1.stats.qnodes;
 
@@ -102,7 +102,7 @@ fn test_qnodes_limit_performance() {
 
     let start2 = Instant::now();
     let mut pos2 = complex_pos.clone();
-    let _score2 = quiescence::quiescence_search(&mut searcher2, &mut pos2, -1000, 1000, 0);
+    let _score2 = quiescence::quiescence_search(&mut searcher2, &mut pos2, -1000, 1000, 0, 0);
     let elapsed2 = start2.elapsed();
     let nodes_with_limit = searcher2.stats.qnodes;
 
@@ -154,7 +154,7 @@ fn test_qnodes_token_return_on_stop() {
     let initial_shared = shared_counter.load(Ordering::Acquire);
 
     // Call quiescence search with stop flag already set
-    let _score = quiescence::quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0);
+    let _score = quiescence::quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0, 0);
 
     // Check that qnodes were not incremented (or were returned)
     let final_qnodes = searcher.stats.qnodes;
@@ -206,7 +206,7 @@ fn test_qnodes_token_return_on_limit_exceeded() {
     let mut pos = pos;
 
     // Call quiescence search
-    let _score = quiescence::quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0);
+    let _score = quiescence::quiescence_search(&mut searcher, &mut pos, -1000, 1000, 0, 0);
 
     // Check that we stayed within reasonable bounds
     let final_qnodes = searcher.stats.qnodes;

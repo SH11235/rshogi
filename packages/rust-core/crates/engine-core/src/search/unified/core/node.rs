@@ -100,7 +100,7 @@ where
         // Go directly to quiescence search if position is really bad
         let razoring_alpha = alpha - crate::search::unified::pruning::razoring_margin(depth);
         let score =
-            super::quiescence_search(searcher, pos, razoring_alpha, razoring_alpha + 1, ply);
+            super::quiescence_search(searcher, pos, razoring_alpha, razoring_alpha + 1, ply, 0);
         if score <= razoring_alpha {
             return score;
         }
