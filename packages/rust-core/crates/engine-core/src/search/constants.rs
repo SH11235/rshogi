@@ -30,6 +30,10 @@ pub const QUIESCE_MAX_PLY: u8 = 4;
 /// Safety limit to prevent stack overflow in extreme cases
 pub const MAX_QUIESCE_DEPTH: u16 = 32;
 
+/// Quiescence search evaluation penalty for check positions
+/// Applied when in check at depth limit to make evaluation slightly pessimistic
+pub const QUIESCE_CHECK_EVAL_PENALTY: i32 = 50;
+
 /// Aspiration window constants
 ///
 /// These values control the alpha-beta window narrowing optimization:
