@@ -3,9 +3,9 @@
 //! This module contains utility functions for attacker detection,
 //! piece value calculations, and x-ray attack updates.
 
+use crate::shogi::attacks;
 use crate::shogi::board::{Bitboard, Color, Piece, PieceType, Position, Square};
 use crate::shogi::piece_constants::SEE_PIECE_VALUES;
-use crate::shogi::{attacks, ATTACK_TABLES};
 
 use super::pin_info::SeePinInfo;
 
@@ -56,12 +56,12 @@ impl Position {
             & !self.board.promoted_bb;
 
         // 飛車・竜による縦横のピン
-        let rook_xray = ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Rook);
+        let rook_xray = attacks::sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Rook);
         let potential_rook_pinners = enemy_rooks & rook_xray;
 
         let mut pinners_bb = potential_rook_pinners;
         while let Some(pinner_sq) = pinners_bb.pop_lsb() {
-            let between = ATTACK_TABLES.between_bb(king_sq, pinner_sq) & occupied;
+            let between = attacks::between_bb(king_sq, pinner_sq) & occupied;
             if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
                 let pinned_sq =
                     between.lsb().expect("Between squares must have at least one square");
@@ -77,13 +77,12 @@ impl Position {
         }
 
         // 角・馬による斜めのピン
-        let bishop_xray =
-            ATTACK_TABLES.sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Bishop);
+        let bishop_xray = attacks::sliding_attacks(king_sq, Bitboard::EMPTY, PieceType::Bishop);
         let potential_bishop_pinners = enemy_bishops & bishop_xray;
 
         pinners_bb = potential_bishop_pinners;
         while let Some(pinner_sq) = pinners_bb.pop_lsb() {
-            let between = ATTACK_TABLES.between_bb(king_sq, pinner_sq) & occupied;
+            let between = attacks::between_bb(king_sq, pinner_sq) & occupied;
             if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
                 let pinned_sq =
                     between.lsb().expect("Between squares must have at least one square");
@@ -119,7 +118,7 @@ impl Position {
                 };
 
                 if can_attack {
-                    let between = ATTACK_TABLES.between_bb(lance_sq, king_sq) & occupied;
+                    let between = attacks::between_bb(lance_sq, king_sq) & occupied;
                     if between.count_ones() == 1 && (between & our_pieces).count_ones() == 1 {
                         let pinned_sq =
                             between.lsb().expect("Between squares must have at least one square");
@@ -142,6 +141,9 @@ impl Position {
     }
 
     /// Get attackers to a square with custom occupancy (for X-ray detection)
+    ///
+    /// TODO: Review occupancy consistency - currently bishop_bb and lance_bb use & occupied
+    /// but other piece types don't. This might be intentional for SEE calculation but needs verification.
     pub(super) fn get_attackers_to_with_occupancy(
         &self,
         sq: Square,
@@ -152,22 +154,22 @@ impl Position {
 
         // Check pawn attacks
         let pawn_bb = self.board.piece_bb[by_color as usize][PieceType::Pawn as usize];
-        let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
+        let pawn_attacks = attacks::pawn_attacks(sq, by_color.opposite());
         attackers |= pawn_bb & pawn_attacks;
 
         // Check knight attacks
         let knight_bb = self.board.piece_bb[by_color as usize][PieceType::Knight as usize];
-        let knight_attacks = ATTACK_TABLES.knight_attacks(sq, by_color.opposite());
+        let knight_attacks = attacks::knight_attacks(sq, by_color.opposite());
         attackers |= knight_bb & knight_attacks;
 
         // Check king attacks
         let king_bb = self.board.piece_bb[by_color as usize][PieceType::King as usize];
-        let king_attacks = ATTACK_TABLES.king_attacks(sq);
+        let king_attacks = attacks::king_attacks(sq);
         attackers |= king_bb & king_attacks;
 
         // Check gold attacks (including promoted pieces that move like gold)
         let gold_bb = self.board.piece_bb[by_color as usize][PieceType::Gold as usize];
-        let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
+        let gold_attacks = attacks::gold_attacks(sq, by_color.opposite());
         attackers |= gold_bb & gold_attacks;
 
         // Check promoted pawns, lances, knights, and silvers (they move like gold)
@@ -184,17 +186,17 @@ impl Position {
         // Check silver attacks (non-promoted)
         let silver_bb =
             self.board.piece_bb[by_color as usize][PieceType::Silver as usize] & !promoted_bb;
-        let silver_attacks = ATTACK_TABLES.silver_attacks(sq, by_color.opposite());
+        let silver_attacks = attacks::silver_attacks(sq, by_color.opposite());
         attackers |= silver_bb & silver_attacks;
 
         // Check sliding attacks with custom occupancy
         let rook_bb = self.board.piece_bb[by_color as usize][PieceType::Rook as usize];
-        let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Rook);
+        let rook_attacks = attacks::sliding_attacks(sq, occupied, PieceType::Rook);
         attackers |= rook_bb & rook_attacks;
 
         let bishop_bb =
             self.board.piece_bb[by_color as usize][PieceType::Bishop as usize] & occupied;
-        let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupied, PieceType::Bishop);
+        let bishop_attacks = attacks::sliding_attacks(sq, occupied, PieceType::Bishop);
         attackers |= bishop_bb & bishop_attacks;
 
         // Check lance attacks with custom occupancy
@@ -226,16 +228,14 @@ impl Position {
         }
 
         // Get potential lance attackers using pre-computed rays
-        let lance_ray = ATTACK_TABLES.lance_rays[by_color.opposite() as usize][sq.index()];
+        let lance_ray = attacks::lance_ray_from(sq, by_color.opposite());
         let potential_attackers = lances_in_file & lance_ray;
 
         // Check each potential attacker for blockers
         let mut lances = potential_attackers;
-        while !lances.is_empty() {
-            let from = lances.pop_lsb().expect("Lance bitboard should not be empty");
-
+        while let Some(from) = lances.pop_lsb() {
             // Use pre-computed between bitboard
-            let between = ATTACK_TABLES.between_bb(from, sq);
+            let between = attacks::between_bb(from, sq);
             if (between & occupied).is_empty() {
                 // Path is clear, lance can attack
                 attackers.set(from);
@@ -309,7 +309,7 @@ impl Position {
         occupied: Bitboard,
     ) {
         // Check if there's a clear line between from and to
-        let between = ATTACK_TABLES.between_bb(from, to);
+        let between = attacks::between_bb(from, to);
         if between.is_empty() {
             return; // Not aligned, no x-rays possible
         }
@@ -320,7 +320,7 @@ impl Position {
                 [PieceType::Rook as usize]
                 | self.board.piece_bb[Color::White as usize][PieceType::Rook as usize])
                 & occupied;
-            let rook_attacks = ATTACK_TABLES.sliding_attacks(to, occupied, PieceType::Rook);
+            let rook_attacks = attacks::sliding_attacks(to, occupied, PieceType::Rook);
             *attackers |= rook_attackers & rook_attacks;
         }
 
@@ -332,7 +332,7 @@ impl Position {
                 [PieceType::Bishop as usize]
                 | self.board.piece_bb[Color::White as usize][PieceType::Bishop as usize])
                 & occupied;
-            let bishop_attacks = ATTACK_TABLES.sliding_attacks(to, occupied, PieceType::Bishop);
+            let bishop_attacks = attacks::sliding_attacks(to, occupied, PieceType::Bishop);
             *attackers |= bishop_attackers & bishop_attacks;
         }
 
@@ -345,11 +345,10 @@ impl Position {
                     & occupied;
                 // Find black lances that can reach the target
                 let mut lance_candidates = black_lances;
-                while let Some(lance_sq) = lance_candidates.lsb() {
-                    lance_candidates.clear(lance_sq);
+                while let Some(lance_sq) = lance_candidates.pop_lsb() {
                     if lance_sq.file() == to.file() && lance_sq.rank() < to.rank() {
                         // Check if path is clear
-                        let between_lance = ATTACK_TABLES.between_bb(lance_sq, to);
+                        let between_lance = attacks::between_bb(lance_sq, to);
                         if (between_lance & occupied).is_empty() {
                             attackers.set(lance_sq);
                         }
@@ -363,11 +362,10 @@ impl Position {
                     & occupied;
                 // Find white lances that can reach the target
                 let mut lance_candidates = white_lances;
-                while let Some(lance_sq) = lance_candidates.lsb() {
-                    lance_candidates.clear(lance_sq);
+                while let Some(lance_sq) = lance_candidates.pop_lsb() {
                     if lance_sq.file() == to.file() && lance_sq.rank() > to.rank() {
                         // Check if path is clear
-                        let between_lance = ATTACK_TABLES.between_bb(lance_sq, to);
+                        let between_lance = attacks::between_bb(lance_sq, to);
                         if (between_lance & occupied).is_empty() {
                             attackers.set(lance_sq);
                         }
