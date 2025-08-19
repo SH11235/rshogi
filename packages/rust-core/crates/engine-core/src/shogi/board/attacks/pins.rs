@@ -3,7 +3,7 @@
 //! This module handles detection of pieces that are pinned to the king.
 
 use crate::shogi::board::{Bitboard, Color, PieceType, Position, Square};
-use crate::shogi::ATTACK_TABLES;
+use crate::shogi::{attacks, ATTACK_TABLES};
 
 impl Position {
     /// Get blockers for king (simplified version)
@@ -65,7 +65,7 @@ impl Position {
             & !self.board.promoted_bb;
 
         // Use file mask to get lances in the same file
-        let file_mask = ATTACK_TABLES.file_masks[king_sq.file() as usize];
+        let file_mask = attacks::file_mask(king_sq.file());
         let lances_in_file = enemy_lances & file_mask;
 
         if !lances_in_file.is_empty() {
