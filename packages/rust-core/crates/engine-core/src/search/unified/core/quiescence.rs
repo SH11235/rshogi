@@ -118,10 +118,15 @@ where
             {
                 log::warn!("Hit relative quiescence depth limit qply={qply} (limit={qply_limit})");
             }
-            // Not in check, return stand pat evaluation (will be computed below)
-            // For now, we need to compute it here since we're returning early
+            // Not in check, return stand pat evaluation with proper window handling
             let stand_pat = searcher.evaluator.evaluate(pos);
-            return stand_pat;
+            if stand_pat >= beta {
+                return beta;
+            }
+            if stand_pat > alpha {
+                return stand_pat;
+            }
+            return alpha;
         }
     }
 
@@ -181,7 +186,7 @@ where
         let mut best = -SEARCH_INF;
         for &mv in moves.iter() {
             // Check QNodes budget before each move (important for strict limit enforcement)
-            if let Some(limit) = searcher.context.limits().qnodes_limit {
+            if let Some(limit) = qlimit {
                 let exceeded = if let Some(ref counter) = qnodes_counter {
                     // Check current value against limit
                     counter.load(Ordering::Acquire) >= limit
@@ -304,7 +309,7 @@ where
         }
 
         // Check QNodes budget before each capture move
-        if let Some(limit) = searcher.context.limits().qnodes_limit {
+        if let Some(limit) = qlimit {
             let exceeded = if let Some(ref counter) = qnodes_counter {
                 counter.load(Ordering::Acquire) >= limit
             } else {
