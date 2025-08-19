@@ -6,7 +6,7 @@
 //! - Lance
 
 use crate::shogi::board::{Bitboard, Color, PieceType, Position, Square};
-use crate::shogi::ATTACK_TABLES;
+use crate::shogi::{attacks, ATTACK_TABLES};
 
 impl Position {
     /// Get lance attackers to a square using optimized bitboard operations
@@ -21,7 +21,7 @@ impl Position {
         let file = sq.file();
 
         // Get all lances in the same file
-        let file_mask = ATTACK_TABLES.file_masks[file as usize];
+        let file_mask = attacks::file_mask(file);
         let lances_in_file = lance_bb & file_mask;
 
         if lances_in_file.is_empty() {
