@@ -22,13 +22,19 @@ pub const MAX_PLY: usize = 127;
 /// This value can be overridden by engine configuration if needed
 pub const DEFAULT_SEARCH_DEPTH: u8 = 6;
 
-/// Maximum additional plies for quiescence search
-/// Limits the depth of capture-only search to avoid explosion
-pub const QUIESCE_MAX_PLY: u8 = 4;
+/// Relative maximum depth for quiescence search
+/// This is the primary limit for qsearch recursion depth
+/// Note: This limit is not applied when in check to ensure proper check evasion
+pub const MAX_QPLY: u8 = 32;
 
 /// Absolute maximum depth for quiescence search
 /// Safety limit to prevent stack overflow in extreme cases
-pub const MAX_QUIESCE_DEPTH: u16 = 32;
+/// This is now a secondary safeguard, increased from 32 to allow deeper main searches
+pub const MAX_QUIESCE_DEPTH: u16 = 96;
+
+/// Quiescence search evaluation penalty for check positions
+/// Applied when in check at depth limit to make evaluation slightly pessimistic
+pub const QUIESCE_CHECK_EVAL_PENALTY: i32 = 50;
 
 /// Aspiration window constants
 ///
