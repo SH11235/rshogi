@@ -25,7 +25,7 @@ where
     searcher.pv_table.clear_len_at(ply as usize);
 
     // Get adaptive polling mask based on time control (unified with alpha_beta)
-    let time_check_mask = super::get_event_poll_mask(searcher);
+    let time_check_mask = super::time_control::get_event_poll_mask(searcher);
 
     // Early stop check
     if searcher.context.should_stop() {
@@ -372,7 +372,7 @@ where
                 #[cfg(debug_assertions)]
                 {
                     let local_pv = searcher.pv_table.get_line(ply as usize).to_vec();
-                    super::pv_local_sanity(pos, &local_pv);
+                    super::pv_validation::pv_local_sanity(pos, &local_pv);
                 }
 
                 if alpha >= beta {
