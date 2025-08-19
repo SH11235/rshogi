@@ -289,8 +289,9 @@ where
 
         // Principal variation search
         if moves_searched == 0 {
-            // Full window search for first move
-            score = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, ply + 1);
+            // Full window search for first move (saturating for safety)
+            let next_depth = depth.saturating_sub(1);
+            score = -super::alpha_beta(searcher, pos, next_depth, -beta, -alpha, ply + 1);
         } else {
             // Special handling for king moves - extend search to see consequences
             let extension = if is_king_move && depth >= 3 {
@@ -667,5 +668,25 @@ mod tests {
 
         // Scores might differ due to early return, but should be reasonable
         assert!(score2.abs() < 10000);
+    }
+
+    #[test]
+    fn test_search_node_depth_zero() {
+        // Test that search_node handles depth=0 correctly without underflow
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(1).build());
+
+        let mut pos = Position::startpos();
+
+        // Call search_node with depth=0 should not panic or underflow
+        let score = search_node(&mut searcher, &mut pos, 0, -1000, 1000, 0);
+
+        // Should return a valid score (will trigger quiescence search)
+        assert!((-10000..=10000).contains(&score));
+
+        // Should have searched some nodes (quiescence search)
+        assert!(searcher.stats.nodes > 0);
+        assert!(searcher.stats.qnodes > 0);
     }
 }

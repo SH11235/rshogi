@@ -59,7 +59,11 @@ pub fn try_null_move<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SI
 where
     E: Evaluator + Send + Sync + 'static,
 {
-    // Don't do null move if we might be in zugzwang
+    // Don't do null move in check or if we might be in zugzwang
+    if pos.is_in_check() {
+        return None;
+    }
+
     // Check if we have non-pawn material (simplified check)
     if has_non_pawn_material(pos) {
         // Make null move using the Position's method
