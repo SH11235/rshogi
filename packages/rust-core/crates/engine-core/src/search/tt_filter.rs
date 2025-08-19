@@ -5,15 +5,16 @@
 
 use crate::search::tt::NodeType;
 
-/// Simple optimization: Skip TT storage for very shallow nodes and quiescence
+/// Simple optimization: Skip TT storage for very shallow nodes
+/// PV nodes are always stored regardless of depth
 #[inline(always)]
-pub fn should_skip_tt_store(depth: u8, in_quiescence: bool) -> bool {
-    // Skip quiescence entries - they add overhead with minimal benefit
-    if in_quiescence {
-        return true;
+pub fn should_skip_tt_store(depth: u8, is_pv: bool) -> bool {
+    // Always store PV nodes - they are critical for move ordering
+    if is_pv {
+        return false;
     }
 
-    // Skip very shallow entries (depth < 2)
+    // Skip very shallow entries (depth < 2) for non-PV nodes
     // These are unlikely to be reused and add overhead
     if depth < 2 {
         return true;
@@ -47,4 +48,50 @@ pub fn boost_tt_depth(base_depth: u8, node_type: NodeType) -> u8 {
     }
 
     base_depth
+}
+
+/// Additional boost for PV nodes
+#[inline(always)]
+pub fn boost_pv_depth(base_depth: u8, is_pv: bool) -> u8 {
+    // PV nodes get additional depth boost to ensure they stay in TT
+    if is_pv {
+        return base_depth.saturating_add(2);
+    }
+    base_depth
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tt_store_keeps_pv_even_at_shallow_depth() {
+        // PV nodes should always be stored, regardless of depth
+        assert!(!should_skip_tt_store(0, true));
+        assert!(!should_skip_tt_store(1, true));
+
+        // Non-PV shallow nodes should be skipped
+        assert!(should_skip_tt_store(0, false));
+        assert!(should_skip_tt_store(1, false));
+
+        // Non-PV deeper nodes should be stored
+        assert!(!should_skip_tt_store(2, false));
+        assert!(!should_skip_tt_store(3, false));
+    }
+
+    #[test]
+    fn test_depth_boosting() {
+        // Test TT depth boost for exact nodes
+        assert_eq!(boost_tt_depth(5, NodeType::Exact), 6);
+        assert_eq!(boost_tt_depth(5, NodeType::LowerBound), 5);
+        assert_eq!(boost_tt_depth(5, NodeType::UpperBound), 5);
+
+        // Test PV depth boost
+        assert_eq!(boost_pv_depth(5, true), 7);
+        assert_eq!(boost_pv_depth(5, false), 5);
+
+        // Test saturation
+        assert_eq!(boost_tt_depth(255, NodeType::Exact), 255);
+        assert_eq!(boost_pv_depth(254, true), 255);
+    }
 }

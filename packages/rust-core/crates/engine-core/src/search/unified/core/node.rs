@@ -25,7 +25,7 @@ where
     searcher.pv_table.clear_len_at(ply as usize);
 
     // Get adaptive polling mask based on time control (unified with alpha_beta)
-    let time_check_mask = super::get_event_poll_mask(searcher);
+    let time_check_mask = super::time_control::get_event_poll_mask(searcher);
 
     // Early stop check
     if searcher.context.should_stop() {
@@ -100,7 +100,7 @@ where
         // Go directly to quiescence search if position is really bad
         let razoring_alpha = alpha - crate::search::unified::pruning::razoring_margin(depth);
         let score =
-            super::quiescence_search(searcher, pos, razoring_alpha, razoring_alpha + 1, ply);
+            super::quiescence_search(searcher, pos, razoring_alpha, razoring_alpha + 1, ply, 0);
         if score <= razoring_alpha {
             return score;
         }
@@ -139,7 +139,7 @@ where
                     }
                     // Even without a good score, stop searching this node
                     // to avoid duplication with sibling threads
-                    // Return alpha to maintain fail-soft consistency
+                    // Return alpha to keep a safe fail-low bound under negamax
                     return alpha;
                 }
             }
@@ -289,8 +289,9 @@ where
 
         // Principal variation search
         if moves_searched == 0 {
-            // Full window search for first move
-            score = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, ply + 1);
+            // Full window search for first move (saturating for safety)
+            let next_depth = depth.saturating_sub(1);
+            score = -super::alpha_beta(searcher, pos, next_depth, -beta, -alpha, ply + 1);
         } else {
             // Special handling for king moves - extend search to see consequences
             let extension = if is_king_move && depth >= 3 {
@@ -372,7 +373,7 @@ where
                 #[cfg(debug_assertions)]
                 {
                     let local_pv = searcher.pv_table.get_line(ply as usize).to_vec();
-                    super::pv_local_sanity(pos, &local_pv);
+                    super::pv_validation::pv_local_sanity(pos, &local_pv);
                 }
 
                 if alpha >= beta {
@@ -511,9 +512,15 @@ where
             NodeType::Exact
         };
 
+        // Determine if this is a PV node
+        // A node is a PV node if the score improved alpha but didn't exceed beta
+        let is_pv = best_score > original_alpha && best_score < beta;
+
         // Simple optimization: skip shallow nodes
-        if !crate::search::tt_filter::should_skip_tt_store(depth, false) {
-            let boosted_depth = crate::search::tt_filter::boost_tt_depth(depth, node_type);
+        if !crate::search::tt_filter::should_skip_tt_store(depth, is_pv) {
+            let mut boosted_depth = crate::search::tt_filter::boost_tt_depth(depth, node_type);
+            // Apply additional boost for PV nodes
+            boosted_depth = crate::search::tt_filter::boost_pv_depth(boosted_depth, is_pv);
             searcher.store_tt(hash, boosted_depth, best_score, node_type, best_move);
         }
     }
@@ -661,5 +668,25 @@ mod tests {
 
         // Scores might differ due to early return, but should be reasonable
         assert!(score2.abs() < 10000);
+    }
+
+    #[test]
+    fn test_search_node_depth_zero() {
+        // Test that search_node handles depth=0 correctly without underflow
+        let mut searcher =
+            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(1).build());
+
+        let mut pos = Position::startpos();
+
+        // Call search_node with depth=0 should not panic or underflow
+        let score = search_node(&mut searcher, &mut pos, 0, -1000, 1000, 0);
+
+        // Should return a valid score (will trigger quiescence search)
+        assert!((-10000..=10000).contains(&score));
+
+        // Should have searched some nodes (quiescence search)
+        assert!(searcher.stats.nodes > 0);
+        assert!(searcher.stats.qnodes > 0);
     }
 }
