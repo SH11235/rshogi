@@ -205,7 +205,6 @@ fn test_worker_no_bestmove() {
                     should_send_fallback = true;
                 }
             }
-            _ => {}
         }
     }
 
