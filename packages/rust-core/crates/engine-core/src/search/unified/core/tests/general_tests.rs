@@ -63,6 +63,21 @@ fn test_has_non_pawn_material() {
     // Test position with non-pawn piece in hand
     let with_hand = Position::from_sfen("k8/9/ppp6/9/9/9/6PPP/9/K8 b S 1").unwrap();
     assert!(null_move::has_non_pawn_material(&with_hand), "Black has a silver in hand");
+
+    // Test position with promoted pawn (tokin) - should count as non-pawn material
+    // SFEN: k8/9/+P8/9/9/9/9/9/K8 b - 1 (black has a promoted pawn - uppercase P for black)
+    let with_tokin = Position::from_sfen("k8/9/+P8/9/9/9/9/9/K8 b - 1").unwrap();
+    assert!(
+        null_move::has_non_pawn_material(&with_tokin),
+        "Black has a tokin (promoted pawn), which is equivalent to gold"
+    );
+
+    // Test position with promoted pawn for white
+    let white_tokin = Position::from_sfen("k8/9/9/9/9/9/+p8/9/K8 w - 1").unwrap();
+    assert!(
+        null_move::has_non_pawn_material(&white_tokin),
+        "White has a tokin (promoted pawn), which is equivalent to gold"
+    );
 }
 
 #[test]
