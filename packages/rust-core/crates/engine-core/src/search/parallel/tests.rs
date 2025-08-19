@@ -192,3 +192,80 @@ fn test_pending_work_counter_accuracy() {
         "Pending work counter should return to zero after search"
     );
 }
+
+#[test]
+fn test_fallback_bestmove() {
+    // Test that parallel searcher always returns a move, even in edge cases
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 1); // Single thread to simplify
+
+    let mut pos = Position::startpos();
+
+    // Use extremely limited search to potentially trigger no-best-move scenario
+    let limits = SearchLimits::builder()
+        .depth(1)
+        .nodes(1) // Extremely limited node budget
+        .build();
+
+    let result = searcher.search(&mut pos, limits);
+
+    // Verify that we always get a best move
+    assert!(
+        result.best_move.is_some(),
+        "Search should always return a best move, even with limited resources"
+    );
+
+    // Verify that the move is legal
+    if let Some(best_move) = result.best_move {
+        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let legal_moves = move_gen.generate_all();
+        let move_found = legal_moves.iter().any(|&m| m == best_move);
+        assert!(move_found, "Fallback move must be legal");
+    }
+
+    // Verify depth is at least 1
+    assert!(result.stats.depth >= 1, "Search depth should be at least 1");
+
+    // Verify PV contains the move
+    assert!(!result.stats.pv.is_empty(), "PV should not be empty");
+    if let Some(best_move) = result.best_move {
+        assert_eq!(result.stats.pv[0], best_move, "PV should start with best move");
+    }
+}
+
+#[test]
+fn test_fallback_bestmove_extreme_limits() {
+    // Test fallback with extremely restrictive limits
+    let evaluator = Arc::new(MaterialEvaluator);
+    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
+
+    // Use a complex middle game position
+    let mut pos =
+        Position::from_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap_or_else(|_| Position::startpos());
+
+    // Extremely limited search that might not complete properly
+    let limits = SearchLimits::builder()
+        .depth(1)
+        .nodes(1) // Only 1 node allowed
+        .qnodes_limit(0) // No quiescence search
+        .build();
+
+    let result = searcher.search(&mut pos, limits);
+
+    // Even with extreme limits, we should get a move
+    assert!(
+        result.best_move.is_some(),
+        "Should always return a move even with extreme limits"
+    );
+
+    // The move should be legal
+    if let Some(best_move) = result.best_move {
+        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let legal_moves = move_gen.generate_all();
+        let move_found = legal_moves.iter().any(|&m| m == best_move);
+        assert!(move_found, "Move should be legal: {best_move}");
+    }
+}
