@@ -20,8 +20,8 @@ pub(crate) fn probe_simd(
 
     // Use SIMD to find matching key
     if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
-        // Use Acquire ordering on data load for synchronization
-        let data = entries[idx * 2 + 1].load(Ordering::Acquire);
+        // Use Relaxed for data since Acquire on key already synchronized
+        let data = entries[idx * 2 + 1].load(Ordering::Relaxed);
         let entry = TTEntry {
             key: keys[idx],
             data,
