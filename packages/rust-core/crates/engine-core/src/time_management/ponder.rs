@@ -25,6 +25,8 @@ pub struct PonderManager<'a> {
     pub(crate) start_ply: u32,
     pub(crate) game_phase: GamePhase,
     pub(crate) params: TimeParameters,
+    pub(crate) last_pv_change_ms: &'a AtomicU64,
+    pub(crate) pv_threshold_ms: &'a AtomicU64,
 }
 
 impl<'a> PonderManager<'a> {
@@ -141,6 +143,10 @@ impl<'a> PonderManager<'a> {
                 *start = Instant::now();
             }
         }
+
+        // Reset PV stability tracking to match new time origin
+        self.last_pv_change_ms.store(0, Ordering::Release);
+        self.pv_threshold_ms.store(self.params.pv_base_threshold_ms, Ordering::Release);
 
         // Clear ponder flag
         self.is_ponder.store(false, Ordering::Release);
