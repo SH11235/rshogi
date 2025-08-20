@@ -41,8 +41,8 @@ pub use metrics::DetailedTTMetrics;
 // Re-export SIMD types
 pub use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
 
-/// Number of entries per bucket (default for backward compatibility)
-const BUCKET_SIZE: usize = 4;
+// Re-export BUCKET_SIZE from constants
+pub use constants::BUCKET_SIZE;
 
 /// Transposition table implementation
 pub struct TranspositionTable {
@@ -283,9 +283,9 @@ impl TranspositionTable {
 
         // Use prefetcher if enabled
         if let Some(ref _prefetcher) = self.prefetcher {
-            // Prefetch next likely bucket
-            let next_hash = hash.wrapping_add(1);
-            self.prefetch_l1(next_hash);
+            // Prefetch next bucket directly (more efficient than rehashing)
+            let next_idx = (idx + 1) & (self.num_buckets - 1);
+            self.prefetch_bucket(next_idx, 3); // L1 cache hint
 
             #[cfg(feature = "tt_metrics")]
             if let Some(ref metrics) = self.metrics {
@@ -730,6 +730,16 @@ impl TranspositionTable {
     /// Get prefetch statistics
     pub fn prefetch_stats(&self) -> Option<prefetch::PrefetchStats> {
         self.prefetcher.as_ref().map(|p| p.stats())
+    }
+
+    /// Prefetch a specific bucket by index
+    #[inline]
+    fn prefetch_bucket(&self, bucket_idx: usize, hint: i32) {
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            flexible_buckets[bucket_idx].prefetch(hint);
+        } else {
+            self.buckets[bucket_idx].prefetch(hint);
+        }
     }
 
     /// Start a new search (increment age)
