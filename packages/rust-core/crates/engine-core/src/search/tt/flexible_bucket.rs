@@ -531,69 +531,17 @@ impl FlexibleTTBucket {
 
     /// Prefetch bucket into cache
     pub(crate) fn prefetch(&self, hint: i32) {
-        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-        unsafe {
-            use std::arch::x86_64::{
-                _mm_prefetch, _MM_HINT_NTA, _MM_HINT_T0, _MM_HINT_T1, _MM_HINT_T2,
-            };
+        use super::prefetch::prefetch_multiple;
 
-            let addr = self.entries.as_ptr() as *const i8;
+        let addr = self.entries.as_ptr() as *const u8;
 
-            match hint {
-                0 => _mm_prefetch(addr, _MM_HINT_NTA), // Non-temporal
-                1 => _mm_prefetch(addr, _MM_HINT_T2),  // L3
-                2 => _mm_prefetch(addr, _MM_HINT_T1),  // L2
-                3 => _mm_prefetch(addr, _MM_HINT_T0),  // L1
-                _ => {}                                // Invalid hint, do nothing
-            }
+        // Calculate number of cache lines based on bucket size
+        let cache_lines = match self.size {
+            BucketSize::Small => 1,  // 64 bytes = 1 cache line
+            BucketSize::Medium => 2, // 128 bytes = 2 cache lines
+            BucketSize::Large => 4,  // 256 bytes = 4 cache lines
+        };
 
-            // For large buckets, prefetch additional cache lines
-            if self.size == BucketSize::Large {
-                let addr2 = addr.add(64);
-                let addr3 = addr.add(128);
-                let addr4 = addr.add(192);
-
-                match hint {
-                    0 => {
-                        _mm_prefetch(addr2, _MM_HINT_NTA);
-                        _mm_prefetch(addr3, _MM_HINT_NTA);
-                        _mm_prefetch(addr4, _MM_HINT_NTA);
-                    }
-                    1 => {
-                        _mm_prefetch(addr2, _MM_HINT_T2);
-                        _mm_prefetch(addr3, _MM_HINT_T2);
-                        _mm_prefetch(addr4, _MM_HINT_T2);
-                    }
-                    2 => {
-                        _mm_prefetch(addr2, _MM_HINT_T1);
-                        _mm_prefetch(addr3, _MM_HINT_T1);
-                        _mm_prefetch(addr4, _MM_HINT_T1);
-                    }
-                    3 => {
-                        _mm_prefetch(addr2, _MM_HINT_T0);
-                        _mm_prefetch(addr3, _MM_HINT_T0);
-                        _mm_prefetch(addr4, _MM_HINT_T0);
-                    }
-                    _ => {}
-                }
-            } else if self.size == BucketSize::Medium {
-                // Medium buckets need 2 cache lines
-                let addr2 = addr.add(64);
-
-                match hint {
-                    0 => _mm_prefetch(addr2, _MM_HINT_NTA),
-                    1 => _mm_prefetch(addr2, _MM_HINT_T2),
-                    2 => _mm_prefetch(addr2, _MM_HINT_T1),
-                    3 => _mm_prefetch(addr2, _MM_HINT_T0),
-                    _ => {}
-                }
-            }
-        }
-
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-        {
-            // No prefetch available on this architecture
-            let _ = hint;
-        }
+        prefetch_multiple(addr, cache_lines, hint);
     }
 }

@@ -88,6 +88,7 @@ impl TTBucket {
     }
 
     /// Scalar fallback probe implementation with early termination
+    #[inline(always)]
     fn probe_scalar(&self, target_key: u64) -> Option<TTEntry> {
         // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
@@ -308,7 +309,9 @@ impl TTBucket {
                     if let Some(m) = metrics {
                         use super::metrics::{record_metric, MetricType};
                         record_metric(m, MetricType::CasSuccess);
-                        record_metric(m, MetricType::AtomicStore(3)); // 1 CAS + 2 stores
+                        // AtomicStore counts pure store operations only (not CAS)
+                        // Here we have 2 stores: first to clear (data=0), then actual data
+                        record_metric(m, MetricType::AtomicStore(2));
                         record_metric(m, MetricType::ReplaceWorst);
                     }
                 }
