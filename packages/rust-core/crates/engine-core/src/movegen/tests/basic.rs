@@ -67,8 +67,7 @@ fn test_no_king_capture() {
             // 移動先が後手玉の位置になっている手がないことを確認
             assert_ne!(
                 to, white_king_square,
-                "Generated illegal move: piece moves to king square! Move: {:?}",
-                m
+                "Generated illegal move: piece moves to king square! Move: {m:?}"
             );
         }
     }
