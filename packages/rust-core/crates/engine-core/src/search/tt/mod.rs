@@ -6,8 +6,10 @@
 //! - Better memory locality
 
 pub mod bucket;
+pub mod bucket_simd;
 pub mod constants;
 pub mod entry;
+pub mod flexible_bucket;
 pub mod gc;
 pub mod metrics;
 pub mod prefetch;
@@ -18,8 +20,9 @@ mod tests;
 
 use crate::shogi::Move;
 use crate::util;
-use bucket::{FlexibleTTBucket, TTBucket};
+use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
+use flexible_bucket::FlexibleTTBucket;
 use prefetch::AdaptivePrefetcher;
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;

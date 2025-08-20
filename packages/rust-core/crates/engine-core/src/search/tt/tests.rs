@@ -793,7 +793,7 @@ mod tt_tests {
     #[test]
     fn test_flexible_bucket_store_with_metrics_default() {
         // This test ensures FlexibleTTBucket::store_with_metrics is referenced in default builds
-        let bucket = bucket::FlexibleTTBucket::new(BucketSize::Medium);
+        let bucket = super::flexible_bucket::FlexibleTTBucket::new(BucketSize::Medium);
         let key = 0x0FEDCBA987654321_u64;
         let entry = TTEntry::new(key, None, 200, 60, 9, NodeType::Exact, 1);
 
@@ -813,7 +813,7 @@ mod tt_tests {
     #[test]
     fn test_flexible_bucket_empty_slot_mode_no_replacement() {
         // Fill a small flexible bucket fully, then attempt to store with empty_slot_mode=true
-        let bucket = bucket::FlexibleTTBucket::new(BucketSize::Small); // 4 entries
+        let bucket = super::flexible_bucket::FlexibleTTBucket::new(BucketSize::Small); // 4 entries
 
         // Fill with 4 unique keys
         for i in 0..4u64 {

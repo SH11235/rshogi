@@ -1,6 +1,124 @@
-//! Prefetch functionality for transposition table
-//!
-//! This module provides adaptive prefetching with integration to the
-//! existing AdaptivePrefetcher implementation.
+//! CPU cache prefetch utilities for transposition table
 
-pub use crate::search::adaptive_prefetcher::{AdaptivePrefetcher, PrefetchStats};
+use crate::util::sync_compat::{AtomicU64, Ordering};
+
+/// Statistics for prefetch operations
+#[derive(Debug, Clone, Copy)]
+pub struct PrefetchStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub hit_rate: f64,
+    pub distance: usize,
+}
+
+/// Adaptive prefetcher that tracks hit/miss rates
+pub(crate) struct AdaptivePrefetcher {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl AdaptivePrefetcher {
+    /// Create new adaptive prefetcher
+    pub fn new() -> Self {
+        AdaptivePrefetcher {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a hit
+    pub fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a miss
+    #[allow(dead_code)]
+    pub fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get statistics
+    pub fn stats(&self) -> PrefetchStats {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        let hit_rate = if total > 0 {
+            hits as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        PrefetchStats {
+            hits,
+            misses,
+            hit_rate,
+            distance: 1, // Default distance, could be made configurable
+        }
+    }
+}
+
+/// Prefetch memory into cache with specified hint
+///
+/// # Arguments
+/// * `addr` - The memory address to prefetch
+/// * `hint` - Prefetch hint (0-3):
+///   - 0: Non-temporal (bypass cache)
+///   - 1: L3 cache
+///   - 2: L2 cache  
+///   - 3: L1 cache
+pub(crate) fn prefetch_memory(addr: *const u8, hint: i32) {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    unsafe {
+        use std::arch::x86_64::{
+            _mm_prefetch, _MM_HINT_NTA, _MM_HINT_T0, _MM_HINT_T1, _MM_HINT_T2,
+        };
+
+        match hint {
+            0 => _mm_prefetch(addr as *const i8, _MM_HINT_NTA), // Non-temporal
+            1 => _mm_prefetch(addr as *const i8, _MM_HINT_T2),  // L3
+            2 => _mm_prefetch(addr as *const i8, _MM_HINT_T1),  // L2
+            3 => _mm_prefetch(addr as *const i8, _MM_HINT_T0),  // L1
+            _ => {}                                             // Invalid hint, do nothing
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        // No prefetch available on this architecture
+        let _ = (addr, hint);
+    }
+}
+
+/// Prefetch multiple cache lines for larger data structures
+///
+/// # Arguments
+/// * `addr` - The base memory address
+/// * `cache_lines` - Number of cache lines to prefetch (each is 64 bytes)
+/// * `hint` - Prefetch hint (0-3)
+#[allow(dead_code)]
+pub(crate) fn prefetch_multiple(addr: *const u8, cache_lines: usize, hint: i32) {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    unsafe {
+        use std::arch::x86_64::{
+            _mm_prefetch, _MM_HINT_NTA, _MM_HINT_T0, _MM_HINT_T1, _MM_HINT_T2,
+        };
+
+        for i in 0..cache_lines {
+            let offset_addr = addr.add(i * 64) as *const i8;
+
+            match hint {
+                0 => _mm_prefetch(offset_addr, _MM_HINT_NTA),
+                1 => _mm_prefetch(offset_addr, _MM_HINT_T2),
+                2 => _mm_prefetch(offset_addr, _MM_HINT_T1),
+                3 => _mm_prefetch(offset_addr, _MM_HINT_T0),
+                _ => break,
+            }
+        }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        // No prefetch available on this architecture
+        let _ = (addr, cache_lines, hint);
+    }
+}
