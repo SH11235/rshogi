@@ -530,6 +530,7 @@ impl FlexibleTTBucket {
     }
 
     /// Prefetch bucket into cache
+    #[inline(always)]
     pub(crate) fn prefetch(&self, hint: i32) {
         use super::prefetch::prefetch_multiple;
         use core::mem::size_of;

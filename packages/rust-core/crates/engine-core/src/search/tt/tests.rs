@@ -110,8 +110,8 @@ mod tt_tests {
         }
         tt.update_hashfull_estimate();
 
-        // Since we marked all 64 sampled buckets, estimate should be 1000
-        // But due to EMA, it won't jump immediately
+        // Since we marked all 64 sampled buckets, estimate should reflect
+        // the occupancy based on sampling (not necessarily 1000)
         let estimate = tt.hashfull_estimate();
         assert!(estimate > 0);
 
