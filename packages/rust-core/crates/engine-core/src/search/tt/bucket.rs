@@ -122,8 +122,8 @@ impl TTBucket {
 
         // If we found a match, load data with fence + Relaxed
         if let Some(idx) = matching_idx {
-            // Use Acquire ordering on data load for synchronization
-            let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+            // Use Relaxed for data since Acquire on key already synchronized
+            let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: target_key,
                 data,

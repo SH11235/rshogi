@@ -56,7 +56,8 @@ impl FlexibleTTBucket {
             let idx = i * 2;
             let key = self.entries[idx].load(Ordering::Acquire);
             if key == target_key {
-                let data = self.entries[idx + 1].load(Ordering::Acquire);
+                // Use Relaxed for data since Acquire on key already synchronized
+                let data = self.entries[idx + 1].load(Ordering::Relaxed);
                 let entry = TTEntry { key, data };
                 if entry.depth() > 0 {
                     return Some(entry);
@@ -78,7 +79,8 @@ impl FlexibleTTBucket {
 
             if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_8(&keys, target_key)
             {
-                let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+                // Use Relaxed for data since Acquire on key already synchronized
+                let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
                 let entry = TTEntry {
                     key: keys[idx],
                     data,
@@ -93,7 +95,8 @@ impl FlexibleTTBucket {
                 let idx = i * 2;
                 let key = self.entries[idx].load(Ordering::Acquire);
                 if key == target_key {
-                    let data = self.entries[idx + 1].load(Ordering::Acquire);
+                    // Use Relaxed for data since Acquire on key already synchronized
+                    let data = self.entries[idx + 1].load(Ordering::Relaxed);
                     let entry = TTEntry { key, data };
                     if entry.depth() > 0 {
                         return Some(entry);
@@ -116,7 +119,8 @@ impl FlexibleTTBucket {
 
             if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_16(&keys, target_key)
             {
-                let data = self.entries[idx * 2 + 1].load(Ordering::Acquire);
+                // Use Relaxed for data since Acquire on key already synchronized
+                let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
                 let entry = TTEntry {
                     key: keys[idx],
                     data,
@@ -131,7 +135,8 @@ impl FlexibleTTBucket {
                 let idx = i * 2;
                 let key = self.entries[idx].load(Ordering::Acquire);
                 if key == target_key {
-                    let data = self.entries[idx + 1].load(Ordering::Acquire);
+                    // Use Relaxed for data since Acquire on key already synchronized
+                    let data = self.entries[idx + 1].load(Ordering::Relaxed);
                     let entry = TTEntry { key, data };
                     if entry.depth() > 0 {
                         return Some(entry);
