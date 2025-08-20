@@ -5,7 +5,6 @@
 
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
 
 use crate::time_management::{
     allocation::calculate_time_allocation, ByoyomiState, GamePhase, TimeControl, TimeLimits,
@@ -19,7 +18,7 @@ pub struct PonderManager<'a> {
     pub(crate) active_time_control: &'a RwLock<TimeControl>,
     pub(crate) soft_limit_ms: &'a AtomicU64,
     pub(crate) hard_limit_ms: &'a AtomicU64,
-    pub(crate) start_time: &'a Mutex<Instant>,
+    pub(crate) start_epoch_ms: &'a AtomicU64,
     pub(crate) byoyomi_state: &'a Mutex<ByoyomiState>,
     pub(crate) side_to_move: Color,
     pub(crate) start_ply: u32,
@@ -131,17 +130,19 @@ impl<'a> PonderManager<'a> {
         }
 
         // Reset start time to avoid double counting
+        #[cfg(test)]
         {
-            let mut start = self.start_time.lock();
-            #[cfg(test)]
-            {
-                use crate::time_management::test_utils::mock_now;
-                *start = mock_now();
-            }
-            #[cfg(not(test))]
-            {
-                *start = Instant::now();
-            }
+            use crate::time_management::mock_current_ms;
+            self.start_epoch_ms.store(mock_current_ms(), Ordering::Release);
+        }
+        #[cfg(not(test))]
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("System time is before UNIX epoch")
+                .as_millis() as u64;
+            self.start_epoch_ms.store(now_ms, Ordering::Release);
         }
 
         // Reset PV stability tracking to match new time origin
