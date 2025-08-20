@@ -1,9 +1,6 @@
 //! Check and pin calculation
 
-use crate::{
-    shogi::{attacks, ATTACK_TABLES},
-    Bitboard, Color, PieceType, Square,
-};
+use crate::{shogi::attacks, Bitboard, Color, PieceType, Square};
 
 use super::core::MoveGenImpl;
 
@@ -26,18 +23,18 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
     let enemy_pawns = gen.pos.board.piece_bb[them as usize][PieceType::Pawn as usize]
         & !gen.pos.board.promoted_bb;
     // Pawn attacks are asymmetric - we need to check where OUR pawns could attack from
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(king_sq, us);
+    let pawn_attacks = attacks::pawn_attacks(king_sq, us);
     gen.checkers |= enemy_pawns & pawn_attacks;
 
     // Knight checks
     let enemy_knights = gen.pos.board.piece_bb[them as usize][PieceType::Knight as usize]
         & !gen.pos.board.promoted_bb;
     // Knight attacks are asymmetric - we need to check where OUR knights could attack from
-    let knight_attacks = ATTACK_TABLES.knight_attacks(king_sq, us);
+    let knight_attacks = attacks::knight_attacks(king_sq, us);
     gen.checkers |= enemy_knights & knight_attacks;
 
     // Gold/promoted pieces checks
-    let gold_attacks = ATTACK_TABLES.gold_attacks(king_sq, them);
+    let gold_attacks = attacks::gold_attacks(king_sq, them);
     let enemy_golds = gen.pos.board.piece_bb[them as usize][PieceType::Gold as usize];
     gen.checkers |= enemy_golds & gold_attacks;
 
@@ -56,7 +53,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
     // Silver checks
     let enemy_silvers = gen.pos.board.piece_bb[them as usize][PieceType::Silver as usize]
         & !gen.pos.board.promoted_bb;
-    let silver_attacks = ATTACK_TABLES.silver_attacks(king_sq, them);
+    let silver_attacks = attacks::silver_attacks(king_sq, them);
     gen.checkers |= enemy_silvers & silver_attacks;
 
     // Lance checks and pins
@@ -92,7 +89,7 @@ pub(super) fn calculate_checkers_and_pins(gen: &mut MoveGenImpl) {
 
     // Dragon (promoted rook) moves like rook + king
     let dragons = enemy_rooks & gen.pos.board.promoted_bb;
-    let dragon_king_attacks = ATTACK_TABLES.king_attacks(king_sq);
+    let dragon_king_attacks = attacks::king_attacks(king_sq);
     gen.checkers |= dragons & dragon_king_attacks;
 
     // Horse (promoted bishop) moves like bishop + king
@@ -180,7 +177,7 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
     let enemy_pawns = gen.pos.board.piece_bb[them as usize][PieceType::Pawn as usize]
         & !gen.pos.board.promoted_bb;
     // Pawn attacks are asymmetric - we need to check where OUR pawns could attack from
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(to, us);
+    let pawn_attacks = attacks::pawn_attacks(to, us);
     if !(enemy_pawns & pawn_attacks).is_empty() {
         return true;
     }
@@ -189,13 +186,13 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
     let enemy_knights = gen.pos.board.piece_bb[them as usize][PieceType::Knight as usize]
         & !gen.pos.board.promoted_bb;
     // Knight attacks are asymmetric - we need to check where OUR knights could attack from
-    let knight_attacks = ATTACK_TABLES.knight_attacks(to, us);
+    let knight_attacks = attacks::knight_attacks(to, us);
     if !(enemy_knights & knight_attacks).is_empty() {
         return true;
     }
 
     // Gold and promoted piece checks
-    let gold_attacks = ATTACK_TABLES.gold_attacks(to, them);
+    let gold_attacks = attacks::gold_attacks(to, them);
     let enemy_golds = gen.pos.board.piece_bb[them as usize][PieceType::Gold as usize];
     if !(enemy_golds & gold_attacks).is_empty() {
         return true;
@@ -214,14 +211,14 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
     // Silver checks
     let enemy_silvers = gen.pos.board.piece_bb[them as usize][PieceType::Silver as usize]
         & !gen.pos.board.promoted_bb;
-    let silver_attacks = ATTACK_TABLES.silver_attacks(to, them);
+    let silver_attacks = attacks::silver_attacks(to, them);
     if !(enemy_silvers & silver_attacks).is_empty() {
         return true;
     }
 
     // King checks
     let enemy_king = gen.pos.board.piece_bb[them as usize][PieceType::King as usize];
-    let king_attacks = ATTACK_TABLES.king_attacks(to);
+    let king_attacks = attacks::king_attacks(to);
     if !(enemy_king & king_attacks).is_empty() {
         return true;
     }
@@ -239,14 +236,14 @@ pub(super) fn would_be_in_check(gen: &MoveGenImpl, from: Square, to: Square) -> 
 
     // Rook/Dragon checks
     let enemy_rooks = gen.pos.board.piece_bb[them as usize][PieceType::Rook as usize];
-    let rook_attacks = ATTACK_TABLES.sliding_attacks(to, occupancy_after, PieceType::Rook);
+    let rook_attacks = attacks::sliding_attacks(to, occupancy_after, PieceType::Rook);
     if !(enemy_rooks & rook_attacks).is_empty() {
         return true;
     }
 
     // Bishop/Horse checks
     let enemy_bishops = gen.pos.board.piece_bb[them as usize][PieceType::Bishop as usize];
-    let bishop_attacks = ATTACK_TABLES.sliding_attacks(to, occupancy_after, PieceType::Bishop);
+    let bishop_attacks = attacks::sliding_attacks(to, occupancy_after, PieceType::Bishop);
     if !(enemy_bishops & bishop_attacks).is_empty() {
         return true;
     }

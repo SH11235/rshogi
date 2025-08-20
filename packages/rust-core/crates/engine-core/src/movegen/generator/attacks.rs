@@ -1,6 +1,6 @@
 //! Attack detection functions
 
-use crate::{shogi::ATTACK_TABLES, Bitboard, Color, PieceType, Square};
+use crate::{shogi::attacks, Bitboard, Color, PieceType, Square};
 
 use super::core::MoveGenImpl;
 
@@ -28,7 +28,7 @@ pub(super) fn attackers_to_with_occupancy(
     // For each pawn, check if it can attack sq
     let mut pawn_copy = pawn_pieces;
     while let Some(pawn_sq) = pawn_copy.pop_lsb() {
-        let pawn_attacks = ATTACK_TABLES.pawn_attacks(pawn_sq, color);
+        let pawn_attacks = attacks::pawn_attacks(pawn_sq, color);
         if pawn_attacks.test(sq) {
             attackers.set(pawn_sq);
         }
@@ -38,7 +38,7 @@ pub(super) fn attackers_to_with_occupancy(
     let gold_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Gold as usize] & pieces;
     let mut gold_copy = gold_pieces;
     while let Some(gold_sq) = gold_copy.pop_lsb() {
-        let gold_attacks = ATTACK_TABLES.gold_attacks(gold_sq, color);
+        let gold_attacks = attacks::gold_attacks(gold_sq, color);
         if gold_attacks.test(sq) {
             attackers.set(gold_sq);
         }
@@ -53,7 +53,7 @@ pub(super) fn attackers_to_with_occupancy(
             | gen.pos.board.piece_bb[color as usize][PieceType::Pawn as usize]);
     let mut promoted_copy = promoted_gold_movers;
     while let Some(promoted_sq) = promoted_copy.pop_lsb() {
-        let gold_attacks = ATTACK_TABLES.gold_attacks(promoted_sq, color);
+        let gold_attacks = attacks::gold_attacks(promoted_sq, color);
         if gold_attacks.test(sq) {
             attackers.set(promoted_sq);
         }
@@ -65,7 +65,7 @@ pub(super) fn attackers_to_with_occupancy(
         & pieces;
     let mut silver_copy = silver_pieces;
     while let Some(silver_sq) = silver_copy.pop_lsb() {
-        let silver_attacks = ATTACK_TABLES.silver_attacks(silver_sq, color);
+        let silver_attacks = attacks::silver_attacks(silver_sq, color);
         if silver_attacks.test(sq) {
             attackers.set(silver_sq);
         }
@@ -77,7 +77,7 @@ pub(super) fn attackers_to_with_occupancy(
         & pieces;
     let mut knight_copy = knight_pieces;
     while let Some(knight_sq) = knight_copy.pop_lsb() {
-        let knight_attacks = ATTACK_TABLES.knight_attacks(knight_sq, color);
+        let knight_attacks = attacks::knight_attacks(knight_sq, color);
         if knight_attacks.test(sq) {
             attackers.set(knight_sq);
         }
@@ -87,19 +87,19 @@ pub(super) fn attackers_to_with_occupancy(
     let king_pieces = gen.pos.board.piece_bb[color as usize][PieceType::King as usize] & pieces;
     let mut king_copy = king_pieces;
     while let Some(king_sq) = king_copy.pop_lsb() {
-        let king_attacks = ATTACK_TABLES.king_attacks(king_sq);
+        let king_attacks = attacks::king_attacks(king_sq);
         if king_attacks.test(sq) {
             attackers.set(king_sq);
         }
     }
 
     // Rook/Dragon
-    let rook_attacks = ATTACK_TABLES.sliding_attacks(sq, occupancy, PieceType::Rook);
+    let rook_attacks = attacks::sliding_attacks(sq, occupancy, PieceType::Rook);
     let rook_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Rook as usize] & pieces;
     attackers |= rook_attacks & rook_pieces;
 
     // Bishop/Horse
-    let bishop_attacks = ATTACK_TABLES.sliding_attacks(sq, occupancy, PieceType::Bishop);
+    let bishop_attacks = attacks::sliding_attacks(sq, occupancy, PieceType::Bishop);
     let bishop_pieces = gen.pos.board.piece_bb[color as usize][PieceType::Bishop as usize] & pieces;
     attackers |= bishop_attacks & bishop_pieces;
 
@@ -119,7 +119,7 @@ pub(super) fn attackers_to_with_occupancy(
         };
         if can_attack {
             // Check if path is clear
-            let between = ATTACK_TABLES.between_bb(lance_sq, sq);
+            let between = attacks::between_bb(lance_sq, sq);
             if (between & occupancy).is_empty() {
                 lance_attackers.set(lance_sq);
             }
@@ -135,7 +135,7 @@ pub(super) fn attackers_to_with_occupancy(
     let promoted_rb = dragons | horses;
     let mut promoted_rb_copy = promoted_rb;
     while let Some(prb_sq) = promoted_rb_copy.pop_lsb() {
-        let king_attacks = ATTACK_TABLES.king_attacks(prb_sq);
+        let king_attacks = attacks::king_attacks(prb_sq);
         if king_attacks.test(sq) {
             attackers.set(prb_sq);
         }
