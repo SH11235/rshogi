@@ -10,7 +10,7 @@
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust,ignore
 /// use crate::debug_log;
 /// debug_log!(SHOGI_DEBUG_PV, "PV validation failed at depth {depth}");
 /// debug_log!(SHOGI_DEBUG_SEARCH, "Search node at ply {}: score={}", ply, score);
@@ -34,7 +34,7 @@ macro_rules! debug_log {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust,ignore
 /// use crate::debug_exec;
 /// debug_exec!(SHOGI_DEBUG_PV, {
 ///     eprintln!("Complex debug output:");
@@ -61,7 +61,7 @@ macro_rules! debug_exec {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust,ignore
 /// use crate::pv_debug;
 /// pv_debug!("Invalid move {} in PV at depth {}", move_str, depth);
 /// ```
@@ -78,7 +78,7 @@ macro_rules! pv_debug {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust,ignore
 /// use crate::search_debug;
 /// search_debug!("Alpha-beta window: [{}, {}] at depth {}", alpha, beta, depth);
 /// ```
