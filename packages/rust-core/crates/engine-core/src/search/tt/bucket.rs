@@ -53,23 +53,14 @@ impl TTBucket {
     /// Create new empty bucket
     pub(crate) fn new() -> Self {
         TTBucket {
-            entries: [
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-            ],
+            entries: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
     /// Clear all entries in the bucket
     pub(crate) fn clear(&mut self) {
-        for entry in self.entries.iter_mut() {
-            *entry = AtomicU64::new(0);
+        for e in &self.entries {
+            e.store(0, Ordering::Relaxed);
         }
     }
 
@@ -96,7 +87,7 @@ impl TTBucket {
         bucket_simd::probe_simd(&self.entries, target_key)
     }
 
-    /// Scalar fallback probe implementation (hybrid: early termination + single fence)
+    /// Scalar fallback probe implementation with early termination
     fn probe_scalar(&self, target_key: u64) -> Option<TTEntry> {
         // Hybrid approach: early termination to minimize memory access
         let mut matching_idx = None;
@@ -110,7 +101,7 @@ impl TTBucket {
             }
         }
 
-        // If we found a match, load data with fence + Relaxed
+        // If we found a match, load data with Relaxed ordering
         if let Some(idx) = matching_idx {
             // Design note: We use Relaxed for data load because the key's Acquire ordering
             // already provides the necessary synchronization. The writer uses Release ordering
@@ -306,8 +297,10 @@ impl TTBucket {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    // CAS succeeded - write data with Release
-                    // This ensures readers see the complete entry
+                    // CAS succeeded - use two-phase publish to minimize race window
+                    // First, clear old data to ensure readers see depth=0 during the window
+                    self.entries[idx + 1].store(0, Ordering::Release);
+                    // Then store the actual new data
                     self.entries[idx + 1].store(new_entry.data, Ordering::Release);
 
                     // Record metrics
@@ -315,7 +308,7 @@ impl TTBucket {
                     if let Some(m) = metrics {
                         use super::metrics::{record_metric, MetricType};
                         record_metric(m, MetricType::CasSuccess);
-                        record_metric(m, MetricType::AtomicStore(2));
+                        record_metric(m, MetricType::AtomicStore(3)); // 1 CAS + 2 stores
                         record_metric(m, MetricType::ReplaceWorst);
                     }
                 }
