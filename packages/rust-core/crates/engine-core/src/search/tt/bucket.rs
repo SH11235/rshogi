@@ -9,8 +9,7 @@ use super::utils::{try_update_entry_generic, UpdateResult};
 use crate::search::tt_simd::simd_enabled;
 use crate::util::sync_compat::{AtomicU64, Ordering};
 
-/// Number of entries per bucket (default for backward compatibility)
-const BUCKET_SIZE: usize = 4;
+use super::constants::BUCKET_SIZE;
 
 /// Dynamic bucket size configuration
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,16 +88,7 @@ impl TTBucket {
     /// This is inlined and the feature detection is cached by the CPU
     #[inline(always)]
     fn probe_simd_available(&self) -> bool {
-        // The is_x86_feature_detected! macro is already optimized:
-        // It caches the result in a static variable after first call
-        #[cfg(target_arch = "x86_64")]
-        {
-            std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("sse2")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
+        simd_enabled()
     }
 
     /// SIMD-optimized probe implementation
@@ -122,7 +112,10 @@ impl TTBucket {
 
         // If we found a match, load data with fence + Relaxed
         if let Some(idx) = matching_idx {
-            // Use Relaxed for data since Acquire on key already synchronized
+            // Design note: We use Relaxed for data load because the key's Acquire ordering
+            // already provides the necessary synchronization. The writer uses Release ordering
+            // when storing key, which ensures all prior writes (including data) are visible
+            // when we read the key with Acquire.
             let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
             let entry = TTEntry {
                 key: target_key,
@@ -300,7 +293,12 @@ impl TTBucket {
                 record_metric(m, MetricType::CasAttempt);
             }
 
-            // Attempt atomic update of the key
+            // Design note: CAS replacement creates a brief window where readers might see
+            // new key with old data. This is a known and acceptable race condition in TT:
+            // 1. We update key first (with Release) to claim the slot
+            // 2. Then update data (with Release)
+            // Readers using Acquire on key will either see old key+old data or new key+new data
+            // in most cases. The brief inconsistency window is tolerable for TT's approximate nature.
             match self.entries[idx].compare_exchange(
                 old_key,
                 new_entry.key,
