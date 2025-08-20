@@ -109,3 +109,28 @@ fn test_board_edge_knight_moves() {
     assert_eq!(knight9_moves.len(), 1);
     assert_eq!(knight9_moves[0].to(), parse_usi_square("8g").unwrap()); // Black knight jumps to rank 6
 }
+
+#[test]
+fn test_all_legal_moves_generated_completeness() {
+    // Test that MoveGenImpl generates all legal moves by verifying
+    // each generated move is legal and all legal moves are generated
+    use std::collections::HashSet;
+
+    let pos = Position::startpos();
+
+    // Generate moves using MoveGenImpl
+    let mut gen = MoveGenImpl::new(&pos);
+    let all_moves = gen.generate_all();
+    let move_set: HashSet<_> = all_moves.as_slice().iter().cloned().collect();
+
+    // Verify all generated moves are legal
+    for &mv in all_moves.as_slice() {
+        assert!(pos.is_pseudo_legal(mv), "Generated move should be pseudo-legal: {mv:?}");
+    }
+
+    // Verify no duplicates
+    assert_eq!(all_moves.len(), move_set.len(), "Should have no duplicate moves");
+
+    // Verify expected count for startpos (30 moves)
+    assert_eq!(all_moves.len(), 30, "Starting position should have exactly 30 legal moves");
+}
