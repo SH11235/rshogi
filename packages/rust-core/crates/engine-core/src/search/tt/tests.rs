@@ -935,7 +935,7 @@ mod parallel_tests {
                 // Second phase: shared positions with higher depth for better priority
                 for i in 0..updates_per_thread / 4 {
                     let pos_idx = (thread_id * (updates_per_thread / 4) + i) % shared_positions;
-                    let hash = splitmix64(0xC0FFEE_F00D_0000 ^ (pos_idx as u64)) | 1;
+                    let hash = splitmix64(0x00C0_FFEE_F00D_0000 ^ (pos_idx as u64)) | 1;
                     let depth = 15 + (i % 10) as u8; // Higher depth for better retention
                     let score = (thread_id * 1000 + i) as i16;
                     tt_clone.store(hash, None, score, 0, depth, NodeType::Exact);
@@ -954,7 +954,7 @@ mod parallel_tests {
         let mut found_count = 0;
         for i in 0..shared_positions {
             // Use the same hash generation as in the threads
-            let hash = splitmix64(0xC0FFEE_F00D_0000 ^ (i as u64)) | 1;
+            let hash = splitmix64(0x00C0_FFEE_F00D_0000 ^ (i as u64)) | 1;
             let entry = tt.probe(hash);
             if entry.is_some() {
                 found_count += 1;
