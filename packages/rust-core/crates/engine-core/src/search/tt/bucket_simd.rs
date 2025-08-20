@@ -1,10 +1,8 @@
 //! SIMD-optimized bucket operations for transposition table
 
+use super::constants::BUCKET_SIZE;
 use super::entry::{NodeType, TTEntry};
 use crate::util::sync_compat::{AtomicU64, Ordering};
-
-/// Number of entries per standard bucket
-const BUCKET_SIZE: usize = 4;
 
 /// SIMD-optimized probe implementation for TTBucket
 pub(crate) fn probe_simd(
