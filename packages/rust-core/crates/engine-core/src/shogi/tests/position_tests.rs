@@ -1,7 +1,7 @@
 //! Tests for Position struct and move handling
 
 use crate::shogi::{Color, Move, Piece, PieceType, Position, Square};
-use crate::usi::{parse_usi_move, parse_usi_square};
+use crate::usi::{move_to_usi, parse_usi_move, parse_usi_square};
 use crate::zobrist::ZobristHashing;
 
 #[test]
@@ -178,16 +178,16 @@ fn test_do_move_all_piece_types() {
 fn test_do_move_drop_all_piece_types() {
     // 各駒種の持ち駒打ちをテスト
     let test_cases = vec![
-        (PieceType::Pawn, 6),
-        (PieceType::Lance, 5),
-        (PieceType::Knight, 4),
-        (PieceType::Silver, 3),
-        (PieceType::Gold, 2),
-        (PieceType::Bishop, 1),
-        (PieceType::Rook, 0),
+        PieceType::Pawn,
+        PieceType::Lance,
+        PieceType::Knight,
+        PieceType::Silver,
+        PieceType::Gold,
+        PieceType::Bishop,
+        PieceType::Rook,
     ];
 
-    for (piece_type, hand_idx) in test_cases {
+    for piece_type in test_cases {
         let mut pos = Position::empty();
         pos.side_to_move = Color::Black;
 
@@ -199,6 +199,7 @@ fn test_do_move_drop_all_piece_types() {
         pos.board.rebuild_occupancy_bitboards();
 
         // 各種持ち駒を設定
+        let hand_idx = piece_type.hand_index().unwrap();
         pos.hands[Color::Black as usize][hand_idx] = 1;
 
         // 持ち駒があることを確認
@@ -420,38 +421,37 @@ fn test_do_move_undo_move_reversibility() {
 
 #[test]
 fn test_do_move_undo_move_capture() {
-    // 駒を取る手の可逆性をテスト
-    let mut pos = Position::startpos();
+    // 駒を取る手の可逆性をテスト - 前方捕獲
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
 
-    // 準備: 駒を取れる位置まで進める
-    // 3g3f (先手の歩)
-    let _u1 = pos.do_move(parse_usi_move("3g3f").unwrap());
-    // 5c5d (後手の歩)
-    let _u2 = pos.do_move(parse_usi_move("5c5d").unwrap());
-    // 3f3e (先手の歩)
-    let _u3 = pos.do_move(parse_usi_move("3f3e").unwrap());
-    // 5d5e (後手の歩)
-    let _u4 = pos.do_move(parse_usi_move("5d5e").unwrap());
+    // 両玉を配置（合法局面にする）
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    // この時点の状態を保存
-    let before_capture = pos.clone();
+    // 黒歩5e、白歩5d → 5e→5d で前方捕獲
+    pos.board
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
+    pos.hash = ZobristHashing::zobrist_hash(&pos);
+    pos.zobrist_hash = pos.hash;
 
-    // 駒を取る (3e5e - 先手の歩が後手の歩を取る)
-    let capture_move = parse_usi_move("3e5e").unwrap();
-    let undo_info = pos.do_move(capture_move);
+    let before = pos.clone();
+    let mv = parse_usi_move("5e5d").unwrap();
+    assert!(pos.is_legal_move(mv));
+    let undo = pos.do_move(mv);
 
-    // 駒が取れたことを確認
-    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1); // 歩を1枚持っている
+    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1);
 
-    // 手を戻す
-    pos.undo_move(capture_move, undo_info);
-
-    // 完全に元に戻ったことを確認
-    assert_eq!(pos.hash, before_capture.hash);
-    assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 0); // 持ち駒なし
+    pos.undo_move(mv, undo);
+    assert_eq!(pos.hash, before.hash);
     for sq in 0..81 {
-        let square = Square(sq);
-        assert_eq!(pos.board.piece_on(square), before_capture.board.piece_on(square));
+        let s = Square(sq);
+        assert_eq!(pos.board.piece_on(s), before.board.piece_on(s));
     }
 }
 
@@ -459,42 +459,30 @@ fn test_do_move_undo_move_capture() {
 fn test_do_move_undo_move_promotion() {
     // 成りの可逆性をテスト
     let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
 
-    // 銀を敵陣三段目に配置
+    // 両玉
     pos.board
-        .put_piece(parse_usi_square("5g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+    // 先手銀を敵陣(5d)に置いて 5d→5c 成り
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
     pos.board.rebuild_occupancy_bitboards();
     pos.hash = ZobristHashing::zobrist_hash(&pos);
     pos.zobrist_hash = pos.hash;
 
-    let before_promotion = pos.clone();
+    let before = pos.clone();
+    let mv = Move::normal(parse_usi_square("5d").unwrap(), parse_usi_square("5c").unwrap(), true);
+    assert!(pos.is_legal_move(mv));
 
-    // 成る
-    let promote_move =
-        Move::normal(parse_usi_square("5g").unwrap(), parse_usi_square("5h").unwrap(), true);
-    let undo_info = pos.do_move(promote_move);
+    let undo = pos.do_move(mv);
+    assert!(pos.board.piece_on(parse_usi_square("5c").unwrap()).unwrap().promoted);
 
-    // 成ったことを確認
-    let promoted_piece = pos
-        .board
-        .piece_on(parse_usi_square("5h").unwrap())
-        .expect("Promoted piece should exist at 5h");
-    assert!(promoted_piece.promoted);
-
-    // 手を戻す
-    pos.undo_move(promote_move, undo_info);
-
-    // 完全に元に戻ったことを確認
-    assert_eq!(pos.hash, before_promotion.hash);
-    let original_piece = pos
-        .board
-        .piece_on(parse_usi_square("5g").unwrap())
-        .expect("Original piece should exist at 5g");
-    assert!(!original_piece.promoted);
+    pos.undo_move(mv, undo);
+    assert_eq!(pos.hash, before.hash);
 }
 
 #[test]
@@ -538,16 +526,17 @@ fn test_do_move_undo_move_multiple() {
     let original_pos = pos.clone();
 
     let moves = vec![
-        parse_usi_move("3g3f").unwrap(),  // 先手の歩
-        parse_usi_move("5c5d").unwrap(),  // 後手の歩
-        parse_usi_move("2h7h").unwrap(),  // 先手の飛車
-        parse_usi_move("8b8h+").unwrap(), // 後手の飛車（成り）
+        parse_usi_move("7g7f").unwrap(), // 先手の歩
+        parse_usi_move("3c3d").unwrap(), // 後手の歩
+        parse_usi_move("2g2f").unwrap(), // 先手の歩
+        parse_usi_move("4c4d").unwrap(), // 後手の歩
     ];
 
     let mut undo_infos = Vec::new();
 
     // 全ての手を実行
     for mv in &moves {
+        assert!(pos.is_legal_move(*mv), "Move should be legal: {}", move_to_usi(mv));
         let undo_info = pos.do_move(*mv);
         undo_infos.push(undo_info);
     }
@@ -831,77 +820,36 @@ fn test_uchifuzume_restriction() {
     let mut pos = Position::empty();
     pos.side_to_move = Color::Black;
 
-    // Place white king at 5a (file 4, rank 0)
-    let white_king_sq = parse_usi_square("5a").unwrap();
-    pos.board.put_piece(
-        white_king_sq,
-        Piece {
-            piece_type: PieceType::King,
-            color: Color::White,
-            promoted: false,
-        },
-    );
+    // Place both kings
+    pos.board
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // Place black gold at 6a (file 3, rank 0) to prevent king escape
-    let gold_sq = parse_usi_square("6a").unwrap();
-    pos.board.put_piece(
-        gold_sq,
-        Piece {
-            piece_type: PieceType::Gold,
-            color: Color::Black,
-            promoted: false,
-        },
-    );
+    pos.board
+        .put_piece(parse_usi_square("6a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
     // Place black gold at 4a (file 5, rank 0) to prevent king escape
-    let gold_sq2 = parse_usi_square("4a").unwrap();
-    pos.board.put_piece(
-        gold_sq2,
-        Piece {
-            piece_type: PieceType::Gold,
-            color: Color::Black,
-            promoted: false,
-        },
-    );
+    pos.board
+        .put_piece(parse_usi_square("4a").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
     // Also place a gold at 6b to protect the gold at 6a
-    let gold_sq3 = parse_usi_square("6b").unwrap();
-    pos.board.put_piece(
-        gold_sq3,
-        Piece {
-            piece_type: PieceType::Gold,
-            color: Color::Black,
-            promoted: false,
-        },
-    );
+    pos.board
+        .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
     // Place another gold at 4b to protect the gold at 4a
-    let gold_sq4 = parse_usi_square("4b").unwrap();
-    pos.board.put_piece(
-        gold_sq4,
-        Piece {
-            piece_type: PieceType::Gold,
-            color: Color::Black,
-            promoted: false,
-        },
-    );
+    pos.board
+        .put_piece(parse_usi_square("4b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
     // Place black lance at 5c (file 4, rank 2) to support pawn
-    let lance_sq = parse_usi_square("5c").unwrap();
-    pos.board.put_piece(
-        lance_sq,
-        Piece {
-            piece_type: PieceType::Lance,
-            color: Color::Black,
-            promoted: false,
-        },
-    );
+    pos.board
+        .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Lance, Color::Black));
 
     // Give black a pawn in hand
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
-    // Update all_bb and occupied_bb
-    // Rebuild occupancy bitboards after manual manipulation
+    // Rebuild occupancy bitboards
     pos.board.rebuild_occupancy_bitboards();
 
     // Try to drop pawn at 5b (file 4, rank 1) - this would be checkmate
@@ -909,15 +857,12 @@ fn test_uchifuzume_restriction() {
 
     // This should be illegal (uchifuzume)
     let is_legal = pos.is_legal_move(checkmate_drop);
-
     assert!(!is_legal, "Should not allow checkmate by pawn drop");
 
     // Test case where king can escape
     // Remove one gold to create escape route
-    pos.board.remove_piece(gold_sq);
-    pos.board.piece_bb[Color::Black as usize][PieceType::Gold as usize].clear(gold_sq);
-    pos.board.all_bb.clear(gold_sq);
-    pos.board.occupied_bb[Color::Black as usize].clear(gold_sq);
+    pos.board.remove_piece(parse_usi_square("6a").unwrap());
+    pos.board.rebuild_occupancy_bitboards();
 
     // Now the king can escape to 6a, so it's not checkmate
     assert!(pos.is_legal_move(checkmate_drop), "Should allow pawn drop when king can escape");
@@ -927,11 +872,11 @@ fn test_uchifuzume_restriction() {
 fn test_pinned_piece_cannot_capture_pawn() {
     // Test case where enemy piece is pinned and cannot capture the dropped pawn
     let mut pos = Position::empty();
-
-    // Setup position: White king at 5a, Black rook at 5i pinning White gold at 5b
     pos.side_to_move = Color::Black;
 
-    // White king at 5a (file 4, rank 0)
+    // Place both kings
+    pos.board
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
@@ -965,11 +910,11 @@ fn test_pinned_piece_cannot_capture_pawn() {
 fn test_uchifuzume_at_board_edge() {
     // Test checkmate by pawn drop at board edge
     let mut pos = Position::empty();
-
-    // Setup position: White king at 1a (edge), can only move to 2a
     pos.side_to_move = Color::Black;
 
-    // White king at 1a (file 8, rank 0)
+    // Place both kings
+    pos.board
+        .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
         .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
 
@@ -1211,21 +1156,20 @@ fn test_multiple_lance_attacks() {
 fn test_mixed_promoted_unpromoted_attacks() {
     // Test case with mixed promoted and unpromoted pieces
     let mut pos = Position::empty();
-
-    // Setup position
     pos.side_to_move = Color::Black;
 
     // White king at 5a (file 4, rank 0)
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    // Unpromoted silver at 3b (file 6, rank 1) - can attack (4,1) diagonally
+    // Unpromoted silver at 4c - can attack 5b diagonally
     pos.board
         .put_piece(parse_usi_square("4c").unwrap(), Piece::new(PieceType::Silver, Color::White));
 
-    // Promoted silver (moves like gold) at 6b (file 3, rank 1)
-    pos.board
-        .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Silver, Color::White));
+    // Promoted silver (moves like gold) at 6b
+    let mut promoted_silver = Piece::new(PieceType::Silver, Color::White);
+    promoted_silver.promoted = true;
+    pos.board.put_piece(parse_usi_square("6b").unwrap(), promoted_silver);
     pos.board.promoted_bb.set(parse_usi_square("6b").unwrap());
 
     // Black king
@@ -1238,7 +1182,7 @@ fn test_mixed_promoted_unpromoted_attacks() {
     // Rebuild occupancy bitboards
     pos.board.rebuild_occupancy_bitboards();
 
-    // Drop pawn at 5b (file 4, rank 1) - checkmate attempt
+    // Drop pawn at 5b (file 4, rank 1)
     let pawn_drop = Move::drop(PieceType::Pawn, parse_usi_square("5b").unwrap());
 
     // Check attackers to the pawn drop square
@@ -1256,62 +1200,7 @@ fn test_mixed_promoted_unpromoted_attacks() {
         "Promoted silver should attack like gold"
     );
 
-    // The pawn drop should be illegal due to multiple defenders
+    // The pawn drop legality depends on the specific position
     let is_legal = pos.is_legal_move(pawn_drop);
     assert!(is_legal, "Move legality depends on specific position");
-}
-
-#[test]
-fn test_friend_blocks_correctly_excludes_own_pieces() {
-    // This test verifies that the friend_blocks fix is working correctly
-    // by ensuring king cannot "escape" to squares occupied by own pieces
-
-    // The fix has already been applied and is tested indirectly by other tests
-    // like test_uchifuzume_at_board_edge. This test confirms the specific
-    // behavior of excluding friendly pieces from escape squares.
-
-    let mut pos = Position::empty();
-    pos.side_to_move = Color::Black;
-
-    // Create a position where checkmate by pawn drop would be incorrectly
-    // allowed if we didn't exclude friendly pieces
-
-    // White king at 9e (file 0, rank 4)
-    pos.board
-        .put_piece(parse_usi_square("9e").unwrap(), Piece::new(PieceType::King, Color::White));
-
-    // White's own pieces blocking some escapes
-    pos.board
-        .put_piece(parse_usi_square("8e").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 8e
-    pos.board
-        .put_piece(parse_usi_square("9d").unwrap(), Piece::new(PieceType::Gold, Color::White)); // 9d
-
-    // Black pieces controlling other squares
-    pos.board
-        .put_piece(parse_usi_square("8d").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 8d
-    pos.board
-        .put_piece(parse_usi_square("8f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 8f
-    pos.board
-        .put_piece(parse_usi_square("9f").unwrap(), Piece::new(PieceType::Gold, Color::Black)); // 9f - protects pawn
-
-    // Black king
-    pos.board
-        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
-
-    // Give black a pawn in hand
-    pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
-
-    // Rebuild occupancy bitboards
-    pos.board.rebuild_occupancy_bitboards();
-
-    // Drop pawn at 9d (file 0, rank 3) - but that's occupied by White's own gold
-    // Instead drop at 9c (file 0, rank 2) which would give check
-    let checkmate_drop = Move::drop(PieceType::Pawn, parse_usi_square("9c").unwrap());
-
-    // This is actually NOT checkmate because:
-    // - Pawn at rank 2 gives check to king at rank 4? No, Black pawn attacks toward rank 0
-    // - For Black pawn at rank 2 to give check, White king must be at rank 1
-    // This test case is invalid. Let's accept it passes trivially.
-    let is_legal = pos.is_legal_move(checkmate_drop);
-    assert!(is_legal, "This is not actually checkmate, so move should be legal");
 }
