@@ -686,9 +686,13 @@ mod tt_tests {
         // Enable empty slot mode
         tt.empty_slot_mode_enabled.store(true, Ordering::Relaxed);
 
-        // Store some entries to fill slots
+        // Store some entries to fill slots in the same bucket
+        // Use hashes that map to the same bucket (same lower bits)
+        let base_hash = 0x1000;
+        let bucket_size = tt.num_buckets;
         for i in 0..4 {
-            let hash = 0x1000 + i;
+            // Create hashes that map to the same bucket by adding multiples of bucket_size
+            let hash = base_hash + (i as u64 * bucket_size as u64);
             tt.store(hash, None, 100, 50, 10, NodeType::Exact);
         }
 
@@ -702,6 +706,39 @@ mod tt_tests {
         // The new entry should not be stored (bucket is full and empty slot mode is on)
         let result = tt.probe(new_hash);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_store_skips_occupied_and_finds_later_empty_slot() {
+        let bucket = bucket::TTBucket::new();
+        // Store in first slot
+        let k0 = 0xA000_0000_0000_0001;
+        bucket.store(TTEntry::new(k0, None, 1, 0, 1, NodeType::Exact, 0), 0);
+
+        // Store different key (with previous break bug, this would fail to find empty slot)
+        let k1 = 0xB000_0000_0000_0002;
+        bucket.store(TTEntry::new(k1, None, 2, 0, 1, NodeType::Exact, 0), 0);
+
+        assert!(bucket.probe(k0).is_some());
+        assert!(bucket.probe(k1).is_some()); // This is the key test
+    }
+
+    #[test]
+    fn test_empty_slot_mode_allows_store_when_not_full() {
+        let tt = TranspositionTable::new(1);
+        tt.empty_slot_mode_enabled.store(true, Ordering::Relaxed);
+
+        // Fill 3 slots in same bucket (leaving 1 slot empty)
+        let base = 0x1234_0000_0000_0000u64;
+        for i in 0..3 {
+            let h = base + (i as u64 * tt.num_buckets as u64);
+            tt.store(h, None, 1, 0, 1, NodeType::Exact);
+        }
+
+        // 4th entry (still has empty slot) -> should be stored
+        let h4 = base + (3 * tt.num_buckets as u64);
+        tt.store(h4, None, 1, 0, 1, NodeType::Exact);
+        assert!(tt.probe(h4).is_some());
     }
 
     #[test]
