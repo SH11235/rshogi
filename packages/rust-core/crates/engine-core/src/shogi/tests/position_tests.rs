@@ -38,43 +38,39 @@ fn test_do_move_normal_move() {
 
 #[test]
 fn test_do_move_capture() {
-    // 駒を取る手のテスト
-    let mut pos = Position::startpos();
+    // Test simple pawn takes pawn (forward capture)
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
 
-    // Black歩を前進させる (rank 6 -> 5)
-    let mv1 = Move::normal(parse_usi_square("3g").unwrap(), parse_usi_square("3f").unwrap(), false);
-    let _undo1 = pos.do_move(mv1);
+    // Place kings (required for legal position)
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    // White歩を前進させる (rank 2 -> 3)
-    let mv2 = Move::normal(parse_usi_square("5c").unwrap(), parse_usi_square("5d").unwrap(), false);
-    let _undo2 = pos.do_move(mv2);
+    // Black pawn on 5e, White pawn on 5d - can capture forward
+    pos.board
+        .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
 
-    // Black歩をさらに前進 (rank 5 -> 4)
-    let mv3 = Move::normal(parse_usi_square("3f").unwrap(), parse_usi_square("3e").unwrap(), false);
-    let _undo3 = pos.do_move(mv3);
+    let mv = Move::normal(parse_usi_square("5e").unwrap(), parse_usi_square("5d").unwrap(), false);
+    assert!(pos.is_legal_move(mv), "Move should be legal");
 
-    // White歩をさらに前進 (rank 3 -> 4)
-    let mv4 = Move::normal(parse_usi_square("5d").unwrap(), parse_usi_square("5e").unwrap(), false);
-    let _undo4 = pos.do_move(mv4);
+    let captured_before = pos.board.piece_on(parse_usi_square("5d").unwrap()).unwrap();
+    assert_eq!(captured_before.piece_type, PieceType::Pawn);
+    assert_eq!(captured_before.color, Color::White);
 
-    // Black歩でWhite歩を取る
-    let from = parse_usi_square("3e").unwrap();
-    let to = parse_usi_square("5e").unwrap();
-    let mv = Move::normal(from, to, false);
+    let _undo = pos.do_move(mv);
 
-    let captured_piece = pos.board.piece_on(to).expect("Capture move must have captured piece");
-    assert_eq!(captured_piece.piece_type, PieceType::Pawn);
-    assert_eq!(captured_piece.color, Color::White);
-
-    let _undo5 = pos.do_move(mv);
-
-    // 駒が取られていることを確認
-    assert_eq!(pos.board.piece_on(from), None);
-    assert_eq!(pos.board.piece_on(to), Some(Piece::new(PieceType::Pawn, Color::Black)));
-
-    // 持ち駒が増えていることを確認
+    // Verify capture
+    assert_eq!(pos.board.piece_on(parse_usi_square("5e").unwrap()), None);
+    assert_eq!(
+        pos.board.piece_on(parse_usi_square("5d").unwrap()),
+        Some(Piece::new(PieceType::Pawn, Color::Black))
+    );
     assert_eq!(pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()], 1);
-    // 歩のインデックスは6
 }
 
 #[test]
@@ -112,6 +108,7 @@ fn test_do_move_drop() {
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
 
     // 持ち駒を設定
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
@@ -134,95 +131,46 @@ fn test_do_move_drop() {
 
 #[test]
 fn test_do_move_all_piece_types() {
-    // 各駒種の移動をテスト
+    // Test each piece type with minimal legal move
     let test_cases = vec![
-        // (from, to, piece_type, color)
-        (
-            parse_usi_square("3g").unwrap(), // Black pawn
-            parse_usi_square("3f").unwrap(), // One square forward
-            PieceType::Pawn,
-            Color::Black,
-        ),
-        (
-            parse_usi_square("5i").unwrap(), // Black King
-            parse_usi_square("4h").unwrap(), // Diagonal move
-            PieceType::King,
-            Color::Black,
-        ),
-        (
-            parse_usi_square("4i").unwrap(), // Black Gold
-            parse_usi_square("4h").unwrap(), // Forward
-            PieceType::Gold,
-            Color::Black,
-        ),
-        (
-            parse_usi_square("3i").unwrap(), // Black Silver
-            parse_usi_square("3h").unwrap(), // Forward
-            PieceType::Silver,
-            Color::Black,
-        ),
-        (
-            parse_usi_square("2i").unwrap(), // Black Knight
-            parse_usi_square("3g").unwrap(), // Knight jump
-            PieceType::Knight,
-            Color::Black,
-        ),
-        (
-            parse_usi_square("1i").unwrap(), // Black Lance
-            parse_usi_square("1h").unwrap(), // Forward
-            PieceType::Lance,
-            Color::Black,
-        ),
-        (
-            parse_usi_square("2h").unwrap(), // Black Rook
-            parse_usi_square("2f").unwrap(), // Forward
-            PieceType::Rook,
-            Color::Black,
-        ),
-        (
-            parse_usi_square("8h").unwrap(), // Black Bishop
-            parse_usi_square("7g").unwrap(), // Diagonal
-            PieceType::Bishop,
-            Color::Black,
-        ),
+        // (from_str, to_str, piece_type)
+        ("5e", "4e", PieceType::King),   // King left
+        ("5e", "5d", PieceType::Gold),   // Gold forward
+        ("5e", "4d", PieceType::Silver), // Silver forward-left
+        ("5g", "4e", PieceType::Knight), // Knight jump
+        ("5g", "5f", PieceType::Lance),  // Lance forward
+        ("5e", "5b", PieceType::Rook),   // Rook vertical
+        ("5e", "2b", PieceType::Bishop), // Bishop diagonal
+        ("5e", "5d", PieceType::Pawn),   // Pawn forward
     ];
 
-    for (from, to, expected_piece_type, expected_color) in test_cases {
-        let mut pos = Position::startpos();
-        let piece = pos.board.piece_on(from);
+    for (from_s, to_s, pt) in test_cases {
+        let mut pos = Position::empty();
+        pos.side_to_move = Color::Black;
 
-        // デバッグ: 初期配置の確認
-        if piece.is_none() {
-            log::debug!("No piece at {from:?}");
-            log::debug!("Expected: {expected_piece_type:?}");
-            // 周辺の駒を確認
-            for rank in 0..9 {
-                for file in 0..9 {
-                    if let Some(p) = pos.board.piece_on(Square(file + rank * 9)) {
-                        if p.piece_type == expected_piece_type && p.color == expected_color {
-                            log::debug!(
-                                "Found {expected_piece_type:?} at Square({} = file {file}, rank {rank})",
-                                file + rank * 9
-                            );
-                        }
-                    }
-                }
-            }
-            panic!("Piece not found at expected position");
-        }
+        // Place both kings
+        pos.board
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos.board
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-        let piece = piece.expect("Piece should exist at this square");
-        assert_eq!(piece.piece_type, expected_piece_type);
-        assert_eq!(piece.color, expected_color);
+        // Place test piece
+        pos.board
+            .put_piece(parse_usi_square(from_s).unwrap(), Piece::new(pt, Color::Black));
+        pos.board.rebuild_occupancy_bitboards();
 
+        let from = parse_usi_square(from_s).unwrap();
+        let to = parse_usi_square(to_s).unwrap();
         let mv = Move::normal(from, to, false);
-        let _undo_info = pos.do_move(mv);
+        assert!(pos.is_legal_move(mv), "Expected legal move for {pt:?}: {from_s}{to_s}");
 
-        // 駒が移動していることを確認
+        let _undo = pos.do_move(mv);
+
+        // Verify piece moved
         assert_eq!(pos.board.piece_on(from), None);
-        let moved_piece =
-            pos.board.piece_on(to).expect("Piece should exist at destination after move");
-        assert_eq!(moved_piece.piece_type, expected_piece_type);
+        let moved_piece = pos.board.piece_on(to).unwrap();
+        assert_eq!(moved_piece.piece_type, pt);
+        assert_eq!(moved_piece.color, Color::Black);
     }
 }
 
@@ -248,6 +196,7 @@ fn test_do_move_drop_all_piece_types() {
             .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
             .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board.rebuild_occupancy_bitboards();
 
         // 各種持ち駒を設定
         pos.hands[Color::Black as usize][hand_idx] = 1;
@@ -274,60 +223,54 @@ fn test_do_move_drop_all_piece_types() {
 
 #[test]
 fn test_do_move_special_promotion_cases() {
-    // 特殊な成りのケース（1段目での成り強制など）
-    // startposを使って基本的な成りの動作をテスト
-    let mut pos = Position::startpos();
+    // Test promotion cases with minimal setup
+    let mut pos = Position::empty();
+    pos.side_to_move = Color::Black;
 
-    // 歩を前進させて成る
-    let mv1 = parse_usi_move("7g7f").unwrap(); // 先手の歩
-    pos.do_move(mv1);
+    // Place kings
+    pos.board
+        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    // 相手の歩を前進
-    let mv2 = parse_usi_move("3c3d").unwrap(); // 後手の歩
-    pos.do_move(mv2);
+    // Test 1: Silver promotion in enemy territory
+    pos.board
+        .put_piece(parse_usi_square("5d").unwrap(), Piece::new(PieceType::Silver, Color::Black));
+    pos.board.rebuild_occupancy_bitboards();
 
-    // さらに前進
-    let mv3 = parse_usi_move("7f7e").unwrap(); // 先手の歩
-    pos.do_move(mv3);
-
-    // 相手の歩をさらに前進
-    let mv4 = parse_usi_move("3d3e").unwrap(); // 後手の歩
-    pos.do_move(mv4);
-
-    // 銀を前進させる（成りのテスト用）
-    let mv5 = parse_usi_move("3i3h").unwrap(); // 先手の銀
-    pos.do_move(mv5);
-
-    // 後手の歩を動かす
-    let mv6 = parse_usi_move("5c5d").unwrap(); // 後手の歩
-    pos.do_move(mv6);
-
-    // 銀をさらに前進
-    let mv7 = parse_usi_move("3h3g").unwrap(); // 先手の銀
-    pos.do_move(mv7);
-
-    // 後手の歩を動かす
-    let mv8 = parse_usi_move("5d5e").unwrap(); // 後手の歩
-    pos.do_move(mv8);
-
-    // 銀をさらに前進
-    let mv9 = parse_usi_move("3g3f").unwrap(); // 先手の銀
-    let _undo9 = pos.do_move(mv9);
-
-    // 後手の歩を動かす
-    let mv10 = parse_usi_move("5e5f").unwrap(); // 後手の歩
-    let _undo10 = pos.do_move(mv10);
-
-    // 銀を敵陣三段目に進めて成る（3eには既に後手の歩があるので取りながら成る）
-    let mv11 = parse_usi_move("3f3e+").unwrap(); // 先手の銀が成る
-    let _undo11 = pos.do_move(mv11);
+    let mv1 = Move::normal(parse_usi_square("5d").unwrap(), parse_usi_square("5c").unwrap(), true);
+    assert!(pos.is_legal_move(mv1), "Silver promotion should be legal");
+    let _undo1 = pos.do_move(mv1);
 
     let piece = pos
         .board
-        .piece_on(parse_usi_square("3e").unwrap())
-        .expect("Piece should exist at 3e");
+        .piece_on(parse_usi_square("5c").unwrap())
+        .expect("Silver should be on this square");
     assert_eq!(piece.piece_type, PieceType::Silver);
-    assert!(piece.promoted);
+    assert!(piece.promoted, "Silver should be promoted");
+
+    // Reset for next test
+    pos.undo_move(mv1, _undo1);
+
+    // Test 2: Pawn forced promotion at last rank
+    pos.board.remove_piece(parse_usi_square("5d").unwrap());
+    pos.board
+        .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+    pos.board.rebuild_occupancy_bitboards();
+
+    let mv2 = Move::normal(parse_usi_square("5b").unwrap(), parse_usi_square("5a").unwrap(), true);
+    // Note: This move would capture the king, so we need a different setup
+    pos.board.remove_piece(parse_usi_square("5a").unwrap());
+    pos.board
+        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
+
+    assert!(pos.is_legal_move(mv2), "Pawn promotion at last rank should be legal");
+    let _undo2 = pos.do_move(mv2);
+
+    let promoted_pawn = pos.board.piece_on(parse_usi_square("5a").unwrap()).unwrap();
+    assert_eq!(promoted_pawn.piece_type, PieceType::Pawn);
+    assert!(promoted_pawn.promoted, "Pawn must be promoted at last rank");
 }
 
 #[test]
@@ -349,6 +292,7 @@ fn test_is_repetition() {
     // 1a: 後手の飛車（後手も動かせるように）
     pos.board
         .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
 
     // 初期ハッシュを計算
     pos.hash = ZobristHashing::zobrist_hash(&pos);
@@ -408,13 +352,17 @@ fn test_is_repetition_with_different_hands() {
 
     // 同じ動き (3g3f)
     let mv1 = parse_usi_move("3g3f").unwrap();
+    assert!(pos1.is_legal_move(mv1), "Move should be legal: 3g3f");
     pos1.do_move(mv1);
+    assert!(pos2.is_legal_move(mv1), "Move should be legal: 3g3f");
     pos2.do_move(mv1);
 
     // pos2では相手の歩を前進させて取る
     let mv2 = parse_usi_move("3c3d").unwrap(); // 後手の歩
+    assert!(pos2.is_legal_move(mv2), "Move should be legal: 3c3d");
     pos2.do_move(mv2);
     let mv3 = parse_usi_move("3f3d").unwrap(); // 先手が歩を取る
+    assert!(pos2.is_legal_move(mv3), "Move should be legal: 3f3d");
     pos2.do_move(mv3);
 
     // 異なるハッシュ値になるはず
@@ -446,6 +394,7 @@ fn test_do_move_undo_move_reversibility() {
 
     // テストケース1: 通常の移動
     let mv1 = parse_usi_move("3g3f").unwrap(); // 先手の歩
+    assert!(pos.is_legal_move(mv1), "Move should be legal: 3g3f");
     let undo_info1 = pos.do_move(mv1);
 
     // 手を実行後の状態を確認
@@ -518,6 +467,7 @@ fn test_do_move_undo_move_promotion() {
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
     pos.hash = ZobristHashing::zobrist_hash(&pos);
     pos.zobrist_hash = pos.hash;
 
@@ -555,6 +505,7 @@ fn test_do_move_undo_move_drop() {
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+    pos.board.rebuild_occupancy_bitboards();
 
     // 持ち駒を設定
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // 歩を1枚
