@@ -724,6 +724,47 @@ mod tt_tests {
     }
 
     #[test]
+    fn test_store_finds_last_empty_slot() {
+        // Explicit test: fill 3/4 slots, ensure 4th slot is used
+        let bucket = bucket::TTBucket::new();
+        
+        // Fill first 3 slots with different keys
+        let k0 = 0xA000_0000_0000_0001;
+        let k1 = 0xB000_0000_0000_0002;
+        let k2 = 0xC000_0000_0000_0003;
+        
+        bucket.store(TTEntry::new(k0, None, 1, 0, 1, NodeType::Exact, 0), 0);
+        bucket.store(TTEntry::new(k1, None, 2, 0, 1, NodeType::Exact, 0), 0);
+        bucket.store(TTEntry::new(k2, None, 3, 0, 1, NodeType::Exact, 0), 0);
+        
+        // Verify first 3 slots are occupied
+        assert!(bucket.probe(k0).is_some());
+        assert!(bucket.probe(k1).is_some());
+        assert!(bucket.probe(k2).is_some());
+        
+        // Store 4th key - should find the last empty slot
+        let k3 = 0xD000_0000_0000_0004;
+        bucket.store(TTEntry::new(k3, None, 4, 0, 1, NodeType::Exact, 0), 0);
+        
+        // All 4 keys should be retrievable
+        assert!(bucket.probe(k0).is_some());
+        assert!(bucket.probe(k1).is_some());
+        assert!(bucket.probe(k2).is_some());
+        assert!(bucket.probe(k3).is_some());
+        
+        // Now bucket is full - a 5th key should replace based on priority
+        let k4 = 0xE000_0000_0000_0005;
+        bucket.store(TTEntry::new(k4, None, 10, 0, 10, NodeType::Exact, 0), 0);
+        assert!(bucket.probe(k4).is_some());
+        
+        // One of the original keys should have been replaced
+        let found_count = [k0, k1, k2, k3].iter()
+            .filter(|&&k| bucket.probe(k).is_some())
+            .count();
+        assert_eq!(found_count, 3); // Exactly one was replaced
+    }
+
+    #[test]
     fn test_empty_slot_mode_allows_store_when_not_full() {
         let tt = TranspositionTable::new(1);
         tt.empty_slot_mode_enabled.store(true, Ordering::Relaxed);
@@ -1262,5 +1303,92 @@ mod parallel_tests {
         // Also verify that any entry with depth=0 is considered invalid
         let entry2 = TTEntry::new(0x1234567890ABCDEF, None, 100, 50, 0, NodeType::Exact, 0);
         assert_eq!(entry2.depth(), 0, "Entry with depth=0 should be invalid");
+    }
+
+    #[test]
+    fn test_probe_consistency_with_different_buckets() {
+        // Test that different bucket implementations give consistent results
+        let standard_bucket = bucket::TTBucket::new();
+        let flexible_bucket = flexible_bucket::FlexibleTTBucket::new(bucket::BucketSize::Small);
+        
+        let test_keys = [
+            0xA000_0000_0000_0001,
+            0xB000_0000_0000_0002,
+            0xC000_0000_0000_0003,
+            0xD000_0000_0000_0004,
+        ];
+        
+        // Store in both buckets
+        for (i, &key) in test_keys.iter().enumerate() {
+            let entry = TTEntry::new(key, None, (i * 10) as i16, 0, (i + 1) as u8, NodeType::Exact, 0);
+            standard_bucket.store(entry, 0);
+            flexible_bucket.store_with_metrics(entry, 0, None);
+        }
+        
+        // Test that both give same results
+        for &key in &test_keys {
+            let standard_result = standard_bucket.probe(key);
+            let flexible_result = flexible_bucket.probe(key);
+            
+            match (standard_result, flexible_result) {
+                (Some(s), Some(f)) => {
+                    assert_eq!(s.key, f.key, "Keys should match");
+                    assert_eq!(s.data, f.data, "Data should match");
+                }
+                (None, None) => {} // Both missed - OK
+                _ => panic!("Standard and flexible bucket results differ for key {:#x}", key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_prefetch_has_no_side_effects() {
+        let tt = TranspositionTable::new(1);
+        
+        // Store some entries
+        let test_data = vec![
+            (0x1000_0000_0000_0001, 100, 10),
+            (0x2000_0000_0000_0002, 200, 20),
+            (0x3000_0000_0000_0003, 300, 30),
+        ];
+        
+        for &(hash, score, depth) in &test_data {
+            tt.store(hash, None, score, score / 2, depth, NodeType::Exact);
+        }
+        
+        // Test that prefetch doesn't affect probe results
+        for &(hash, expected_score, expected_depth) in &test_data {
+            // Probe before prefetch
+            let before = tt.probe(hash);
+            assert!(before.is_some());
+            let before_entry = before.unwrap();
+            assert_eq!(before_entry.score(), expected_score);
+            assert_eq!(before_entry.depth(), expected_depth);
+            
+            // Prefetch with different hints
+            tt.prefetch_l1(hash);
+            tt.prefetch_l2(hash);
+            tt.prefetch_l3(hash);
+            tt.prefetch(hash, 0); // Non-temporal hint
+            
+            // Probe after prefetch - should be identical
+            let after = tt.probe(hash);
+            assert!(after.is_some());
+            let after_entry = after.unwrap();
+            assert_eq!(after_entry.key, before_entry.key);
+            assert_eq!(after_entry.data, before_entry.data);
+            assert_eq!(after_entry.score(), before_entry.score());
+            assert_eq!(after_entry.depth(), before_entry.depth());
+        }
+        
+        // Test prefetch on non-existent entries
+        let missing_hash = 0x9999_9999_9999_9999;
+        assert!(tt.probe(missing_hash).is_none());
+        
+        // Prefetch non-existent entry
+        tt.prefetch_l1(missing_hash);
+        
+        // Should still be none
+        assert!(tt.probe(missing_hash).is_none());
     }
 }
