@@ -35,13 +35,19 @@ pub enum GamePhase {
 }
 
 mod allocation;
+mod byoyomi;
 mod parameters;
+mod ponder;
+mod state;
 mod types;
 
 #[cfg(test)]
 mod test_utils;
+#[cfg(test)]
+mod tests;
 
 pub use allocation::calculate_time_allocation;
+pub use byoyomi::ByoyomiState;
 pub use parameters::{constants, TimeParameterError, TimeParameters, TimeParametersBuilder};
 pub use types::{ByoyomiInfo, TimeControl, TimeInfo, TimeLimits, TimeState};
 
@@ -87,17 +93,6 @@ struct TimeManagerInner {
     is_ponder: AtomicBool, // Whether currently pondering
 }
 
-/// Byoyomi (Japanese overtime) state management
-///
-/// This struct tracks the runtime state of byoyomi time control,
-/// separate from the immutable configuration in TimeControl::Byoyomi.
-#[derive(Debug, Clone, Default)]
-struct ByoyomiState {
-    periods_left: u32,
-    current_period_ms: u64,
-    in_byoyomi: bool, // Whether main time is exhausted
-}
-
 impl TimeManager {
     /// Create a new time manager for a search
     pub fn new(limits: &TimeLimits, side: Color, ply: u32, game_phase: GamePhase) -> Self {
@@ -114,18 +109,7 @@ impl TimeManager {
         );
 
         // Initialize byoyomi state if needed
-        let byoyomi_state = match &limits.time_control {
-            TimeControl::Byoyomi {
-                periods,
-                byoyomi_ms,
-                main_time_ms,
-            } => ByoyomiState {
-                periods_left: *periods,
-                current_period_ms: *byoyomi_ms,
-                in_byoyomi: *main_time_ms == 0, // Start in byoyomi if no main time
-            },
-            _ => ByoyomiState::default(),
-        };
+        let byoyomi_state = byoyomi::ByoyomiManager::init_state(&limits.time_control);
 
         let inner = Arc::new(TimeManagerInner {
             side_to_move: side,
@@ -155,34 +139,11 @@ impl TimeManager {
         ply: u32,
         game_phase: GamePhase,
     ) -> Self {
-        // Check if already Ponder to avoid double-wrapping
-        let time_control = match &pending_limits.time_control {
-            TimeControl::Ponder(_) => {
-                // Already Ponder, use as-is
-                log::debug!("new_ponder: time_control already Ponder, using as-is");
-                pending_limits.time_control.clone()
-            }
-            other => {
-                // Wrap in Ponder
-                log::debug!("new_ponder: wrapping time_control in Ponder: {other:?}");
-                TimeControl::Ponder(Box::new(other.clone()))
-            }
-        };
-
         // Create ponder limits
-        let ponder_limits = TimeLimits {
-            time_control,
-            moves_to_go: pending_limits.moves_to_go,
-            depth: pending_limits.depth,
-            nodes: pending_limits.nodes,
-            time_parameters: pending_limits.time_parameters,
-        };
+        let ponder_limits = ponder::PonderManager::create_ponder_limits(pending_limits);
 
         // Create TimeManager with ponder mode
         let tm = Self::new(&ponder_limits, side, ply, game_phase);
-
-        // No need to store pending time control separately
-        // It's already stored inside TimeControl::Ponder(inner)
 
         // Initialize byoyomi state if pending time control is Byoyomi
         if let TimeControl::Byoyomi {
@@ -220,7 +181,7 @@ impl TimeManager {
 
     /// Create a new time manager with mock time for testing
     #[cfg(test)]
-    fn new_with_mock_time(
+    pub fn new_with_mock_time(
         limits: &TimeLimits,
         side: Color,
         ply: u32,
@@ -272,12 +233,12 @@ impl TimeManager {
 
         // Soft limit with PV stability check
         let soft_limit = self.inner.soft_limit_ms.load(Ordering::Acquire);
-        if elapsed >= soft_limit && self.is_pv_stable() {
+        if elapsed >= soft_limit && self.state_checker().is_pv_stable(elapsed) {
             return true;
         }
 
         // Emergency stop if critically low on time
-        if self.is_time_critical() {
+        if self.state_checker().is_time_critical(elapsed) {
             return true;
         }
 
@@ -286,13 +247,8 @@ impl TimeManager {
 
     /// Notify when PV changes (for stability-based time extension)
     pub fn on_pv_change(&self, depth: u32) {
-        let now_ms = self.elapsed_ms();
-        self.inner.last_pv_change_ms.store(now_ms, Ordering::Relaxed);
-
-        // Adjust threshold based on depth
-        let threshold = self.inner.params.pv_base_threshold_ms
-            + (depth as u64 * self.inner.params.pv_depth_slope_ms);
-        self.inner.pv_threshold_ms.store(threshold, Ordering::Relaxed);
+        let checker = self.state_checker();
+        checker.on_pv_change(depth, self.elapsed_ms());
     }
 
     /// Force immediate stop (user interrupt)
@@ -358,7 +314,8 @@ impl TimeManager {
                 TimeControl::Byoyomi { byoyomi_ms, .. },
                 TimeState::Main { main_left_ms } | TimeState::Byoyomi { main_left_ms },
             ) => {
-                self.handle_byoyomi_update(time_spent_ms, Some(main_left_ms), *byoyomi_ms);
+                let manager = self.byoyomi_manager();
+                manager.handle_update(time_spent_ms, Some(main_left_ms), *byoyomi_ms);
             }
             (TimeControl::Byoyomi { .. }, TimeState::NonByoyomi) => {
                 debug_assert!(false, "TimeState::NonByoyomi used with Byoyomi time control");
@@ -369,92 +326,9 @@ impl TimeManager {
         }
     }
 
-    /// Internal helper for Byoyomi time updates
-    fn handle_byoyomi_update(
-        &self,
-        time_spent_ms: u64,
-        main_time_left_ms: Option<u64>,
-        byoyomi_ms: u64,
-    ) {
-        let mut state = self.inner.byoyomi_state.lock();
-
-        if !state.in_byoyomi {
-            // Still in main time
-            // Check if we should transition to byoyomi based on GUI's report
-            if let Some(main_left) = main_time_left_ms {
-                if main_left == 0 || time_spent_ms >= main_left {
-                    // Transition to byoyomi
-                    state.in_byoyomi = true;
-                    // If we overspent, handle it with the byoyomi period consumption logic
-                    if time_spent_ms > main_left {
-                        let overspent = time_spent_ms - main_left;
-                        // Drop the lock and recursively call to handle overspent time
-                        // Note: This recursion is bounded to max one level (main->byoyomi transition)
-                        drop(state);
-                        self.handle_byoyomi_update(overspent, None, byoyomi_ms);
-                    }
-                }
-            }
-        } else {
-            // In byoyomi - handle multiple period consumption
-            let mut remaining_time = time_spent_ms;
-            let mut current_ms = state.current_period_ms;
-
-            // Consume periods while time exceeds current period
-            while remaining_time >= current_ms && state.periods_left > 0 {
-                remaining_time -= current_ms;
-                state.periods_left = state.periods_left.saturating_sub(1);
-                current_ms = byoyomi_ms; // Reset to full period
-            }
-
-            if state.periods_left == 0 {
-                // Time forfeit - set stop flag
-                self.inner.stop_flag.store(true, Ordering::Release);
-                state.current_period_ms = 0;
-            } else {
-                // Set remaining time in current period
-                state.current_period_ms = current_ms.saturating_sub(remaining_time);
-            }
-        }
-    }
-
     /// Get current time information (for USI/logging)
     pub fn get_time_info(&self) -> TimeInfo {
-        let elapsed = self.elapsed_ms();
-        let nodes = self.inner.nodes_searched.load(Ordering::Relaxed);
-
-        // Calculate time pressure
-        let hard_limit = self.inner.hard_limit_ms.load(Ordering::Relaxed);
-        let time_pressure = if hard_limit == u64::MAX {
-            0.0 // During ponder or infinite search, no time pressure
-        } else {
-            (elapsed as f32 / hard_limit as f32).min(1.0)
-        };
-
-        // Get byoyomi info if applicable (consistent lock order: RwLock before Mutex)
-        let byoyomi_info = {
-            let active_tc = self.inner.active_time_control.read();
-            match &*active_tc {
-                TimeControl::Byoyomi { .. } => {
-                    let state = self.inner.byoyomi_state.lock();
-                    Some(ByoyomiInfo {
-                        in_byoyomi: state.in_byoyomi,
-                        periods_left: state.periods_left,
-                        current_period_ms: state.current_period_ms,
-                    })
-                }
-                _ => None,
-            }
-        };
-
-        TimeInfo {
-            elapsed_ms: elapsed,
-            soft_limit_ms: self.inner.soft_limit_ms.load(Ordering::Relaxed),
-            hard_limit_ms: hard_limit,
-            nodes_searched: nodes,
-            time_pressure,
-            byoyomi_info,
-        }
+        self.state_checker().get_time_info(self.elapsed_ms())
     }
 
     /// Handle ponder hit (convert ponder to normal search)
@@ -466,106 +340,8 @@ impl TimeManager {
     /// - `new_limits`: Updated search limits with actual time control
     /// - `time_already_spent_ms`: Time already spent during pondering
     pub fn ponder_hit(&self, new_limits: Option<&TimeLimits>, time_already_spent_ms: u64) {
-        // Check if currently pondering
-        if !self.is_pondering() {
-            log::warn!("TimeManager::ponder_hit called but not pondering");
-            return;
-        }
-
-        log::info!(
-            "TimeManager::ponder_hit called with time_already_spent_ms: {time_already_spent_ms}"
-        );
-
-        // Get the actual time control from new_limits or extract from Ponder(inner)
-        let (actual_time_control, moves_to_go, params) = if let Some(limits) = new_limits {
-            (
-                limits.time_control.clone(),
-                limits.moves_to_go,
-                limits.time_parameters.unwrap_or_default(),
-            )
-        } else {
-            // Extract inner time control from Ponder
-            let active_tc = self.inner.active_time_control.read();
-            match &*active_tc {
-                TimeControl::Ponder(inner) => ((**inner).clone(), None, self.inner.params),
-                _ => {
-                    log::warn!("ponder_hit: Not in Ponder mode, active_tc = {:?}", *active_tc);
-                    log::warn!("ponder_hit: No pending time control, using conservative defaults");
-                    // Fallback: Set conservative limits
-                    self.inner.soft_limit_ms.store(1000, Ordering::Release);
-                    self.inner.hard_limit_ms.store(2000, Ordering::Release);
-                    self.inner.is_ponder.store(false, Ordering::Release);
-                    return;
-                }
-            }
-        };
-
-        // Calculate new time allocation using saved game phase
-        let (soft_ms, hard_ms) = calculate_time_allocation(
-            &actual_time_control,
-            self.inner.side_to_move,
-            self.inner.start_ply,
-            moves_to_go,
-            self.inner.game_phase, // Use saved game phase
-            &params,
-        );
-
-        // Adjust for time already spent
-        let adjusted_soft = soft_ms.saturating_sub(time_already_spent_ms).max(100);
-        let adjusted_hard = hard_ms.saturating_sub(time_already_spent_ms).max(200);
-
-        // Ensure soft <= hard invariant with reasonable margin
-        // Use 50% of hard limit for soft limit when extremely time-constrained
-        let adjusted_soft = if adjusted_soft >= adjusted_hard {
-            adjusted_hard / 2
-        } else {
-            adjusted_soft
-        };
-
-        // Update limits atomically
-        self.inner.soft_limit_ms.store(adjusted_soft, Ordering::Release);
-        self.inner.hard_limit_ms.store(adjusted_hard, Ordering::Release);
-
-        log::info!(
-            "TimeManager::ponder_hit - Set time limits: soft={adjusted_soft}ms, hard={adjusted_hard}ms"
-        );
-
-        // Update active time control first (consistent lock order: RwLock before Mutex)
-        {
-            let mut active_tc = self.inner.active_time_control.write();
-            *active_tc = actual_time_control.clone();
-        }
-
-        // Then initialize byoyomi state if needed
-        if let TimeControl::Byoyomi {
-            periods,
-            byoyomi_ms,
-            main_time_ms,
-        } = &actual_time_control
-        {
-            let mut byoyomi = self.inner.byoyomi_state.lock();
-            *byoyomi = ByoyomiState {
-                periods_left: *periods,
-                current_period_ms: *byoyomi_ms,
-                in_byoyomi: *main_time_ms == 0,
-            };
-        }
-
-        // Reset start time to avoid double counting
-        {
-            let mut start = self.inner.start_time.lock();
-            #[cfg(test)]
-            {
-                *start = mock_now();
-            }
-            #[cfg(not(test))]
-            {
-                *start = Instant::now();
-            }
-        }
-
-        // Clear ponder flag
-        self.inner.is_ponder.store(false, Ordering::Release);
+        let manager = self.ponder_manager();
+        manager.ponder_hit(new_limits, time_already_spent_ms);
     }
 
     /// Get byoyomi-specific information
@@ -576,802 +352,89 @@ impl TimeManager {
         let active_tc = self.get_active_time_control();
         match &*active_tc {
             TimeControl::Byoyomi { .. } => {
-                let state = self.inner.byoyomi_state.lock();
-                Some((state.periods_left, state.current_period_ms, state.in_byoyomi))
+                let manager = self.byoyomi_manager();
+                Some(manager.get_state())
             }
             _ => None,
         }
     }
 
-    /// Check if PV is stable (no recent changes)
-    fn is_pv_stable(&self) -> bool {
-        let now_ms = self.elapsed_ms();
-        let last_change = self.inner.last_pv_change_ms.load(Ordering::Acquire);
-        let threshold = self.inner.pv_threshold_ms.load(Ordering::Acquire);
-
-        now_ms.saturating_sub(last_change) > threshold
-    }
-
-    /// Check if we're critically low on time
-    fn is_time_critical(&self) -> bool {
-        let active_tc = self.get_active_time_control();
-        match &*active_tc {
-            TimeControl::Fischer {
-                white_ms,
-                black_ms,
-                increment_ms,
-            } => {
-                let remain = if self.inner.side_to_move == Color::White {
-                    *white_ms
-                } else {
-                    *black_ms
-                };
-                remain < self.inner.params.critical_fischer_ms && *increment_ms == 0
-            }
-            TimeControl::Byoyomi { .. } => {
-                let state = self.inner.byoyomi_state.lock();
-                // Critical if in byoyomi and low on period time
-                state.in_byoyomi && state.current_period_ms < self.inner.params.critical_byoyomi_ms
-            }
-            TimeControl::FixedTime { .. } => {
-                // Check for overrun
-                let elapsed = self.elapsed_ms();
-                let hard = self.inner.hard_limit_ms.load(Ordering::Acquire);
-                elapsed > hard * 11 / 10 // 110% exceeded
-            }
-            _ => false,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn create_test_limits() -> TimeLimits {
-        TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            moves_to_go: None,
-            depth: None,
-            nodes: None,
-            time_parameters: None,
+    // Helper methods to create managers
+    #[cfg(not(test))]
+    fn byoyomi_manager(&self) -> byoyomi::ByoyomiManager {
+        byoyomi::ByoyomiManager {
+            byoyomi_state: &self.inner.byoyomi_state,
+            stop_flag: &self.inner.stop_flag,
         }
     }
 
-    #[test]
-    fn test_time_manager_creation() {
-        let limits = create_test_limits();
-        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::Opening);
-        let info = tm.get_time_info();
-
-        assert_eq!(info.elapsed_ms, 0);
-        assert!(info.soft_limit_ms > 0);
-        assert!(info.hard_limit_ms > info.soft_limit_ms);
+    #[cfg(test)]
+    pub fn byoyomi_manager(&self) -> byoyomi::ByoyomiManager {
+        byoyomi::ByoyomiManager {
+            byoyomi_state: &self.inner.byoyomi_state,
+            stop_flag: &self.inner.stop_flag,
+        }
     }
 
-    #[test]
-    fn test_force_stop() {
-        let limits = create_test_limits();
-        let tm = TimeManager::new(&limits, Color::Black, 20, GamePhase::MiddleGame);
-
-        assert!(!tm.should_stop(0));
-        tm.force_stop();
-        assert!(tm.should_stop(0));
+    #[cfg(not(test))]
+    fn ponder_manager(&self) -> ponder::PonderManager {
+        ponder::PonderManager {
+            is_ponder: &self.inner.is_ponder,
+            active_time_control: &self.inner.active_time_control,
+            soft_limit_ms: &self.inner.soft_limit_ms,
+            hard_limit_ms: &self.inner.hard_limit_ms,
+            start_time: &self.inner.start_time,
+            byoyomi_state: &self.inner.byoyomi_state,
+            side_to_move: self.inner.side_to_move,
+            start_ply: self.inner.start_ply,
+            game_phase: self.inner.game_phase,
+            params: self.inner.params,
+        }
     }
 
-    #[test]
-    fn test_byoyomi_exact_boundary() {
-        // Test exact boundary condition: time_spent == byoyomi_ms
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 0,
-                byoyomi_ms: 1000,
-                periods: 3,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
-
-        // Spend exactly one period
-        tm.update_after_move(1000, TimeState::Byoyomi { main_left_ms: 0 });
-        let state = tm.get_byoyomi_state().unwrap();
-        assert_eq!(state.0, 2); // Should have 2 periods left
-        assert_eq!(state.1, 1000); // Should reset to full period
-        assert!(state.2); // Should be in byoyomi
+    #[cfg(test)]
+    pub fn ponder_manager(&self) -> ponder::PonderManager {
+        ponder::PonderManager {
+            is_ponder: &self.inner.is_ponder,
+            active_time_control: &self.inner.active_time_control,
+            soft_limit_ms: &self.inner.soft_limit_ms,
+            hard_limit_ms: &self.inner.hard_limit_ms,
+            start_time: &self.inner.start_time,
+            byoyomi_state: &self.inner.byoyomi_state,
+            side_to_move: self.inner.side_to_move,
+            start_ply: self.inner.start_ply,
+            game_phase: self.inner.game_phase,
+            params: self.inner.params,
+        }
     }
 
-    #[test]
-    fn test_byoyomi_multiple_period_consumption() {
-        // Test consuming multiple periods in one move
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 0,
-                byoyomi_ms: 1000,
-                periods: 5,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
-
-        // Spend 2.5 periods worth of time
-        tm.update_after_move(2500, TimeState::Byoyomi { main_left_ms: 0 });
-        let state = tm.get_byoyomi_state().unwrap();
-        assert_eq!(state.0, 3); // Should have consumed 2 periods, 3 left
-        assert_eq!(state.1, 500); // 500ms left in current period
+    #[cfg(not(test))]
+    fn state_checker(&self) -> state::StateChecker {
+        state::StateChecker {
+            active_time_control: &self.inner.active_time_control,
+            last_pv_change_ms: &self.inner.last_pv_change_ms,
+            pv_threshold_ms: &self.inner.pv_threshold_ms,
+            hard_limit_ms: &self.inner.hard_limit_ms,
+            soft_limit_ms: &self.inner.soft_limit_ms,
+            nodes_searched: &self.inner.nodes_searched,
+            byoyomi_state: &self.inner.byoyomi_state,
+            side_to_move: self.inner.side_to_move,
+            params: &self.inner.params,
+        }
     }
 
-    #[test]
-    fn test_byoyomi_main_time_transition() {
-        // Test transition from main time to byoyomi
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 5000,
-                byoyomi_ms: 1000,
-                periods: 3,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
-
-        // Not in byoyomi initially
-        let state = tm.get_byoyomi_state().unwrap();
-        assert!(!state.2); // Should not be in byoyomi
-
-        // Transition to byoyomi when main time runs out
-        tm.update_after_move(3000, TimeState::Main { main_left_ms: 2000 }); // 2s left, spent 3s
-        let state = tm.get_byoyomi_state().unwrap();
-        assert!(state.2); // Should now be in byoyomi
-        assert_eq!(state.0, 2); // Overspent by 1s, so consumed 1 period
-        assert_eq!(state.1, 1000); // Full period remains after consuming the overspent period
-
-        // Another move that consumes a period
-        tm.update_after_move(1500, TimeState::Byoyomi { main_left_ms: 0 });
-        let state = tm.get_byoyomi_state().unwrap();
-        assert_eq!(state.0, 1); // Should have 1 period left (consumed 1 from the 2 remaining)
-        assert_eq!(state.1, 500); // 500ms left in current period
-    }
-
-    #[test]
-    fn test_pv_stability_with_mock_time() {
-        // Test PV stability tracking with MockClock
-        mock_set_time(0);
-
-        let limits = create_test_limits();
-        let tm = TimeManager::new_with_mock_time(&limits, Color::White, 0, GamePhase::Opening);
-
-        // Initial PV change
-        tm.on_pv_change(10);
-        assert!(!tm.is_pv_stable()); // Just changed
-
-        // Advance time but not enough for stability
-        mock_advance_time(50);
-        assert!(!tm.is_pv_stable()); // 50ms < 80ms base + 10*5ms = 130ms
-
-        // Advance past threshold
-        mock_advance_time(100); // Total 150ms
-        assert!(tm.is_pv_stable()); // 150ms > 130ms
-
-        // Another PV change at deeper depth
-        tm.on_pv_change(20);
-        assert!(!tm.is_pv_stable()); // Just changed again
-
-        // Deeper searches require more stability
-        mock_advance_time(150); // Need 80 + 20*5 = 180ms
-        assert!(!tm.is_pv_stable()); // 150ms < 180ms
-
-        mock_advance_time(50); // Total 200ms
-        assert!(tm.is_pv_stable()); // 200ms > 180ms
-    }
-
-    #[test]
-    fn test_time_pressure_calculation() {
-        mock_set_time(0);
-
-        let limits = TimeLimits {
-            time_control: TimeControl::FixedTime { ms_per_move: 1000 },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_with_mock_time(&limits, Color::Black, 0, GamePhase::MiddleGame);
-
-        // Initially no pressure
-        let info = tm.get_time_info();
-        assert!(info.time_pressure < 0.1);
-
-        // Half way through
-        mock_advance_time(500);
-        let info = tm.get_time_info();
-        assert!((info.time_pressure - 0.5).abs() < 0.1);
-
-        // Near hard limit
-        mock_advance_time(450); // Total 950ms
-        let info = tm.get_time_info();
-        assert!(info.time_pressure > 0.9);
-    }
-
-    #[test]
-    fn test_emergency_stop_with_mock_time() {
-        mock_set_time(0);
-
-        // Test Fischer emergency stop
-        let limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 200, // Critical time
-                black_ms: 200,
-                increment_ms: 0,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_with_mock_time(&limits, Color::White, 100, GamePhase::EndGame);
-        assert!(tm.is_time_critical()); // Should be critical immediately
-
-        // Test Byoyomi emergency stop
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 0,
-                byoyomi_ms: 1000,
-                periods: 1,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_with_mock_time(&limits, Color::Black, 80, GamePhase::EndGame);
-
-        // Use most of the period
-        tm.update_after_move(950, TimeState::Byoyomi { main_left_ms: 0 });
-        assert!(tm.is_time_critical()); // Only 50ms left < 80ms critical threshold
-    }
-
-    #[test]
-    fn test_soft_limit_extension() {
-        mock_set_time(0);
-
-        let limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_with_mock_time(&limits, Color::White, 20, GamePhase::MiddleGame);
-        let info = tm.get_time_info();
-        let soft_limit = info.soft_limit_ms;
-
-        // Advance to soft limit
-        mock_advance_time(soft_limit);
-
-        // With unstable PV, should not stop
-        tm.on_pv_change(15);
-        assert!(!tm.should_stop(1000));
-
-        // Advance past soft limit but PV still unstable
-        mock_advance_time(50);
-        assert!(!tm.should_stop(2000)); // Should continue searching
-
-        // Make PV stable
-        mock_advance_time(200); // Well past stability threshold
-        assert!(tm.should_stop(3000)); // Now should stop
-    }
-
-    #[test]
-    fn test_byoyomi_time_forfeit() {
-        // Test time forfeit when all periods consumed
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 0,
-                byoyomi_ms: 1000,
-                periods: 2,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
-
-        // Consume all periods
-        tm.update_after_move(2000, TimeState::Byoyomi { main_left_ms: 0 }); // Consume both periods
-
-        // Should trigger stop flag
-        assert!(tm.should_stop(0));
-
-        let state = tm.get_byoyomi_state().unwrap();
-        assert_eq!(state.0, 0); // No periods left
-        assert_eq!(state.1, 0); // No time left
-    }
-
-    #[test]
-    #[cfg(not(debug_assertions))]
-    fn test_byoyomi_transition_with_wrong_state() {
-        // Test that using wrong TimeState doesn't cause transition
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 5000,
-                byoyomi_ms: 1000,
-                periods: 3,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
-
-        // Using NonByoyomi state with Byoyomi time control
-        // This should not cause transition to byoyomi
-        tm.update_after_move(2000, TimeState::NonByoyomi);
-        tm.update_after_move(2000, TimeState::NonByoyomi);
-        tm.update_after_move(2000, TimeState::NonByoyomi); // Total 6s spent
-
-        let state = tm.get_byoyomi_state().unwrap();
-        assert!(!state.2); // Still not in byoyomi - wrong TimeState prevents transition
-    }
-
-    #[test]
-    fn test_byoyomi_proper_transition_with_new_api() {
-        // Test proper transition with new API
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 5000,
-                byoyomi_ms: 1000,
-                periods: 3,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
-
-        // First move: still in main time
-        tm.update_after_move(2000, TimeState::Main { main_left_ms: 3000 });
-        let state = tm.get_byoyomi_state().unwrap();
-        assert!(!state.2); // Still in main time
-
-        // Second move: transition to byoyomi
-        tm.update_after_move(3500, TimeState::Main { main_left_ms: 3000 });
-
-        let state = tm.get_byoyomi_state().unwrap();
-        assert!(state.2); // Now in byoyomi
-        assert_eq!(state.0, 3); // All periods still available
-        assert_eq!(state.1, 500); // 500ms left in first period (overspent by 500ms)
-    }
-
-    #[test]
-    fn test_byoyomi_transition_with_multiple_period_overspend() {
-        // Test transition from main time to byoyomi with overspend > 2 periods
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 1000,
-                byoyomi_ms: 1000,
-                periods: 5,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::EndGame);
-
-        // Overspend main time by 2.5 periods worth
-        tm.update_after_move(3500, TimeState::Main { main_left_ms: 1000 });
-
-        let state = tm.get_byoyomi_state().unwrap();
-        assert!(state.2); // In byoyomi
-        assert_eq!(state.0, 3); // Should have consumed 2 periods (2500ms), 3 left
-        assert_eq!(state.1, 500); // 500ms left in current period
-    }
-
-    #[test]
-    fn test_continuous_byoyomi_to_time_forfeit() {
-        // Test main=0 start → consume all periods → time forfeit
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 0, // Start in byoyomi
-                byoyomi_ms: 1000,
-                periods: 2,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::EndGame);
-
-        // Consume first period
-        tm.update_after_move(1200, TimeState::Byoyomi { main_left_ms: 0 });
-        assert!(!tm.should_stop(0));
-
-        let state = tm.get_byoyomi_state().unwrap();
-        assert_eq!(state.0, 1); // One period left
-        assert_eq!(state.1, 800); // 800ms left in current period
-
-        // Consume second period - time forfeit
-        tm.update_after_move(1500, TimeState::Byoyomi { main_left_ms: 0 });
-        assert!(tm.should_stop(0)); // Time forfeit
-
-        let state = tm.get_byoyomi_state().unwrap();
-        assert_eq!(state.0, 0); // No periods left
-        assert_eq!(state.1, 0); // No time left
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "TimeState::NonByoyomi used with Byoyomi")]
-    fn test_debug_assertion_on_wrong_time_state() {
-        // Test debug assertion fires on API misuse
-        let limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 5000,
-                byoyomi_ms: 1000,
-                periods: 3,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
-        tm.update_after_move(1000, TimeState::NonByoyomi); // Wrong state!
-    }
-
-    #[test]
-    fn test_new_api_with_various_time_controls() {
-        // Test that new API works correctly with non-byoyomi time controls
-        let fischer_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new(&fischer_limits, Color::White, 0, GamePhase::Opening);
-        tm.update_after_move(2000, TimeState::NonByoyomi); // Should work fine
-
-        let fixed_limits = TimeLimits {
-            time_control: TimeControl::FixedTime { ms_per_move: 1000 },
-            ..Default::default()
-        };
-
-        let tm2 = TimeManager::new(&fixed_limits, Color::Black, 0, GamePhase::MiddleGame);
-        tm2.update_after_move(500, TimeState::NonByoyomi); // Should work fine
-    }
-
-    #[test]
-    fn test_ponder_to_fischer() {
-        mock_set_time(0);
-
-        // Create pending limits with Fischer time control
-        let pending_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            ..Default::default()
-        };
-
-        // Create TimeManager in ponder mode
-        let tm = TimeManager::new_ponder(&pending_limits, Color::White, 0, GamePhase::Opening);
-
-        // Verify it's pondering
-        assert!(tm.is_pondering());
-        assert!(!tm.should_stop(1000)); // Should not stop during ponder
-
-        // Simulate 5 seconds of pondering
-        mock_advance_time(5000);
-
-        // Ponder hit
-        tm.ponder_hit(None, 5000);
-
-        // Verify ponder mode is off
-        assert!(!tm.is_pondering());
-
-        // Check time allocation is adjusted for spent time
-        let info = tm.get_time_info();
-        assert!(info.soft_limit_ms < 60000 - 5000); // Less than remaining time
-        assert!(info.hard_limit_ms < 60000 - 5000);
-    }
-
-    #[test]
-    fn test_ponder_to_byoyomi() {
-        mock_set_time(0);
-
-        // Create pending limits with Byoyomi
-        let pending_limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 10000, // 10 seconds main time
-                byoyomi_ms: 30000,   // 30 seconds per period
-                periods: 3,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_ponder(&pending_limits, Color::Black, 40, GamePhase::MiddleGame);
-        assert!(tm.is_pondering());
-
-        // Ponder for 3 seconds
-        mock_advance_time(3000);
-        tm.ponder_hit(None, 3000);
-
-        assert!(!tm.is_pondering());
-
-        // Should have conservative allocation from remaining main time
-        let info = tm.get_time_info();
-        assert!(info.soft_limit_ms > 0);
-        assert!(info.soft_limit_ms < 10000 - 3000); // Less than remaining main time
-    }
-
-    #[test]
-    fn test_ponder_edge_cases() {
-        mock_set_time(0);
-
-        // Test 1: Ponder hit with spent > remain
-        let pending_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 2000, // Only 2 seconds
-                black_ms: 2000,
-                increment_ms: 0,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_ponder(&pending_limits, Color::White, 80, GamePhase::EndGame);
-
-        // Ponder for 5 seconds (more than available time)
-        mock_advance_time(5000);
-        tm.ponder_hit(None, 5000);
-
-        // Should have minimal time allocation
-        let info = tm.get_time_info();
-        assert_eq!(info.soft_limit_ms, 100); // Minimum safety limit
-        assert_eq!(info.hard_limit_ms, 200);
-
-        // Test 2: Force stop during ponder
-        let tm2 = TimeManager::new_ponder(&pending_limits, Color::Black, 0, GamePhase::Opening);
-        assert!(!tm2.should_stop(1000)); // Normal check returns false
-
-        tm2.force_stop();
-        assert!(tm2.should_stop(1000)); // Force stop works even during ponder
-    }
-
-    #[test]
-    fn test_ponder_with_new_limits() {
-        mock_set_time(0);
-
-        // Initial pending limits
-        let pending_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 50000,
-                black_ms: 50000,
-                increment_ms: 500,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_ponder(&pending_limits, Color::White, 20, GamePhase::MiddleGame);
-
-        mock_advance_time(2000);
-
-        // New limits provided at ponder hit (e.g., opponent's time updated)
-        let new_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 48000, // Updated time
-                black_ms: 45000,
-                increment_ms: 500,
-            },
-            moves_to_go: Some(30), // Additional info
-            ..Default::default()
-        };
-
-        tm.ponder_hit(Some(&new_limits), 2000);
-
-        // Should use new limits for calculation
-        let info = tm.get_time_info();
-        assert!(info.soft_limit_ms > 0);
-        assert!(info.soft_limit_ms < 48000 - 2000);
-    }
-
-    #[test]
-    fn test_active_time_control_switch() {
-        mock_set_time(0);
-
-        // Start with Fischer in pending
-        let pending_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_ponder(&pending_limits, Color::White, 0, GamePhase::Opening);
-
-        // Initially, active time control should be Ponder
-        assert!(tm.is_pondering());
-        // No byoyomi state since we're not in byoyomi mode
-        assert!(tm.get_byoyomi_state().is_none());
-
-        // After ponder hit, active time control should be Fischer
-        tm.ponder_hit(None, 1000);
-        assert!(!tm.is_pondering());
-
-        // Still no byoyomi state (Fischer mode)
-        assert!(tm.get_byoyomi_state().is_none());
-
-        // Test with Byoyomi
-        let byoyomi_limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 5000,
-                byoyomi_ms: 10000,
-                periods: 3,
-            },
-            ..Default::default()
-        };
-
-        let tm2 = TimeManager::new_ponder(&byoyomi_limits, Color::Black, 0, GamePhase::MiddleGame);
-        tm2.ponder_hit(None, 1000);
-
-        // Now should have byoyomi state
-        let state = tm2.get_byoyomi_state();
-        assert!(state.is_some());
-        let (periods, _, in_byoyomi) = state.unwrap();
-        assert_eq!(periods, 3);
-        assert!(!in_byoyomi); // Still in main time
-    }
-
-    #[test]
-    fn test_ponder_hit_concurrent_access() {
-        use std::sync::Arc;
-        use std::thread;
-
-        mock_set_time(0);
-
-        let pending_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            ..Default::default()
-        };
-
-        let tm =
-            Arc::new(TimeManager::new_ponder(&pending_limits, Color::White, 0, GamePhase::Opening));
-
-        // Clone for threads
-        let tm1 = Arc::clone(&tm);
-        let tm2 = Arc::clone(&tm);
-
-        // Thread 1: Continuously check should_stop
-        let handle1 = thread::spawn(move || {
-            let mut nodes = 0u64;
-            for _ in 0..1000 {
-                nodes += 1;
-                let should_stop = tm1.should_stop(nodes);
-                // During ponder, should not stop
-                if tm1.is_pondering() {
-                    assert!(!should_stop);
-                }
-                // Yield to other threads to increase chance of race
-                thread::yield_now();
-            }
-        });
-
-        // Thread 2: Call ponder_hit after ensuring thread 1 has started
-        let handle2 = thread::spawn(move || {
-            // Yield multiple times to let thread 1 get going
-            for _ in 0..10 {
-                thread::yield_now();
-            }
-            tm2.ponder_hit(None, 1000);
-        });
-
-        // Wait for both threads
-        handle1.join().unwrap();
-        handle2.join().unwrap();
-
-        // Verify final state
-        assert!(!tm.is_pondering());
-    }
-
-    #[test]
-    fn test_fischer_to_byoyomi_switch() {
-        mock_set_time(0);
-
-        // Start with Fischer in pending
-        let fischer_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_ponder(&fischer_limits, Color::White, 0, GamePhase::Opening);
-
-        // Provide new Byoyomi limits at ponder hit
-        let byoyomi_limits = TimeLimits {
-            time_control: TimeControl::Byoyomi {
-                main_time_ms: 10000,
-                byoyomi_ms: 5000,
-                periods: 5,
-            },
-            ..Default::default()
-        };
-
-        tm.ponder_hit(Some(&byoyomi_limits), 2000);
-
-        // Should now have byoyomi state
-        let state = tm.get_byoyomi_state();
-        assert!(state.is_some());
-        let (periods, period_ms, in_byoyomi) = state.unwrap();
-        assert_eq!(periods, 5);
-        assert_eq!(period_ms, 5000);
-        assert!(!in_byoyomi);
-    }
-
-    #[test]
-    fn test_elapsed_time_after_ponder_hit() {
-        mock_set_time(0);
-
-        let pending_limits = TimeLimits {
-            time_control: TimeControl::Fischer {
-                white_ms: 60000,
-                black_ms: 60000,
-                increment_ms: 1000,
-            },
-            ..Default::default()
-        };
-
-        let tm = TimeManager::new_ponder(&pending_limits, Color::White, 0, GamePhase::Opening);
-
-        // Ponder for 5 seconds
-        mock_advance_time(5000);
-        let elapsed_before = tm.elapsed_ms();
-        assert!((4999..=5001).contains(&elapsed_before)); // Allow small variance
-
-        // After ponder hit, elapsed should reset
-        tm.ponder_hit(None, 5000);
-        let elapsed_after = tm.elapsed_ms();
-        assert!(elapsed_after <= 1); // Should be reset (allow 1ms for execution time)
-
-        // Advance more time
-        mock_advance_time(2000);
-        let elapsed_final = tm.elapsed_ms();
-        assert!((1999..=2001).contains(&elapsed_final)); // Should count from ponder_hit
-    }
-
-    #[test]
-    fn test_ponder_hit_clears_ponder_flag_and_sets_control() {
-        mock_set_time(0);
-
-        // Fischer inner control, 10 s each side
-        let inner_tc = TimeControl::Fischer {
-            black_ms: 10_000,
-            white_ms: 10_000,
-            increment_ms: 0,
-        };
-        let limits = TimeLimits {
-            time_control: inner_tc.clone(), // Pass the regular time control, not wrapped in Ponder
-            ..Default::default()
-        };
-        let tm = TimeManager::new_ponder(&limits, Color::Black, 0, GamePhase::Opening);
-
-        assert!(tm.is_pondering());
-
-        // Check initial active time control
-        let initial_active = tm.inner.active_time_control.read().clone();
-        eprintln!("Initial active time control: {initial_active:?}");
-        assert!(matches!(initial_active, TimeControl::Ponder(_)));
-
-        tm.ponder_hit(None, /* elapsed */ 500);
-
-        assert!(!tm.is_pondering());
-        let active = tm.inner.active_time_control.read().clone();
-        eprintln!("Active time control after ponder_hit: {active:?}");
-        assert!(matches!(active, TimeControl::Fischer { .. }));
+    #[cfg(test)]
+    pub fn state_checker(&self) -> state::StateChecker {
+        state::StateChecker {
+            active_time_control: &self.inner.active_time_control,
+            last_pv_change_ms: &self.inner.last_pv_change_ms,
+            pv_threshold_ms: &self.inner.pv_threshold_ms,
+            hard_limit_ms: &self.inner.hard_limit_ms,
+            soft_limit_ms: &self.inner.soft_limit_ms,
+            nodes_searched: &self.inner.nodes_searched,
+            byoyomi_state: &self.inner.byoyomi_state,
+            side_to_move: self.inner.side_to_move,
+            params: &self.inner.params,
+        }
     }
 }
