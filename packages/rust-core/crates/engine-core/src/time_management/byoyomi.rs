@@ -35,45 +35,50 @@ impl<'a> ByoyomiManager<'a> {
         main_time_left_ms: Option<u64>,
         byoyomi_ms: u64,
     ) {
+        let mut remaining = time_spent_ms;
         let mut state = self.byoyomi_state.lock();
 
         if !state.in_byoyomi {
             // Still in main time
-            // Check if we should transition to byoyomi based on GUI's report
             if let Some(main_left) = main_time_left_ms {
-                if main_left == 0 || time_spent_ms >= main_left {
+                if main_left == 0 || remaining >= main_left {
                     // Transition to byoyomi
                     state.in_byoyomi = true;
-                    // If we overspent, handle it with the byoyomi period consumption logic
-                    if time_spent_ms > main_left {
-                        let overspent = time_spent_ms - main_left;
-                        // Drop the lock and recursively call to handle overspent time
-                        // Note: This recursion is bounded to max one level (main->byoyomi transition)
-                        drop(state);
-                        self.handle_update(overspent, None, byoyomi_ms);
-                    }
+                    remaining = remaining.saturating_sub(main_left);
+                    // Fall through to byoyomi consumption
+                } else {
+                    // Still in main time
+                    return;
                 }
-            }
-        } else {
-            // In byoyomi - handle multiple period consumption
-            let mut remaining_time = time_spent_ms;
-            let mut current_ms = state.current_period_ms;
-
-            // Consume periods while time exceeds current period
-            while remaining_time >= current_ms && state.periods_left > 0 {
-                remaining_time -= current_ms;
-                state.periods_left = state.periods_left.saturating_sub(1);
-                current_ms = byoyomi_ms; // Reset to full period
-            }
-
-            if state.periods_left == 0 {
-                // Time forfeit - set stop flag
-                self.stop_flag.store(true, Ordering::Release);
-                state.current_period_ms = 0;
             } else {
-                // Set remaining time in current period
-                state.current_period_ms = current_ms.saturating_sub(remaining_time);
+                // This path is defensive: if called with None by mistake, do nothing.
+                // In current design, update_after_move always passes Some(main_left_ms).
+                return;
             }
+        }
+
+        // In byoyomi state - add defensive assert
+        debug_assert!(
+            state.periods_left == 0 || state.current_period_ms > 0,
+            "Invalid ByoyomiState: periods_left > 0 but current_period_ms == 0"
+        );
+
+        // Handle byoyomi period consumption
+        let mut current_ms = state.current_period_ms;
+        while remaining >= current_ms && state.periods_left > 0 {
+            remaining -= current_ms;
+            state.periods_left = state.periods_left.saturating_sub(1);
+            current_ms = byoyomi_ms; // Reset to full period
+        }
+
+        if state.periods_left == 0 {
+            // Time forfeit - set stop flag
+            self.stop_flag.store(true, Ordering::Release);
+            state.current_period_ms = 0;
+            log::info!("Byoyomi time forfeit: no periods left");
+        } else {
+            // Set remaining time in current period
+            state.current_period_ms = current_ms.saturating_sub(remaining);
         }
     }
 
