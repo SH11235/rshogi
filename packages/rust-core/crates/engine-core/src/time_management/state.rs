@@ -33,7 +33,7 @@ impl<'a> StateChecker<'a> {
     }
 
     /// Check if we're critically low on time
-    pub fn is_time_critical(&self, elapsed_ms: u64) -> bool {
+    pub fn is_time_critical(&self) -> bool {
         let active_tc = self.active_time_control.read();
         match &*active_tc {
             TimeControl::Fischer {
@@ -52,11 +52,6 @@ impl<'a> StateChecker<'a> {
                 let state = self.byoyomi_state.lock();
                 // Critical if in byoyomi and low on period time
                 state.in_byoyomi && state.current_period_ms < self.params.critical_byoyomi_ms
-            }
-            TimeControl::FixedTime { .. } => {
-                // Check for overrun
-                let hard = self.hard_limit_ms.load(Ordering::Acquire);
-                elapsed_ms > hard * 11 / 10 // 110% exceeded
             }
             _ => false,
         }

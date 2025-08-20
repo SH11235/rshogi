@@ -229,6 +229,8 @@ impl TimeManager {
         self.inner.nodes_searched.fetch_max(current_nodes, Ordering::Relaxed);
 
         // Check node limit
+        // TODO: For future optimization, consider caching TimeControl variant in AtomicU8
+        // to avoid RwLock acquisition in hot path (especially for non-FixedNodes cases)
         let active_tc = self.get_active_time_control();
         if let TimeControl::FixedNodes { nodes } = &*active_tc {
             if current_nodes >= *nodes {
@@ -252,7 +254,7 @@ impl TimeManager {
         }
 
         // Emergency stop if critically low on time
-        if self.state_checker().is_time_critical(elapsed) {
+        if self.state_checker().is_time_critical() {
             return true;
         }
 
