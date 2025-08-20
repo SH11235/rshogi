@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use engine_core::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
 use engine_core::Color;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 

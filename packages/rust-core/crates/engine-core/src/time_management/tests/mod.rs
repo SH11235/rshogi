@@ -2,6 +2,7 @@
 
 mod byoyomi_tests;
 mod integration_tests;
+mod monotonic_test;
 mod ponder_tests;
 mod pv_stability_tests;
 

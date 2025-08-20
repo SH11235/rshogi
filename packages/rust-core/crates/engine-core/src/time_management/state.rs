@@ -26,8 +26,8 @@ pub struct StateChecker<'a> {
 impl<'a> StateChecker<'a> {
     /// Check if PV is stable (no recent changes)
     pub fn is_pv_stable(&self, elapsed_ms: u64) -> bool {
-        let last_change = self.last_pv_change_ms.load(Ordering::Acquire);
-        let threshold = self.pv_threshold_ms.load(Ordering::Acquire);
+        let last_change = self.last_pv_change_ms.load(Ordering::Relaxed);
+        let threshold = self.pv_threshold_ms.load(Ordering::Relaxed);
 
         elapsed_ms.saturating_sub(last_change) > threshold
     }

@@ -14,11 +14,13 @@
 //! - State changes don't affect the original settings
 //! - Current state is accessible via `TimeInfo::byoyomi_info`
 
+use lazy_static::lazy_static;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
+use std::time::Instant;
 
 use crate::Color;
 
@@ -71,7 +73,7 @@ struct TimeManagerInner {
     active_time_control: RwLock<TimeControl>,
 
     // Time tracking (AtomicU64 for lock-free access in hot path)
-    start_epoch_ms: AtomicU64, // Milliseconds since UNIX epoch
+    start_mono_ms: AtomicU64, // Milliseconds since monotonic base
 
     // Limits (Atomic for lock-free access)
     soft_limit_ms: AtomicU64,
@@ -92,9 +94,13 @@ struct TimeManagerInner {
     is_ponder: AtomicBool, // Whether currently pondering
 }
 
-/// Get current epoch time in milliseconds
+lazy_static! {
+    static ref MONO_BASE: Instant = Instant::now();
+}
+
+/// Get current monotonic time in milliseconds since process start
 #[inline]
-fn get_epoch_ms() -> u64 {
+pub(crate) fn monotonic_ms() -> u64 {
     #[cfg(test)]
     {
         // In test mode, use mock time
@@ -102,10 +108,7 @@ fn get_epoch_ms() -> u64 {
     }
     #[cfg(not(test))]
     {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("System time is before UNIX epoch")
-            .as_millis() as u64
+        MONO_BASE.elapsed().as_millis() as u64
     }
 }
 
@@ -133,7 +136,7 @@ impl TimeManager {
             params,
             game_phase,
             active_time_control: RwLock::new(limits.time_control.clone()),
-            start_epoch_ms: AtomicU64::new(get_epoch_ms()),
+            start_mono_ms: AtomicU64::new(monotonic_ms()),
             soft_limit_ms: AtomicU64::new(soft_ms),
             hard_limit_ms: AtomicU64::new(hard_ms),
             nodes_searched: AtomicU64::new(0),
@@ -237,13 +240,13 @@ impl TimeManager {
         let elapsed = self.elapsed_ms();
 
         // Hard limit always stops
-        let hard_limit = self.inner.hard_limit_ms.load(Ordering::Acquire);
+        let hard_limit = self.inner.hard_limit_ms.load(Ordering::Relaxed);
         if elapsed >= hard_limit {
             return true;
         }
 
         // Soft limit with PV stability check
-        let soft_limit = self.inner.soft_limit_ms.load(Ordering::Acquire);
+        let soft_limit = self.inner.soft_limit_ms.load(Ordering::Relaxed);
         if elapsed >= soft_limit && self.state_checker().is_pv_stable(elapsed) {
             return true;
         }
@@ -269,14 +272,14 @@ impl TimeManager {
 
     /// Get elapsed time since search start
     pub fn elapsed_ms(&self) -> u64 {
-        let now_ms = get_epoch_ms();
-        let start_ms = self.inner.start_epoch_ms.load(Ordering::Acquire);
+        let now_ms = monotonic_ms();
+        let start_ms = self.inner.start_mono_ms.load(Ordering::Relaxed);
         now_ms.saturating_sub(start_ms)
     }
 
     /// Get soft time limit in milliseconds
     pub fn soft_limit_ms(&self) -> u64 {
-        self.inner.soft_limit_ms.load(Ordering::Acquire)
+        self.inner.soft_limit_ms.load(Ordering::Relaxed)
     }
 
     /// Get current time control
@@ -386,7 +389,7 @@ impl TimeManager {
             active_time_control: &self.inner.active_time_control,
             soft_limit_ms: &self.inner.soft_limit_ms,
             hard_limit_ms: &self.inner.hard_limit_ms,
-            start_epoch_ms: &self.inner.start_epoch_ms,
+            start_mono_ms: &self.inner.start_mono_ms,
             byoyomi_state: &self.inner.byoyomi_state,
             side_to_move: self.inner.side_to_move,
             start_ply: self.inner.start_ply,
@@ -404,7 +407,7 @@ impl TimeManager {
             active_time_control: &self.inner.active_time_control,
             soft_limit_ms: &self.inner.soft_limit_ms,
             hard_limit_ms: &self.inner.hard_limit_ms,
-            start_epoch_ms: &self.inner.start_epoch_ms,
+            start_mono_ms: &self.inner.start_mono_ms,
             byoyomi_state: &self.inner.byoyomi_state,
             side_to_move: self.inner.side_to_move,
             start_ply: self.inner.start_ply,
