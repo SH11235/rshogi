@@ -2,7 +2,6 @@
 
 use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
 use crate::Color;
-use std::sync::atomic::Ordering;
 
 use super::{mock_advance_time, mock_set_time};
 
@@ -44,12 +43,12 @@ fn test_pv_stability_after_ponder_hit() {
     // After ponder_hit:
     // - start_time is reset to current time
     // - elapsed_ms() will return ~0
-    // - last_pv_change_ms is still 3000 (from old start_time)
+    // - last_pv_change_ms is reset to 0 (properly handled in ponder_hit)
 
     // Check if PV is considered stable
-    // This should fail due to the bug:
-    // elapsed_ms (0) - last_pv_change_ms (3000) will saturate to 0
-    // making it always appear unstable
+    // With the fix, PV stability tracking is properly reset:
+    // elapsed_ms (0) - last_pv_change_ms (0) = 0
+    // which correctly makes it unstable until threshold time passes
     let elapsed = tm.elapsed_ms();
     eprintln!("Elapsed after ponder_hit: {elapsed}ms");
 
@@ -227,7 +226,8 @@ fn test_pv_instability_extends_soft_limit() {
     assert!(!tm.should_stop(1000), "Should not stop at soft limit with unstable PV");
 
     // But should stop at hard limit
-    let hard_limit = tm.inner.hard_limit_ms.load(Ordering::Relaxed);
+    let time_info = tm.get_time_info();
+    let hard_limit = time_info.hard_limit_ms;
     mock_set_time(hard_limit);
     assert!(tm.should_stop(1000), "Should always stop at hard limit");
 }
