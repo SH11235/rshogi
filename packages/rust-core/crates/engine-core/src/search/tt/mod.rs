@@ -717,7 +717,7 @@ impl TranspositionTable {
 
         // Update prefetcher state if enabled
         if let Some(ref prefetcher) = self.prefetcher {
-            prefetcher.record_hit();
+            prefetcher.record_call();
         }
     }
 

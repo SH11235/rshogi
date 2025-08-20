@@ -382,6 +382,7 @@ impl TTBucket {
     }
 
     /// Prefetch bucket into cache
+    #[inline(always)]
     pub(crate) fn prefetch(&self, hint: i32) {
         let addr = self.entries.as_ptr() as *const u8;
         prefetch_memory(addr, hint);
