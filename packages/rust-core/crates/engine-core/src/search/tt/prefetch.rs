@@ -32,8 +32,8 @@ impl AdaptivePrefetcher {
         }
     }
 
-    /// Record a hit
-    pub fn record_hit(&self) {
+    /// Record a prefetch call
+    pub fn record_call(&self) {
         self.hits.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -98,6 +98,7 @@ pub(crate) fn prefetch_memory(addr: *const u8, hint: i32) {
 /// * `addr` - The base memory address
 /// * `cache_lines` - Number of cache lines to prefetch (each is 64 bytes)
 /// * `hint` - Prefetch hint (0-3)
+#[inline(always)]
 pub(crate) fn prefetch_multiple(addr: *const u8, cache_lines: usize, hint: i32) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     unsafe {
