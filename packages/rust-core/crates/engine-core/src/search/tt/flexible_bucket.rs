@@ -35,8 +35,8 @@ impl FlexibleTTBucket {
 
     /// Clear all entries in the bucket
     pub(crate) fn clear(&mut self) {
-        for entry in self.entries.iter_mut() {
-            *entry = AtomicU64::new(0);
+        for entry in self.entries.iter() {
+            entry.store(0, Ordering::Relaxed);
         }
     }
 
@@ -532,15 +532,13 @@ impl FlexibleTTBucket {
     /// Prefetch bucket into cache
     pub(crate) fn prefetch(&self, hint: i32) {
         use super::prefetch::prefetch_multiple;
+        use core::mem::size_of;
 
         let addr = self.entries.as_ptr() as *const u8;
 
-        // Calculate number of cache lines based on bucket size
-        let cache_lines = match self.size {
-            BucketSize::Small => 1,  // 64 bytes = 1 cache line
-            BucketSize::Medium => 2, // 128 bytes = 2 cache lines
-            BucketSize::Large => 4,  // 256 bytes = 4 cache lines
-        };
+        // Calculate size in bytes and round up to cache lines
+        let bytes = self.entries.len() * size_of::<AtomicU64>();
+        let cache_lines = bytes.div_ceil(64); // Round up to next cache line
 
         prefetch_multiple(addr, cache_lines, hint);
     }
