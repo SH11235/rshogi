@@ -933,12 +933,25 @@ mod parallel_tests {
             handle.join().unwrap();
         }
 
-        // Verify shared positions have valid data
+        // Verify that most shared positions have valid data
+        // Note: TT is a cache and doesn't guarantee all entries are retained
+        let mut found_count = 0;
         for i in 0..shared_positions {
             let hash = (i as u64) + 1; // Match the hash generation above
             let entry = tt.probe(hash);
-            assert!(entry.is_some(), "Shared position {i} should have an entry");
+            if entry.is_some() {
+                found_count += 1;
+            }
         }
+
+        // We expect at least 80% of shared positions to be retained
+        // This accounts for bucket conflicts and replacement policies
+        let retention_rate = (found_count as f64) / (shared_positions as f64);
+        assert!(
+            retention_rate >= 0.8,
+            "Expected at least 80% retention rate for shared positions, got {:.1}% ({found_count}/{shared_positions})",
+            retention_rate * 100.0
+        );
     }
 
     #[test]
