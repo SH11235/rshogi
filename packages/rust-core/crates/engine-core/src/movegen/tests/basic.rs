@@ -29,6 +29,7 @@ fn test_movegen_king_moves() {
     let mut pos = Position::empty();
     pos.board
         .put_piece(parse_usi_square("5e").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board.rebuild_occupancy_bitboards();
 
     let mut gen = MoveGenImpl::new(&pos);
     let moves = gen.generate_all();
@@ -52,6 +53,7 @@ fn test_no_king_capture() {
         .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Silver, Color::Black)); // 先手銀: 5b
     pos.board
         .put_piece(parse_usi_square("6c").unwrap(), Piece::new(PieceType::King, Color::White)); // 後手玉: 6c
+    pos.board.rebuild_occupancy_bitboards();
 
     let mut gen = MoveGenImpl::new(&pos);
     let moves = gen.generate_all();
@@ -84,6 +86,7 @@ fn test_board_edge_knight_moves() {
         .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::Knight, Color::Black)); // 9i
     pos.board
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board.rebuild_occupancy_bitboards();
 
     let mut gen = MoveGenImpl::new(&pos);
     let moves = gen.generate_all();
@@ -111,8 +114,9 @@ fn test_board_edge_knight_moves() {
 
 #[test]
 fn test_all_legal_moves_generated_completeness() {
-    // Test that MoveGenImpl generates all legal moves by verifying
-    // each generated move is legal and all legal moves are generated
+    // Test that MoveGenImpl generates pseudo-legal moves by verifying
+    // each generated move is pseudo-legal and there are no duplicates.
+    // Note: This test checks for pseudo-legal moves, not strictly legal moves.
     use std::collections::HashSet;
 
     let pos = Position::startpos();
