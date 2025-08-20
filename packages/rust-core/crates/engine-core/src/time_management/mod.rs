@@ -389,6 +389,8 @@ impl TimeManager {
             start_ply: self.inner.start_ply,
             game_phase: self.inner.game_phase,
             params: self.inner.params,
+            last_pv_change_ms: &self.inner.last_pv_change_ms,
+            pv_threshold_ms: &self.inner.pv_threshold_ms,
         }
     }
 
@@ -405,6 +407,8 @@ impl TimeManager {
             start_ply: self.inner.start_ply,
             game_phase: self.inner.game_phase,
             params: self.inner.params,
+            last_pv_change_ms: &self.inner.last_pv_change_ms,
+            pv_threshold_ms: &self.inner.pv_threshold_ms,
         }
     }
 
