@@ -1,6 +1,7 @@
 //! Time management module tests
 
 mod byoyomi_tests;
+mod concurrent_tests;
 mod integration_tests;
 mod monotonic_test;
 mod ponder_tests;
