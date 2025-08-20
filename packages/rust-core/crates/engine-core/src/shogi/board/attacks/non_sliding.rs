@@ -7,8 +7,8 @@
 //! - Gold
 //! - Silver
 
+use crate::shogi::attacks;
 use crate::shogi::board::{Bitboard, Color, PieceType, Square};
-use crate::shogi::ATTACK_TABLES;
 
 /// Check for non-sliding piece attacks to a square
 pub fn check_non_sliding_attacks(
@@ -19,35 +19,35 @@ pub fn check_non_sliding_attacks(
 ) -> bool {
     // Check pawn attacks
     let pawn_bb = piece_bb[by_color as usize][PieceType::Pawn as usize];
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
+    let pawn_attacks = attacks::pawn_attacks(sq, by_color.opposite());
     if !(pawn_bb & pawn_attacks).is_empty() {
         return true;
     }
 
     // Check knight attacks
     let knight_bb = piece_bb[by_color as usize][PieceType::Knight as usize];
-    let knight_attacks = ATTACK_TABLES.knight_attacks(sq, by_color.opposite());
+    let knight_attacks = attacks::knight_attacks(sq, by_color.opposite());
     if !(knight_bb & knight_attacks).is_empty() {
         return true;
     }
 
     // Check king attacks
     let king_bb = piece_bb[by_color as usize][PieceType::King as usize];
-    let king_attacks = ATTACK_TABLES.king_attacks(sq);
+    let king_attacks = attacks::king_attacks(sq);
     if !(king_bb & king_attacks).is_empty() {
         return true;
     }
 
     // Check gold attacks
     let gold_bb = piece_bb[by_color as usize][PieceType::Gold as usize];
-    let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
+    let gold_attacks = attacks::gold_attacks(sq, by_color.opposite());
     if !(gold_bb & gold_attacks).is_empty() {
         return true;
     }
 
     // Check silver attacks (unpromoted only)
     let silver_bb = piece_bb[by_color as usize][PieceType::Silver as usize] & !promoted_bb;
-    let silver_attacks = ATTACK_TABLES.silver_attacks(sq, by_color.opposite());
+    let silver_attacks = attacks::silver_attacks(sq, by_color.opposite());
     if !(silver_bb & silver_attacks).is_empty() {
         return true;
     }
@@ -78,22 +78,22 @@ pub fn get_non_sliding_attackers(
 
     // Check pawn attacks
     let pawn_bb = piece_bb[by_color as usize][PieceType::Pawn as usize];
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(sq, by_color.opposite());
+    let pawn_attacks = attacks::pawn_attacks(sq, by_color.opposite());
     attackers |= pawn_bb & pawn_attacks;
 
     // Check knight attacks
     let knight_bb = piece_bb[by_color as usize][PieceType::Knight as usize];
-    let knight_attacks = ATTACK_TABLES.knight_attacks(sq, by_color.opposite());
+    let knight_attacks = attacks::knight_attacks(sq, by_color.opposite());
     attackers |= knight_bb & knight_attacks;
 
     // Check king attacks
     let king_bb = piece_bb[by_color as usize][PieceType::King as usize];
-    let king_attacks = ATTACK_TABLES.king_attacks(sq);
+    let king_attacks = attacks::king_attacks(sq);
     attackers |= king_bb & king_attacks;
 
     // Check gold attacks (including promoted pieces that move like gold)
     let gold_bb = piece_bb[by_color as usize][PieceType::Gold as usize];
-    let gold_attacks = ATTACK_TABLES.gold_attacks(sq, by_color.opposite());
+    let gold_attacks = attacks::gold_attacks(sq, by_color.opposite());
     attackers |= gold_bb & gold_attacks;
 
     // Check promoted pawns, lances, knights, and silvers (they move like gold)
@@ -106,7 +106,7 @@ pub fn get_non_sliding_attackers(
 
     // Check silver attacks (unpromoted only)
     let silver_bb = piece_bb[by_color as usize][PieceType::Silver as usize] & !promoted_bb;
-    let silver_attacks = ATTACK_TABLES.silver_attacks(sq, by_color.opposite());
+    let silver_attacks = attacks::silver_attacks(sq, by_color.opposite());
     attackers |= silver_bb & silver_attacks;
 
     attackers
