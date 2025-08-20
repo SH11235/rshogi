@@ -12,7 +12,7 @@ pub mod util;
 
 pub use engine::zobrist;
 pub use evaluation::{evaluate, nnue};
-pub use movegen::{MoveGen, MovePicker};
+pub use movegen::MoveGen;
 pub use opening_book::{BookMove, MoveEncoder, OpeningBookReader, PositionHasher};
 pub use search::history::History;
 pub use search::{GamePhase, TranspositionTable};

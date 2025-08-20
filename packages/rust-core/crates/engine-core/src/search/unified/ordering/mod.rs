@@ -349,6 +349,9 @@ mod tests {
         let time_limit = Duration::from_millis(50); // Reduced from 100ms for faster CI
         let start_time = Instant::now();
 
+        // Ensure minimum iterations to prevent flaky failures in CI
+        const MIN_ITERATIONS_PER_THREAD: usize = 10;
+
         let handles: Vec<_> = (0..num_threads)
             .map(|thread_id| {
                 let ordering = Arc::clone(&ordering);
@@ -357,8 +360,10 @@ mod tests {
                 thread::spawn(move || {
                     let mut iterations = 0;
 
-                    // Simulate time pressure - keep accessing shared resources until time runs out
-                    while start_time.elapsed() < time_limit {
+                    // Continue until either time limit is reached OR minimum iterations are completed
+                    while start_time.elapsed() < time_limit
+                        || iterations < MIN_ITERATIONS_PER_THREAD
+                    {
                         // Test killer table operations
                         let test_move = crate::shogi::Move::normal(
                             crate::shogi::Square::new((thread_id % 9) as u8, 6),

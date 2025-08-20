@@ -710,4 +710,168 @@ mod see_edge_cases {
             "King safety should be considered: {see_value}"
         );
     }
+
+    #[test]
+    fn test_see_silver_captures_pawn_with_promotion_defended_by_rook() {
+        // Test the specific case: Silver on 8h captures pawn on 7c with promotion
+        // White rook on 2c can recapture
+        // SFEN: "4k4/9/p6R1/9/9/9/9/1S7/4K4 b - 1"
+        let mut pos = Position::empty();
+
+        // Kings
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+
+        // White pawn on 7c (target)
+        pos.board
+            .put_piece(parse_usi_square("7c").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+
+        // Black silver on 8h (attacker)
+        pos.board.put_piece(
+            parse_usi_square("8h").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+
+        // White rook on 2c (can recapture)
+        pos.board
+            .put_piece(parse_usi_square("2c").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+        pos.side_to_move = Color::Black;
+
+        // Move: Silver captures pawn with promotion (8h7c+)
+        let mv =
+            Move::normal(parse_usi_square("8h").unwrap(), parse_usi_square("7c").unwrap(), true);
+
+        // SEE calculation:
+        // +100 (pawn) + 100 (promotion bonus) - 600 (promoted silver recaptured by rook)
+        // Total: 100 + 100 - 600 = -400
+        let see_value = pos.see(mv);
+        eprintln!("SEE value for 8h7c+: {see_value}");
+
+        // This should be negative because the promoted silver (worth 600) gets captured by the rook
+        assert!(see_value < 0, "SEE should be negative, but got: {see_value}");
+        assert_eq!(see_value, -400, "SEE should be exactly -400");
+    }
+
+    #[test]
+    fn test_see_from_exact_sfen() {
+        // Test using exact SFEN: "4k4/9/p6R1/9/9/9/9/1S7/4K4 b - 1"
+        use crate::usi::parse_sfen;
+
+        let pos = parse_sfen("4k4/9/p6R1/9/9/9/9/1S7/4K4 b - 1").expect("Valid SFEN");
+
+        // Debug: Print all pieces
+        eprintln!("=== Board state from SFEN ===");
+        for rank in 1..=9 {
+            for file in (1..=9).rev() {
+                let sq = parse_usi_square(&format!("{file}{}", (b'a' + rank - 1) as char)).unwrap();
+                if let Some(piece) = pos.board.piece_on(sq) {
+                    eprintln!(
+                        "Square {file}{}: {:?} {:?}",
+                        (b'a' + rank - 1) as char,
+                        piece.color,
+                        piece.piece_type
+                    );
+                }
+            }
+        }
+
+        // Check the move 8h9c+ exists and calculate SEE
+        // Silver on 8h captures pawn on 9c with promotion
+        let from = parse_usi_square("8h").unwrap();
+        let to = parse_usi_square("9c").unwrap();
+
+        // Verify pieces are where we expect
+        if let Some(piece) = pos.board.piece_on(from) {
+            eprintln!("Piece at 8h: {:?} {:?}", piece.color, piece.piece_type);
+        } else {
+            eprintln!("No piece at 8h!");
+        }
+
+        if let Some(piece) = pos.board.piece_on(to) {
+            eprintln!("Piece at 9c: {:?} {:?}", piece.color, piece.piece_type);
+        } else {
+            eprintln!("No piece at 9c!");
+        }
+
+        // Check for rook on 2c
+        let rook_sq = parse_usi_square("2c").unwrap();
+        if let Some(piece) = pos.board.piece_on(rook_sq) {
+            eprintln!("Piece at 2c: {:?} {:?}", piece.color, piece.piece_type);
+        } else {
+            eprintln!("No piece at 2c!");
+        }
+
+        // Create the move
+        let mv = Move::normal(from, to, true);
+
+        // Calculate SEE
+        let see_value = pos.see(mv);
+        eprintln!("SEE value for 8h9c+: {see_value}");
+
+        // In this position, the silver captures pawn with promotion
+        // Black Rook on 2c CANNOT recapture because it's black's own piece!
+        // So SEE should be: +100 (pawn) + 100 (promotion bonus) = +200
+        assert_eq!(
+            see_value, 200,
+            "SEE should be +200 for undefended pawn capture with promotion, but got: {see_value}"
+        );
+    }
+
+    #[test]
+    fn test_see_corrected_position_with_white_rook() {
+        // Create the position we actually want to test:
+        // - Black Silver on 2h captures White Pawn on 7c with promotion
+        // - White Rook on 2c can recapture
+        // This is what the user seems to have intended
+        let mut pos = Position::empty();
+
+        // Kings
+        pos.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+
+        // White pawn on 7c (target)
+        pos.board
+            .put_piece(parse_usi_square("7c").unwrap(), Piece::new(PieceType::Pawn, Color::White));
+
+        // Black silver on 2h (attacker) - note: this is rank 8, file 2
+        pos.board.put_piece(
+            parse_usi_square("2h").unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+
+        // White rook on 2c (can recapture along the file)
+        pos.board
+            .put_piece(parse_usi_square("2c").unwrap(), Piece::new(PieceType::Rook, Color::White));
+
+        pos.board.rebuild_occupancy_bitboards();
+        pos.side_to_move = Color::Black;
+
+        // Move: Silver captures pawn with promotion (2h7c+)
+        let mv =
+            Move::normal(parse_usi_square("2h").unwrap(), parse_usi_square("7c").unwrap(), true);
+
+        // Check if rook can actually see the target square
+        eprintln!("Checking if White Rook on 2c can attack 7c...");
+
+        // SEE calculation:
+        // +100 (pawn) + 100 (promotion bonus) - 600 (promoted silver recaptured by rook)
+        // Total: 100 + 100 - 600 = -400
+        let see_value = pos.see(mv);
+        eprintln!("SEE value for 2h7c+: {see_value}");
+
+        // This should be negative because the promoted silver (worth 600) gets captured by the rook
+        // The rook on 2c CAN reach 7c because they're on the same rank (c = rank 3)
+        // Rooks move horizontally and vertically, so it can move from 2c to 7c along rank c
+        // SEE calculation: +100 (pawn) + 100 (promotion) - 600 (promoted silver captured) = -400
+        assert_eq!(
+            see_value, -400,
+            "SEE should be -400 because rook can recapture along rank c, but got: {see_value}"
+        );
+    }
 }
