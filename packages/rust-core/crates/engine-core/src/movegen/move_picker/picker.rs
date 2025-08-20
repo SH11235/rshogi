@@ -25,7 +25,7 @@ pub struct MovePicker<'a> {
     /// Search stack entry
     pub(super) stack: SearchStack,
     /// Current stage
-    pub(super) stage: MovePickerStage,
+    pub(crate) stage: MovePickerStage,
     /// Generated moves
     pub(super) moves: Vec<ScoredMove>,
     /// Bad captures
