@@ -19,7 +19,6 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use std::time::Instant;
 
 use crate::Color;
 
@@ -71,8 +70,8 @@ struct TimeManagerInner {
     // Using RwLock for better read performance in hot path
     active_time_control: RwLock<TimeControl>,
 
-    // Time tracking (Mutex to avoid UB with Instant)
-    start_time: Mutex<Instant>,
+    // Time tracking (AtomicU64 for lock-free access in hot path)
+    start_epoch_ms: AtomicU64, // Milliseconds since UNIX epoch
 
     // Limits (Atomic for lock-free access)
     soft_limit_ms: AtomicU64,
@@ -91,6 +90,23 @@ struct TimeManagerInner {
 
     // Ponder-specific state
     is_ponder: AtomicBool, // Whether currently pondering
+}
+
+/// Get current epoch time in milliseconds
+#[inline]
+fn get_epoch_ms() -> u64 {
+    #[cfg(test)]
+    {
+        // In test mode, use mock time
+        mock_current_ms()
+    }
+    #[cfg(not(test))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("System time is before UNIX epoch")
+            .as_millis() as u64
+    }
 }
 
 impl TimeManager {
@@ -117,7 +133,7 @@ impl TimeManager {
             params,
             game_phase,
             active_time_control: RwLock::new(limits.time_control.clone()),
-            start_time: Mutex::new(Instant::now()),
+            start_epoch_ms: AtomicU64::new(get_epoch_ms()),
             soft_limit_ms: AtomicU64::new(soft_ms),
             hard_limit_ms: AtomicU64::new(hard_ms),
             nodes_searched: AtomicU64::new(0),
@@ -187,13 +203,8 @@ impl TimeManager {
         ply: u32,
         game_phase: GamePhase,
     ) -> Self {
-        let tm = Self::new(limits, side, ply, game_phase);
-        // Replace start_time with mock time
-        {
-            let mut start_time = tm.inner.start_time.lock();
-            *start_time = mock_now();
-        } // MutexGuard is dropped here
-        tm
+        // In test mode, get_epoch_ms() already uses mock time
+        Self::new(limits, side, ply, game_phase)
     }
 
     /// Check if search should stop (called frequently from search loop)
@@ -258,17 +269,9 @@ impl TimeManager {
 
     /// Get elapsed time since search start
     pub fn elapsed_ms(&self) -> u64 {
-        let start = self.inner.start_time.lock();
-        #[cfg(test)]
-        {
-            // In test mode, use mock time
-            let now = mock_now();
-            now.duration_since(*start).as_millis() as u64
-        }
-        #[cfg(not(test))]
-        {
-            start.elapsed().as_millis() as u64
-        }
+        let now_ms = get_epoch_ms();
+        let start_ms = self.inner.start_epoch_ms.load(Ordering::Acquire);
+        now_ms.saturating_sub(start_ms)
     }
 
     /// Get soft time limit in milliseconds
@@ -383,7 +386,7 @@ impl TimeManager {
             active_time_control: &self.inner.active_time_control,
             soft_limit_ms: &self.inner.soft_limit_ms,
             hard_limit_ms: &self.inner.hard_limit_ms,
-            start_time: &self.inner.start_time,
+            start_epoch_ms: &self.inner.start_epoch_ms,
             byoyomi_state: &self.inner.byoyomi_state,
             side_to_move: self.inner.side_to_move,
             start_ply: self.inner.start_ply,
@@ -401,7 +404,7 @@ impl TimeManager {
             active_time_control: &self.inner.active_time_control,
             soft_limit_ms: &self.inner.soft_limit_ms,
             hard_limit_ms: &self.inner.hard_limit_ms,
-            start_time: &self.inner.start_time,
+            start_epoch_ms: &self.inner.start_epoch_ms,
             byoyomi_state: &self.inner.byoyomi_state,
             side_to_move: self.inner.side_to_move,
             start_ply: self.inner.start_ply,
