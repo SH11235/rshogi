@@ -44,9 +44,9 @@ fn test_do_move_capture() {
 
     // Place kings (required for legal position)
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // Black pawn on 5e, White pawn on 5d - can capture forward
     pos.board
@@ -74,30 +74,6 @@ fn test_do_move_capture() {
 }
 
 #[test]
-fn test_do_move_promotion() {
-    // 成りのテスト - 成り動作だけをチェック
-    let _pos = Position::startpos();
-
-    // 手動で駒を配置して成りをテスト
-    let mut board = crate::shogi::Board::empty();
-    let mut pawn = Piece::new(PieceType::Pawn, Color::Black);
-    board.put_piece(parse_usi_square("7g").unwrap(), pawn);
-
-    // do_moveを使わずに直接成りをテスト
-    pawn.promoted = true;
-    board.remove_piece(parse_usi_square("7g").unwrap());
-    board.put_piece(parse_usi_square("7h").unwrap(), pawn);
-
-    // 成った駒になっていることを確認
-    let piece = board
-        .piece_on(parse_usi_square("7h").unwrap())
-        .expect("Piece should exist at 7h");
-    assert_eq!(piece.piece_type, PieceType::Pawn);
-    assert!(piece.promoted);
-    assert_eq!(piece.color, Color::Black);
-}
-
-#[test]
 fn test_do_move_drop() {
     // 持ち駒を打つテスト
     let mut pos = Position::empty();
@@ -105,9 +81,9 @@ fn test_do_move_drop() {
 
     // 最小限の駒を配置
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
     pos.board.rebuild_occupancy_bitboards();
 
     // 持ち駒を設定
@@ -148,11 +124,16 @@ fn test_do_move_all_piece_types() {
         let mut pos = Position::empty();
         pos.side_to_move = Color::Black;
 
-        // Place both kings
-        pos.board
-            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        // Always place White king
         pos.board
             .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
+        // Place Black king only if we're NOT testing a king piece
+        if pt != PieceType::King {
+            pos.board.put_piece(
+                parse_usi_square("1i").unwrap(),
+                Piece::new(PieceType::King, Color::Black),
+            );
+        }
 
         // Place test piece
         pos.board
@@ -193,9 +174,9 @@ fn test_do_move_drop_all_piece_types() {
 
         // 最小限の駒を配置
         pos.board
-            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
+            .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
         pos.board
-            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
         pos.board.rebuild_occupancy_bitboards();
 
         // 各種持ち駒を設定
@@ -230,9 +211,9 @@ fn test_do_move_special_promotion_cases() {
 
     // Place kings
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // Test 1: Silver promotion in enemy territory
     pos.board
@@ -281,12 +262,12 @@ fn test_is_repetition() {
     pos.side_to_move = Color::Black;
 
     // 最小限の駒を配置
-    // 5i: 先手の王
+    // 1i: 先手の王
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
-    // 5a: 後手の王
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    // 9a: 後手の王
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
     // 9i: 先手の飛車
     pos.board
         .put_piece(parse_usi_square("9i").unwrap(), Piece::new(PieceType::Rook, Color::Black));
@@ -427,9 +408,9 @@ fn test_do_move_undo_move_capture() {
 
     // 両玉を配置（合法局面にする）
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
 
     // 黒歩5e、白歩5d → 5e→5d で前方捕獲
     pos.board
@@ -490,9 +471,9 @@ fn test_do_move_undo_move_drop() {
     // 駒打ちの可逆性をテスト
     let mut pos = Position::empty();
     pos.board
-        .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::Black));
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::White));
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
     pos.board.rebuild_occupancy_bitboards();
 
     // 持ち駒を設定
@@ -623,6 +604,12 @@ fn test_pawn_drop_restrictions() {
     let mut pos = Position::empty();
     pos.side_to_move = Color::Black;
 
+    // Place kings for a valid position
+    pos.board
+        .put_piece(parse_usi_square("1i").unwrap(), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::King, Color::White));
+
     // Put a black pawn on file 5 (index 4)
     let sq = parse_usi_square("5f").unwrap(); // 5f
     pos.board.put_piece(
@@ -636,6 +623,8 @@ fn test_pawn_drop_restrictions() {
 
     // Give black a pawn in hand
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // Pawn is index 6
+
+    pos.board.rebuild_occupancy_bitboards();
 
     // Try to drop a pawn in the same file
     let illegal_drop = Move::drop(PieceType::Pawn, parse_usi_square("5d").unwrap()); // 5d
@@ -1038,9 +1027,9 @@ fn test_uchifuzume_no_support_but_king_cannot_capture() {
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    // Black bishop at 1e (file 8, rank 4) - controls diagonal including 5a
+    // Black bishop at 2e controls 5b (2e→3d→4c→5b)
     pos.board
-        .put_piece(parse_usi_square("1e").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
+        .put_piece(parse_usi_square("2e").unwrap(), Piece::new(PieceType::Bishop, Color::Black));
 
     // Some blocking pieces to prevent other escapes
     pos.board
