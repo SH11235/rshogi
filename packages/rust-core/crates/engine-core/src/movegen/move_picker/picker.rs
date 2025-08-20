@@ -15,7 +15,7 @@ use crate::History;
 /// Move picker for efficient move ordering
 pub struct MovePicker<'a> {
     /// Current position
-    pub(super) pos: Position,
+    pub(super) pos: &'a Position,
     /// TT move
     pub(super) tt_move: Option<Move>,
     /// PV move (from previous iteration)
@@ -42,7 +42,7 @@ pub struct MovePicker<'a> {
 impl<'a> MovePicker<'a> {
     /// Create new move picker for main search
     pub fn new(
-        pos: &Position,
+        pos: &'a Position,
         tt_move: Option<Move>,
         pv_move: Option<Move>,
         history: &'a History,
@@ -65,7 +65,7 @@ impl<'a> MovePicker<'a> {
         };
 
         MovePicker {
-            pos: pos.clone(),
+            pos,
             tt_move,
             pv_move: validated_pv_move,
             history,
@@ -85,7 +85,7 @@ impl<'a> MovePicker<'a> {
     /// This is why bad captures are placed after quiet moves in normal search -
     /// they're often not searched at all.
     pub fn new_quiescence(
-        pos: &Position,
+        pos: &'a Position,
         tt_move: Option<Move>,
         history: &'a History,
         stack: &SearchStack,
