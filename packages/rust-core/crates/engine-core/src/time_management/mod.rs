@@ -15,6 +15,7 @@
 //! - Current state is accessible via `TimeInfo::byoyomi_info`
 
 use lazy_static::lazy_static;
+use log::warn;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -326,6 +327,7 @@ impl TimeManager {
                 manager.handle_update(time_spent_ms, Some(main_left_ms), *byoyomi_ms);
             }
             (TimeControl::Byoyomi { .. }, TimeState::NonByoyomi) => {
+                warn!("TimeState::NonByoyomi used with Byoyomi time control - ignoring update");
                 debug_assert!(false, "TimeState::NonByoyomi used with Byoyomi time control");
             }
             _ => {
