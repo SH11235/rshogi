@@ -11,7 +11,7 @@ impl<'a> MovePicker<'a> {
         self.moves.clear();
         let mut move_list = MoveList::new();
         let mut gen = MoveGen::new();
-        gen.generate_captures(&self.pos, &mut move_list);
+        gen.generate_captures(self.pos, &mut move_list);
 
         for &mv in move_list.as_slice() {
             self.moves.push(ScoredMove::new(mv, 0));
@@ -23,7 +23,7 @@ impl<'a> MovePicker<'a> {
         self.moves.clear();
         let mut move_list = MoveList::new();
         let mut gen = MoveGen::new();
-        gen.generate_all(&self.pos, &mut move_list);
+        gen.generate_all(self.pos, &mut move_list);
 
         // Add only non-captures that are not killers, TT move, or PV move
         for &mv in move_list.as_slice() {
