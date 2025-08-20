@@ -1248,4 +1248,19 @@ mod parallel_tests {
             handle.join().unwrap();
         }
     }
+
+    #[test]
+    fn test_ttentry_zero_means_empty() {
+        // Verify that data=0 always represents an empty/invalid entry
+        // This is a sentinel value assumption for two-phase publish optimization
+        let entry = TTEntry {
+            key: 0x1234567890ABCDEF,
+            data: 0,
+        };
+        assert_eq!(entry.depth(), 0, "data=0 must represent an empty/invalid entry");
+
+        // Also verify that any entry with depth=0 is considered invalid
+        let entry2 = TTEntry::new(0x1234567890ABCDEF, None, 100, 50, 0, NodeType::Exact, 0);
+        assert_eq!(entry2.depth(), 0, "Entry with depth=0 should be invalid");
+    }
 }
