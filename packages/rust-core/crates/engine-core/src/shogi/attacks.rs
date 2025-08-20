@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 
 /// Direction offsets for piece movements
 #[derive(Clone, Copy, Debug)]
-pub enum Direction {
+enum Direction {
     North = -9,      // Up
     NorthEast = -8,  // Up-Right
     East = 1,        // Right
@@ -49,7 +49,7 @@ impl Direction {
 }
 
 /// Pre-computed attack tables
-pub struct AttackTables {
+struct AttackTables {
     /// King attacks from each square
     pub king_attacks: [Bitboard; 81],
 
@@ -536,7 +536,7 @@ impl AttackTables {
 
 // Global attack tables instance
 lazy_static! {
-    pub static ref ATTACK_TABLES: AttackTables = AttackTables::new();
+    static ref ATTACK_TABLES: AttackTables = AttackTables::new();
 }
 
 // ============================================================================
