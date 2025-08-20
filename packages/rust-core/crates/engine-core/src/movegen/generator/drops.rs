@@ -1,7 +1,7 @@
 //! Drop move generation
 
 use crate::{
-    shogi::{attacks, Move, ATTACK_TABLES},
+    shogi::{attacks, Move},
     Bitboard, Color, PieceType, Square,
 };
 
@@ -61,10 +61,10 @@ fn get_valid_drop_squares(
             // Pawns cannot be dropped on last rank
             match us {
                 Color::Black => {
-                    valid &= !ATTACK_TABLES.rank_mask(0); // Black's last rank
+                    valid &= !attacks::rank_mask(0); // Black's last rank
                 }
                 Color::White => {
-                    valid &= !ATTACK_TABLES.rank_mask(8); // White's last rank
+                    valid &= !attacks::rank_mask(8); // White's last rank
                 }
             }
 
@@ -102,10 +102,10 @@ fn get_valid_drop_squares(
             // Lances cannot be dropped on last rank
             match us {
                 Color::Black => {
-                    valid &= !ATTACK_TABLES.rank_mask(0);
+                    valid &= !attacks::rank_mask(0);
                 }
                 Color::White => {
-                    valid &= !ATTACK_TABLES.rank_mask(8);
+                    valid &= !attacks::rank_mask(8);
                 }
             }
         }
@@ -113,12 +113,12 @@ fn get_valid_drop_squares(
             // Knights cannot be dropped on last two ranks
             match us {
                 Color::Black => {
-                    valid &= !ATTACK_TABLES.rank_mask(0);
-                    valid &= !ATTACK_TABLES.rank_mask(1);
+                    valid &= !attacks::rank_mask(0);
+                    valid &= !attacks::rank_mask(1);
                 }
                 Color::White => {
-                    valid &= !ATTACK_TABLES.rank_mask(7);
-                    valid &= !ATTACK_TABLES.rank_mask(8);
+                    valid &= !attacks::rank_mask(7);
+                    valid &= !attacks::rank_mask(8);
                 }
             }
         }
@@ -138,7 +138,7 @@ pub(super) fn is_drop_pawn_mate(gen: &MoveGenImpl, to: Square, them: Color) -> b
 
     // Check if the pawn drop gives check
     let us = them.opposite();
-    let pawn_attacks = ATTACK_TABLES.pawn_attacks(to, us);
+    let pawn_attacks = attacks::pawn_attacks(to, us);
     if !pawn_attacks.test(their_king_sq) {
         return false; // Not even a check
     }
@@ -181,7 +181,7 @@ pub(super) fn is_drop_pawn_mate(gen: &MoveGenImpl, to: Square, them: Color) -> b
     }
 
     // 3) Check if king has any escape squares
-    let king_attacks = ATTACK_TABLES.king_attacks(their_king_sq);
+    let king_attacks = attacks::king_attacks(their_king_sq);
     let their_pieces = gen.pos.board.occupied_bb[them as usize];
     let our_pieces = gen.pos.board.occupied_bb[us as usize];
 
