@@ -3,8 +3,27 @@
 use super::MovePicker;
 use crate::shogi::Move;
 
+/// Number of bits to shift SEE value left for score packing
+pub(crate) const SEE_PACK_SHIFT: i32 = 8;
+
+/// Number of bits available for tie-breaking values
+const TIE_BREAK_BITS: i32 = SEE_PACK_SHIFT;
+
+/// Mask for tie-breaking values (lower 8 bits)
+const TIE_BREAK_MASK: i32 = (1 << TIE_BREAK_BITS) - 1;
+
+/// Promotion bonus for quiet moves (significant compared to typical history scores ±1000)
+pub(crate) const QUIET_PROMO_BONUS: i32 = 300;
+
+/// Tie-break bonus for promoting captures (in lower bits of packed score)
+pub(crate) const CAPTURE_PROMO_TIE_BREAK: i32 = 1;
+
 impl<'a> MovePicker<'a> {
     /// Score captures using Static Exchange Evaluation (SEE)
+    ///
+    /// Score format (32-bit integer):
+    /// - Upper 24 bits (bit 31-8): SEE value (preserves sign for good/bad capture classification)
+    /// - Lower 8 bits (bit 7-0): Tie-breaking values (currently only promotion bonus)
     pub(super) fn score_captures(&mut self) {
         for i in 0..self.moves.len() {
             let mv = self.moves[i].mv;
@@ -12,13 +31,23 @@ impl<'a> MovePicker<'a> {
                 // Calculate SEE value for this capture
                 let see_value = self.see(mv);
 
-                // Use SEE value as the primary score
-                self.moves[i].score = see_value;
+                // Debug check: ensure SEE value won't overflow when shifted
+                debug_assert!(
+                    see_value.abs() <= (i32::MAX >> SEE_PACK_SHIFT),
+                    "SEE value {see_value} would overflow when packed"
+                );
 
-                // Small promotion bonus (SEE already accounts for promoted piece value)
-                if mv.is_promote() {
-                    self.moves[i].score += 100;
-                }
+                // Calculate tie-break value with range check
+                let tie_break =
+                    (i32::from(mv.is_promote()) * CAPTURE_PROMO_TIE_BREAK) & TIE_BREAK_MASK;
+                debug_assert!(
+                    (0..=TIE_BREAK_MASK).contains(&tie_break),
+                    "Tie-break value {tie_break} exceeds allowed range"
+                );
+
+                // Pack score: upper bits for SEE (preserves sign), lower bits for tie-breaking
+                // Use bitwise OR to make the intent clearer
+                self.moves[i].score = (see_value << SEE_PACK_SHIFT) | tie_break;
             }
         }
     }
@@ -29,9 +58,10 @@ impl<'a> MovePicker<'a> {
             let mv = scored_move.mv;
             scored_move.score = self.history.get_score(self.pos.side_to_move, mv, None);
 
-            // Promotion bonus
+            // Promotion bonus: bias towards promotions in move ordering
+            // (history score typically ranges ±1000, so +300 is significant)
             if mv.is_promote() {
-                scored_move.score += 300;
+                scored_move.score += QUIET_PROMO_BONUS;
             }
         }
     }
@@ -42,6 +72,7 @@ impl<'a> MovePicker<'a> {
     }
 
     /// Pick best move from current list with its score
+    /// Returns the move and its ordering score (may include tie-breaking bonuses)
     pub(super) fn pick_best_scored(&mut self) -> Option<(Move, i32)> {
         if self.current >= self.moves.len() {
             return None;
