@@ -227,3 +227,114 @@ fn test_debug_assertion_on_wrong_time_state() {
     let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
     tm.update_after_move(1000, TimeState::NonByoyomi); // Wrong state!
 }
+
+#[test]
+#[cfg(not(debug_assertions))]
+fn test_byoyomi_gui_misuse_tolerance() {
+    // Test that system handles GUI sending wrong TimeState gracefully
+    // In production, debug_assert is disabled so we need to handle this case
+    let limits = TimeLimits {
+        time_control: TimeControl::Byoyomi {
+            main_time_ms: 0,
+            byoyomi_ms: 30000,
+            periods: 3,
+        },
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::Black, 40, GamePhase::MiddleGame);
+
+    // Initial state check
+    let (periods_before, period_ms_before, in_byoyomi_before) = tm.get_byoyomi_state().unwrap();
+    assert_eq!(periods_before, 3);
+    assert_eq!(period_ms_before, 30000);
+    assert!(in_byoyomi_before);
+
+    // GUI mistakenly sends NonByoyomi state for a Byoyomi time control
+    // This should be silently ignored (not panic or corrupt state)
+    tm.update_after_move(1000, TimeState::NonByoyomi);
+
+    // Verify byoyomi state is unchanged
+    let (periods_after, period_ms_after, in_byoyomi_after) = tm.get_byoyomi_state().unwrap();
+    assert_eq!(periods_after, periods_before, "Periods should remain unchanged");
+    assert_eq!(period_ms_after, period_ms_before, "Period time should remain unchanged");
+    assert_eq!(in_byoyomi_after, in_byoyomi_before, "Byoyomi status should remain unchanged");
+}
+
+#[test]
+#[cfg(not(debug_assertions))]
+fn test_byoyomi_repeated_gui_errors() {
+    // Test that repeated GUI errors don't accumulate problems
+    let limits = TimeLimits {
+        time_control: TimeControl::Byoyomi {
+            main_time_ms: 60000,
+            byoyomi_ms: 10000,
+            periods: 5,
+        },
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::Opening);
+
+    // Verify initial state
+    let (initial_periods, initial_period_ms, initial_in_byoyomi) = tm.get_byoyomi_state().unwrap();
+    assert_eq!(initial_periods, 5);
+    assert_eq!(initial_period_ms, 10000);
+    assert!(!initial_in_byoyomi);
+
+    // Multiple incorrect state updates
+    for _ in 0..10 {
+        tm.update_after_move(100, TimeState::NonByoyomi);
+    }
+
+    // State should be unchanged after errors
+    let (periods, period_ms, in_byoyomi) = tm.get_byoyomi_state().unwrap();
+    assert_eq!(periods, initial_periods);
+    assert_eq!(period_ms, initial_period_ms);
+    assert_eq!(in_byoyomi, initial_in_byoyomi);
+
+    // Then a correct update
+    tm.update_after_move(
+        5000,
+        TimeState::Main {
+            main_left_ms: 55000,
+        },
+    );
+
+    // System should still work correctly
+    let (periods_after, period_ms_after, in_byoyomi_after) = tm.get_byoyomi_state().unwrap();
+    assert_eq!(periods_after, 5, "Periods should be unchanged");
+    assert_eq!(period_ms_after, 10000, "Period time should be unchanged");
+    assert!(!in_byoyomi_after, "Should not be in byoyomi yet");
+}
+
+#[test]
+#[cfg(not(debug_assertions))]
+fn test_byoyomi_mixed_correct_incorrect_updates() {
+    // Test mixing correct and incorrect updates
+    let limits = TimeLimits {
+        time_control: TimeControl::Byoyomi {
+            main_time_ms: 5000,
+            byoyomi_ms: 1000,
+            periods: 3,
+        },
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
+
+    // Correct update
+    tm.update_after_move(2000, TimeState::Main { main_left_ms: 3000 });
+
+    // Incorrect update (should be ignored)
+    tm.update_after_move(1000, TimeState::NonByoyomi);
+
+    // Another correct update that transitions to byoyomi
+    tm.update_after_move(4000, TimeState::Main { main_left_ms: 3000 });
+
+    // Verify we're in byoyomi with correct state
+    let (periods, period_ms, in_byoyomi) = tm.get_byoyomi_state().unwrap();
+    assert!(in_byoyomi, "Should be in byoyomi after spending all main time");
+    assert_eq!(periods, 3, "All periods should be available");
+    assert_eq!(period_ms, 0, "Should have consumed exactly one period");
+}

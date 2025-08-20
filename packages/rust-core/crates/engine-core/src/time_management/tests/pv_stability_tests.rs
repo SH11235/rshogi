@@ -2,6 +2,7 @@
 
 use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager};
 use crate::Color;
+use std::sync::atomic::Ordering;
 
 use super::{mock_advance_time, mock_set_time};
 
@@ -124,4 +125,109 @@ fn test_pv_stability_allows_soft_limit_stop() {
 
     // Verify the fix works: we stop at soft limit when PV is stable
     assert!(should_stop, "Should stop at soft limit with stable PV after fix");
+}
+
+#[test]
+fn test_pv_stability_after_ponder_hit_without_pv_change() {
+    // Test that soft limit extension works correctly after ponder_hit
+    // when no PV change occurs after the transition
+    mock_set_time(0);
+
+    let pending_limits = TimeLimits {
+        time_control: TimeControl::Fischer {
+            white_ms: 5000,
+            black_ms: 5000,
+            increment_ms: 0,
+        },
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new_ponder(&pending_limits, Color::White, 20, GamePhase::MiddleGame);
+
+    // Simulate pondering for 500ms without PV changes
+    mock_advance_time(500);
+    assert!(tm.is_pondering());
+
+    // Get soft limit before ponder_hit
+    let ponder_manager = tm.ponder_manager();
+    ponder_manager.ponder_hit(Some(&pending_limits), 500);
+
+    // After ponder_hit, PV stability should be reset
+    let checker = tm.state_checker();
+    let initial_elapsed = tm.elapsed_ms();
+    let initial_stable = checker.is_pv_stable(initial_elapsed);
+    eprintln!("After ponder_hit - elapsed: {initial_elapsed}ms, PV stable: {initial_stable}");
+    assert!(!initial_stable, "PV should be unstable immediately after ponder_hit");
+
+    // Get the actual soft limit after ponder_hit
+    let soft_limit = tm.soft_limit_ms();
+    eprintln!("Soft limit after ponder_hit: {soft_limit}ms");
+
+    // If soft limit is already reached or very close, advance less
+    if initial_elapsed < soft_limit {
+        let advance_to_soft = soft_limit.saturating_sub(initial_elapsed);
+        if advance_to_soft > 10 {
+            mock_advance_time(advance_to_soft - 10);
+            assert!(!tm.should_stop(1000), "Should not stop before soft limit");
+            mock_advance_time(10);
+        } else {
+            mock_advance_time(advance_to_soft);
+        }
+    }
+
+    // At soft limit, PV should still be unstable (not enough time passed since ponder_hit)
+    let elapsed_at_soft = tm.elapsed_ms();
+    let is_stable_at_soft = checker.is_pv_stable(elapsed_at_soft);
+    eprintln!("At soft limit - elapsed: {elapsed_at_soft}ms, soft: {soft_limit}ms, PV stable: {is_stable_at_soft}");
+
+    if elapsed_at_soft >= soft_limit && !is_stable_at_soft {
+        assert!(!tm.should_stop(1000), "Should not stop at soft limit with unstable PV");
+    }
+
+    // Advance time past stability threshold (default is 80ms base + depth*5ms = 80 + 20*5 = 180ms for depth 20)
+    mock_advance_time(200);
+
+    // Now PV should be stable and search should stop
+    let elapsed = tm.elapsed_ms();
+    eprintln!("After stability wait - elapsed: {elapsed}ms");
+    assert!(checker.is_pv_stable(elapsed), "PV should be stable after threshold");
+
+    if elapsed >= soft_limit {
+        assert!(tm.should_stop(1000), "Should stop with stable PV past soft limit");
+    }
+}
+
+#[test]
+fn test_pv_instability_extends_soft_limit() {
+    // Test that frequent PV changes prevent soft limit stop
+    mock_set_time(0);
+
+    let limits = TimeLimits {
+        time_control: TimeControl::Fischer {
+            white_ms: 5000,
+            black_ms: 5000,
+            increment_ms: 0,
+        },
+        ..Default::default()
+    };
+
+    let tm = TimeManager::new_with_mock_time(&limits, Color::White, 20, GamePhase::MiddleGame);
+    let soft_limit = tm.soft_limit_ms();
+
+    // Simulate frequent PV changes
+    for i in 0..10 {
+        mock_advance_time(50);
+        tm.on_pv_change(5 + i);
+    }
+
+    // Advance to soft limit
+    mock_set_time(soft_limit);
+
+    // Should NOT stop because PV is unstable
+    assert!(!tm.should_stop(1000), "Should not stop at soft limit with unstable PV");
+
+    // But should stop at hard limit
+    let hard_limit = tm.inner.hard_limit_ms.load(Ordering::Relaxed);
+    mock_set_time(hard_limit);
+    assert!(tm.should_stop(1000), "Should always stop at hard limit");
 }
