@@ -282,10 +282,11 @@ impl TranspositionTable {
         }
 
         // Use prefetcher if enabled
-        if let Some(ref _prefetcher) = self.prefetcher {
+        if let Some(ref prefetcher) = self.prefetcher {
             // Prefetch next bucket directly (more efficient than rehashing)
             let next_idx = (idx + 1) & (self.num_buckets - 1);
             self.prefetch_bucket(next_idx, 3); // L1 cache hint
+            prefetcher.record_call(); // Record the prefetch call for statistics
 
             #[cfg(feature = "tt_metrics")]
             if let Some(ref metrics) = self.metrics {
