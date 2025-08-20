@@ -232,7 +232,7 @@ impl TTBucket {
 
             // We no longer use CAS for empty slots - direct store with proper ordering
             {
-                // Use Relaxed for speculative read in CAS loop
+                // Use Relaxed for empty slot detection
                 let old_key = self.entries[idx].load(Ordering::Relaxed);
 
                 // Record atomic load
@@ -266,9 +266,9 @@ impl TTBucket {
                         m.replace_empty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     return;
-                } else if old_key != 0 {
+                } else {
                     // Slot is occupied by different position, try next
-                    break;
+                    continue;
                 }
             }
         }
