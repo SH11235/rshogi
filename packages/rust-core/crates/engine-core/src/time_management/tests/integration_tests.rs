@@ -117,7 +117,7 @@ fn test_emergency_stop_with_mock_time() {
 
     let tm = TimeManager::new_with_mock_time(&limits, Color::White, 100, GamePhase::EndGame);
     let checker = tm.state_checker();
-    assert!(checker.is_time_critical(tm.elapsed_ms())); // Should be critical immediately
+    assert!(checker.is_time_critical()); // Should be critical immediately
 
     // Test Byoyomi emergency stop
     let limits = TimeLimits {
@@ -134,7 +134,7 @@ fn test_emergency_stop_with_mock_time() {
     // Use most of the period
     tm.update_after_move(950, TimeState::Byoyomi { main_left_ms: 0 });
     let checker = tm.state_checker();
-    assert!(checker.is_time_critical(tm.elapsed_ms())); // Only 50ms left < 80ms critical threshold
+    assert!(checker.is_time_critical()); // Only 50ms left < 80ms critical threshold
 }
 
 #[test]
