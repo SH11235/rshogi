@@ -11,7 +11,8 @@ use std::arch::x86_64::{_mm_prefetch, _MM_HINT_NTA, _MM_HINT_T0, _MM_HINT_T1, _M
 /// Statistics for prefetch operations
 #[derive(Debug, Clone, Copy)]
 pub struct PrefetchStats {
-    pub hits: u64,
+    pub calls: u64,    // Number of prefetch calls
+    pub hits: u64,     // Kept for compatibility (same as calls for now)
     pub misses: u64,
     pub hit_rate: f64,
     pub distance: usize,
@@ -45,17 +46,18 @@ impl AdaptivePrefetcher {
 
     /// Get statistics
     pub fn stats(&self) -> PrefetchStats {
-        let hits = self.hits.load(Ordering::Relaxed);
+        let calls = self.hits.load(Ordering::Relaxed); // Currently tracking calls
         let misses = self.misses.load(Ordering::Relaxed);
-        let total = hits + misses;
+        let total = calls + misses;
         let hit_rate = if total > 0 {
-            hits as f64 / total as f64
+            calls as f64 / total as f64
         } else {
             0.0
         };
 
         PrefetchStats {
-            hits,
+            calls,
+            hits: calls, // Keep for compatibility
             misses,
             hit_rate,
             distance: 1, // Default distance, could be made configurable
@@ -93,6 +95,8 @@ pub(crate) fn prefetch_memory(addr: *const u8, hint: i32) {
 }
 
 /// Prefetch multiple cache lines for larger data structures
+///
+/// NOTE: Assumes 64-byte cache lines (x86/x86_64). Adjust if targeting different architectures.
 ///
 /// # Arguments
 /// * `addr` - The base memory address
