@@ -336,5 +336,8 @@ fn test_byoyomi_mixed_correct_incorrect_updates() {
     let (periods, period_ms, in_byoyomi) = tm.get_byoyomi_state().unwrap();
     assert!(in_byoyomi, "Should be in byoyomi after spending all main time");
     assert_eq!(periods, 3, "All periods should be available");
-    assert_eq!(period_ms, 0, "Should have consumed exactly one period");
+    assert_eq!(
+        period_ms, 1000,
+        "After consuming exactly one period, current period resets to full"
+    );
 }

@@ -108,7 +108,7 @@ fn test_concurrent_pv_changes_and_time_info() {
     let h1 = thread::spawn(move || {
         for depth in 1..20 {
             tm1.on_pv_change(depth);
-            thread::sleep(Duration::from_micros(100));
+            thread::sleep(Duration::from_millis(1));
         }
     });
     handles.push(h1);
@@ -125,7 +125,7 @@ fn test_concurrent_pv_changes_and_time_info() {
             assert!(info.time_pressure >= 0.0 && info.time_pressure <= 1.0);
             let _ = is_stable; // Result varies based on timing
 
-            thread::sleep(Duration::from_micros(50));
+            thread::sleep(Duration::from_millis(1));
         }
     });
     handles.push(h2);
@@ -139,7 +139,7 @@ fn test_concurrent_pv_changes_and_time_info() {
             if tm3.elapsed_ms() < 100 {
                 assert!(!should_stop, "Shouldn't stop early in search");
             }
-            thread::sleep(Duration::from_micros(10));
+            thread::sleep(Duration::from_millis(1));
         }
     });
     handles.push(h3);
