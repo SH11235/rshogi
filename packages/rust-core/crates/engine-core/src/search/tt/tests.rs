@@ -763,6 +763,65 @@ mod tt_tests {
     }
 
     #[test]
+    fn test_cas_window_tolerance() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let bucket = Arc::new(bucket::TTBucket::new());
+        let bucket_reader = Arc::clone(&bucket);
+        let bucket_writer = Arc::clone(&bucket);
+
+        // Start writer thread that creates a deliberate window between key and data update
+        let writer = thread::spawn(move || {
+            let entry = TTEntry::new(0x1234567890ABCDEF, None, 100, 50, 10, NodeType::Exact, 0);
+
+            // Manually perform the CAS replacement with a delay
+            let idx = 0; // Use first slot
+            let old_key = bucket_writer.entries[idx * 2].load(Ordering::Relaxed);
+
+            // Update key first
+            bucket_writer.entries[idx * 2]
+                .compare_exchange(old_key, entry.key, Ordering::Release, Ordering::Relaxed)
+                .ok();
+
+            // Deliberate delay to widen the inconsistency window
+            thread::sleep(Duration::from_micros(10));
+
+            // Then update data
+            bucket_writer.entries[idx * 2 + 1].store(entry.data, Ordering::Release);
+        });
+
+        // Start reader thread that might observe the inconsistent state
+        let reader = thread::spawn(move || {
+            thread::sleep(Duration::from_micros(5)); // Read in the middle of the update
+
+            // This probe might see new key with old data, which should be handled gracefully
+            let result = bucket_reader.probe(0x1234567890ABCDEF);
+
+            // The reader should either see nothing (if depth check fails) or valid data
+            // but should never crash or panic
+            match result {
+                Some(entry) => {
+                    // If we got an entry, verify the key matches
+                    assert_eq!(entry.key, 0x1234567890ABCDEF);
+                }
+                None => {
+                    // It's ok to get None during the inconsistent window
+                }
+            }
+        });
+
+        writer.join().unwrap();
+        reader.join().unwrap();
+
+        // After both threads complete, verify final state is consistent
+        let final_result = bucket.probe(0x1234567890ABCDEF);
+        assert!(final_result.is_some());
+        assert_eq!(final_result.unwrap().depth(), 10);
+    }
+
+    #[test]
     fn test_flexible_bucket_sizes() {
         // Test small bucket
         let small_tt = TranspositionTable::new_with_config(1, Some(BucketSize::Small));
