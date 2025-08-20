@@ -119,9 +119,9 @@ fn generate_king_style_moves(
     targets: Bitboard,
     piece_type: PieceType,
 ) {
-    use crate::shogi::ATTACK_TABLES;
+    use crate::shogi::attacks;
 
-    let king_attacks = ATTACK_TABLES.king_attacks(from);
+    let king_attacks = attacks::king_attacks(from);
     let valid_targets = king_attacks & targets;
 
     // Add moves
