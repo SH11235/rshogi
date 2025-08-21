@@ -18,16 +18,11 @@ pub fn lock_or_recover_generic<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// Threshold for converting large cp values to mate scores
-/// Values above this are likely mate-related and should be converted
-const LARGE_CP_THRESHOLD: i32 = 10000;
-
 /// Convert raw engine score to USI score format (Cp or Mate)
 ///
 /// This function transforms internal engine scores to the USI protocol format:
 /// - Regular evaluations are reported as centipawns (cp)
 /// - Mate scores are converted to "mate in N moves" format
-/// - Very large cp values (>10000) are also converted to mate format
 ///
 /// # Arguments
 ///
@@ -40,7 +35,6 @@ const LARGE_CP_THRESHOLD: i32 = 10000;
 /// # Notes
 ///
 /// - Mate scores are identified when the absolute value exceeds `MATE_SCORE - MAX_PLY`
-/// - Large cp values (>10000) are treated as mate scores for better USI compliance
 /// - For GUI compatibility, immediate mate (0 moves) is reported as "mate 1"
 /// - Positive scores favor the side to move, negative scores favor the opponent
 pub fn to_usi_score(raw_score: i32) -> Score {
@@ -48,28 +42,14 @@ pub fn to_usi_score(raw_score: i32) -> Score {
         // It's a mate score - calculate mate distance
         let mate_in_half = MATE_SCORE - raw_score.abs();
         // Calculate mate in moves (1 move = 2 plies)
-        // Use max(1) to avoid "mate 0" (some GUIs prefer "mate 1" for immediate mate)
-        //
-        // Policy rationale: While USI spec allows "mate 0", some GUIs (e.g., older versions
-        // of ShogiGUI) have issues displaying it. Using "mate 1" for immediate mate is
-        // a conservative choice that works with all GUIs.
-        //
-        // TODO: Consider making this configurable via USI option for GUI compatibility
-        let mate_in = ((mate_in_half + 1) / 2).max(1);
+        let mate_in = (mate_in_half + 1) / 2;
+        // Note: USI spec allows "mate 0" for immediate mate.
+        // Some older GUIs may have issues with "mate 0", but we follow the spec.
+        // TODO: Consider adding a USI option for "mate0_to_1" compatibility mode if needed
         if raw_score > 0 {
             Score::Mate(mate_in)
         } else {
             Score::Mate(-mate_in)
-        }
-    } else if raw_score.abs() > LARGE_CP_THRESHOLD {
-        // Very large cp value - likely a mate score that wasn't properly converted
-        // Estimate mate distance based on the cp value
-        // This is a heuristic: assume 100 cp = 1 move closer to mate
-        let estimated_moves = (raw_score.abs() / 100).min(100); // Cap at mate in 100
-        if raw_score > 0 {
-            Score::Mate(estimated_moves.max(1))
-        } else {
-            Score::Mate(-estimated_moves.max(1))
         }
     } else {
         Score::Cp(raw_score)
@@ -235,9 +215,9 @@ mod tests {
         assert_eq!(to_usi_score(MATE_SCORE - 6), Score::Mate(3));
         assert_eq!(to_usi_score(-(MATE_SCORE - 6)), Score::Mate(-3));
 
-        // Immediate mate (0 plies) should be reported as mate 1
-        assert_eq!(to_usi_score(MATE_SCORE), Score::Mate(1));
-        assert_eq!(to_usi_score(-MATE_SCORE), Score::Mate(-1));
+        // Immediate mate (0 plies) should be reported as mate 0
+        assert_eq!(to_usi_score(MATE_SCORE), Score::Mate(0));
+        assert_eq!(to_usi_score(-MATE_SCORE), Score::Mate(0));
 
         // Score just below mate threshold
         assert_eq!(to_usi_score(mate_threshold - 1), Score::Cp(mate_threshold - 1));

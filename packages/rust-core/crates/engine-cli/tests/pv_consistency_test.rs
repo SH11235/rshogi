@@ -1,6 +1,7 @@
 //! Test for PV consistency - ensures bestmove matches PV[0]
 
 use engine_cli::engine_adapter::ExtendedSearchResult;
+use engine_core::search::NodeType;
 use engine_core::shogi::{Move, Square};
 
 #[test]
@@ -19,6 +20,7 @@ fn test_extended_search_result_pv_consistency() {
         depth: 10,
         score: 100,
         pv: pv.clone(),
+        node_type: NodeType::Exact,
     };
 
     // Verify consistency

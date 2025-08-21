@@ -251,6 +251,7 @@ fn test_partial_result_validation() {
 fn test_session_bestmove_validation() {
     // Test that session-based bestmove validation works correctly
     use engine_cli::search_session::{CommittedBest, Score, SearchSession};
+    use engine_core::search::NodeType;
     use engine_core::usi::parse_usi_move;
     use smallvec::SmallVec;
 
@@ -271,6 +272,7 @@ fn test_session_bestmove_validation() {
         depth: 5,
         score: Score::Cp(100),
         pv: SmallVec::from_vec(vec![best_move]),
+        node_type: NodeType::Exact,
     };
     session.committed_best = Some(committed);
 
@@ -368,6 +370,7 @@ fn test_ponder_behavior() {
     // Test that ponder searches don't send bestmove immediately
     // This is more of an integration test but we can test the validation part
     use engine_cli::search_session::{CommittedBest, Score, SearchSession};
+    use engine_core::search::NodeType;
     use engine_core::usi::parse_usi_move;
     use smallvec::SmallVec;
 
@@ -393,6 +396,7 @@ fn test_ponder_behavior() {
         depth: 10,
         score: Score::Cp(50),
         pv: SmallVec::from_vec(vec![best_move, ponder_move]),
+        node_type: NodeType::Exact,
     };
     session.committed_best = Some(committed);
 
