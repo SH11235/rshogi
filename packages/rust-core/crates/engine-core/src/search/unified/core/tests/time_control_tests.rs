@@ -11,7 +11,7 @@ use std::sync::Arc;
 fn test_get_event_poll_mask_values() {
     // Test that the polling mask function returns expected values
     let evaluator = MaterialEvaluator;
-    let searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Without time manager, should return 0x7F (127) for responsiveness
     let mask = time_control::get_event_poll_mask(&searcher);
@@ -23,7 +23,7 @@ fn test_event_poll_mask_byoyomi() {
     // Test that byoyomi time control gets more frequent polling
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Set up byoyomi time control
     let limits = TimeLimits {
@@ -51,7 +51,7 @@ fn test_event_poll_mask_various_time_controls() {
     // Test polling masks for different time controls
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Test Fischer with short time
     let limits = TimeLimits {
