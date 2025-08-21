@@ -280,6 +280,19 @@ where
             continue;
         }
 
+        // Calculate gives_check before making the move to avoid double move execution
+        // Use lightweight pre-filter first, then accurate check if needed
+        // Skip for first move since LMR is not applied anyway
+        let gives_check = if USE_PRUNING && moves_searched > 0 {
+            if crate::search::unified::pruning::likely_could_give_check(pos, mv) {
+                pos.gives_check(mv)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         // Make move
         let undo_info = pos.do_move(mv);
 
@@ -305,13 +318,6 @@ where
             };
 
             // Late move reduction using advanced pruning module
-            // Use lightweight pre-filter first, then accurate check if needed
-            let gives_check = if crate::search::unified::pruning::likely_could_give_check(pos, mv) {
-                pos.gives_check(mv)
-            } else {
-                false
-            };
-
             let reduction = if USE_PRUNING
                 && crate::search::unified::pruning::can_do_lmr(
                     depth,
