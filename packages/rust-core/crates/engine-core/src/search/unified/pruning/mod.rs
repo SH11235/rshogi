@@ -272,7 +272,7 @@ pub fn can_do_static_null_move_with_pos(
 /// This is much cheaper than full gives_check() calculation
 /// Note: King cannot give check to opponent king (illegal by shogi rules), so we don't handle direct King attacks.
 /// However, King moves can still cause discovered checks, which are handled in the discovered check section.
-fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
+pub fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
     use crate::shogi::PieceType;
 
     // Get opponent king position
