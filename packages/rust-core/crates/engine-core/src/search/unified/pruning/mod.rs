@@ -1065,4 +1065,177 @@ mod tests {
             "LMR should be applicable for non-checking moves"
         );
     }
+
+    #[test]
+    fn test_likely_could_give_check_no_false_negatives() {
+        use crate::{
+            movegen::MoveGen,
+            shogi::{MoveList, Position},
+        };
+
+        // Test that likely_could_give_check never returns false when gives_check is true
+        // This ensures our lightweight filter doesn't miss any actual checks
+
+        // Test various positions
+        let test_positions = vec![
+            // Starting position
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            // Middle game position with pieces in hand
+            "ln1g1g1nl/1r2k2b1/p1pppp1pp/1p4p2/9/2P4P1/PP1PPPP1P/1B5R1/LN1GKGSNL b Ss 20",
+            // Endgame position with kings
+            "8k/9/9/9/9/9/9/9/8K b 2r2b4g4s4n4l14p 1",
+            // Position with promoted pieces
+            "+R2g1g1nl/2s1k1sb1/p1pppp1pp/1p4p2/9/2P4P1/PP1PPPP1P/1+B5R1/LN1GKG1NL w - 30",
+        ];
+
+        for sfen in &test_positions {
+            let pos = match Position::from_sfen(sfen) {
+                Ok(p) => p,
+                Err(_) => continue, // Skip invalid SFEN
+            };
+
+            let mut move_gen = MoveGen::new();
+            let mut moves = MoveList::new();
+            move_gen.generate_all(&pos, &mut moves);
+
+            let mut false_negatives = 0;
+            let mut total_checks = 0;
+
+            for &mv in moves.as_slice() {
+                // Skip if move is invalid
+                if !pos.is_pseudo_legal(mv) {
+                    continue;
+                }
+
+                let gives_check = pos.gives_check(mv);
+                let likely_check = likely_could_give_check(&pos, mv);
+
+                if gives_check {
+                    total_checks += 1;
+                    if !likely_check {
+                        false_negatives += 1;
+                        #[cfg(debug_assertions)]
+                        {
+                            eprintln!(
+                                "False negative detected! Move {} gives check but likely_could_give_check returned false",
+                                crate::usi::move_to_usi(&mv)
+                            );
+                        }
+                    }
+                }
+            }
+
+            assert_eq!(
+                false_negatives, 0,
+                "Found {false_negatives} false negatives out of {total_checks} checking moves in position: {sfen}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_likely_could_give_check_property_random_positions() {
+        use crate::{
+            movegen::MoveGen,
+            shogi::{MoveList, Position},
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Property-based test with semi-random positions
+        // For any position and pseudo-legal move:
+        // gives_check(m) == true => likely_could_give_check(m) == true
+
+        // Generate deterministic "random" positions for reproducibility
+        let mut hasher = DefaultHasher::new();
+        let base_positions = vec![
+            Position::startpos(),
+            // Add more base positions as needed
+        ];
+
+        for (idx, mut pos) in base_positions.into_iter().enumerate() {
+            // Apply some semi-random moves to create varied positions
+            let mut move_gen = MoveGen::new();
+            let mut moves = MoveList::new();
+
+            // Make 5-15 moves from starting position
+            let num_moves = 5 + (idx % 11);
+            for i in 0..num_moves {
+                move_gen.generate_all(&pos, &mut moves);
+                if moves.is_empty() {
+                    break;
+                }
+
+                // Pick a move based on hash
+                i.hash(&mut hasher);
+                let hash = hasher.finish();
+                let move_idx = (hash as usize) % moves.len();
+                let mv = moves.as_slice()[move_idx];
+
+                if pos.is_pseudo_legal(mv) {
+                    pos.do_move(mv);
+                }
+                moves.clear();
+            }
+
+            // Now test all moves from this position
+            move_gen.generate_all(&pos, &mut moves);
+
+            for &mv in moves.as_slice() {
+                if !pos.is_pseudo_legal(mv) {
+                    continue;
+                }
+
+                let gives_check = pos.gives_check(mv);
+                let likely_check = likely_could_give_check(&pos, mv);
+
+                // Property: gives_check implies likely_could_give_check
+                if gives_check {
+                    assert!(
+                        likely_check,
+                        "Property violated: gives_check is true but likely_could_give_check is false for move {}",
+                        crate::usi::move_to_usi(&mv)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_likely_could_give_check_discovered_checks() {
+        use crate::{
+            movegen::MoveGen,
+            shogi::{MoveList, Position},
+        };
+
+        // Specific test for discovered checks
+        // Position where moving a piece uncovers an attack from behind
+
+        // White king on 5d (rank 5), Black pawn on 5f (rank 3), Black rook on 5h (rank 1), Black king on 1i
+        // Moving the pawn from 5f to 5e discovers check from the rook
+        let sfen = "9/9/9/4k4/9/4P4/9/3R5/K8 b - 1";
+        let pos = Position::from_sfen(sfen).unwrap();
+
+        // Find the pawn move
+        let from = parse_usi_square("5f").unwrap();
+        let to = parse_usi_square("5e").unwrap();
+
+        let mut move_gen = MoveGen::new();
+        let mut moves = MoveList::new();
+        move_gen.generate_all(&pos, &mut moves);
+
+        let pawn_move = moves
+            .as_slice()
+            .iter()
+            .find(|&&mv| !mv.is_drop() && mv.from() == Some(from) && mv.to() == to)
+            .copied();
+
+        assert!(pawn_move.is_some(), "Pawn move from 5f to 5e should exist");
+        let mv = pawn_move.unwrap();
+
+        assert!(pos.gives_check(mv), "Pawn move should give discovered check");
+        assert!(
+            likely_could_give_check(&pos, mv),
+            "likely_could_give_check should detect discovered check"
+        );
+    }
 }
