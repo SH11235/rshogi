@@ -603,4 +603,40 @@ mod tests {
         let info = SearchInfo::default();
         assert_eq!(info.to_string(), "");
     }
+
+    #[test]
+    fn test_search_info_with_bound_flags() {
+        // Test mate score with lowerbound
+        let info = SearchInfo {
+            depth: Some(18),
+            score: Some(Score::Mate(-3)),
+            score_bound: Some(ScoreBound::LowerBound),
+            pv: vec!["7g7f".to_string()],
+            ..Default::default()
+        };
+        let resp = UsiResponse::Info(info);
+        assert_eq!(resp.to_string(), "info depth 18 score mate -3 lowerbound pv 7g7f");
+
+        // Test cp score with upperbound
+        let info = SearchInfo {
+            depth: Some(12),
+            score: Some(Score::Cp(250)),
+            score_bound: Some(ScoreBound::UpperBound),
+            pv: vec!["2g2f".to_string(), "8c8d".to_string()],
+            ..Default::default()
+        };
+        let resp = UsiResponse::Info(info);
+        assert_eq!(resp.to_string(), "info depth 12 score cp 250 upperbound pv 2g2f 8c8d");
+
+        // Test exact score (no bound flag)
+        let info = SearchInfo {
+            depth: Some(15),
+            score: Some(Score::Mate(5)),
+            score_bound: Some(ScoreBound::Exact),
+            pv: vec!["3g3f".to_string()],
+            ..Default::default()
+        };
+        let resp = UsiResponse::Info(info);
+        assert_eq!(resp.to_string(), "info depth 15 score mate 5 pv 3g3f");
+    }
 }
