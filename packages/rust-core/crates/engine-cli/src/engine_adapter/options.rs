@@ -100,6 +100,15 @@ impl EngineAdapter {
                     let hash_size = Self::parse_u64_in_range("USI_Hash", val, 1, 1024)? as usize;
                     self.hash_size = hash_size;
 
+                    // Inform about non-power-of-2 sizes
+                    if !hash_size.is_power_of_two() && hash_size > 1 {
+                        info!(
+                            "USI_Hash set to {}MB (non-power-of-2). \
+                            For optimal memory usage, consider power-of-2 sizes: 16, 32, 64, 128, 256, 512, 1024 MB",
+                            hash_size
+                        );
+                    }
+
                     // Apply to engine if it exists
                     if let Some(ref mut engine) = self.engine {
                         engine.set_hash_size(hash_size);
@@ -272,8 +281,8 @@ impl EngineAdapter {
                     // We just send a simple confirmation to GUI
                     send_info_string("Hash table cleared")?;
                 } else {
-                    warn!("ClearHash: No engine available (search in progress)");
-                    send_info_string("ClearHash skipped: search in progress")?;
+                    warn!("ClearHash: No engine available (search in progress or not initialized)");
+                    send_info_string("ClearHash skipped: engine not available")?;
                 }
             }
             _ => {
