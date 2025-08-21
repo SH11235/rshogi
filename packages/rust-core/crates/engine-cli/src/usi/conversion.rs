@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Result};
 use engine_core::movegen::MoveGen;
 use engine_core::shogi::{Move, MoveList, Position};
-use engine_core::usi::{parse_sfen, parse_usi_move};
+use engine_core::usi::{parse_sfen, parse_usi_move, position_to_sfen};
 use log::debug;
 
 /// Create a Position from USI position command data
@@ -35,31 +35,35 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
         // Generate all legal moves for current position
         move_gen.generate_all(&pos, &mut legal_moves);
 
-        // Find all legal moves that match the parsed move's from/to squares
-        let candidates: Vec<Move> = legal_moves
-            .as_slice()
-            .iter()
-            .copied()
-            .filter(|&lm| {
+        // Find matching legal move with promotion priority
+        let mut fallback: Option<Move> = None;
+        let mut exact: Option<Move> = None;
+
+        for &lm in legal_moves.as_slice() {
+            let matched = if mv.is_drop() || lm.is_drop() {
                 // Drop moves: match to square and drop piece type
-                if mv.is_drop() || lm.is_drop() {
-                    return mv.is_drop() == lm.is_drop()
-                        && mv.drop_piece_type() == lm.drop_piece_type()
-                        && mv.to() == lm.to();
-                }
+                mv.is_drop() == lm.is_drop()
+                    && mv.drop_piece_type() == lm.drop_piece_type()
+                    && mv.to() == lm.to()
+            } else {
                 // Normal moves: match from and to squares
                 mv.from() == lm.from() && mv.to() == lm.to()
-            })
-            .collect();
+            };
 
-        // First try to find exact promotion match, then fallback to any match
-        let legal_move = candidates
-            .iter()
-            .copied()
-            // Prioritize exact promotion match
-            .find(|lm| lm.is_promote() == mv.is_promote())
-            // Fallback to any matching move (handles cases where promotion is invalid)
-            .or_else(|| candidates.first().copied());
+            if matched {
+                if lm.is_promote() == mv.is_promote() {
+                    // Found exact promotion match
+                    exact = Some(lm);
+                    break;
+                }
+                if fallback.is_none() {
+                    // Store first match as fallback
+                    fallback = Some(lm);
+                }
+            }
+        }
+
+        let legal_move = exact.or(fallback);
 
         if let Some(legal_mv) = legal_move {
             // Log if USI specified promotion but it's not possible
@@ -106,7 +110,7 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
                 }
             }
             return Err(anyhow!(
-                "Illegal move '{}' at move {} in position after: {} (parsed: {:?}, side_to_move: {:?}, legal_moves_count: {})",
+                "Illegal move '{}' at move {} in position after: {} (parsed: {:?}, side_to_move: {:?}, legal_moves_count: {}, sfen: {})",
                 move_str,
                 i + 1,
                 if i == 0 {
@@ -116,7 +120,8 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
                 },
                 mv,
                 pos.side_to_move,
-                legal_moves.len()
+                legal_moves.len(),
+                position_to_sfen(&pos)
             ));
         }
     }
@@ -168,5 +173,70 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Illegal move"));
         assert!(err_msg.contains("at move 2"));
+    }
+
+    #[test]
+    fn test_promotion_mismatch_fallback() {
+        // Test that invalid promotion ("+") is ignored and falls back to normal move
+        // Move sequence: advance pawn to a position where it cannot promote
+        let moves = vec![
+            "7g7f".to_string(),  // Black pawn forward
+            "3c3d".to_string(),  // White pawn forward
+            "2g2f+".to_string(), // Black pawn forward with invalid promotion (not in promotion zone)
+        ];
+
+        // This should succeed - the "+" should be ignored
+        let result = create_position(true, None, &moves);
+        assert!(result.is_ok(), "Should accept move with invalid promotion flag");
+
+        let pos = result.unwrap();
+        assert_eq!(pos.side_to_move, engine_core::shogi::Color::White);
+    }
+
+    #[test]
+    fn test_promotion_priority_matching() {
+        // Test that when both promoted and non-promoted moves are legal,
+        // the exact match (with promotion flag) is preferred
+        use engine_core::shogi::{Piece, PieceType, Square};
+
+        // Create a position where a silver can promote
+        let mut pos = Position::empty();
+
+        // Place kings (required for legal position)
+        pos.board.put_piece(
+            Square::new(4, 8),
+            Piece::new(PieceType::King, engine_core::shogi::Color::Black),
+        );
+        pos.board.put_piece(
+            Square::new(4, 0),
+            Piece::new(PieceType::King, engine_core::shogi::Color::White),
+        );
+
+        // Place a black silver at 3d (can move to promotion zone)
+        pos.board.put_piece(
+            Square::new(6, 3), // 3d in internal coordinates
+            Piece::new(PieceType::Silver, engine_core::shogi::Color::Black),
+        );
+
+        // Place a white pawn that the silver can capture in promotion zone
+        pos.board.put_piece(
+            Square::new(7, 2), // 2c in internal coordinates - diagonal from silver
+            Piece::new(PieceType::Pawn, engine_core::shogi::Color::White),
+        );
+
+        pos.side_to_move = engine_core::shogi::Color::Black;
+
+        // Convert position to SFEN
+        let sfen = position_to_sfen(&pos);
+
+        // Test that "3d2c+" (with promotion) is correctly applied
+        let moves_with_promotion = vec!["3d2c+".to_string()];
+        let result = create_position(false, Some(&sfen), &moves_with_promotion);
+        assert!(result.is_ok(), "Should accept silver promotion move");
+
+        // Test that "3d2c" (without promotion) is also accepted
+        let moves_without_promotion = vec!["3d2c".to_string()];
+        let result = create_position(false, Some(&sfen), &moves_without_promotion);
+        assert!(result.is_ok(), "Should accept silver non-promotion move");
     }
 }
