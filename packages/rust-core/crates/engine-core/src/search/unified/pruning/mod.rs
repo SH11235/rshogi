@@ -270,8 +270,13 @@ pub fn can_do_static_null_move_with_pos(
 
 /// Lightweight pre-filter to check if a move might give check
 /// This is much cheaper than full gives_check() calculation
+///
+/// IMPORTANT: This function must be called with the position BEFORE the move is made.
+/// The function analyzes whether 'mv' would give check when played from 'pos'.
+///
 /// Note: King cannot give check to opponent king (illegal by shogi rules), so we don't handle direct King attacks.
 /// However, King moves can still cause discovered checks, which are handled in the discovered check section.
+#[inline]
 pub fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
     use crate::shogi::PieceType;
 
@@ -472,17 +477,23 @@ pub fn likely_could_give_check(pos: &Position, mv: Move) -> bool {
                         if piece.color == pos.side_to_move {
                             // Check if this is a sliding piece that could attack through the line
                             let piece_found = match piece.piece_type {
-                                PieceType::Rook if on_rank || on_file => true,
-                                PieceType::Bishop if on_diagonal => true,
-                                PieceType::Lance
-                                    if on_file
+                                PieceType::Rook => {
+                                    // Unpromoted rook: rank/file only
+                                    // Promoted rook (dragon): rank/file + one square diagonally
+                                    on_rank || on_file
+                                }
+                                PieceType::Bishop => {
+                                    // Unpromoted bishop: diagonal only
+                                    // Promoted bishop (horse): diagonal + one square orthogonally
+                                    on_diagonal
+                                }
+                                PieceType::Lance if !piece.promoted => {
+                                    // Unpromoted lance: forward file only
+                                    on_file
                                         && ((pos.side_to_move == crate::shogi::Color::Black
                                             && dr_from < 0)
-                                            || (pos.side_to_move
-                                                == crate::shogi::Color::White
-                                                && dr_from > 0)) =>
-                                {
-                                    true
+                                            || (pos.side_to_move == crate::shogi::Color::White
+                                                && dr_from > 0))
                                 }
                                 _ => false,
                             };
@@ -924,5 +935,134 @@ mod tests {
                 prev_reduction = reduction;
             }
         }
+    }
+
+    #[test]
+    fn test_promoted_lance_discovered_check() {
+        use crate::shogi::{Color, Move, Piece, PieceType, Position, Square};
+
+        // Test 1: Promoted lance should NOT be detected as giving discovered check
+        // Setup: Black promoted lance behind a piece, with White king in line
+        let mut pos = Position::empty();
+        pos.board
+            .put_piece(Square::new(4, 4), Piece::new(PieceType::King, Color::White));
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::promoted(PieceType::Lance, Color::Black));
+        pos.board
+            .put_piece(Square::new(4, 5), Piece::new(PieceType::Pawn, Color::Black));
+        pos.side_to_move = Color::Black;
+
+        // Move the pawn sideways - should NOT create discovered check from promoted lance
+        let mv = Move::normal(Square::new(4, 5), Square::new(3, 5), false);
+        assert!(
+            !likely_could_give_check(&pos, mv),
+            "Promoted lance should not give discovered check (moves like gold)"
+        );
+
+        // Test 2: Unpromoted lance SHOULD be detected as giving discovered check
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::new(PieceType::Lance, Color::Black));
+        assert!(
+            likely_could_give_check(&pos, mv),
+            "Unpromoted lance should give discovered check when piece moves off the file"
+        );
+
+        // Test 3: Promoted rook (dragon) should still give discovered check on rank/file
+        pos.board
+            .put_piece(Square::new(4, 6), Piece::promoted(PieceType::Rook, Color::Black));
+        assert!(
+            likely_could_give_check(&pos, mv),
+            "Promoted rook should give discovered check on rank/file"
+        );
+
+        // Test 4: Promoted bishop (horse) should give discovered check on diagonal
+        let mut pos2 = Position::empty();
+        pos2.board
+            .put_piece(Square::new(2, 2), Piece::new(PieceType::King, Color::White));
+        pos2.board
+            .put_piece(Square::new(4, 4), Piece::promoted(PieceType::Bishop, Color::Black));
+        pos2.board
+            .put_piece(Square::new(3, 3), Piece::new(PieceType::Pawn, Color::Black));
+        pos2.side_to_move = Color::Black;
+
+        // Move pawn off diagonal
+        let mv2 = Move::normal(Square::new(3, 3), Square::new(3, 2), false);
+        assert!(
+            likely_could_give_check(&pos2, mv2),
+            "Promoted bishop should give discovered check on diagonal"
+        );
+    }
+
+    #[test]
+    fn test_gives_check_pre_move_position() {
+        use crate::shogi::board::{Color, Piece, PieceType, Square};
+        use crate::shogi::Position;
+
+        // Test that gives_check functions work on pre-move position
+        // Setup: Black rook on 2h, white king on 2a
+        // Move rook to 2b gives check
+        let mut pos = Position::empty();
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'h').unwrap(),
+            Piece::new(PieceType::Rook, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('2', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.rebuild_occupancy_bitboards();
+        pos.side_to_move = Color::Black;
+
+        // Move that gives check
+        let mv = Move::normal(
+            Square::from_usi_chars('2', 'h').unwrap(),
+            Square::from_usi_chars('2', 'b').unwrap(),
+            false,
+        );
+
+        // Test lightweight check works on pre-move position
+        assert!(
+            likely_could_give_check(&pos, mv),
+            "Rook to 2b should likely give check to king on 2a"
+        );
+
+        // Test actual gives_check on pre-move position
+        assert!(pos.gives_check(mv), "Rook to 2b should give check to king on 2a");
+
+        // Make the move and verify post-move state
+        let undo_info = pos.do_move(mv);
+        assert!(pos.is_in_check(), "White should be in check after rook to 2b");
+
+        // After move, side_to_move has changed
+        assert_eq!(pos.side_to_move, Color::White);
+
+        // Undo and verify
+        pos.undo_move(mv, undo_info);
+        assert_eq!(pos.side_to_move, Color::Black);
+    }
+
+    #[test]
+    fn test_lmr_does_not_reduce_checking_moves() {
+        use crate::shogi::Move;
+
+        // Test that moves giving check are not reduced by LMR
+        let normal_move =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+
+        // Verify LMR conditions with gives_check = true
+        assert!(
+            !can_do_lmr(5, 10, false, true, normal_move),
+            "LMR should not reduce moves that give check"
+        );
+
+        // Verify LMR conditions with gives_check = false
+        assert!(
+            can_do_lmr(5, 10, false, false, normal_move),
+            "LMR should be applicable for non-checking moves"
+        );
     }
 }

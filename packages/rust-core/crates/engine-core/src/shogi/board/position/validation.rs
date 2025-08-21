@@ -411,6 +411,9 @@ impl Position {
     /// For arbitrary moves not from the move generator, use `is_pseudo_legal()` first
     /// or expect undefined behavior/panics.
     ///
+    /// IMPORTANT: This function must be called with the position BEFORE the move is made.
+    /// The function internally applies and undoes the move to check if it results in check.
+    ///
     /// # Panics
     /// May panic if the move source doesn't contain a piece of the correct color.
     pub fn gives_check(&self, mv: Move) -> bool {
