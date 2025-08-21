@@ -49,7 +49,8 @@ where
         return alpha;
     }
 
-    // Get adaptive polling mask based on time control
+    // Get adaptive polling mask based on time control and stop conditions
+    // This unified mask handles all event checking including stop_flag polling
     let event_mask = time_control::get_event_poll_mask(searcher);
 
     // Process events based on adaptive mask (handle mask=0 for immediate check)
@@ -69,8 +70,10 @@ where
 
         searcher.context.process_events(&searcher.time_manager);
 
-        // Check time limit using unified method
-        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager) {
+        // Check both time limit and stop flag using unified method
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)
+            || searcher.context.should_stop()
+        {
             return alpha;
         }
     }
@@ -88,20 +91,6 @@ where
                 }
             }
         }
-    }
-
-    // Check stop flag periodically to minimize overhead
-    // Use more frequent checking if stop_flag is present
-    let stop_check_interval = if searcher.context.limits().stop_flag.is_some() {
-        0x3F // Check every 64 nodes when stop_flag is present
-    } else {
-        0x3FF // Check every 1024 nodes for normal operation
-    };
-
-    if searcher.stats.nodes & stop_check_interval == 0 && searcher.context.should_stop() {
-        // Skip TT storage when aborting search - it adds overhead with minimal benefit
-        // The partial evaluation is likely to be overwritten anyway
-        return alpha;
     }
 
     // Absolute depth limit to prevent stack overflow
