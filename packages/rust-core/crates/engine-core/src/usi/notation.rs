@@ -51,7 +51,8 @@ pub fn parse_usi_square(s: &str) -> Result<Square, UsiParseError> {
 
 /// Parse a USI piece character to PieceType
 fn parse_usi_piece_type(c: char) -> Result<PieceType, UsiParseError> {
-    match c.to_uppercase().next().unwrap() {
+    let upper_char = c.to_uppercase().next().ok_or(UsiParseError::InvalidPiece(c))?;
+    match upper_char {
         'P' => Ok(PieceType::Pawn),
         'L' => Ok(PieceType::Lance),
         'N' => Ok(PieceType::Knight),
@@ -77,7 +78,9 @@ pub fn parse_usi_move(s: &str) -> Result<Move, UsiParseError> {
             return Err(UsiParseError::InvalidMoveFormat(s.to_string()));
         }
 
-        let piece_type = parse_usi_piece_type(parts[0].chars().next().unwrap())?;
+        let first_char =
+            parts[0].chars().next().ok_or(UsiParseError::InvalidMoveFormat(s.to_string()))?;
+        let piece_type = parse_usi_piece_type(first_char)?;
         let to = parse_usi_square(parts[1])?;
 
         return Ok(Move::drop(piece_type, to));
@@ -115,7 +118,9 @@ pub fn move_to_usi(mv: &Move) -> String {
         };
         format!("{}*{}", piece_char, mv.to())
     } else {
-        let from = mv.from().unwrap();
+        // Normal moves always have a from square
+        debug_assert!(mv.from().is_some(), "Normal move must have from square");
+        let from = mv.from().expect("Normal move must have from square");
         let to = mv.to();
         if mv.is_promote() {
             format!("{from}{to}+")
