@@ -297,7 +297,9 @@ where
         let undo_info = pos.do_move(mv);
 
         // Simple optimization: selective prefetch
-        if USE_TT && !crate::search::tt_filter::should_skip_prefetch(depth, moves_searched as usize)
+        if USE_TT
+            && !searcher.is_prefetch_disabled()
+            && !crate::search::tt_filter::should_skip_prefetch(depth, moves_searched as usize)
         {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
