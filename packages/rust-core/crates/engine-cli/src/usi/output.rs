@@ -638,5 +638,15 @@ mod tests {
         };
         let resp = UsiResponse::Info(info);
         assert_eq!(resp.to_string(), "info depth 15 score mate 5 pv 3g3f");
+        
+        // Test mate 0 output
+        let info = SearchInfo {
+            depth: Some(12),
+            score: Some(Score::Mate(0)),
+            pv: vec!["7g7f".to_string()],
+            ..Default::default()
+        };
+        let resp = UsiResponse::Info(info);
+        assert_eq!(resp.to_string(), "info depth 12 score mate 0 pv 7g7f");
     }
 }

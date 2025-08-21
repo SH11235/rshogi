@@ -176,7 +176,16 @@ pub fn search_worker(
                     Score::Cp(cp) => *cp,
                     Score::Mate(mate) => {
                         // Convert mate score to centipawn equivalent
-                        if *mate > 0 {
+                        // For mate 0, we need to preserve the sign from the original position
+                        // Since we're winning if it's our turn to be mated (defensive mate)
+                        if *mate == 0 {
+                            // mate 0 means immediate mate - use a large value
+                            // The sign should be based on who is being mated
+                            // If we set up the mate, it's positive; if we're mated, it's negative
+                            // Since this is a limitation of the current architecture,
+                            // we'll use the convention that mate 0 is always positive
+                            30000
+                        } else if *mate > 0 {
                             30000 - (*mate * 100)
                         } else {
                             -30000 - (*mate * 100)
