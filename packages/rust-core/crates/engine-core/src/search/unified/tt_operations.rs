@@ -115,8 +115,8 @@ pub trait TTOperations<const USE_TT: bool> {
 /// Implementation of TTOperations for UnifiedSearcher
 ///
 /// This is implemented in the main module to access private fields
-impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize> TTOperations<USE_TT>
-    for super::UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>
+impl<E, const USE_TT: bool, const USE_PRUNING: bool> TTOperations<USE_TT>
+    for super::UnifiedSearcher<E, USE_TT, USE_PRUNING>
 where
     E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static,
 {
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_tt_operations_with_tt_enabled() {
-        let searcher = UnifiedSearcher::<_, true, false, 8>::new(MaterialEvaluator);
+        let searcher = UnifiedSearcher::<_, true, false>::new(MaterialEvaluator);
 
         // TT should be available
         assert!(searcher.tt().is_some());
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_tt_operations_with_tt_disabled() {
-        let searcher = UnifiedSearcher::<_, false, false, 8>::new(MaterialEvaluator);
+        let searcher = UnifiedSearcher::<_, false, false>::new(MaterialEvaluator);
 
         // TT should not be available
         assert!(searcher.tt().is_none());
@@ -174,13 +174,13 @@ mod tests {
     #[test]
     fn test_probe_tt_compile_time_optimization() {
         // With TT enabled
-        let searcher_with_tt = UnifiedSearcher::<_, true, false, 8>::new(MaterialEvaluator);
+        let searcher_with_tt = UnifiedSearcher::<_, true, false>::new(MaterialEvaluator);
         let result = searcher_with_tt.probe_tt(12345);
         // Should return None (empty table) but not panic
         assert!(result.is_none());
 
         // With TT disabled - should always return None
-        let searcher_without_tt = UnifiedSearcher::<_, false, false, 8>::new(MaterialEvaluator);
+        let searcher_without_tt = UnifiedSearcher::<_, false, false>::new(MaterialEvaluator);
         let result = searcher_without_tt.probe_tt(12345);
         assert!(result.is_none());
     }

@@ -47,6 +47,9 @@ impl EngineAdapter {
         // Re-apply thread count in case it was changed
         engine.set_threads(self.threads);
 
+        // Apply hash size if it was changed
+        engine.set_hash_size(self.hash_size);
+
         // Return the engine
         self.engine = Some(engine);
     }

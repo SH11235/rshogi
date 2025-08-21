@@ -26,13 +26,8 @@ const N1024_MASK: u64 = 0x3FF; // Check every 1024 nodes
 /// This unified mask handles all event checking including stop_flag polling,
 /// eliminating the need for separate stop_check_interval logic.
 #[inline(always)]
-pub fn get_event_poll_mask<
-    E,
-    const USE_TT: bool,
-    const USE_PRUNING: bool,
-    const TT_SIZE_MB: usize,
->(
-    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+pub fn get_event_poll_mask<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING>,
 ) -> u64
 where
     E: Evaluator + Send + Sync + 'static,
@@ -112,7 +107,7 @@ mod tests {
     #[test]
     fn test_stopped_returns_every_node() {
         let evaluator = MaterialEvaluator;
-        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
 
         // Set up a search that's already stopped
         let stop_flag = Arc::new(AtomicBool::new(true));
@@ -125,7 +120,7 @@ mod tests {
     #[test]
     fn test_stop_flag_returns_n64() {
         let evaluator = MaterialEvaluator;
-        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
 
         // Set up with stop_flag but not stopped
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -138,7 +133,7 @@ mod tests {
     #[test]
     fn test_fixed_nodes_returns_n64() {
         let evaluator = MaterialEvaluator;
-        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
 
         let limits = SearchLimitsBuilder::default().fixed_nodes(10000).build();
         searcher.context.set_limits(limits);
@@ -149,7 +144,7 @@ mod tests {
     #[test]
     fn test_ponder_returns_n64() {
         let evaluator = MaterialEvaluator;
-        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
 
         // Create a ponder search - first set up a base time control, then convert to ponder
         let limits = SearchLimitsBuilder::default().fixed_time_ms(1000).ponder_with_inner().build();
@@ -161,7 +156,7 @@ mod tests {
     #[test]
     fn test_byoyomi_returns_n32() {
         let evaluator = MaterialEvaluator;
-        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
 
         // Set up byoyomi time control
         let limits = SearchLimitsBuilder::default()
@@ -200,7 +195,7 @@ mod tests {
         ];
 
         for (soft_limit_ms, expected_mask) in test_cases {
-            let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+            let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
 
             // Set up fixed time to get a specific soft limit
             let limits = SearchLimitsBuilder::default()
@@ -238,7 +233,7 @@ mod tests {
     #[test]
     fn test_no_time_manager_returns_n128() {
         let evaluator = MaterialEvaluator;
-        let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
 
         // Depth-only search (no time manager)
         let limits = SearchLimitsBuilder::default().depth(10).build();

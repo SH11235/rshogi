@@ -49,8 +49,8 @@ pub fn has_non_pawn_material(pos: &Position) -> bool {
 }
 
 /// Try null move pruning
-pub fn try_null_move<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
-    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+pub fn try_null_move<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
     pos: &mut Position,
     depth: u8,
     beta: i32,

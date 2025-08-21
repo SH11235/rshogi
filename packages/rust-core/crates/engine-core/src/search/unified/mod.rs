@@ -43,7 +43,6 @@ pub use self::tt_operations::TTOperations;
 /// - `E`: The evaluator type (e.g., MaterialEvaluator, NnueEvaluator)
 /// - `USE_TT`: Whether to use transposition table
 /// - `USE_PRUNING`: Whether to use advanced pruning techniques
-/// - `TT_SIZE_MB`: Transposition table size in megabytes
 ///
 /// # Examples
 /// ```
@@ -52,17 +51,13 @@ pub use self::tt_operations::TTOperations;
 /// use engine_core::evaluation::nnue::NNUEEvaluator;
 ///
 /// // Basic searcher with minimal features
-/// type BasicSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
+/// type BasicSearcher = UnifiedSearcher<MaterialEvaluator, true, false>;
 ///
 /// // Enhanced searcher with all features
-/// type EnhancedSearcher = UnifiedSearcher<NNUEEvaluator, true, true, 16>;
+/// type EnhancedSearcher = UnifiedSearcher<NNUEEvaluator, true, true>;
 /// ```
-pub struct UnifiedSearcher<
-    E,
-    const USE_TT: bool = true,
-    const USE_PRUNING: bool = true,
-    const TT_SIZE_MB: usize = 16,
-> where
+pub struct UnifiedSearcher<E, const USE_TT: bool = true, const USE_PRUNING: bool = true>
+where
     E: Evaluator + Send + Sync + 'static,
 {
     /// The evaluation function (internally Arc-wrapped for efficient sharing)
@@ -106,8 +101,7 @@ pub struct UnifiedSearcher<
     duplication_stats: Option<Arc<DuplicationStats>>,
 }
 
-impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
-    UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>
+impl<E, const USE_TT: bool, const USE_PRUNING: bool> UnifiedSearcher<E, USE_TT, USE_PRUNING>
 where
     E: Evaluator + Send + Sync + 'static,
 {
@@ -337,5 +331,5 @@ where
 
 /// Type aliases for common configurations
 pub type BasicSearcher =
-    UnifiedSearcher<crate::evaluation::evaluate::MaterialEvaluator, true, false, 8>;
-pub type EnhancedSearcher<E> = UnifiedSearcher<E, true, true, 16>;
+    UnifiedSearcher<crate::evaluation::evaluate::MaterialEvaluator, true, false>;
+pub type EnhancedSearcher<E> = UnifiedSearcher<E, true, true>;
