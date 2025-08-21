@@ -1482,4 +1482,26 @@ mod parallel_tests {
         // If it does, we expect an increment
         assert!(after2 >= after1, "probe may trigger prefetch");
     }
+
+    #[test]
+    fn test_zero_size_tt() {
+        // Test that TranspositionTable can handle 0MB size
+        let tt = TranspositionTable::new(0);
+
+        // 0MB still allocates minimum buckets (1024 buckets = 64KB)
+        assert!(tt.size_bytes() >= 64 * 1024, "TT should have at least 64KB even with 0MB input");
+
+        // Basic operations should work
+        let hash = 0x123456789ABCDEF0;
+        tt.store(hash, None, 100, 50, 5, NodeType::Exact);
+
+        let entry = tt.probe(hash);
+        assert!(entry.is_some(), "Should be able to store and retrieve even with 0MB");
+
+        // Verify stored values
+        let entry = entry.unwrap();
+        assert_eq!(entry.score(), 100);
+        assert_eq!(entry.depth(), 5);
+        assert_eq!(entry.node_type(), NodeType::Exact);
+    }
 }

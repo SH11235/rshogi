@@ -24,14 +24,32 @@ pub struct ShardedTranspositionTable {
 impl ShardedTranspositionTable {
     /// Create a new sharded transposition table with the given total size in MB
     pub fn new(total_size_mb: usize) -> Self {
-        let num_shards = NUM_SHARDS;
-        // Use ceiling division to avoid losing space due to truncation
-        // Ensure at least 1 MB per shard to avoid zero-sized allocations
-        let shard_size_mb = total_size_mb.div_ceil(num_shards).max(1);
+        // Dynamic shard count: use fewer shards for small sizes to ensure each shard gets at least 1MB
+        // Find the largest power of 2 <= total_size_mb, but not more than NUM_SHARDS
+        let num_shards = if total_size_mb == 0 {
+            1 // Special case: 0MB gets 1 shard
+        } else {
+            // Find power of 2: 1, 2, 4, 8, 16
+            let mut shards = 1;
+            while shards * 2 <= total_size_mb && shards * 2 <= NUM_SHARDS {
+                shards *= 2;
+            }
+            shards
+        };
 
-        // Create independent TT shards
-        let shards: Vec<TranspositionTable> =
-            (0..num_shards).map(|_| TranspositionTable::new(shard_size_mb)).collect();
+        // Distribute size across shards with remainder handling
+        let base_size = total_size_mb / num_shards;
+        let remainder = total_size_mb % num_shards;
+
+        // Create independent TT shards with distributed sizes
+        let shards: Vec<TranspositionTable> = (0..num_shards)
+            .map(|i| {
+                // First 'remainder' shards get base_size + 1 MB
+                // Remaining shards get base_size MB
+                let size_mb = base_size + if i < remainder { 1 } else { 0 };
+                TranspositionTable::new(size_mb)
+            })
+            .collect();
 
         Self {
             shards,
@@ -141,7 +159,10 @@ impl ShardedTranspositionTable {
 
     /// Get total size in MB
     pub fn size_mb(&self) -> usize {
-        self.shards.iter().map(|shard| shard.size() / (1024 * 1024)).sum()
+        // Sum bytes first, then convert to MB to avoid rounding errors
+        let total_bytes: usize = self.shards.iter().map(|shard| shard.size_bytes()).sum();
+        // Round up to nearest MB
+        total_bytes.div_ceil(1024 * 1024)
     }
 
     /// Check if exact cut flag is set
@@ -222,5 +243,36 @@ mod tests {
 
         // Non-existent hash should not have exact cut
         assert!(!tt.has_exact_cut(0x1111111111111111));
+    }
+
+    #[test]
+    fn test_total_size_exact_match() {
+        // Test that total size matches requested size exactly
+
+        // USI_Hash = 1 should give 1MB total
+        let tt1 = ShardedTranspositionTable::new(1);
+        assert_eq!(tt1.size_mb(), 1, "1MB should give exactly 1MB total");
+
+        // USI_Hash = 16 should give 16MB total
+        let tt16 = ShardedTranspositionTable::new(16);
+        assert_eq!(tt16.size_mb(), 16, "16MB should give exactly 16MB total");
+
+        // USI_Hash = 17 should give 17MB total
+        let tt17 = ShardedTranspositionTable::new(17);
+        assert_eq!(tt17.size_mb(), 17, "17MB should give exactly 17MB total");
+
+        // USI_Hash = 64 should give 64MB total
+        let tt64 = ShardedTranspositionTable::new(64);
+        assert_eq!(tt64.size_mb(), 64, "64MB should give exactly 64MB total");
+    }
+
+    #[test]
+    fn test_small_sizes() {
+        // Test very small sizes (< NUM_SHARDS)
+        for size in 1..NUM_SHARDS {
+            let tt = ShardedTranspositionTable::new(size);
+            let actual_size = tt.size_mb();
+            assert_eq!(actual_size, size, "Requested {size}MB but got {actual_size}MB");
+        }
     }
 }
