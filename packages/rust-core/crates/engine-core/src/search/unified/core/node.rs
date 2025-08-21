@@ -127,8 +127,8 @@ where
     let tt_move = if USE_TT {
         let tt_entry = searcher.probe_tt(hash);
 
-        // Note: Duplication statistics are now updated during TT store, not probe.
-        // This ensures accurate counting of unique vs duplicate nodes.
+        // Note: Duplication statistics are updated during TT probe in alpha_beta().
+        // Store-time updates are temporarily disabled in tt_operations.rs.
 
         // ABDADA: Check if sibling node found exact cut
         if depth > 2 {
@@ -280,11 +280,26 @@ where
             continue;
         }
 
+        // Calculate gives_check before making the move to avoid double move execution
+        // Use lightweight pre-filter first, then accurate check if needed
+        // Only calculate when LMR reduction might be applied
+        let gives_check = if USE_PRUNING && depth >= 3 && moves_searched >= 4 {
+            if crate::search::unified::pruning::likely_could_give_check(pos, mv) {
+                pos.gives_check(mv)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         // Make move
         let undo_info = pos.do_move(mv);
 
         // Simple optimization: selective prefetch
-        if USE_TT && !crate::search::tt_filter::should_skip_prefetch(depth, moves_searched as usize)
+        if USE_TT
+            && !searcher.is_prefetch_disabled()
+            && !crate::search::tt_filter::should_skip_prefetch(depth, moves_searched as usize)
         {
             searcher.prefetch_tt(pos.zobrist_hash);
         }
@@ -305,7 +320,6 @@ where
             };
 
             // Late move reduction using advanced pruning module
-            let gives_check = false; // TODO: implement gives_check detection
             let reduction = if USE_PRUNING
                 && crate::search::unified::pruning::can_do_lmr(
                     depth,
@@ -403,16 +417,11 @@ where
                         match searcher.history.lock() {
                             Ok(mut history) => {
                                 // Update history for the cutoff move
-                                history.update_cutoff(
-                                    pos.side_to_move,
-                                    mv,
-                                    depth as i32,
-                                    prev_move,
-                                );
+                                history.update_cutoff(us, mv, depth as i32, prev_move);
 
                                 // Update counter move history
                                 if let Some(prev_mv) = prev_move {
-                                    history.counter_moves.update(pos.side_to_move, prev_mv, mv);
+                                    history.counter_moves.update(us, prev_mv, mv);
                                 }
 
                                 // Update capture history if the cutoff move is a capture
@@ -430,12 +439,7 @@ where
                                         .or_else(|| pos.piece_at(mv.to()).map(|p| p.piece_type));
 
                                     if let (Some(att), Some(vic)) = (attacker, victim) {
-                                        history.capture.update_good(
-                                            pos.side_to_move,
-                                            att,
-                                            vic,
-                                            depth as i32,
-                                        );
+                                        history.capture.update_good(us, att, vic, depth as i32);
                                     }
                                 }
 
@@ -446,12 +450,7 @@ where
                                 for &quiet_mv in quiet_moves_tried.iter().take(MAX_MOVES_TO_UPDATE)
                                 {
                                     if quiet_mv != mv {
-                                        history.update_quiet(
-                                            pos.side_to_move,
-                                            quiet_mv,
-                                            depth as i32,
-                                            prev_move,
-                                        );
+                                        history.update_quiet(us, quiet_mv, depth as i32, prev_move);
                                     }
                                 }
 
@@ -466,12 +465,7 @@ where
                                             });
 
                                         if let (Some(att), Some(vic)) = (attacker, victim) {
-                                            history.capture.update_bad(
-                                                pos.side_to_move,
-                                                att,
-                                                vic,
-                                                depth as i32,
-                                            );
+                                            history.capture.update_bad(us, att, vic, depth as i32);
                                         }
                                     }
                                 }

@@ -231,7 +231,7 @@ mod tests {
                 _ => N1024_MASK,
             };
 
-            assert_eq!(mask, expected_mask, "Failed for soft_limit_ms={}", soft_limit_ms);
+            assert_eq!(mask, expected_mask, "Failed for soft_limit_ms={soft_limit_ms}");
         }
     }
 
