@@ -65,10 +65,10 @@ const PHASE_OPENING_THRESHOLD: u8 = 96;
 const PHASE_ENDGAME_THRESHOLD: u8 = 32;
 
 /// Type alias for unified searchers
-type MaterialSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
-type NnueBasicSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, false, 8>;
-type MaterialEnhancedSearcher = UnifiedSearcher<MaterialEvaluator, true, true, 16>;
-type NnueEnhancedSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, true, 16>;
+type MaterialSearcher = UnifiedSearcher<MaterialEvaluator, true, false>;
+type NnueBasicSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, false>;
+type MaterialEnhancedSearcher = UnifiedSearcher<MaterialEvaluator, true, true>;
+type NnueEnhancedSearcher = UnifiedSearcher<NNUEEvaluatorProxy, true, true>;
 
 /// Type alias for parallel searchers
 type MaterialParallelSearcher = ParallelSearcher<MaterialEvaluator>;
@@ -149,12 +149,17 @@ pub struct Engine {
     use_parallel: bool,
     // Pending thread count for safe update during search
     pending_thread_count: Option<usize>,
+    // Transposition table size in MB
+    tt_size_mb: usize,
+    // Pending TT size for safe update during search
+    pending_tt_size: Option<usize>,
 }
 
 impl Engine {
     /// Create new engine with specified type
     pub fn new(engine_type: EngineType) -> Self {
         let material_evaluator = Arc::new(MaterialEvaluator);
+        let default_tt_size = 16; // Default TT size in MB
 
         let nnue_evaluator = if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
             // Initialize with zero weights for NNUE engine
@@ -165,7 +170,10 @@ impl Engine {
 
         // Initialize searchers based on engine type
         let material_searcher = if engine_type == EngineType::Material {
-            Arc::new(Mutex::new(Some(MaterialSearcher::new(*material_evaluator))))
+            Arc::new(Mutex::new(Some(MaterialSearcher::new_with_tt_size(
+                *material_evaluator,
+                default_tt_size,
+            ))))
         } else {
             Arc::new(Mutex::new(None))
         };
@@ -174,13 +182,19 @@ impl Engine {
             let nnue_proxy = NNUEEvaluatorProxy {
                 evaluator: nnue_evaluator.clone(),
             };
-            Arc::new(Mutex::new(Some(NnueBasicSearcher::new(nnue_proxy))))
+            Arc::new(Mutex::new(Some(NnueBasicSearcher::new_with_tt_size(
+                nnue_proxy,
+                default_tt_size,
+            ))))
         } else {
             Arc::new(Mutex::new(None))
         };
 
         let material_enhanced_searcher = if engine_type == EngineType::Enhanced {
-            Arc::new(Mutex::new(Some(MaterialEnhancedSearcher::new(*material_evaluator))))
+            Arc::new(Mutex::new(Some(MaterialEnhancedSearcher::new_with_tt_size(
+                *material_evaluator,
+                default_tt_size,
+            ))))
         } else {
             Arc::new(Mutex::new(None))
         };
@@ -189,13 +203,16 @@ impl Engine {
             let nnue_proxy = NNUEEvaluatorProxy {
                 evaluator: nnue_evaluator.clone(),
             };
-            Arc::new(Mutex::new(Some(NnueEnhancedSearcher::new(nnue_proxy))))
+            Arc::new(Mutex::new(Some(NnueEnhancedSearcher::new_with_tt_size(
+                nnue_proxy,
+                default_tt_size,
+            ))))
         } else {
             Arc::new(Mutex::new(None))
         };
 
         // Create shared TT for parallel search
-        let shared_tt = Arc::new(ShardedTranspositionTable::new(64)); // 64MB for shared TT
+        let shared_tt = Arc::new(ShardedTranspositionTable::new(default_tt_size)); // Use same TT size for shared TT
 
         Engine {
             engine_type,
@@ -211,6 +228,8 @@ impl Engine {
             num_threads: 1, // Default to single thread
             use_parallel: false,
             pending_thread_count: None,
+            tt_size_mb: default_tt_size,
+            pending_tt_size: None,
         }
     }
 
@@ -276,6 +295,8 @@ impl Engine {
     pub fn search(&mut self, pos: &mut Position, limits: SearchLimits) -> SearchResult {
         // Apply pending thread count if any
         self.apply_pending_thread_count();
+        // Apply pending TT size if any
+        self.apply_pending_tt_size();
 
         // Calculate active threads for this phase
         let active_threads = self.calculate_active_threads(pos);
@@ -483,6 +504,62 @@ impl Engine {
         self.num_threads
     }
 
+    /// Set transposition table size in MB
+    pub fn set_hash_size(&mut self, size_mb: usize) {
+        // Store in pending to be applied on next search
+        self.pending_tt_size = Some(size_mb.max(1));
+        info!("Hash size will be updated to {size_mb}MB on next search");
+    }
+
+    /// Apply pending TT size (called at search start)
+    fn apply_pending_tt_size(&mut self) {
+        if let Some(new_size) = self.pending_tt_size.take() {
+            self.tt_size_mb = new_size;
+
+            // Clear existing searchers so they'll be recreated with new TT size
+            if let Ok(mut guard) = self.material_searcher.lock() {
+                *guard = None;
+            } else {
+                error!("Failed to lock material searcher for clearing");
+            }
+            if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+                *guard = None;
+            } else {
+                error!("Failed to lock NNUE basic searcher for clearing");
+            }
+            if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+                *guard = None;
+            } else {
+                error!("Failed to lock material enhanced searcher for clearing");
+            }
+            if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+                *guard = None;
+            } else {
+                error!("Failed to lock NNUE enhanced searcher for clearing");
+            }
+            if let Ok(mut guard) = self.material_parallel_searcher.lock() {
+                *guard = None;
+            } else {
+                error!("Failed to lock material parallel searcher for clearing");
+            }
+            if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
+                *guard = None;
+            } else {
+                error!("Failed to lock NNUE parallel searcher for clearing");
+            }
+
+            // Recreate shared TT with new size
+            self.shared_tt = Arc::new(ShardedTranspositionTable::new(new_size));
+
+            info!("Applied hash size: {}MB", self.tt_size_mb);
+        }
+    }
+
+    /// Get current hash size in MB
+    pub fn get_hash_size(&self) -> usize {
+        self.tt_size_mb
+    }
+
     /// Load NNUE weights from file
     pub fn load_nnue_weights(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Validate that we're using NNUE engine
@@ -518,7 +595,10 @@ impl Engine {
                 match self.material_searcher.lock() {
                     Ok(mut searcher_guard) => {
                         if searcher_guard.is_none() {
-                            *searcher_guard = Some(MaterialSearcher::new(*self.material_evaluator));
+                            *searcher_guard = Some(MaterialSearcher::new_with_tt_size(
+                                *self.material_evaluator,
+                                self.tt_size_mb,
+                            ));
                         }
                     }
                     Err(e) => {
@@ -546,7 +626,10 @@ impl Engine {
                             let nnue_proxy = NNUEEvaluatorProxy {
                                 evaluator: self.nnue_evaluator.clone(),
                             };
-                            *searcher_guard = Some(NnueBasicSearcher::new(nnue_proxy));
+                            *searcher_guard = Some(NnueBasicSearcher::new_with_tt_size(
+                                nnue_proxy,
+                                self.tt_size_mb,
+                            ));
                         }
                     }
                     Err(e) => {
@@ -562,8 +645,10 @@ impl Engine {
                 match self.material_enhanced_searcher.lock() {
                     Ok(mut searcher_guard) => {
                         if searcher_guard.is_none() {
-                            *searcher_guard =
-                                Some(MaterialEnhancedSearcher::new(*self.material_evaluator));
+                            *searcher_guard = Some(MaterialEnhancedSearcher::new_with_tt_size(
+                                *self.material_evaluator,
+                                self.tt_size_mb,
+                            ));
                         }
                     }
                     Err(e) => {
@@ -591,7 +676,10 @@ impl Engine {
                             let nnue_proxy = NNUEEvaluatorProxy {
                                 evaluator: self.nnue_evaluator.clone(),
                             };
-                            *searcher_guard = Some(NnueEnhancedSearcher::new(nnue_proxy));
+                            *searcher_guard = Some(NnueEnhancedSearcher::new_with_tt_size(
+                                nnue_proxy,
+                                self.tt_size_mb,
+                            ));
                         }
                     }
                     Err(e) => {
@@ -991,6 +1079,24 @@ mod tests {
         // Try another load
         let result2 = engine.load_nnue_weights("nonexistent2.nnue");
         assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_hash_size_configuration() {
+        let mut engine = Engine::new(EngineType::Material);
+
+        // Initial hash size should be default
+        assert_eq!(engine.get_hash_size(), 16);
+
+        // Set new hash size
+        engine.set_hash_size(32);
+
+        // Should still be 16 until next search
+        assert_eq!(engine.get_hash_size(), 16);
+
+        // After applying pending changes
+        engine.apply_pending_tt_size();
+        assert_eq!(engine.get_hash_size(), 32);
     }
 
     #[test]

@@ -113,7 +113,7 @@ pub struct SearchThread<E: Evaluator + Send + Sync + 'static> {
 
     /// The actual searcher instance
     /// Uses shared TT from parallel coordinator
-    pub searcher: UnifiedSearcher<E, true, true, 16>,
+    pub searcher: UnifiedSearcher<E, true, true>,
 
     /// Thread-local history table
     pub local_history: History,

@@ -15,8 +15,7 @@ mod tests {
         let pos = parse_sfen(sfen).unwrap();
 
         // Create searcher with pruning enabled
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
         searcher.context.set_limits(SearchLimitsBuilder::default().depth(1).build());
 
         // The bad capture: S5g captures p4f (loses silver because gold recaptures)

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 #[test]
 fn test_unified_searcher_creation() {
     let evaluator = MaterialEvaluator;
-    let searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+    let searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
     assert_eq!(searcher.nodes(), 0);
 }
 
@@ -22,8 +22,8 @@ fn test_shared_tt_creation() {
 
     // Create two searchers with the same TT
     let searcher1 =
-        UnifiedSearcher::<_, true, false, 16>::with_shared_tt(evaluator.clone(), tt.clone());
-    let searcher2 = UnifiedSearcher::<_, true, false, 16>::with_shared_tt(evaluator, tt.clone());
+        UnifiedSearcher::<_, true, false>::with_shared_tt(evaluator.clone(), tt.clone());
+    let searcher2 = UnifiedSearcher::<_, true, false>::with_shared_tt(evaluator, tt.clone());
 
     // Both searchers should start with 0 nodes
     assert_eq!(searcher1.nodes(), 0);
@@ -37,8 +37,8 @@ fn test_shared_tt_creation() {
 fn test_compile_time_features() {
     // Test that const generic parameters work correctly
     // We can directly use the const parameters in the type
-    type BasicConfig = UnifiedSearcher<MaterialEvaluator, true, false, 8>;
-    type EnhancedConfig = UnifiedSearcher<MaterialEvaluator, true, true, 16>;
+    type BasicConfig = UnifiedSearcher<MaterialEvaluator, true, false>;
+    type EnhancedConfig = UnifiedSearcher<MaterialEvaluator, true, true>;
 
     // These tests verify the type system works correctly with const generics
     // The actual behavior is tested in search tests
@@ -50,10 +50,22 @@ fn test_compile_time_features() {
 }
 
 #[test]
+fn test_runtime_tt_size() {
+    // Test creating searchers with different TT sizes
+    let evaluator = MaterialEvaluator;
+    let searcher_small = UnifiedSearcher::<_, true, false>::new_with_tt_size(evaluator, 8);
+    let searcher_large = UnifiedSearcher::<_, true, false>::new_with_tt_size(evaluator, 64);
+
+    // Both searchers should work correctly regardless of TT size
+    assert_eq!(searcher_small.nodes(), 0);
+    assert_eq!(searcher_large.nodes(), 0);
+}
+
+#[test]
 fn test_fixed_nodes() {
     // Test FixedNodes - 時間に依存しない
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
     let mut pos = Position::startpos();
 
     let limits = SearchLimitsBuilder::default().fixed_nodes(5000).build();
@@ -74,7 +86,7 @@ fn test_fixed_nodes() {
 fn test_depth_limit() {
     // Test depth limit - 浅い深さで確実に終了
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
     let mut pos = Position::startpos();
 
     let limits = SearchLimitsBuilder::default().depth(1).build();
@@ -91,7 +103,7 @@ fn test_depth_limit() {
 #[test]
 fn test_stop_flag_responsiveness() {
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
     let mut pos = Position::startpos();
     let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -123,7 +135,7 @@ fn test_stop_flag_responsiveness() {
 #[test]
 fn test_time_manager_integration() {
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
     let mut pos = Position::startpos();
 
     // 100msの時間制限で、深さ3に制限
@@ -149,7 +161,7 @@ fn test_time_manager_integration() {
 fn test_short_time_control() {
     // Test very short time controls with adaptive polling
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
     let mut pos = Position::startpos();
 
     // 50msの時間制限（depth 1が完走できる程度）
@@ -171,7 +183,7 @@ fn test_short_time_control() {
 #[test]
 fn test_aspiration_window_search() {
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, true, 8>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, true>::new(evaluator);
     let mut pos = Position::startpos();
 
     // Search with depth limit to test aspiration windows
@@ -193,7 +205,7 @@ fn test_aspiration_window_search() {
 #[test]
 fn test_pv_consistency_depth5() {
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, true>::new(evaluator);
     let mut pos = Position::startpos();
 
     // Search to depth 5 with fixed seed for reproducibility
