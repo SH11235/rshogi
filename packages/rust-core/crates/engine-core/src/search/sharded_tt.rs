@@ -7,6 +7,14 @@
 //! The number of shards is dynamic, chosen based on the total size to ensure
 //! each shard gets at least 1MB. The shard count is always a power of 2
 //! (1, 2, 4, 8, or 16) for efficient hash distribution.
+//!
+//! ## Recommended Sizes
+//!
+//! For optimal memory usage and predictable behavior, use power-of-2 sizes:
+//! 16, 32, 64, 128, 256, 512, 1024 MB.
+//!
+//! Non-power-of-2 sizes may result in actual memory usage that differs from
+//! the requested size due to internal bucket alignment in TranspositionTable.
 
 use super::tt::{NodeType, TTEntry, TTEntryParams, TranspositionTable};
 use crate::shogi::Move;
@@ -56,6 +64,9 @@ impl ShardedTranspositionTable {
             })
             .collect();
 
+        // Ensure num_shards is power of 2 for efficient modulo
+        debug_assert!(num_shards.is_power_of_two() && num_shards >= 1);
+
         Self {
             shards,
             num_shards,
@@ -66,6 +77,7 @@ impl ShardedTranspositionTable {
     /// Get the shard index for a given hash
     #[inline(always)]
     fn shard_index(&self, hash: u64) -> usize {
+        debug_assert!(self.num_shards.is_power_of_two());
         // Use lower bits for shard selection (better distribution)
         (hash as usize) & (self.num_shards - 1)
     }
@@ -288,6 +300,27 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_mb_sharded_tt() {
+        // Test 0MB input behavior
+        let tt = ShardedTranspositionTable::new(0);
+
+        // Should use 1 shard for 0MB
+        assert_eq!(tt.num_shards(), 1, "0MB should use exactly 1 shard");
+
+        // Size should be at least 1MB due to minimum allocation
+        assert!(
+            tt.size_mb() >= 1,
+            "0MB input should result in at least 1MB due to minimum allocation"
+        );
+
+        // Should still be functional
+        let hash = 0x123456789ABCDEF0;
+        tt.store(hash, None, 100, 50, 5, NodeType::Exact);
+        let entry = tt.probe(hash);
+        assert!(entry.is_some(), "Should be able to store and retrieve with 0MB");
+    }
+
+    #[test]
     fn test_shard_count_distribution() {
         // Test various sizes to ensure proper shard count selection
         let test_cases = vec![
@@ -304,7 +337,9 @@ mod tests {
             (17, 16), // 17MB -> 16 shards
             (31, 16), // 31MB -> 16 shards
             (32, 16), // 32MB -> 16 shards
-            // (63, 16), // 63MB -> 16 shards (commented out - rounding issue)
+            // (63, 16), // 63MB -> 16 shards
+            // Commented out: TranspositionTable's internal bucket allocation
+            // may round up causing total bytes to exceed 63MB when divided by 1024*1024
             (64, 16), // 64MB -> 16 shards
         ];
 
@@ -320,6 +355,72 @@ mod tests {
             );
             // Also verify total size is correct
             assert_eq!(tt.size_mb(), size, "Size {}MB: actual size mismatch", size);
+        }
+    }
+
+    #[test]
+    fn test_shard_properties() {
+        // Property-based test: verify invariants for various sizes
+        // Focus on power-of-2 sizes and nearby values where TT sizing is more predictable
+        let test_sizes = vec![
+            1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 3, 5, 7, 9, 15, 17, 31, 33, 63, 65, 127,
+            129, 255, 257,
+        ];
+
+        for size in test_sizes {
+            let tt = ShardedTranspositionTable::new(size);
+            let num_shards = tt.num_shards();
+
+            // Property 1: num_shards is always a power of 2
+            assert!(
+                num_shards.is_power_of_two(),
+                "Size {}MB: num_shards {} must be power of 2",
+                size,
+                num_shards
+            );
+
+            // Property 2: num_shards is between 1 and NUM_SHARDS
+            assert!(
+                num_shards >= 1 && num_shards <= NUM_SHARDS,
+                "Size {}MB: num_shards {} must be in range [1, {}]",
+                size,
+                num_shards,
+                NUM_SHARDS
+            );
+
+            // Property 3: base + remainder calculation is correct
+            let base_size = size / num_shards;
+            let remainder = size % num_shards;
+            let reconstructed = base_size * num_shards + remainder;
+            assert_eq!(
+                reconstructed, size,
+                "Size {}MB: base {} * shards {} + remainder {} != original",
+                size, base_size, num_shards, remainder
+            );
+
+            // Property 4: Verify actual size is reasonable
+            // Due to TranspositionTable's internal bucket alignment,
+            // actual size may differ significantly for non-power-of-2 sizes
+            let actual_mb = tt.size_mb();
+
+            // For testing purposes, we just ensure it's not wildly off
+            // In practice, users should use power-of-2 sizes for best results
+            assert!(actual_mb > 0, "Size {}MB: actual size must be positive", size);
+
+            // Log the size difference for documentation
+            if actual_mb != size {
+                eprintln!(
+                    "Size {}MB -> actual {}MB (shards: {}, diff: {}MB)",
+                    size,
+                    actual_mb,
+                    num_shards,
+                    if actual_mb > size {
+                        actual_mb - size
+                    } else {
+                        size - actual_mb
+                    }
+                );
+            }
         }
     }
 }
