@@ -4,7 +4,11 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
-    search::{common::mate_score, constants::SEARCH_INF, unified::UnifiedSearcher},
+    search::{
+        common::mate_score,
+        constants::SEARCH_INF,
+        unified::{tt_operations::TTOperations, UnifiedSearcher},
+    },
     shogi::{Move, Position},
 };
 

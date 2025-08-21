@@ -10,10 +10,15 @@
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use crate::debug_log;
+/// ```rust,no_run
+/// # #[macro_use] extern crate engine_core;
+/// # fn main() {
+/// # let depth = 5;
+/// # let ply = 3;
+/// # let score = 100;
 /// debug_log!(SHOGI_DEBUG_PV, "PV validation failed at depth {depth}");
 /// debug_log!(SHOGI_DEBUG_SEARCH, "Search node at ply {}: score={}", ply, score);
+/// # }
 /// ```
 #[macro_export]
 macro_rules! debug_log {
@@ -34,14 +39,17 @@ macro_rules! debug_log {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use crate::debug_exec;
+/// ```rust,no_run
+/// # #[macro_use] extern crate engine_core;
+/// # fn main() {
+/// # let items = vec!["item1", "item2", "item3"];
 /// debug_exec!(SHOGI_DEBUG_PV, {
 ///     eprintln!("Complex debug output:");
 ///     for item in &items {
 ///         eprintln!("  - {}", item);
 ///     }
 /// });
+/// # }
 /// ```
 #[macro_export]
 macro_rules! debug_exec {
@@ -61,9 +69,13 @@ macro_rules! debug_exec {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use crate::pv_debug;
+/// ```rust,no_run
+/// # #[macro_use] extern crate engine_core;
+/// # fn main() {
+/// # let move_str = "7g7f";
+/// # let depth = 10;
 /// pv_debug!("Invalid move {} in PV at depth {}", move_str, depth);
+/// # }
 /// ```
 #[macro_export]
 macro_rules! pv_debug {
@@ -78,9 +90,14 @@ macro_rules! pv_debug {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// use crate::search_debug;
+/// ```rust,no_run
+/// # #[macro_use] extern crate engine_core;
+/// # fn main() {
+/// # let alpha = -1000;
+/// # let beta = 1000;
+/// # let depth = 5;
 /// search_debug!("Alpha-beta window: [{}, {}] at depth {}", alpha, beta, depth);
+/// # }
 /// ```
 #[macro_export]
 macro_rules! search_debug {

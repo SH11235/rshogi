@@ -20,22 +20,26 @@ mod alignment_tests {
     #[test]
     fn test_bucket_alignment() {
         // Verify size matches cache line
-        assert_eq!(std::mem::size_of::<bucket::TTBucket>(), 64,
-                  "TTBucket size should be exactly 64 bytes for cache efficiency");
-        
+        assert_eq!(
+            std::mem::size_of::<bucket::TTBucket>(),
+            64,
+            "TTBucket size should be exactly 64 bytes for cache efficiency"
+        );
+
         // Current implementation achieves 64-byte alignment
         // If this becomes a hard requirement, add #[repr(align(64))] to TTBucket
         let current_align = std::mem::align_of::<bucket::TTBucket>();
-        
+
         // Log current alignment for debugging
         #[cfg(test)]
-        println!("TTBucket alignment: {} bytes", current_align);
-        
+        println!("TTBucket alignment: {current_align} bytes");
+
         // Minimum requirement: 16-byte alignment for atomic operations
-        assert!(current_align >= 16,
-                "TTBucket must have at least 16-byte alignment for atomic operations, got {} bytes",
-                current_align);
-        
+        assert!(
+            current_align >= 16,
+            "TTBucket must have at least 16-byte alignment for atomic operations, got {current_align} bytes"
+        );
+
         // Current expectation: 64-byte alignment for cache line optimization
         // This is not a hard requirement but reflects current implementation
         if current_align == 64 {
@@ -43,8 +47,9 @@ mod alignment_tests {
             assert_eq!(current_align, 64, "Expected cache line alignment");
         } else {
             // Log warning but don't fail - alignment may vary by platform
-            eprintln!("Warning: TTBucket alignment is {} bytes, not cache-line aligned (64 bytes)", 
-                     current_align);
+            eprintln!(
+                "Warning: TTBucket alignment is {current_align} bytes, not cache-line aligned (64 bytes)"
+            );
         }
     }
 }
@@ -133,12 +138,12 @@ mod tt_tests {
         // The sampling uses: start_idx + i * 97 for i in 0..sample_size
         let sample_size = (tt.num_buckets / 100).clamp(64, 1024);
         let start_idx = (tt.node_counter.load(Ordering::Relaxed) as usize) % tt.num_buckets;
-        
+
         for i in 0..sample_size {
             let bucket_idx = (start_idx + i * 97) % tt.num_buckets;
             tt.mark_bucket_occupied(bucket_idx);
         }
-        
+
         tt.update_hashfull_estimate();
 
         // Since we marked all sampled buckets, estimate should be 1000
@@ -718,7 +723,7 @@ mod tt_tests {
         // Use hashes that map to the same bucket (same lower bits)
         let base_hash = 0x1000;
         let bucket_size = tt.num_buckets;
-        
+
         // Fill all BUCKET_SIZE slots in the same bucket
         for i in 0..BUCKET_SIZE {
             // Create hashes that map to the same bucket by adding multiples of bucket_size
@@ -756,7 +761,7 @@ mod tt_tests {
     fn test_store_finds_last_empty_slot() {
         // Explicit test: fill BUCKET_SIZE-1 slots, ensure last slot is used
         let bucket = bucket::TTBucket::new();
-        
+
         // BUCKET_SIZE-1 個を先に埋める
         let to_fill = BUCKET_SIZE - 1;
         let mut keys = Vec::new();
@@ -766,23 +771,27 @@ mod tt_tests {
             bucket.store(TTEntry::new(k, None, i as i16, 0, 1, NodeType::Exact, 0), 0);
             assert!(bucket.probe(k).is_some());
         }
-        
+
         // 最後の空きを使う
         let last = 0xD000_0000_0000_0000u64 | 0xF;
         bucket.store(TTEntry::new(last, None, 999, 0, 1, NodeType::Exact, 0), 0);
         assert!(bucket.probe(last).is_some());
-        
+
         // さらに 1 件入れて置換が発生することを確認
         let replacing = 0xE000_0000_0000_0000u64 | 0x1E;
         bucket.store(TTEntry::new(replacing, None, 1000, 0, 10, NodeType::Exact, 0), 0);
         assert!(bucket.probe(replacing).is_some());
-        
+
         // One of the original keys should have been replaced
         let mut present = 0;
         for k in &keys {
-            if bucket.probe(*k).is_some() { present += 1; }
+            if bucket.probe(*k).is_some() {
+                present += 1;
+            }
         }
-        if bucket.probe(last).is_some() { present += 1; }
+        if bucket.probe(last).is_some() {
+            present += 1;
+        }
         assert_eq!(present, BUCKET_SIZE - 1); // Exactly one was replaced
     }
 
@@ -1334,71 +1343,86 @@ mod parallel_tests {
         // as replacement policies may differ between implementations
         let standard_bucket = bucket::TTBucket::new();
         let flexible_bucket = flexible_bucket::FlexibleTTBucket::new(bucket::BucketSize::Small);
-        
+
         // Use fewer keys than bucket size to avoid replacement
         let test_keys = [
             0xA000_0000_0000_0001,
             0xB000_0000_0000_0002,
             0xC000_0000_0000_0003,
         ];
-        
+
         // Store in both buckets
         for (i, &key) in test_keys.iter().enumerate() {
-            let entry = TTEntry::new(key, None, (i * 10) as i16, 0, (i + 1) as u8, NodeType::Exact, 0);
+            let entry =
+                TTEntry::new(key, None, (i * 10) as i16, 0, (i + 1) as u8, NodeType::Exact, 0);
             standard_bucket.store(entry, 0);
             flexible_bucket.store_with_metrics(entry, 0, None);
         }
-        
+
         // Test that both give same results
         for &key in &test_keys {
             let standard_result = standard_bucket.probe(key);
             let flexible_result = flexible_bucket.probe(key);
-            
+
             match (standard_result, flexible_result) {
                 (Some(s), Some(f)) => {
                     assert_eq!(s.key, f.key, "Keys should match");
                     assert_eq!(s.data, f.data, "Data should match");
                 }
                 (None, None) => {} // Both missed - OK
-                _ => panic!("Standard and flexible bucket results differ for key {:#x}", key),
+                _ => panic!("Standard and flexible bucket results differ for key {key:#x}"),
             }
         }
-        
+
         // Test with replacement scenario - only check that new key exists in both
         let new_key = 0xD000_0000_0000_0004;
         let new_entry = TTEntry::new(new_key, None, 100, 0, 10, NodeType::Exact, 0);
-        
+
         standard_bucket.store(new_entry, 0);
         flexible_bucket.store_with_metrics(new_entry, 0, None);
-        
+
         // Both should have the new key (though they may have evicted different old keys)
-        assert!(standard_bucket.probe(new_key).is_some(), "New key should exist in standard bucket");
-        assert!(flexible_bucket.probe(new_key).is_some(), "New key should exist in flexible bucket");
-        
+        assert!(
+            standard_bucket.probe(new_key).is_some(),
+            "New key should exist in standard bucket"
+        );
+        assert!(
+            flexible_bucket.probe(new_key).is_some(),
+            "New key should exist in flexible bucket"
+        );
+
         // Count how many entries remain in each bucket (may differ due to eviction policy)
-        let standard_count = test_keys.iter().filter(|&&k| standard_bucket.probe(k).is_some()).count();
-        let flexible_count = test_keys.iter().filter(|&&k| flexible_bucket.probe(k).is_some()).count();
-        
+        let standard_count =
+            test_keys.iter().filter(|&&k| standard_bucket.probe(k).is_some()).count();
+        let flexible_count =
+            test_keys.iter().filter(|&&k| flexible_bucket.probe(k).is_some()).count();
+
         // Both should have evicted at most one entry if bucket was full
-        assert!(standard_count >= test_keys.len() - 1, "Standard bucket evicted too many entries");
-        assert!(flexible_count >= test_keys.len() - 1, "Flexible bucket evicted too many entries");
+        assert!(
+            standard_count >= test_keys.len() - 1,
+            "Standard bucket evicted too many entries"
+        );
+        assert!(
+            flexible_count >= test_keys.len() - 1,
+            "Flexible bucket evicted too many entries"
+        );
     }
 
     #[test]
     fn test_prefetch_has_no_side_effects() {
         let tt = TranspositionTable::new(1);
-        
+
         // Store some entries
         let test_data = vec![
             (0x1000_0000_0000_0001, 100, 10),
             (0x2000_0000_0000_0002, 200, 20),
             (0x3000_0000_0000_0003, 300, 30),
         ];
-        
+
         for &(hash, score, depth) in &test_data {
             tt.store(hash, None, score, score / 2, depth, NodeType::Exact);
         }
-        
+
         // Test that prefetch doesn't affect probe results
         for &(hash, expected_score, expected_depth) in &test_data {
             // Probe before prefetch
@@ -1407,13 +1431,13 @@ mod parallel_tests {
             let before_entry = before.unwrap();
             assert_eq!(before_entry.score(), expected_score);
             assert_eq!(before_entry.depth(), expected_depth);
-            
+
             // Prefetch with different hints
             tt.prefetch_l1(hash);
             tt.prefetch_l2(hash);
             tt.prefetch_l3(hash);
             tt.prefetch(hash, 0); // Non-temporal hint
-            
+
             // Probe after prefetch - should be identical
             let after = tt.probe(hash);
             assert!(after.is_some());
@@ -1423,14 +1447,14 @@ mod parallel_tests {
             assert_eq!(after_entry.score(), before_entry.score());
             assert_eq!(after_entry.depth(), before_entry.depth());
         }
-        
+
         // Test prefetch on non-existent entries
         let missing_hash = 0x9999_9999_9999_9999;
         assert!(tt.probe(missing_hash).is_none());
-        
+
         // Prefetch non-existent entry
         tt.prefetch_l1(missing_hash);
-        
+
         // Should still be none
         assert!(tt.probe(missing_hash).is_none());
     }
@@ -1439,17 +1463,17 @@ mod parallel_tests {
     fn test_prefetch_increments_stats_when_enabled() {
         let mut tt = TranspositionTable::new(1);
         tt.enable_prefetcher();
-        
+
         // Get initial stats
         let before = tt.prefetch_stats().map(|s| s.calls).unwrap_or(0);
-        
+
         let h = 0x1234_5678_9ABC_DEF0;
-        
+
         // Test direct prefetch calls
         tt.prefetch_l1(h);
         let after1 = tt.prefetch_stats().map(|s| s.calls).unwrap_or(0);
-        assert!(after1 >= before + 1, "prefetch_l1 should increment calls");
-        
+        assert!(after1 > before, "prefetch_l1 should increment calls");
+
         // Test probe-triggered prefetch (if implemented)
         tt.store(h, None, 1, 0, 1, NodeType::Exact);
         let _ = tt.probe(h);

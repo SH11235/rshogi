@@ -328,10 +328,10 @@ impl FlexibleTTBucket {
         }
 
         // Second pass: find worst entry to replace
-        let (worst_idx, worst_score) = match entries {
-            16 => self.find_worst_entry_16(current_age),
-            8 => self.find_worst_entry_8(current_age),
-            _ => self.find_worst_entry_n(current_age, entries),
+        let (worst_idx, worst_score) = match self.size {
+            BucketSize::Large => self.find_worst_entry_16(current_age),
+            BucketSize::Medium => self.find_worst_entry_8(current_age),
+            BucketSize::Small => self.find_worst_entry_n(current_age, 4),
         };
 
         // Replace if new entry is better
