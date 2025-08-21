@@ -1,6 +1,6 @@
 use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::helpers::{
-    calculate_max_search_time, generate_fallback_move, send_bestmove_once,
+    calculate_max_search_time, generate_fallback_move, send_bestmove_and_finalize,
     wait_for_search_completion,
 };
 use crate::search_session::{self, SearchSession};
@@ -148,18 +148,6 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
     Ok(())
 }
 
-/// Helper function to send bestmove and finalize the search state
-/// This ensures current_search_is_ponder flag is always reset after sending bestmove
-fn send_bestmove_and_finalize(
-    best_move: String,
-    ponder_move: Option<String>,
-    ctx: &mut CommandContext,
-) -> Result<()> {
-    let result = send_bestmove_once(best_move, ponder_move, ctx.search_state, ctx.bestmove_sent);
-    *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
-    result
-}
-
 fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     log::info!("Received go command with params: {params:?}");
 
@@ -177,6 +165,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     // Reset stop flag and bestmove_sent flag
     ctx.stop_flag.store(false, Ordering::Release);
     *ctx.bestmove_sent = false; // Reset for new search
+    *ctx.current_session = None; // Clear any previous session to avoid reuse
 
     // Verify we can start a new search (defensive check)
     if !ctx.search_state.can_start_search() {
@@ -296,7 +285,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     ))?;
 
                     log::info!("Sending committed bestmove from session on stop: {best_move}");
-                    return send_bestmove_and_finalize(best_move, ponder, ctx);
+                    return send_bestmove_and_finalize(
+                        best_move,
+                        ponder,
+                        ctx.search_state,
+                        ctx.bestmove_sent,
+                        ctx.current_search_is_ponder,
+                    );
                 }
             }
         }
@@ -362,11 +357,23 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             send_info_string("bestmove_from=emergency_fallback_timeout")?;
                         }
                         log::debug!("Sending emergency fallback bestmove: {move_str}");
-                        send_bestmove_and_finalize(move_str, None, ctx)?;
+                        send_bestmove_and_finalize(
+                            move_str,
+                            None,
+                            ctx.search_state,
+                            ctx.bestmove_sent,
+                            ctx.current_search_is_ponder,
+                        )?;
                     }
                     Err(e) => {
                         log::error!("Emergency fallback move generation failed: {e}");
-                        send_bestmove_and_finalize("resign".to_string(), None, ctx)?;
+                        send_bestmove_and_finalize(
+                            "resign".to_string(),
+                            None,
+                            ctx.search_state,
+                            ctx.bestmove_sent,
+                            ctx.current_search_is_ponder,
+                        )?;
                     }
                 }
                 break;
@@ -382,7 +389,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     // Only accept if it's for current search
                     if search_id == *ctx.current_search_id {
                         // Always send bestmove, even for ponder searches
-                        send_bestmove_and_finalize(best_move, ponder_move, ctx)?;
+                        send_bestmove_and_finalize(
+                            best_move,
+                            ponder_move,
+                            ctx.search_state,
+                            ctx.bestmove_sent,
+                            ctx.current_search_is_ponder,
+                        )?;
                         break;
                     }
                 }
@@ -444,7 +457,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                         log::info!(
                                             "Sending bestmove from stop handler: {best_move}"
                                         );
-                                        send_bestmove_and_finalize(best_move, ponder, ctx)?;
+                                        send_bestmove_and_finalize(
+                                            best_move,
+                                            ponder,
+                                            ctx.search_state,
+                                            ctx.bestmove_sent,
+                                            ctx.current_search_is_ponder,
+                                        )?;
                                         break;
                                     }
                                     Err(e) => {
@@ -482,7 +501,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 } else {
                                     send_info_string("bestmove_from=emergency_fallback_on_finish")?;
                                 }
-                                send_bestmove_and_finalize(move_str, None, ctx)?;
+                                send_bestmove_and_finalize(
+                                    move_str,
+                                    None,
+                                    ctx.search_state,
+                                    ctx.bestmove_sent,
+                                    ctx.current_search_is_ponder,
+                                )?;
                             }
                             Err(e) => {
                                 let position_info = {
@@ -496,7 +521,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     "Fallback move generation failed in position {}: {e}",
                                     position_info
                                 );
-                                send_bestmove_and_finalize("resign".to_string(), None, ctx)?;
+                                send_bestmove_and_finalize(
+                                    "resign".to_string(),
+                                    None,
+                                    ctx.search_state,
+                                    ctx.bestmove_sent,
+                                    ctx.current_search_is_ponder,
+                                )?;
                             }
                         }
                         break;
