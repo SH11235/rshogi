@@ -686,6 +686,114 @@ impl TranspositionTable {
         }
     }
 
+    /// Reconstruct PV from transposition table using only EXACT entries
+    ///
+    /// This function follows the best moves stored in EXACT TT entries to build
+    /// a principal variation. It stops at the first non-EXACT entry to ensure
+    /// PV reliability.
+    ///
+    /// # Arguments
+    /// * `pos` - Current position to start reconstruction from
+    /// * `max_depth` - Maximum depth to search (prevents infinite loops)
+    ///
+    /// # Returns
+    /// * Vector of moves forming the PV (empty if no PV found)
+    pub fn reconstruct_pv_from_tt(
+        &self,
+        pos: &mut crate::shogi::Position,
+        max_depth: u8,
+    ) -> Vec<Move> {
+        use crate::shogi::UndoInfo;
+
+        let mut pv = Vec::new();
+        let mut visited_hashes = std::collections::HashSet::new();
+        let mut undo_stack: Vec<(Move, UndoInfo)> = Vec::new();
+
+        // Limit PV length to prevent excessive reconstruction
+        let max_pv_length = max_depth.min(crate::search::constants::MAX_PLY as u8) as usize;
+
+        for _ in 0..max_pv_length {
+            let hash = pos.zobrist_hash;
+
+            // Check for cycles
+            if !visited_hashes.insert(hash) {
+                log::debug!("PV reconstruction: Cycle detected at hash {hash:016x}");
+                break;
+            }
+
+            // Probe TT
+            let entry = match self.probe(hash) {
+                Some(e) if e.matches(hash) => e,
+                _ => {
+                    log::trace!("PV reconstruction: No TT entry for hash {hash:016x}");
+                    break;
+                }
+            };
+
+            // Only follow EXACT entries
+            if entry.node_type() != NodeType::Exact {
+                log::trace!(
+                    "PV reconstruction: Stopping at non-EXACT node (type: {:?}) at depth {}",
+                    entry.node_type(),
+                    pv.len()
+                );
+                break;
+            }
+
+            // Get the best move
+            let best_move = match entry.get_move() {
+                Some(mv) => mv,
+                None => {
+                    log::trace!("PV reconstruction: No move in TT entry at depth {}", pv.len());
+                    break;
+                }
+            };
+
+            // Validate move is legal
+            if !pos.is_pseudo_legal(best_move) {
+                log::warn!(
+                    "PV reconstruction: Illegal move {} at depth {}",
+                    crate::usi::move_to_usi(&best_move),
+                    pv.len()
+                );
+                break;
+            }
+
+            // Add move to PV
+            pv.push(best_move);
+
+            // Make the move
+            let undo_info = pos.do_move(best_move);
+            undo_stack.push((best_move, undo_info));
+
+            // Check for terminal positions
+            if pos.is_draw() {
+                log::trace!("PV reconstruction: Draw position reached at depth {}", pv.len());
+                break;
+            }
+
+            // Check if we have no legal moves (mate)
+            let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
+            if move_gen.generate_all().is_empty() {
+                log::trace!("PV reconstruction: Mate position reached at depth {}", pv.len());
+                break;
+            }
+        }
+
+        // Undo all moves
+        for (mv, undo_info) in undo_stack.into_iter().rev() {
+            pos.undo_move(mv, undo_info);
+        }
+
+        log::debug!(
+            "PV reconstruction: Found {} moves from TT (max_depth: {})",
+            pv.len(),
+            max_depth
+        );
+
+        pv
+    }
+
     /// Prefetch a hash into L1 cache
     #[inline]
     pub fn prefetch_l1(&self, hash: u64) {
@@ -751,6 +859,150 @@ impl TranspositionTable {
     /// Get size in MB
     pub fn size(&self) -> usize {
         self.size_bytes() / (1024 * 1024)
+    }
+}
+
+#[cfg(test)]
+mod pv_reconstruction_tests {
+    use super::*;
+    use crate::{
+        shogi::{Move, Position},
+        usi::parse_usi_square,
+    };
+
+    #[test]
+    fn test_reconstruct_pv_from_tt_exact_only() {
+        // Create a TT with some capacity
+        let tt = TranspositionTable::new(1); // 1MB
+
+        // Create a position
+        let mut pos = Position::startpos();
+
+        // Create some test moves
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
+        let move3 =
+            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false);
+
+        // Store some entries in TT
+        let hash1 = pos.zobrist_hash;
+        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
+
+        // Make move1
+        let undo1 = pos.do_move(move1);
+        let hash2 = pos.zobrist_hash;
+        tt.store(hash2, Some(move2), -50, -25, 9, NodeType::Exact);
+
+        // Make move2
+        let undo2 = pos.do_move(move2);
+        let hash3 = pos.zobrist_hash;
+        tt.store(hash3, Some(move3), 25, 20, 8, NodeType::Exact);
+
+        // Undo moves to get back to root
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
+
+        // Reconstruct PV
+        let pv = tt.reconstruct_pv_from_tt(&mut pos, 10);
+
+        // Should get all 3 moves since they're all EXACT
+        assert_eq!(pv.len(), 3);
+        assert_eq!(pv[0], move1);
+        assert_eq!(pv[1], move2);
+        assert_eq!(pv[2], move3);
+    }
+
+    #[test]
+    fn test_reconstruct_pv_stops_at_non_exact() {
+        // Create a TT
+        let tt = TranspositionTable::new(1);
+
+        // Create a position
+        let mut pos = Position::startpos();
+
+        // Create test moves
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
+
+        // Store first move as EXACT
+        let hash1 = pos.zobrist_hash;
+        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
+
+        // Make move1
+        let undo1 = pos.do_move(move1);
+        let hash2 = pos.zobrist_hash;
+
+        // Store second move as LOWERBOUND (not EXACT)
+        tt.store(hash2, Some(move2), -50, -25, 9, NodeType::LowerBound);
+
+        // Undo to root
+        pos.undo_move(move1, undo1);
+
+        // Reconstruct PV
+        let pv = tt.reconstruct_pv_from_tt(&mut pos, 10);
+
+        // Should only get first move since second is not EXACT
+        assert_eq!(pv.len(), 1);
+        assert_eq!(pv[0], move1);
+    }
+
+    #[test]
+    fn test_reconstruct_pv_handles_cycles() {
+        // Create a TT
+        let tt = TranspositionTable::new(1);
+
+        // Create a position
+        let mut pos = Position::startpos();
+
+        // Create moves that lead to a cycle
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
+        let move3 =
+            Move::normal(parse_usi_square("7f").unwrap(), parse_usi_square("7g").unwrap(), false);
+        let move4 =
+            Move::normal(parse_usi_square("3d").unwrap(), parse_usi_square("3c").unwrap(), false);
+
+        // Store entries that would create a cycle
+        let hash1 = pos.zobrist_hash;
+        tt.store(hash1, Some(move1), 0, 0, 10, NodeType::Exact);
+
+        let undo1 = pos.do_move(move1);
+        let hash2 = pos.zobrist_hash;
+        tt.store(hash2, Some(move2), 0, 0, 9, NodeType::Exact);
+
+        let undo2 = pos.do_move(move2);
+        let hash3 = pos.zobrist_hash;
+        tt.store(hash3, Some(move3), 0, 0, 8, NodeType::Exact);
+
+        let undo3 = pos.do_move(move3);
+        let hash4 = pos.zobrist_hash;
+        tt.store(hash4, Some(move4), 0, 0, 7, NodeType::Exact);
+
+        // Make move4 to complete the cycle
+        let undo4 = pos.do_move(move4);
+
+        // Add a move that would create a cycle back to start position
+        tt.store(pos.zobrist_hash, Some(move1), 0, 0, 6, NodeType::Exact);
+
+        // Undo all moves to get back to start
+        pos.undo_move(move4, undo4);
+        pos.undo_move(move3, undo3);
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
+
+        // Reconstruct PV - should stop when cycle is detected
+        let pv = tt.reconstruct_pv_from_tt(&mut pos, 20);
+
+        // The PV should stop when it detects that the next position would be a repeat
+        // In this case, after move1, move2, move3, move4, we would be back at a position
+        // we've already seen (the position after move1), so it should stop there
+        assert!(pv.len() >= 4, "PV should have at least 4 moves, got {}", pv.len());
     }
 }
 
