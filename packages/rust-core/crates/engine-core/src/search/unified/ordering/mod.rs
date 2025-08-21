@@ -62,6 +62,106 @@ impl MoveOrdering {
         scored_moves.into_iter().map(|(mv, _)| mv).collect()
     }
 
+    /// Order moves at root position with PV from previous iteration
+    pub fn order_moves_at_root(
+        &self,
+        pos: &Position,
+        moves: &MoveList,
+        tt_move: Option<Move>,
+        previous_pv: &[Move],
+    ) -> Vec<Move> {
+        let mut scored_moves = Vec::with_capacity(moves.len());
+
+        // Get the first move from previous PV (if it exists and is still valid)
+        let pv_move = if !previous_pv.is_empty() {
+            Some(previous_pv[0])
+        } else {
+            None
+        };
+
+        for &mv in moves.as_slice().iter() {
+            let score = self.score_move_at_root(pos, mv, tt_move, pv_move);
+            scored_moves.push((mv, score));
+        }
+
+        // Sort by score (descending) - use stable sort to ensure deterministic ordering
+        scored_moves.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Extract moves
+        scored_moves.into_iter().map(|(mv, _)| mv).collect()
+    }
+
+    /// Score a move at root with PV consideration
+    fn score_move_at_root(
+        &self,
+        pos: &Position,
+        mv: Move,
+        tt_move: Option<Move>,
+        pv_move: Option<Move>,
+    ) -> i32 {
+        // PV move from previous iteration gets highest priority
+        if Some(mv) == pv_move {
+            return 1_100_000; // Higher than TT move
+        }
+
+        // TT move is second priority
+        if Some(mv) == tt_move {
+            return 1_000_000;
+        }
+
+        // For other moves, use normal scoring but without SearchStack-specific features
+        // (since we're at root and don't have a meaningful SearchStack context)
+
+        // Special handling for king moves
+        if mv.piece_type() == Some(crate::PieceType::King) && !pos.is_in_check() {
+            if mv.is_capture_hint() {
+                if let Some(victim) = mv.captured_piece_type() {
+                    use crate::PieceType;
+                    match victim {
+                        PieceType::Rook | PieceType::Bishop => {
+                            return 50_000 + Self::piece_value(Some(victim));
+                        }
+                        _ => {
+                            return -10_000 + Self::piece_value(Some(victim));
+                        }
+                    }
+                }
+            }
+            return -20_000;
+        }
+
+        // Good captures
+        if mv.is_capture_hint() {
+            let victim_value = Self::piece_value(mv.captured_piece_type());
+            let attacker_value = Self::piece_value(mv.piece_type());
+            let mvv_lva = victim_value * 10 - attacker_value;
+
+            // Add capture history score
+            let capture_history_score = match self.history.lock() {
+                Ok(history) => {
+                    if let (Some(attacker_type), Some(victim_type)) =
+                        (mv.piece_type(), mv.captured_piece_type())
+                    {
+                        history.capture.get(pos.side_to_move, attacker_type, victim_type)
+                    } else {
+                        0
+                    }
+                }
+                Err(_) => 0,
+            };
+
+            return 100_000 + mvv_lva + capture_history_score / 10;
+        }
+
+        // History heuristic for quiet moves
+        let history_score = match self.history.lock() {
+            Ok(history) => history.butterfly.get(pos.side_to_move, mv),
+            Err(_) => 0,
+        };
+
+        history_score
+    }
+
     /// Score a single move using SearchStack
     fn score_move(
         &self,

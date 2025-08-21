@@ -19,6 +19,7 @@ pub fn search_root_with_window<E, const USE_TT: bool, const USE_PRUNING: bool>(
     depth: u8,
     initial_alpha: i32,
     initial_beta: i32,
+    previous_pv: &[Move],
 ) -> (i32, Vec<Move>)
 where
     E: Evaluator + Send + Sync + 'static,
@@ -63,7 +64,7 @@ where
     // Order moves - avoid Vec to SmallVec conversion
     let (ordered_slice, _owned_moves);
     if USE_TT || USE_PRUNING {
-        let moves_vec = searcher.ordering.order_moves(pos, &moves, None, &searcher.search_stack, 0);
+        let moves_vec = searcher.ordering.order_moves_at_root(pos, &moves, None, previous_pv);
         _owned_moves = Some(moves_vec);
         let vec_ref = _owned_moves.as_ref().unwrap();
         ordered_slice = &vec_ref[..];
