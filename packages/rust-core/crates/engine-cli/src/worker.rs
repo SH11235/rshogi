@@ -7,6 +7,7 @@ use crate::utils::lock_or_recover_generic;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use engine_core::engine::controller::Engine;
+use engine_core::search::constants::MATE_SCORE;
 use engine_core::search::SearchLimits;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -53,6 +54,35 @@ pub enum WorkerMessage {
         search_id: u64,
     },
     EngineReturn(Engine), // Return the engine after search
+}
+
+/// Convert mate moves to pseudo centipawn value for ordering
+///
+/// This helper function provides a consistent scale for converting mate scores
+/// to centipawn equivalents. This is used for ordering purposes when comparing
+/// different search results.
+///
+/// # Arguments
+///
+/// * `mate` - Number of moves to mate (positive = we're winning, negative = we're losing)
+///
+/// # Returns
+///
+/// * `Some(i32)` - Pseudo centipawn value
+/// * `None` - If mate is 0 (immediate mate with ambiguous sign)
+fn mate_moves_to_pseudo_cp(mate: i32) -> Option<i32> {
+    if mate == 0 {
+        // mate 0: sign is ambiguous, don't convert
+        return None;
+    }
+    // Consistent scale: use 100 cp per move to mate
+    // This gives a smooth gradient for ordering purposes
+    const CP_PER_MOVE: i32 = 100;
+    if mate > 0 {
+        Some(MATE_SCORE - mate * CP_PER_MOVE)
+    } else {
+        Some(-MATE_SCORE - mate * CP_PER_MOVE)
+    }
 }
 
 /// Guard to ensure engine is returned on drop (for panic safety)
@@ -173,31 +203,23 @@ pub fn search_worker(
 
             if should_send {
                 let score_value = match score {
-                    Score::Cp(cp) => *cp,
-                    Score::Mate(mate) => {
-                        // Convert mate score to centipawn equivalent
-                        if *mate == 0 {
-                            // mate 0: immediate mate, but sign is ambiguous in USI
-                            // Skip sending partial result for mate 0 to avoid confusion
-                            log::debug!("Skipping partial result for mate 0 (sign ambiguous)");
-                            return;
-                        } else if *mate > 0 {
-                            30000 - (*mate * 100)
-                        } else {
-                            -30000 - (*mate * 100)
-                        }
-                    }
+                    Score::Cp(cp) => Some(*cp),
+                    Score::Mate(mate) => mate_moves_to_pseudo_cp(*mate),
                 };
 
-                log::debug!(
-                    "Sending partial result: move={pv}, depth={depth}, score={score_value}"
-                );
-                let _ = tx_partial.send(WorkerMessage::PartialResult {
-                    current_best: pv.clone(),
-                    depth,
-                    score: score_value,
-                    search_id,
-                });
+                if let Some(score_value) = score_value {
+                    log::debug!(
+                        "Sending partial result: move={pv}, depth={depth}, score={score_value}"
+                    );
+                    let _ = tx_partial.send(WorkerMessage::PartialResult {
+                        current_best: pv.clone(),
+                        depth,
+                        score: score_value,
+                        search_id,
+                    });
+                } else {
+                    log::debug!("Skipping partial result for mate 0 (sign ambiguous)");
+                }
             }
         }
     };
@@ -367,45 +389,55 @@ pub fn search_worker(
             if !info.pv.is_empty() {
                 // Extract raw score from Score enum
                 let raw_score = match info.score {
-                    Some(Score::Cp(cp)) => cp,
+                    Some(Score::Cp(cp)) => Some(cp),
                     Some(Score::Mate(mate)) => {
-                        // Convert mate score to raw score format
-                        // Positive mate = we're winning
-                        let mate_score =
-                            engine_core::search::constants::MATE_SCORE - (mate.abs() * 2);
-                        if mate > 0 {
-                            mate_score
+                        if mate == 0 {
+                            // mate 0: sign is ambiguous, skip score update
+                            log::debug!("Skipping session update for mate 0 (sign ambiguous)");
+                            None
                         } else {
-                            -mate_score
+                            // Convert mate score to raw score format
+                            // Positive mate = we're winning
+                            let mate_score = MATE_SCORE - (mate.abs() * 2);
+                            if mate > 0 {
+                                Some(mate_score)
+                            } else {
+                                Some(-mate_score)
+                            }
                         }
                     }
-                    None => 0,
+                    None => Some(0),
                 };
 
-                // Convert PV from USI strings to Move objects
-                // WARNING: This loses piece type information from the original moves
-                let pv_moves: Vec<_> = info
-                    .pv
-                    .iter()
-                    .filter_map(|m| engine_core::usi::parse_usi_move(m).ok())
-                    .collect();
+                // Only update session if we have a valid score
+                if let Some(raw_score) = raw_score {
+                    // Convert PV from USI strings to Move objects
+                    // WARNING: This loses piece type information from the original moves
+                    let pv_moves: Vec<_> = info
+                        .pv
+                        .iter()
+                        .filter_map(|m| engine_core::usi::parse_usi_move(m).ok())
+                        .collect();
 
-                // Update session
-                if let Ok(mut session_guard) = session_for_callback.lock() {
-                    // TODO: Get actual NodeType from search result instead of defaulting to Exact
-                    session_guard.update_current_best(
-                        info.depth.unwrap_or(0),
-                        raw_score,
-                        pv_moves,
-                        engine_core::search::NodeType::Exact,
-                    );
-                    session_guard.commit_iteration();
+                    // Update session
+                    if let Ok(mut session_guard) = session_for_callback.lock() {
+                        // Note: During iterative deepening, we don't have NodeType information
+                        // from the info callback, so we default to Exact. The actual NodeType
+                        // will be set when the final search result is available.
+                        session_guard.update_current_best(
+                            info.depth.unwrap_or(0),
+                            raw_score,
+                            pv_moves,
+                            engine_core::search::NodeType::Exact,
+                        );
+                        session_guard.commit_iteration();
 
-                    // Send IterationComplete message
-                    let _ = tx_for_iteration.send(WorkerMessage::IterationComplete {
-                        session: Box::new(session_guard.clone()),
-                        search_id,
-                    });
+                        // Send IterationComplete message
+                        let _ = tx_for_iteration.send(WorkerMessage::IterationComplete {
+                            session: Box::new(session_guard.clone()),
+                            search_id,
+                        });
+                    }
                 }
             }
         }

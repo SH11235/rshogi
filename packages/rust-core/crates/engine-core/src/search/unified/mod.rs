@@ -155,6 +155,7 @@ where
         // Iterative deepening
         let mut best_move = None;
         let mut best_score: i32 = 0;
+        let mut best_node_type = NodeType::Exact;
         let mut depth = 1;
 
         while depth <= max_depth && !self.context.should_stop() {
@@ -180,6 +181,8 @@ where
             let mut score;
             let mut pv;
             let mut aspiration_retries = 0;
+            #[allow(unused_assignments)]
+            let mut final_node_type = NodeType::Exact; // Default, will be updated in loop
 
             loop {
                 // Search at current depth with window
@@ -194,7 +197,16 @@ where
                         self.stats.aspiration_hits =
                             Some(self.stats.aspiration_hits.unwrap_or(0) + 1);
                     }
+                    final_node_type = NodeType::Exact;
                     break;
+                }
+
+                // Determine node type based on score vs bounds
+                if score <= alpha {
+                    final_node_type = NodeType::UpperBound;
+                } else {
+                    // score >= beta
+                    final_node_type = NodeType::LowerBound;
                 }
 
                 // Aspiration window fail - need to re-search
@@ -226,6 +238,7 @@ where
             if !pv.is_empty() {
                 best_score = score;
                 best_move = Some(pv[0]);
+                best_node_type = final_node_type;
                 self.pv_table.update_from_line(&pv);
 
                 // Update statistics
@@ -261,7 +274,7 @@ where
             best_move,
             score: best_score,
             stats: self.stats.clone(),
-            node_type: NodeType::Exact, // TODO: Track actual node type from root search
+            node_type: best_node_type,
         }
     }
 
