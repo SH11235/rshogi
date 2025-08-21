@@ -139,13 +139,19 @@ where
                 if tt_entry.depth() >= depth {
                     let tt_score = tt_entry.score();
                     match tt_entry.node_type() {
+                        // EXACT entries contain the true score for this position
                         crate::search::tt::NodeType::Exact => return tt_score as i32,
+                        // LOWERBOUND means the true score is >= tt_score
+                        // We can use it for cutoff if it's >= beta
                         crate::search::tt::NodeType::LowerBound => {
                             if tt_score as i32 >= beta {
                                 return tt_score as i32;
                             }
+                            // We can also improve alpha since we know score >= tt_score
                             alpha = alpha.max(tt_score as i32);
                         }
+                        // UPPERBOUND means the true score is <= tt_score
+                        // We can use it for cutoff if it's <= alpha
                         crate::search::tt::NodeType::UpperBound => {
                             if tt_score as i32 <= alpha {
                                 return tt_score as i32;
