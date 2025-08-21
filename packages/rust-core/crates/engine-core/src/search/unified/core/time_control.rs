@@ -6,14 +6,17 @@ use crate::{
     evaluation::evaluate::Evaluator, search::unified::UnifiedSearcher, time_management::TimeControl,
 };
 
-/// Get event polling mask based on time limit
+/// Get event polling mask based on time limit and stop conditions
 ///
 /// Returns a bitmask that determines how frequently to check for events (time limit, stop flag, etc).
 /// Lower values mean more frequent checks:
 /// - 0x0 (0): Check every node (immediate response when already stopped)
-/// - 0x1F (31): Check every 32 nodes (responsive stop handling)
-/// - 0x3F (63): Check every 64 nodes (fixed nodes or ponder mode)
+/// - 0x1F (31): Check every 32 nodes (responsive stop handling or Byoyomi)
+/// - 0x3F (63): Check every 64 nodes (fixed nodes, ponder mode, or stop_flag present)
 /// - 0x7F-0x3FF: Check every 128-1024 nodes (time-based controls)
+///
+/// This unified mask handles all event checking including stop_flag polling,
+/// eliminating the need for separate stop_check_interval logic.
 pub fn get_event_poll_mask<
     E,
     const USE_TT: bool,
@@ -31,8 +34,9 @@ where
     }
 
     // If stop_flag is present, use more frequent polling for responsiveness
+    // This replaces the separate stop_check_interval logic
     if searcher.context.limits().stop_flag.is_some() {
-        return 0x1F; // Check every 32 nodes for responsive stop handling
+        return 0x3F; // Check every 64 nodes for responsive stop handling (same as old stop_check_interval)
     }
 
     // Check if we have FixedNodes in either limits or time manager
