@@ -30,8 +30,8 @@ use crate::{
 use std::sync::atomic::Ordering;
 
 /// Alpha-beta search with pruning
-pub(super) fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
-    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+pub(super) fn alpha_beta<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
     pos: &mut Position,
     depth: u8,
     mut alpha: i32,

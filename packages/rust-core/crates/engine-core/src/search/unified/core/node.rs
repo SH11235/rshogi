@@ -11,8 +11,8 @@ use crate::{
 };
 
 /// Search a single node in the tree
-pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
-    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+pub(super) fn search_node<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
     pos: &mut Position,
     depth: u8,
     mut alpha: i32,
@@ -537,8 +537,7 @@ mod tests {
 
     #[test]
     fn test_search_node_basic() {
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
         searcher.context.set_limits(SearchLimits::builder().depth(5).build());
 
         let mut pos = Position::startpos();
@@ -551,8 +550,7 @@ mod tests {
 
     #[test]
     fn test_search_node_stop_flag() {
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
 
         // Set stop flag immediately
         searcher.context.stop();
@@ -570,8 +568,7 @@ mod tests {
     fn test_history_update_with_mutex_error() {
         // This test verifies that search continues even if history mutex fails
         // In real code, we handle the error with logging and continue
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
         searcher.context.set_limits(SearchLimits::builder().depth(3).build());
 
         let mut pos = Position::startpos();
@@ -587,8 +584,7 @@ mod tests {
     #[test]
     fn test_max_moves_to_update_performance() {
         // Test that we limit the number of moves updated for performance
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
         searcher.context.set_limits(SearchLimits::builder().depth(3).build());
 
         let mut pos = Position::startpos();
@@ -614,14 +610,14 @@ mod tests {
     fn test_pruning_conditions_respected() {
         // Test with pruning enabled
         let mut searcher_with_pruning =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+            UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
         searcher_with_pruning
             .context
             .set_limits(SearchLimits::builder().depth(5).build());
 
         // Test with pruning disabled
         let mut searcher_no_pruning =
-            UnifiedSearcher::<MaterialEvaluator, true, false, 16>::new(MaterialEvaluator);
+            UnifiedSearcher::<MaterialEvaluator, true, false>::new(MaterialEvaluator);
         searcher_no_pruning.context.set_limits(SearchLimits::builder().depth(5).build());
 
         let mut pos1 = Position::startpos();
@@ -636,8 +632,7 @@ mod tests {
 
     #[test]
     fn test_abdada_integration() {
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
         searcher.context.set_limits(SearchLimits::builder().depth(5).build());
 
         let mut pos = Position::startpos();
@@ -671,8 +666,7 @@ mod tests {
     #[test]
     fn test_search_node_depth_zero() {
         // Test that search_node handles depth=0 correctly without underflow
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
         searcher.context.set_limits(SearchLimits::builder().depth(1).build());
 
         let mut pos = Position::startpos();

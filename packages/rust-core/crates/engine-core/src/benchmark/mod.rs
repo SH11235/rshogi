@@ -105,7 +105,7 @@ fn benchmark_search() -> (u64, u64, Duration) {
         let limits = SearchLimits::builder().depth(8).fixed_time_ms(5000).build();
 
         let evaluator = MaterialEvaluator;
-        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false, 8>::new(evaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false>::new(evaluator);
         let mut pos_clone = pos.clone();
         let result = searcher.search(&mut pos_clone, limits);
 

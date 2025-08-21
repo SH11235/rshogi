@@ -25,6 +25,7 @@ where
     history: Option<Arc<Mutex<History>>>,
     duplication_stats: Option<Arc<DuplicationStats>>,
     disable_prefetch: bool,
+    tt_size_mb: usize,
 }
 
 impl<E> UnifiedSearcherBuilder<E>
@@ -39,6 +40,7 @@ where
             history: None,
             duplication_stats: None,
             disable_prefetch: false,
+            tt_size_mb: 16, // Default TT size
         }
     }
 
@@ -50,6 +52,7 @@ where
             history: None,
             duplication_stats: None,
             disable_prefetch: false,
+            tt_size_mb: 16, // Default TT size
         }
     }
 
@@ -77,16 +80,25 @@ where
         self
     }
 
+    /// Set transposition table size in MB
+    pub fn with_tt_size(mut self, size_mb: usize) -> Self {
+        self.tt_size_mb = size_mb;
+        self
+    }
+
     /// Build the UnifiedSearcher instance
-    pub fn build<const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
+    pub fn build<const USE_TT: bool, const USE_PRUNING: bool>(
         self,
-    ) -> UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB> {
+    ) -> UnifiedSearcher<E, USE_TT, USE_PRUNING> {
         // Create or use shared history
         let history = self.history.unwrap_or_else(|| Arc::new(Mutex::new(History::new())));
 
         // Create or use shared TT
         let tt = if USE_TT {
-            Some(self.tt.unwrap_or_else(|| Arc::new(ShardedTranspositionTable::new(TT_SIZE_MB))))
+            Some(
+                self.tt
+                    .unwrap_or_else(|| Arc::new(ShardedTranspositionTable::new(self.tt_size_mb))),
+            )
         } else {
             None
         };
@@ -131,14 +143,18 @@ where
 }
 
 /// Convenience constructors for UnifiedSearcher
-impl<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>
-    UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>
+impl<E, const USE_TT: bool, const USE_PRUNING: bool> UnifiedSearcher<E, USE_TT, USE_PRUNING>
 where
     E: Evaluator + Send + Sync + 'static,
 {
     /// Create a new unified searcher using the builder
     pub fn new(evaluator: E) -> Self {
         UnifiedSearcherBuilder::new(evaluator).build()
+    }
+
+    /// Create a new unified searcher with specific TT size
+    pub fn new_with_tt_size(evaluator: E, tt_size_mb: usize) -> Self {
+        UnifiedSearcherBuilder::new(evaluator).with_tt_size(tt_size_mb).build()
     }
 
     /// Create a new unified searcher with an already Arc-wrapped evaluator
@@ -160,7 +176,7 @@ mod tests {
     #[test]
     fn test_builder_basic() {
         let evaluator = MaterialEvaluator;
-        let searcher: UnifiedSearcher<_, true, false, 8> =
+        let searcher: UnifiedSearcher<_, true, false> =
             UnifiedSearcherBuilder::new(evaluator).build();
         assert_eq!(searcher.nodes(), 0);
     }
@@ -170,12 +186,12 @@ mod tests {
         let evaluator = Arc::new(MaterialEvaluator);
         let tt = Arc::new(ShardedTranspositionTable::new(16));
 
-        let searcher1: UnifiedSearcher<_, true, false, 16> =
+        let searcher1: UnifiedSearcher<_, true, false> =
             UnifiedSearcherBuilder::with_arc(evaluator.clone())
                 .with_shared_tt(tt.clone())
                 .build();
 
-        let searcher2: UnifiedSearcher<_, true, false, 16> =
+        let searcher2: UnifiedSearcher<_, true, false> =
             UnifiedSearcherBuilder::with_arc(evaluator).with_shared_tt(tt.clone()).build();
 
         // Both searchers should have the same TT instance
@@ -185,7 +201,7 @@ mod tests {
     #[test]
     fn test_builder_disable_prefetch() {
         let evaluator = MaterialEvaluator;
-        let searcher: UnifiedSearcher<_, true, false, 8> =
+        let searcher: UnifiedSearcher<_, true, false> =
             UnifiedSearcherBuilder::new(evaluator).disable_prefetch(true).build();
 
         assert!(searcher.is_prefetch_disabled());
@@ -196,17 +212,21 @@ mod tests {
         let evaluator = MaterialEvaluator;
 
         // Test new()
-        let searcher1 = UnifiedSearcher::<_, true, false, 8>::new(evaluator);
+        let searcher1 = UnifiedSearcher::<_, true, false>::new(evaluator);
         assert_eq!(searcher1.nodes(), 0);
+
+        // Test new_with_tt_size()
+        let searcher2 = UnifiedSearcher::<_, true, false>::new_with_tt_size(evaluator, 32);
+        assert_eq!(searcher2.nodes(), 0);
 
         // Test with_arc()
         let evaluator = Arc::new(MaterialEvaluator);
-        let searcher2 = UnifiedSearcher::<_, true, false, 8>::with_arc(evaluator.clone());
-        assert_eq!(searcher2.nodes(), 0);
+        let searcher3 = UnifiedSearcher::<_, true, false>::with_arc(evaluator.clone());
+        assert_eq!(searcher3.nodes(), 0);
 
         // Test with_shared_tt()
         let tt = Arc::new(ShardedTranspositionTable::new(8));
-        let searcher3 = UnifiedSearcher::<_, true, false, 8>::with_shared_tt(evaluator, tt);
-        assert_eq!(searcher3.nodes(), 0);
+        let searcher4 = UnifiedSearcher::<_, true, false>::with_shared_tt(evaluator, tt);
+        assert_eq!(searcher4.nodes(), 0);
     }
 }

@@ -34,8 +34,8 @@ use super::move_ordering::victim_score;
 ///
 /// # Returns
 /// The evaluation score of the position after resolving captures
-pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool, const TT_SIZE_MB: usize>(
-    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
     pos: &mut Position,
     mut alpha: i32,
     beta: i32,

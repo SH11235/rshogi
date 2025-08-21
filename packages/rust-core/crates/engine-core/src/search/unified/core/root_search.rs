@@ -13,13 +13,8 @@ use crate::{
 };
 
 /// Search from root position with aspiration window
-pub fn search_root_with_window<
-    E,
-    const USE_TT: bool,
-    const USE_PRUNING: bool,
-    const TT_SIZE_MB: usize,
->(
-    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING, TT_SIZE_MB>,
+pub fn search_root_with_window<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
     pos: &mut Position,
     depth: u8,
     initial_alpha: i32,

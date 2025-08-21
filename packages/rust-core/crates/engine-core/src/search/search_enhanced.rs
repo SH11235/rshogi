@@ -21,7 +21,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     /// Unified searcher with enhanced features (TT enabled, pruning enabled)
-    searcher: UnifiedSearcher<E, true, true, 16>,
+    searcher: UnifiedSearcher<E, true, true>,
 }
 
 impl<E> EnhancedSearcher<E>

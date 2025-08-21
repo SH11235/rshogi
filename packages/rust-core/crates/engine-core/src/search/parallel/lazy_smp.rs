@@ -77,7 +77,7 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
                     debug!("Thread {thread_id} starting search");
 
                     // Create thread-local searcher with shared TT
-                    let mut searcher = UnifiedSearcher::<E, true, true, 16>::with_shared_tt(
+                    let mut searcher = UnifiedSearcher::<E, true, true>::with_shared_tt(
                         evaluator.clone(), // Use Arc directly
                         tt,                // Use the shared TT
                     );

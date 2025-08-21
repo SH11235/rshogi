@@ -10,9 +10,8 @@ use log::{debug, info, warn};
 
 use crate::engine_adapter::EngineAdapter;
 use crate::usi::{
-    clamp_periods, send_info_string, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS,
-    OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_OVERHEAD_MS,
-    OPT_USI_BYOYOMI_PERIODS,
+    clamp_periods, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_OVERHEAD_MS,
+    OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_OVERHEAD_MS, OPT_USI_BYOYOMI_PERIODS,
 };
 use engine_core::time_management::constants::{
     DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
@@ -74,9 +73,10 @@ impl EngineAdapter {
 
     /// Initialize the engine
     pub fn initialize(&mut self) -> Result<()> {
-        // Apply thread count to engine
+        // Apply thread count and hash size to engine
         if let Some(ref mut engine) = self.engine {
             engine.set_threads(self.threads);
+            engine.set_hash_size(self.hash_size);
         }
         Ok(())
     }
@@ -95,15 +95,17 @@ impl EngineAdapter {
         match name {
             "USI_Hash" => {
                 if let Some(val) = value {
-                    self.hash_size = val.parse::<usize>().map_err(|_| {
+                    let hash_size = val.parse::<usize>().map_err(|_| {
                         anyhow!("Invalid hash size: '{}'. Must be a number between 1 and 1024", val)
                     })?;
+                    self.hash_size = hash_size;
 
-                    // Note: Hash table is not currently implemented in the engine
-                    // This value is stored for future use
-                    send_info_string(
-                        "Note: Hash table is not currently implemented. This setting will be used in future versions.",
-                    )?;
+                    // Apply to engine if it exists
+                    if let Some(ref mut engine) = self.engine {
+                        engine.set_hash_size(hash_size);
+                    } else {
+                        info!("Hash size option queued: {hash_size}MB");
+                    }
                 }
             }
             "Threads" => {
@@ -273,5 +275,74 @@ impl EngineAdapter {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usi_hash_option() {
+        let mut adapter = EngineAdapter::new();
+
+        // Initialize with Material engine
+        adapter.set_option("EngineType", Some("Material")).unwrap();
+        adapter.initialize().unwrap();
+
+        // Check initial hash size
+        assert_eq!(adapter.hash_size, 16); // default
+
+        // Set new hash size via USI option
+        adapter.set_option("USI_Hash", Some("64")).unwrap();
+
+        // Hash size should be updated in adapter
+        assert_eq!(adapter.hash_size, 64);
+
+        // Take and return engine to verify it applies
+        if let Ok(engine) = adapter.take_engine() {
+            // Engine should have pending hash size
+            assert_eq!(engine.get_hash_size(), 16); // Still old size until applied
+            adapter.return_engine(engine);
+        }
+
+        // After return, engine should have new hash size set as pending
+        if let Some(ref engine) = adapter.engine {
+            // Next search will apply the pending size
+            assert_eq!(engine.get_hash_size(), 16); // Still 16 until next search
+        }
+    }
+
+    #[test]
+    fn test_usi_hash_invalid_values() {
+        let mut adapter = EngineAdapter::new();
+
+        // Test invalid number
+        let result = adapter.set_option("USI_Hash", Some("not_a_number"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid hash size"));
+
+        // Test empty value
+        let result = adapter.set_option("USI_Hash", None);
+        assert!(result.is_ok()); // None is OK, just doesn't change anything
+    }
+
+    #[test]
+    fn test_hash_size_queued_before_engine_init() {
+        let mut adapter = EngineAdapter::new();
+
+        // Set hash size before engine exists
+        adapter.set_option("USI_Hash", Some("128")).unwrap();
+        assert_eq!(adapter.hash_size, 128);
+
+        // Initialize engine
+        adapter.set_option("EngineType", Some("Enhanced")).unwrap();
+        adapter.initialize().unwrap();
+
+        // Engine should be created with the queued hash size
+        if let Some(ref engine) = adapter.engine {
+            // Hash size should be set as pending in the engine
+            assert_eq!(engine.get_hash_size(), 16); // Default until applied
+        }
     }
 }

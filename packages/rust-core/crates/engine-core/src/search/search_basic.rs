@@ -12,11 +12,11 @@ use std::sync::Arc;
 /// Basic searcher configured for simple alpha-beta search
 ///
 /// Uses UnifiedSearcher with:
-/// - Transposition table: 8MB
+/// - Transposition table: configurable
 /// - Advanced pruning: disabled
 /// - Basic move ordering only
 pub struct Searcher<E: Evaluator + Send + Sync + 'static> {
-    inner: UnifiedSearcher<E, true, false, 8>,
+    inner: UnifiedSearcher<E, true, false>,
 }
 
 impl<E: Evaluator + Send + Sync + 'static> Searcher<E> {
