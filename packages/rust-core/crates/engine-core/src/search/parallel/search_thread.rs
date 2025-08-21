@@ -325,6 +325,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                 score: -search_result.score,
                 stats: search_result.stats,
                 best_move: Some(root_move),
+                node_type: search_result.node_type,
             }
         } else {
             // At depth 1, just evaluate the position
@@ -347,6 +348,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                     duplication_percentage: None,
                 },
                 best_move: Some(root_move),
+                node_type: crate::search::NodeType::Exact, // Depth 1 evaluation is exact
             }
         };
 

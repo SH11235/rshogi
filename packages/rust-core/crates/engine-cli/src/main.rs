@@ -182,9 +182,25 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                 // Also output a final PV info line to ensure consistency with bestmove
                                                 if let Some(committed) = session.committed_best.as_ref() {
                                                     let pv_usi: Vec<String> = committed.pv.iter().map(move_to_usi).collect();
+
+                                                    // Convert engine NodeType to USI ScoreBound
+                                                    let score_bound = match committed.node_type {
+                                                        engine_core::search::NodeType::Exact => None, // Exact scores don't need bound flag
+                                                        engine_core::search::NodeType::LowerBound => Some(usi::output::ScoreBound::LowerBound),
+                                                        engine_core::search::NodeType::UpperBound => Some(usi::output::ScoreBound::UpperBound),
+                                                    };
+
+                                                    // Convert score to USI format
+                                                    let usi_score = match &committed.score {
+                                                        search_session::Score::Cp(cp) => Some(usi::output::Score::Cp(*cp)),
+                                                        search_session::Score::Mate(mate) => Some(usi::output::Score::Mate(*mate)),
+                                                    };
+
                                                     let info = SearchInfo {
                                                         depth: Some(committed.depth),
                                                         pv: pv_usi,
+                                                        score: usi_score,
+                                                        score_bound,
                                                         ..Default::default()
                                                     };
                                                     let _ = send_response(UsiResponse::Info(info));

@@ -3,6 +3,7 @@
 //! This module provides SearchSession to encapsulate all search-related data
 //! within a single worker thread, preventing cross-thread contamination.
 
+use engine_core::search::NodeType;
 use engine_core::shogi::Move;
 use smallvec::SmallVec;
 
@@ -66,11 +67,18 @@ impl SearchSession {
     }
 
     /// Update current iteration best
-    pub fn update_current_best(&mut self, depth: u32, score: i32, pv: Vec<Move>) {
+    pub fn update_current_best(
+        &mut self,
+        depth: u32,
+        score: i32,
+        pv: Vec<Move>,
+        node_type: NodeType,
+    ) {
         self.current_iteration_best = Some(CommittedBest {
             depth,
             score: Score::from_raw(score),
             pv: pv.into_iter().collect(),
+            node_type,
         });
     }
 }
@@ -86,4 +94,7 @@ pub struct CommittedBest {
 
     /// Principal variation (fixed-size optimized)
     pub pv: SmallVec<[Move; 32]>,
+
+    /// Node type (Exact, LowerBound, UpperBound)
+    pub node_type: NodeType,
 }

@@ -47,6 +47,8 @@ pub struct SearchResult {
     pub score: i32,
     /// Search statistics
     pub stats: SearchStats,
+    /// Node type (Exact, LowerBound, UpperBound)
+    pub node_type: NodeType,
 }
 
 impl SearchResult {
@@ -56,6 +58,22 @@ impl SearchResult {
             best_move,
             score,
             stats,
+            node_type: NodeType::Exact, // Default to Exact for backward compatibility
+        }
+    }
+
+    /// Create a new search result with node type
+    pub fn with_node_type(
+        best_move: Option<Move>,
+        score: i32,
+        stats: SearchStats,
+        node_type: NodeType,
+    ) -> Self {
+        Self {
+            best_move,
+            score,
+            stats,
+            node_type,
         }
     }
 
@@ -78,6 +96,7 @@ impl SearchResult {
                 depth,
                 ..Default::default()
             },
+            node_type: NodeType::Exact, // Default to Exact for legacy format
         }
     }
 }

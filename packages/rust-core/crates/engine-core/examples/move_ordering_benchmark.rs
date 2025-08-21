@@ -40,7 +40,7 @@ fn main() {
 
             // Create searcher with move ordering improvements
             let mut searcher =
-                UnifiedSearcher::<MaterialEvaluator, true, true, 32>::new(MaterialEvaluator);
+                UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
 
             // Set time limit to prevent infinite search
             let limits = SearchLimitsBuilder::default().depth(depth).fixed_time_ms(5000).build();

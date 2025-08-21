@@ -104,7 +104,7 @@ mod search_integration_tests {
 
         // Create unified searcher with enhanced features
         let mut searcher_with_see =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+            UnifiedSearcher::<MaterialEvaluator, true, true>::new(*evaluator);
 
         // Test position with many captures available
         let test_positions = vec![
@@ -154,8 +154,7 @@ mod search_integration_tests {
 
         for _ in 0..3 {
             // Create a fresh searcher for each iteration to ensure no TT pollution
-            let mut searcher =
-                UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+            let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(*evaluator);
             use engine_core::search::SearchLimitsBuilder;
             let limits = SearchLimitsBuilder::default().depth(6).nodes(50_000).build();
             let result = searcher.search(&mut pos.clone(), limits);
@@ -196,7 +195,7 @@ mod search_integration_tests {
     fn test_complex_tactical_positions_benchmark() {
         let database = load_tactical_positions();
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 64>::new(*evaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(*evaluator);
 
         println!("\nTactical Position Analysis:");
         println!("{:-<80}", "");
@@ -258,7 +257,7 @@ mod search_integration_tests {
     #[ignore = "Requires proper Position::from_sfen implementation"]
     fn test_see_pruning_in_main_search() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(*evaluator);
 
         // Position with many bad captures that should be pruned
         let mut pos = Position::from_sfen(
@@ -391,7 +390,7 @@ mod byoyomi_timeout_tests {
     fn test_byoyomi_respects_time_limit() {
         // Create engine with 1 second byoyomi
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(*evaluator);
 
         // Use a standard starting position for stability
         let pos = Position::startpos();
@@ -437,7 +436,7 @@ mod byoyomi_timeout_tests {
     #[test]
     fn test_quiescence_time_check() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(*evaluator);
 
         // Use a standard middle game position
         let pos = Position::startpos();
@@ -475,8 +474,7 @@ mod byoyomi_timeout_tests {
         let mut elapsed_times = Vec::new();
 
         for i in 0..3 {
-            let mut searcher =
-                UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(*evaluator);
+            let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(*evaluator);
             let pos = Position::startpos();
 
             let limits = SearchLimitsBuilder::default()

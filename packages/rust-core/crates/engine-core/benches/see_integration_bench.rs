@@ -122,8 +122,7 @@ fn bench_search_with_see(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: Create new searcher and clone position
-                    let searcher =
-                        UnifiedSearcher::<MaterialEvaluator, true, true, 2>::new(evaluator);
+                    let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                     let pos_clone = pos.clone();
                     (searcher, pos_clone)
                 },
@@ -164,8 +163,7 @@ fn bench_move_ordering(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Setup: Create new searcher and clone position
-                    let searcher =
-                        UnifiedSearcher::<MaterialEvaluator, true, true, 1>::new(evaluator);
+                    let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                     let pos_clone = pos.clone();
                     (searcher, pos_clone)
                 },

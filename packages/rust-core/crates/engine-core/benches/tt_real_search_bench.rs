@@ -54,8 +54,7 @@ fn bench_search_single_thread(c: &mut Criterion) {
                 || {
                     // Setup: Create position and searcher with fresh TT
                     let pos = Position::from_sfen(sfen).expect("Valid SFEN");
-                    let searcher =
-                        UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator);
+                    let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                     (searcher, pos)
                 },
                 |(mut searcher, mut pos)| {
@@ -109,7 +108,7 @@ fn bench_search_multi_thread(c: &mut Criterion) {
                             let handle = thread::spawn(move || {
                                 // Create searcher with its own TT
                                 let mut searcher =
-                                    UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(
+                                    UnifiedSearcher::<MaterialEvaluator, true, true>::new(
                                         evaluator,
                                     );
 
@@ -164,7 +163,7 @@ fn bench_tt_size_impact(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let pos = Position::from_sfen(sfen).expect("Valid SFEN");
-                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 1>::new(evaluator);
+                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                 (searcher, pos)
             },
             |(mut searcher, mut pos)| {
@@ -186,7 +185,7 @@ fn bench_tt_size_impact(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let pos = Position::from_sfen(sfen).expect("Valid SFEN");
-                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 4>::new(evaluator);
+                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                 (searcher, pos)
             },
             |(mut searcher, mut pos)| {
@@ -208,7 +207,7 @@ fn bench_tt_size_impact(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let pos = Position::from_sfen(sfen).expect("Valid SFEN");
-                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator);
+                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                 (searcher, pos)
             },
             |(mut searcher, mut pos)| {
@@ -230,7 +229,7 @@ fn bench_tt_size_impact(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let pos = Position::from_sfen(sfen).expect("Valid SFEN");
-                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 64>::new(evaluator);
+                let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                 (searcher, pos)
             },
             |(mut searcher, mut pos)| {
@@ -270,8 +269,7 @@ fn bench_iterative_deepening(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let pos = Position::from_sfen(sfen).expect("Valid SFEN");
-                    let searcher =
-                        UnifiedSearcher::<MaterialEvaluator, true, true, 32>::new(evaluator);
+                    let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                     (searcher, pos)
                 },
                 |(mut searcher, mut pos)| {
@@ -323,8 +321,7 @@ fn bench_pv_search_contention(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let pos = Position::from_sfen(sfen).expect("Valid SFEN");
-                    let searcher =
-                        UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator);
+                    let searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
                     (searcher, pos)
                 },
                 |(mut searcher, mut pos)| {
