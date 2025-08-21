@@ -25,11 +25,6 @@ fn test_black_pawn_forward_capture() {
             .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
         pos.board
             .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
-        // Kings are required for move generation
-        pos.board
-            .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
-        pos.board
-            .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
         pos.side_to_move = Color::Black;
 
         let mut move_gen = MoveGen::new();
@@ -215,11 +210,11 @@ fn test_pawn_must_promote_on_last_rank() {
 
     pos.board.put_piece(black_pawn_sq, Piece::new(PieceType::Pawn, Color::Black));
     pos.board.put_piece(target_sq, Piece::new(PieceType::Pawn, Color::White));
-    // Kings are required for move generation
+    // Kings are required for move generation (place kings away from the action)
     pos.board
-        .put_piece(Square::new(4, 8), Piece::new(PieceType::King, Color::Black));
+        .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
     pos.board
-        .put_piece(Square::new(4, 0), Piece::new(PieceType::King, Color::White));
+        .put_piece(Square::new(8, 1), Piece::new(PieceType::King, Color::White));
     pos.side_to_move = Color::Black;
 
     let mut move_gen = MoveGen::new();
@@ -245,5 +240,49 @@ fn test_pawn_must_promote_on_last_rank() {
     assert!(
         !normal_capture,
         "Black pawn should NOT be able to capture without promotion to last rank"
+    );
+}
+
+#[test]
+fn test_white_pawn_must_promote_on_last_rank() {
+    // Test that white pawns must promote when capturing to the last rank
+
+    // White pawn capturing on rank 8 (must promote)
+    let mut pos = Position::empty();
+    let white_pawn_sq = Square::new(4, 7);
+    let target_sq = Square::new(4, 8);
+
+    pos.board.put_piece(white_pawn_sq, Piece::new(PieceType::Pawn, Color::White));
+    pos.board.put_piece(target_sq, Piece::new(PieceType::Pawn, Color::Black));
+    // Kings are required for move generation (place kings away from the action)
+    pos.board
+        .put_piece(Square::new(0, 8), Piece::new(PieceType::King, Color::Black));
+    pos.board
+        .put_piece(Square::new(8, 0), Piece::new(PieceType::King, Color::White));
+    pos.side_to_move = Color::White;
+
+    let mut move_gen = MoveGen::new();
+    let mut moves = MoveList::new();
+    move_gen.generate_all(&pos, &mut moves);
+
+    // Check that only promoting capture is generated (not non-promoting)
+    let promote_capture = moves.as_slice().iter().any(|&mv| {
+        !mv.is_drop() && mv.from() == Some(white_pawn_sq) && mv.to() == target_sq && mv.is_promote()
+    });
+
+    let normal_capture = moves.as_slice().iter().any(|&mv| {
+        !mv.is_drop()
+            && mv.from() == Some(white_pawn_sq)
+            && mv.to() == target_sq
+            && !mv.is_promote()
+    });
+
+    assert!(
+        promote_capture,
+        "White pawn must be able to capture with promotion to last rank"
+    );
+    assert!(
+        !normal_capture,
+        "White pawn should NOT be able to capture without promotion to last rank"
     );
 }

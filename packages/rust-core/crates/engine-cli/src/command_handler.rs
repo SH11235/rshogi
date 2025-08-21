@@ -326,13 +326,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 // Log timeout error
                 log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
 
-                if *ctx.current_search_is_ponder {
-                    // Ponder search - don't send bestmove (USI protocol)
-                    log::info!("Ponder search timeout, not sending bestmove (USI protocol)");
-                    *ctx.search_state = SearchState::Idle;
-                    *ctx.current_search_is_ponder = false; // Reset ponder flag
-                    break;
-                }
+                // Even for ponder search, send bestmove on timeout
 
                 // Use emergency fallback (session already tried at the beginning)
                 match generate_fallback_move(
@@ -372,22 +366,16 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     ponder_move,
                     search_id,
                 }) => {
-                    // Only accept if it's for current search and not pondering
+                    // Only accept if it's for current search
                     if search_id == *ctx.current_search_id {
-                        if !*ctx.current_search_is_ponder {
-                            send_bestmove_once(
-                                best_move,
-                                ponder_move,
-                                ctx.search_state,
-                                ctx.bestmove_sent,
-                            )?;
-                            *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
-                        } else {
-                            // Ponder search stopped - don't send bestmove
-                            log::debug!("Ponder search stopped, not sending bestmove");
-                            *ctx.search_state = SearchState::Idle;
-                            *ctx.current_search_is_ponder = false; // Reset ponder flag
-                        }
+                        // Always send bestmove, even for ponder searches
+                        send_bestmove_once(
+                            best_move,
+                            ponder_move,
+                            ctx.search_state,
+                            ctx.bestmove_sent,
+                        )?;
+                        *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
                         break;
                     }
                 }
@@ -418,7 +406,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     search_id,
                 }) => {
                     // Handle SearchFinished in stop command context
-                    if search_id == *ctx.current_search_id && !*ctx.current_search_is_ponder {
+                    if search_id == *ctx.current_search_id {
                         log::info!("SearchFinished received in stop handler, sending bestmove");
                         // Try to use session-based bestmove
                         if let Some(ref session) = *ctx.current_session {
@@ -474,15 +462,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 }) => {
                     // Only process if it's for current search
                     if search_id == *ctx.current_search_id {
-                        if *ctx.current_search_is_ponder {
-                            // Ponder search - don't send bestmove (USI protocol)
-                            log::debug!("Ponder search finished without bestmove, not sending fallback (USI protocol)");
-                            *ctx.search_state = SearchState::Idle;
-                            *ctx.current_search_is_ponder = false; // Reset ponder flag
-                            break;
-                        }
-
-                        // Normal search - use fallback strategy
+                        // Use fallback strategy for both normal and ponder searches
                         log::warn!("Worker finished without bestmove (from_guard: {from_guard})");
                         match generate_fallback_move(
                             ctx.engine,
