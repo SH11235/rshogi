@@ -110,12 +110,7 @@ impl EngineAdapter {
             }
             "Threads" => {
                 if let Some(val) = value {
-                    let threads = val.parse::<usize>().map_err(|_| {
-                        anyhow!(
-                            "Invalid thread count: '{}'. Must be a number between 1 and 256",
-                            val
-                        )
-                    })?;
+                    let threads = Self::parse_u64_in_range("Threads", val, 1, 256)? as usize;
                     self.threads = threads;
 
                     // Apply to engine if it exists
@@ -273,9 +268,14 @@ impl EngineAdapter {
             "ClearHash" => {
                 if let Some(ref mut engine) = self.engine {
                     engine.clear_hash();
-                    send_info_string("Hash table cleared")?;
+                    let engine_type = engine.get_engine_type();
+                    let tt_size_mb = engine.get_hash_size();
+                    send_info_string(format!(
+                        "Hash table cleared (engine: {engine_type:?}, size: {tt_size_mb}MB)"
+                    ))?;
                 } else {
-                    warn!("ClearHash: No engine available");
+                    warn!("ClearHash: No engine available (search in progress)");
+                    send_info_string("ClearHash skipped: search in progress")?;
                 }
             }
             _ => {
@@ -413,5 +413,38 @@ mod tests {
         } else {
             panic!("Failed to take engine");
         }
+    }
+
+    #[test]
+    fn test_threads_boundary_values() {
+        let mut adapter = EngineAdapter::new();
+
+        // Test minimum value (1)
+        assert!(adapter.set_option("Threads", Some("1")).is_ok());
+        assert_eq!(adapter.threads, 1);
+
+        // Test maximum value (256)
+        assert!(adapter.set_option("Threads", Some("256")).is_ok());
+        assert_eq!(adapter.threads, 256);
+
+        // Test below minimum (0)
+        let result = adapter.set_option("Threads", Some("0"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be between 1 and 256"));
+
+        // Test above maximum (257)
+        let result = adapter.set_option("Threads", Some("257"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be between 1 and 256"));
+
+        // Test negative value (-1)
+        let result = adapter.set_option("Threads", Some("-1"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid Threads"));
+
+        // Test invalid string
+        let result = adapter.set_option("Threads", Some("not_a_number"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid Threads"));
     }
 }
