@@ -37,7 +37,7 @@ pub fn lock_or_recover_generic<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// - Mate scores are identified when the absolute value exceeds `MATE_SCORE - MAX_PLY`
 /// - For GUI compatibility, immediate mate (0 moves) is reported as "mate 1"
 /// - Positive scores favor the side to move, negative scores favor the opponent
-pub fn to_usi_score(raw_score: i32) -> Score {
+pub(crate) fn to_usi_score(raw_score: i32) -> Score {
     if raw_score.abs() >= MATE_SCORE - MAX_PLY as i32 {
         // It's a mate score - calculate mate distance
         let mate_in_half = MATE_SCORE - raw_score.abs();
@@ -46,10 +46,15 @@ pub fn to_usi_score(raw_score: i32) -> Score {
         // Note: USI spec allows "mate 0" for immediate mate.
         // Some older GUIs may have issues with "mate 0", but we follow the spec.
         // TODO: Consider adding a USI option for "mate0_to_1" compatibility mode if needed
+        
+        // USI spec: positive mate N means we have mate in N moves,
+        // negative mate N means we are being mated in N moves
+        // Special case: to distinguish between winning and losing immediate mate,
+        // we use mate 1 / mate -1 instead of mate 0 / mate -0 (which are the same)
         if raw_score > 0 {
-            Score::Mate(mate_in)
+            Score::Mate(mate_in.max(1))
         } else {
-            Score::Mate(-mate_in)
+            Score::Mate(-(mate_in.max(1)))
         }
     } else {
         Score::Cp(raw_score)

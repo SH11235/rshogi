@@ -57,7 +57,7 @@ mod to_usi_score_tests {
 
         // Negative mate scores
         match to_usi_score(-MATE_SCORE) {
-            Score::Mate(n) => assert_eq!(n, -1, "Being mated immediately should be mate -1"),
+            Score::Mate(n) => assert_eq!(n, -1, "Being mated immediately should be mate -1 (USI allows negative mate)"),
             _ => panic!("Expected negative mate score"),
         }
 
