@@ -415,16 +415,11 @@ where
                         match searcher.history.lock() {
                             Ok(mut history) => {
                                 // Update history for the cutoff move
-                                history.update_cutoff(
-                                    pos.side_to_move,
-                                    mv,
-                                    depth as i32,
-                                    prev_move,
-                                );
+                                history.update_cutoff(us, mv, depth as i32, prev_move);
 
                                 // Update counter move history
                                 if let Some(prev_mv) = prev_move {
-                                    history.counter_moves.update(pos.side_to_move, prev_mv, mv);
+                                    history.counter_moves.update(us, prev_mv, mv);
                                 }
 
                                 // Update capture history if the cutoff move is a capture
@@ -442,12 +437,7 @@ where
                                         .or_else(|| pos.piece_at(mv.to()).map(|p| p.piece_type));
 
                                     if let (Some(att), Some(vic)) = (attacker, victim) {
-                                        history.capture.update_good(
-                                            pos.side_to_move,
-                                            att,
-                                            vic,
-                                            depth as i32,
-                                        );
+                                        history.capture.update_good(us, att, vic, depth as i32);
                                     }
                                 }
 
@@ -458,12 +448,7 @@ where
                                 for &quiet_mv in quiet_moves_tried.iter().take(MAX_MOVES_TO_UPDATE)
                                 {
                                     if quiet_mv != mv {
-                                        history.update_quiet(
-                                            pos.side_to_move,
-                                            quiet_mv,
-                                            depth as i32,
-                                            prev_move,
-                                        );
+                                        history.update_quiet(us, quiet_mv, depth as i32, prev_move);
                                     }
                                 }
 
@@ -478,12 +463,7 @@ where
                                             });
 
                                         if let (Some(att), Some(vic)) = (attacker, victim) {
-                                            history.capture.update_bad(
-                                                pos.side_to_move,
-                                                att,
-                                                vic,
-                                                depth as i32,
-                                            );
+                                            history.capture.update_bad(us, att, vic, depth as i32);
                                         }
                                     }
                                 }
