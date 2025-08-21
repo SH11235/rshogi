@@ -59,18 +59,18 @@ fn benchmark_mode(sfen: &str, depth: u8, mode: BenchmarkMode) -> DetailedMetrics
     let result = match mode {
         BenchmarkMode::NoTT => {
             // No TT, no prefetch
-            let mut searcher = UnifiedSearcher::<_, false, true, 0>::new(evaluator);
+            let mut searcher = UnifiedSearcher::<_, false, true>::new(evaluator);
             searcher.search(&mut pos, limits)
         }
         BenchmarkMode::TTOnly => {
             // TT enabled but prefetch disabled
-            let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
+            let mut searcher = UnifiedSearcher::<_, true, true>::new_with_tt_size(evaluator, 16);
             searcher.set_disable_prefetch(true);
             searcher.search(&mut pos, limits)
         }
         BenchmarkMode::TTWithPrefetch => {
             // Full TT with prefetch
-            let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
+            let mut searcher = UnifiedSearcher::<_, true, true>::new_with_tt_size(evaluator, 16);
             let result = searcher.search(&mut pos, limits);
 
             // Collect TT statistics if available

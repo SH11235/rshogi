@@ -11,7 +11,7 @@ use std::time::Instant;
 fn benchmark_search_with_prefetch(sfen: &str, depth: u8) -> (u64, f64) {
     // Create enhanced searcher with TT and pruning (prefetch enabled)
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, true, true, 16>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, true, true>::new_with_tt_size(evaluator, 16);
     let mut pos = if sfen == "startpos" {
         Position::startpos()
     } else {
@@ -33,7 +33,7 @@ fn benchmark_search_with_prefetch(sfen: &str, depth: u8) -> (u64, f64) {
 fn benchmark_search_without_prefetch(sfen: &str, depth: u8) -> (u64, f64) {
     // Create basic searcher without TT (no prefetch)
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<_, false, true, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<_, false, true>::new(evaluator);
     let mut pos = if sfen == "startpos" {
         Position::startpos()
     } else {

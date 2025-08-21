@@ -14,7 +14,7 @@ use std::time::Instant;
 fn test_qnodes_limit_basic() {
     // Test basic QNodes limit functionality
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Set a very small qnodes limit
     let limits = SearchLimits::builder()
@@ -42,7 +42,7 @@ fn test_qnodes_limit_basic() {
 fn test_qnodes_limit_in_check() {
     // Test QNodes limit when in check position
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Set a small qnodes limit
     let limits = SearchLimits::builder()
@@ -82,7 +82,7 @@ fn test_qnodes_limit_performance() {
     .unwrap();
 
     // Test without qnodes limit
-    let mut searcher1 = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher1 = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
     searcher1.context.set_limits(SearchLimits::builder().depth(1).build());
 
     let start1 = Instant::now();
@@ -92,7 +92,7 @@ fn test_qnodes_limit_performance() {
     let nodes_without_limit = searcher1.stats.qnodes;
 
     // Test with qnodes limit
-    let mut searcher2 = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher2 = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
     searcher2.context.set_limits(
         SearchLimits::builder()
             .depth(1)
@@ -127,7 +127,7 @@ fn test_qnodes_token_return_on_stop() {
     // Test that qnodes are returned when stop flag is set
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Set up stop flag and shared counter
     let stop_flag = Arc::new(AtomicBool::new(true)); // Already stopped
@@ -179,7 +179,7 @@ fn test_qnodes_token_return_on_limit_exceeded() {
     // Test that qnodes are properly returned when limit is exceeded
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Set up shared counter
     let shared_counter = Arc::new(AtomicU64::new(0));

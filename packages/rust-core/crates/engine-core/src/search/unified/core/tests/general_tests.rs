@@ -9,7 +9,7 @@ use crate::Position;
 fn test_stop_flag_polling_interval() {
     // Test that stop flag checks are done at appropriate intervals
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Simulate node counting and verify polling frequency
     let mut check_count = 0;

@@ -26,7 +26,7 @@ fn test_quiescence_search_check_evasion() {
     let pos = Position::from_sfen("9/9/9/9/4K3r/9/9/9/9 b - 1").unwrap();
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
     searcher.context.set_limits(SearchLimits::builder().depth(1).build());
 
     // Verify we're in check
@@ -54,7 +54,7 @@ fn test_quiescence_search_check_at_depth_limit() {
     let pos = Position::from_sfen("9/9/9/9/4K3r/9/9/9/9 b - 1").unwrap();
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
     searcher.context.set_limits(SearchLimits::builder().depth(1).build());
 
     // Verify we're in check
@@ -85,7 +85,7 @@ fn test_quiescence_search_check_at_depth_limit() {
 fn test_quiescence_relative_depth_limit() {
     // Test that relative qply limit is enforced consistently
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(evaluator);
     searcher.context.set_limits(SearchLimits::builder().depth(10).build());
 
     // Create a complex position with many captures
@@ -115,7 +115,7 @@ fn test_quiescence_relative_depth_limit() {
 fn test_quiescence_check_no_relative_limit() {
     // Test that relative qply limit is NOT applied when in check
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
     searcher.context.set_limits(SearchLimits::builder().depth(1).build());
 
     // Position: King in check from rook
