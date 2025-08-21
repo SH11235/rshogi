@@ -62,6 +62,11 @@ pub enum WorkerMessage {
 /// to centipawn equivalents. This is used for ordering purposes when comparing
 /// different search results.
 ///
+/// Note: This function uses a simplified 100cp per move scale for UI display purposes.
+/// This is different from the engine's internal representation which uses 2 plies
+/// per move. The purpose here is to provide a smooth gradient for partial results,
+/// not to preserve the exact engine score.
+///
 /// # Arguments
 ///
 /// * `mate` - Number of moves to mate (positive = we're winning, negative = we're losing)
@@ -398,6 +403,10 @@ pub fn search_worker(
                         } else {
                             // Convert mate score to raw score format
                             // Positive mate = we're winning
+                            // Note: This preserves the engine's internal score representation
+                            // (MATE_SCORE - plies), which uses 2 plies per move.
+                            // This is different from the simplified pseudo-cp conversion
+                            // used for partial results in mate_moves_to_pseudo_cp().
                             let mate_score = MATE_SCORE - (mate.abs() * 2);
                             if mate > 0 {
                                 Some(mate_score)
@@ -406,7 +415,7 @@ pub fn search_worker(
                             }
                         }
                     }
-                    None => Some(0),
+                    None => None,
                 };
 
                 // Only update session if we have a valid score
@@ -766,4 +775,29 @@ pub fn wait_for_worker_with_timeout(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mate_moves_to_pseudo_cp() {
+        // Test mate 0 returns None (sign ambiguous)
+        assert_eq!(mate_moves_to_pseudo_cp(0), None);
+
+        // Test positive mate (we're winning)
+        assert_eq!(mate_moves_to_pseudo_cp(1), Some(MATE_SCORE - 100));
+        assert_eq!(mate_moves_to_pseudo_cp(3), Some(MATE_SCORE - 300));
+        assert_eq!(mate_moves_to_pseudo_cp(10), Some(MATE_SCORE - 1000));
+
+        // Test negative mate (we're losing)
+        assert_eq!(mate_moves_to_pseudo_cp(-1), Some(-MATE_SCORE + 100));
+        assert_eq!(mate_moves_to_pseudo_cp(-2), Some(-MATE_SCORE + 200));
+        assert_eq!(mate_moves_to_pseudo_cp(-5), Some(-MATE_SCORE + 500));
+
+        // Test edge cases
+        assert_eq!(mate_moves_to_pseudo_cp(300), Some(MATE_SCORE - 30000));
+        assert_eq!(mate_moves_to_pseudo_cp(-300), Some(-MATE_SCORE + 30000));
+    }
 }
