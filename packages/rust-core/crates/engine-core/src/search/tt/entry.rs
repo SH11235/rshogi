@@ -246,4 +246,26 @@ impl TTEntry {
     pub fn from_old_format(key: u64, data: u64) -> Self {
         TTEntry { key, data }
     }
+
+    /// Calculate priority score for replacement decision
+    pub(crate) fn priority_score(&self, current_age: u8) -> i32 {
+        // Calculate cyclic age distance (Apery-style)
+        let age_distance = ((GENERATION_CYCLE + current_age as u16 - self.age() as u16)
+            & (AGE_MASK as u16)) as i32;
+
+        // Base priority: depth minus age distance
+        let mut priority = self.depth() as i32 - age_distance;
+
+        // Bonus for PV nodes
+        if self.is_pv() {
+            priority += 32;
+        }
+
+        // Bonus for exact entries
+        if self.node_type() == NodeType::Exact {
+            priority += 16;
+        }
+
+        priority
+    }
 }
