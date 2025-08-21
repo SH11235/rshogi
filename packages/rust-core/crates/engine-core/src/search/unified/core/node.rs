@@ -282,8 +282,8 @@ where
 
         // Calculate gives_check before making the move to avoid double move execution
         // Use lightweight pre-filter first, then accurate check if needed
-        // Skip for first move since LMR is not applied anyway
-        let gives_check = if USE_PRUNING && moves_searched > 0 {
+        // Only calculate when LMR reduction might be applied
+        let gives_check = if USE_PRUNING && depth >= 3 && moves_searched >= 4 {
             if crate::search::unified::pruning::likely_could_give_check(pos, mv) {
                 pos.gives_check(mv)
             } else {
