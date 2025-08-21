@@ -387,7 +387,13 @@ pub fn search_worker(
 
                 // Update session
                 if let Ok(mut session_guard) = session_for_callback.lock() {
-                    session_guard.update_current_best(info.depth.unwrap_or(0), raw_score, pv_moves);
+                    // TODO: Get actual NodeType from search result instead of defaulting to Exact
+                    session_guard.update_current_best(
+                        info.depth.unwrap_or(0),
+                        raw_score,
+                        pv_moves,
+                        engine_core::search::NodeType::Exact,
+                    );
                     session_guard.commit_iteration();
 
                     // Send IterationComplete message
@@ -431,6 +437,7 @@ pub fn search_worker(
                 extended_result.depth,
                 extended_result.score,
                 extended_result.pv, // Original Move objects with piece types preserved
+                extended_result.node_type,
             );
             session.commit_iteration();
             // Clean up ponder state if needed

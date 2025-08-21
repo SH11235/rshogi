@@ -230,6 +230,7 @@ impl EngineAdapter {
             depth: result.stats.depth as u32,
             score: result.score,
             pv,
+            node_type: result.node_type,
         })
     }
 

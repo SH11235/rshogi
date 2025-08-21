@@ -17,7 +17,7 @@ mod tests {
         // Disable pruning to ensure we search enough nodes for TT prefetching to be relevant
         // With pruning enabled, MaterialEvaluator results in very few nodes being searched
         let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, false, 32>::new(MaterialEvaluator);
+            UnifiedSearcher::<MaterialEvaluator, true, false>::new(MaterialEvaluator);
 
         // Search to depth 5 with node limit to prevent hanging
         // This tests TT prefetching without running forever
@@ -50,8 +50,7 @@ mod tests {
     fn test_tt_hit_rate() {
         // Test that TT is actually being used effectively
         let mut pos = Position::startpos();
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 32>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
 
         // First search
         let limits = SearchLimitsBuilder::default().depth(5).build();

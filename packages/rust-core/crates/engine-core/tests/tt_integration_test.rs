@@ -6,7 +6,7 @@ use engine_core::{
     shogi::Position,
 };
 
-type TestSearcher = UnifiedSearcher<MaterialEvaluator, true, false, 1>;
+type TestSearcher = UnifiedSearcher<MaterialEvaluator, true, false>;
 
 #[test]
 fn test_tt_search_integration() {
