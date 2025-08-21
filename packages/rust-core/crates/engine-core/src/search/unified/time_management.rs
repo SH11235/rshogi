@@ -98,13 +98,13 @@ mod tests {
         assert_eq!(estimate_game_phase(30), GamePhase::Opening); // 15 moves
         assert_eq!(estimate_game_phase(60), GamePhase::Opening); // 30 moves
         assert_eq!(estimate_game_phase(61), GamePhase::Opening); // 30 moves (61/2 = 30)
-        
+
         // Middle game: 31-70 moves
         assert_eq!(estimate_game_phase(62), GamePhase::MiddleGame); // 31 moves
         assert_eq!(estimate_game_phase(100), GamePhase::MiddleGame); // 50 moves
         assert_eq!(estimate_game_phase(140), GamePhase::MiddleGame); // 70 moves
         assert_eq!(estimate_game_phase(141), GamePhase::MiddleGame); // 70 moves (141/2 = 70)
-        
+
         // End game: 71+ moves
         assert_eq!(estimate_game_phase(142), GamePhase::EndGame); // 71 moves
         assert_eq!(estimate_game_phase(200), GamePhase::EndGame); // 100 moves
