@@ -127,8 +127,8 @@ where
     let tt_move = if USE_TT {
         let tt_entry = searcher.probe_tt(hash);
 
-        // Note: Duplication statistics are now updated during TT store, not probe.
-        // This ensures accurate counting of unique vs duplicate nodes.
+        // Note: Duplication statistics are updated during TT probe in alpha_beta().
+        // Store-time updates are temporarily disabled in tt_operations.rs.
 
         // ABDADA: Check if sibling node found exact cut
         if depth > 2 {
