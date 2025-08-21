@@ -3,7 +3,10 @@
 
 use engine_core::{
     evaluation::evaluate::MaterialEvaluator,
-    search::{unified::UnifiedSearcher, SearchLimitsBuilder},
+    search::{
+        unified::{TTOperations, UnifiedSearcher},
+        SearchLimitsBuilder,
+    },
     Position,
 };
 use std::time::Instant;
