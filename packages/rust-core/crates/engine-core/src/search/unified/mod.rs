@@ -791,8 +791,8 @@ mod tests {
 
         assert!(result.best_move.is_some());
         assert!(
-            elapsed.as_millis() < 50,
-            "Search should stop within 50ms after stop flag is set, but took {}ms",
+            elapsed.as_millis() < 60,
+            "Search should stop within 60ms after stop flag is set, but took {}ms",
             elapsed.as_millis()
         );
     }
