@@ -117,6 +117,7 @@ impl ShardedTranspositionTable {
         for shard in &mut self.shards {
             shard.clear();
         }
+        self.age = 0;
     }
 
     /// Advance generation/age
