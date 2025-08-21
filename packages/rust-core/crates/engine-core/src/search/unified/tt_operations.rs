@@ -87,6 +87,7 @@ pub trait TTOperations<const USE_TT: bool> {
     }
 
     /// Get TT statistics (for benchmarking)
+    #[inline(always)]
     fn get_tt_stats(&self) -> Option<(f32, u64, u64)> {
         if USE_TT {
             if let Some(ref tt) = self.tt() {
@@ -99,6 +100,7 @@ pub trait TTOperations<const USE_TT: bool> {
     }
 
     /// Get adaptive prefetcher statistics (for benchmarking)
+    #[inline(always)]
     fn get_prefetch_stats(&self) -> Option<(u64, u64)> {
         if USE_TT {
             if let Some(ref prefetcher) = self.adaptive_prefetcher() {
