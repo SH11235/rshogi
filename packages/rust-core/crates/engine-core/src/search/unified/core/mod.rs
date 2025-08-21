@@ -20,7 +20,11 @@ pub use root_search::search_root_with_window;
 
 use crate::{
     evaluation::evaluate::Evaluator,
-    search::{common::mate_score, constants::MAX_PLY, unified::UnifiedSearcher},
+    search::{
+        common::mate_score,
+        constants::MAX_PLY,
+        unified::{tt_operations::TTOperations, UnifiedSearcher},
+    },
     shogi::Position,
 };
 use std::sync::atomic::Ordering;
