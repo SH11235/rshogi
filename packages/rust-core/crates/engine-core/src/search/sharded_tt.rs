@@ -217,6 +217,22 @@ impl ShardedTranspositionTable {
         let shard_idx = self.shard_index(hash);
         self.shards[shard_idx].prefetch_l1(hash);
     }
+
+    /// Reconstruct PV from transposition table using only EXACT entries
+    ///
+    /// This delegates to the appropriate shard based on the root position hash
+    pub fn reconstruct_pv_from_tt(
+        &self,
+        pos: &mut crate::shogi::Position,
+        max_depth: u8,
+    ) -> Vec<Move> {
+        // Determine which shard to use based on the root position
+        let root_hash = pos.zobrist_hash;
+        let shard_idx = self.shard_index(root_hash);
+
+        // Delegate to the shard's implementation
+        self.shards[shard_idx].reconstruct_pv_from_tt(pos, max_depth)
+    }
 }
 
 /// Thread-safe reference to sharded TT

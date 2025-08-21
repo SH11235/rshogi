@@ -127,6 +127,7 @@ where
             disable_prefetch: self.disable_prefetch,
             adaptive_prefetcher,
             duplication_stats: self.duplication_stats,
+            previous_pv: Vec::new(),
         }
     }
 

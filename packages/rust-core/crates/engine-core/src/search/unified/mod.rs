@@ -99,6 +99,9 @@ where
 
     /// Duplication statistics for parallel search (optional)
     duplication_stats: Option<Arc<DuplicationStats>>,
+
+    /// Previous iteration's PV for move ordering
+    previous_pv: Vec<Move>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool> UnifiedSearcher<E, USE_TT, USE_PRUNING>
@@ -139,6 +142,9 @@ where
         self.context.reset();
         self.pv_table.clear();
         self.aspiration_window.clear();
+
+        // Clear previous PV if starting a new search from a different position
+        // (we'll update it at the end of each iteration)
 
         let start_time = Instant::now();
 
@@ -247,6 +253,38 @@ where
 
                 // Update score history for volatility calculation
                 self.aspiration_window.update_score(score);
+
+                // Try to reconstruct PV from TT if we have TT enabled
+                if USE_TT {
+                    if let Some(ref tt) = self.tt {
+                        // Clone position to avoid modifying the original
+                        let mut temp_pos = pos.clone();
+                        let tt_pv = tt.reconstruct_pv_from_tt(&mut temp_pos, depth);
+
+                        // Use TT PV if it's longer or if triangular PV is incomplete
+                        if !tt_pv.is_empty()
+                            && (tt_pv.len() > self.stats.pv.len()
+                                || (self.stats.pv.len() == 1 && tt_pv.len() > 1))
+                        {
+                            log::debug!(
+                                "Using TT PV (length: {}) instead of triangular PV (length: {})",
+                                tt_pv.len(),
+                                self.stats.pv.len()
+                            );
+
+                            // Validate that TT PV starts with the same best move
+                            if tt_pv[0] == self.stats.pv[0] {
+                                self.stats.pv = tt_pv;
+                            } else {
+                                log::warn!(
+                                    "TT PV starts with different move: {} vs {}",
+                                    crate::usi::move_to_usi(&tt_pv[0]),
+                                    crate::usi::move_to_usi(&self.stats.pv[0])
+                                );
+                            }
+                        }
+                    }
+                }
             }
 
             // Call info callback if not stopped
@@ -263,6 +301,9 @@ where
                     // Use snapshot for callback (immune to concurrent updates)
                     callback(depth, score, self.stats.nodes, self.context.elapsed(), &pv_snapshot);
                 }
+
+                // Save PV for next iteration's move ordering
+                self.previous_pv = self.stats.pv.clone();
             }
 
             depth += 1;
@@ -286,8 +327,10 @@ where
         alpha: i32,
         beta: i32,
     ) -> (i32, Vec<Move>) {
+        // Clone previous PV to avoid borrow checker issues
+        let previous_pv = self.previous_pv.clone();
         // Implementation will be added in core module
-        core::search_root_with_window(self, pos, depth, alpha, beta)
+        core::search_root_with_window(self, pos, depth, alpha, beta, &previous_pv)
     }
 
     /// Get current node count
