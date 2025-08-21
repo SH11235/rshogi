@@ -4,6 +4,7 @@ use crate::usi::{self, send_response, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, wait_for_worker_with_timeout, WorkerMessage};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
+use engine_core::usi::position_to_sfen;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -36,7 +37,12 @@ pub fn generate_fallback_move(
             );
             return Ok(best_move);
         } else {
-            log::warn!("Partial result move {best_move} is illegal, proceeding to Stage 2");
+            // Include position SFEN in warning
+            let sfen = adapter
+                .get_position()
+                .map(position_to_sfen)
+                .unwrap_or_else(|| "<no position>".to_string());
+            log::warn!("Partial result move {best_move} is illegal in position {sfen}, proceeding to Stage 2");
         }
     }
 
@@ -73,7 +79,15 @@ pub fn generate_fallback_move(
             Ok(move_str)
         }
         Err(EngineError::NoLegalMoves) => {
-            log::error!("No legal moves available - position is checkmate or stalemate");
+            let sfen = engine
+                .lock()
+                .unwrap()
+                .get_position()
+                .map(position_to_sfen)
+                .unwrap_or_else(|| "<no position>".to_string());
+            log::error!(
+                "No legal moves available in position {sfen} - position is checkmate or stalemate"
+            );
             Ok("resign".to_string())
         }
         Err(EngineError::EngineNotAvailable(msg)) if msg.contains("Position not set") => {
@@ -88,7 +102,13 @@ pub fn generate_fallback_move(
             }
         }
         Err(e) => {
-            log::error!("Failed to generate fallback move: {e}");
+            let sfen = engine
+                .lock()
+                .unwrap()
+                .get_position()
+                .map(position_to_sfen)
+                .unwrap_or_else(|| "<no position>".to_string());
+            log::error!("Failed to generate fallback move in position {sfen}: {e}");
             if allow_null_move {
                 // Return null move for better GUI compatibility
                 // Note: This is not defined in USI spec but widely supported

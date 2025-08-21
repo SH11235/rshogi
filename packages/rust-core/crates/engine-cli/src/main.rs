@@ -16,7 +16,7 @@ use command_handler::{handle_command, CommandContext};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
 use engine_core::usi::move_to_usi;
-use helpers::{generate_fallback_move, send_bestmove_once};
+use helpers::generate_fallback_move;
 use search_session::SearchSession;
 use state::SearchState;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -190,8 +190,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                     let _ = send_response(UsiResponse::Info(info));
                                                 }
 
-                                                log::info!("Sending bestmove on search finish: {best_move}, ponder: {ponder:?}");
-                                                send_bestmove_once(best_move, ponder, &mut search_state, &mut bestmove_sent)?;
+                                                log::info!("Session bestmove ready: {best_move}, ponder: {ponder:?}");
+                                                // Bestmove sending is handled in command_handler.rs
                                             }
                                             Err(e) => {
                                                 log::warn!("Session validation failed on finish: {e}");
@@ -200,30 +200,30 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                 match generate_fallback_move(&engine, None, allow_null_move) {
                                                     Ok(fallback_move) => {
                                                         send_info_string("bestmove_from=emergency_fallback")?;
-                                                        log::info!("Sending fallback move on search finish: {fallback_move}");
-                                                        send_bestmove_once(fallback_move, None, &mut search_state, &mut bestmove_sent)?;
+                                                        log::info!("Fallback move ready: {fallback_move}");
+                                                        // Bestmove sending is handled in command_handler.rs
                                                     }
                                                     Err(e) => {
                                                         log::error!("Fallback move generation failed: {e}");
-                                                        send_bestmove_once("resign".to_string(), None, &mut search_state, &mut bestmove_sent)?;
+                                                        // Resign will be handled in command_handler.rs
                                                     }
                                                 }
                                             }
                                         }
                                     } else {
                                         log::error!("No position available for bestmove validation");
-                                        send_bestmove_once("resign".to_string(), None, &mut search_state, &mut bestmove_sent)?;
+                                        // Resign will be handled in command_handler.rs
                                     }
                                 } else {
                                     log::warn!("No session available on search finish");
                                     // Try emergency move generation
                                     match generate_fallback_move(&engine, None, allow_null_move) {
-                                        Ok(fallback_move) => {
+                                        Ok(_fallback_move) => {
                                             send_info_string("bestmove_from=emergency_fallback_no_session")?;
-                                            send_bestmove_once(fallback_move, None, &mut search_state, &mut bestmove_sent)?;
+                                            // Bestmove sending is handled in command_handler.rs
                                         }
                                         Err(_) => {
-                                            send_bestmove_once("resign".to_string(), None, &mut search_state, &mut bestmove_sent)?;
+                                            // Resign will be handled in command_handler.rs
                                         }
                                     }
                                 }
@@ -232,7 +232,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             }
                         }
                     }
-                    Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
+                    Ok(WorkerMessage::BestMove { best_move, ponder_move: _, search_id }) => {
                         // Only send bestmove if:
                         // 1. We're still searching AND haven't sent one yet
                         // 2. The search_id matches current search (prevents old search results)
@@ -251,8 +251,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             };
 
                             if is_valid {
-                                log::info!("Sending validated bestmove: {best_move}");
-                                send_bestmove_once(best_move, ponder_move, &mut search_state, &mut bestmove_sent)?;
+                                log::info!("Validated bestmove ready: {best_move}");
+                                // Bestmove sending is handled in command_handler.rs
                             } else {
                                 // Log detailed error information
                                 log::error!("Invalid bestmove detected: {best_move}");
@@ -262,18 +262,17 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 // Try to generate a fallback move
                                 log::warn!("Attempting to generate fallback move after invalid bestmove");
                                 match generate_fallback_move(&engine, None, allow_null_move) {
-                                    Ok(fallback_move) => {
-                                        log::info!("Sending fallback move: {fallback_move}");
-                                        send_bestmove_once(fallback_move, None, &mut search_state, &mut bestmove_sent)?;
+                                    Ok(_fallback_move) => {
+                                        log::info!("Fallback move ready: {_fallback_move}");
+                                        // Bestmove sending is handled in command_handler.rs
                                     }
                                     Err(e) => {
                                         log::error!("Failed to generate fallback move: {e}");
-                                        // As last resort, send resign
-                                        send_bestmove_once("resign".to_string(), None, &mut search_state, &mut bestmove_sent)?;
+                                        // Resign will be handled in command_handler.rs
                                     }
                                 }
                             }
-                            current_search_is_ponder = false; // Reset ponder flag
+                            // Ponder flag is managed in command_handler.rs
                         } else {
                             log::warn!("Ignoring late/ponder bestmove: {best_move} (search_state={search_state:?}, bestmove_sent={bestmove_sent}, search_id={search_id}, current={current_search_id}, is_ponder={current_search_is_ponder})");
                         }
