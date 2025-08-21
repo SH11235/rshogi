@@ -8,7 +8,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use engine_core::evaluate::MaterialEvaluator;
-use engine_core::search::unified::UnifiedSearcher;
+use engine_core::search::unified::{TTOperations, UnifiedSearcher};
 use engine_core::search::{SearchLimitsBuilder, SearchResult};
 use engine_core::Position;
 use std::hint::black_box;

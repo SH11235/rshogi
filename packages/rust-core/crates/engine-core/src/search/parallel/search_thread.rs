@@ -7,7 +7,7 @@ use crate::{
     search::{
         history::{CounterMoveHistory, History},
         unified::{ordering::KillerTable, UnifiedSearcher},
-        SearchLimits, SearchResult, SearchStats,
+        SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable,
     },
     shogi::{Move, Position},
 };
@@ -152,7 +152,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
     pub fn new(
         id: usize,
         evaluator: Arc<E>,
-        tt: Arc<crate::search::ShardedTranspositionTable>,
+        tt: Arc<ShardedTranspositionTable>,
         shared_state: Arc<SharedSearchState>,
     ) -> Self {
         // Create searcher with shared TT
