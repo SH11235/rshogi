@@ -371,7 +371,7 @@ impl TimeManager {
 
     // Helper methods to create managers
     #[cfg(not(test))]
-    fn byoyomi_manager(&self) -> byoyomi::ByoyomiManager {
+    fn byoyomi_manager(&self) -> byoyomi::ByoyomiManager<'_> {
         byoyomi::ByoyomiManager {
             byoyomi_state: &self.inner.byoyomi_state,
             stop_flag: &self.inner.stop_flag,
@@ -379,7 +379,7 @@ impl TimeManager {
     }
 
     #[cfg(test)]
-    pub fn byoyomi_manager(&self) -> byoyomi::ByoyomiManager {
+    pub fn byoyomi_manager(&self) -> byoyomi::ByoyomiManager<'_> {
         byoyomi::ByoyomiManager {
             byoyomi_state: &self.inner.byoyomi_state,
             stop_flag: &self.inner.stop_flag,
@@ -387,7 +387,7 @@ impl TimeManager {
     }
 
     #[cfg(not(test))]
-    fn ponder_manager(&self) -> ponder::PonderManager {
+    fn ponder_manager(&self) -> ponder::PonderManager<'_> {
         ponder::PonderManager {
             is_ponder: &self.inner.is_ponder,
             active_time_control: &self.inner.active_time_control,
@@ -405,7 +405,7 @@ impl TimeManager {
     }
 
     #[cfg(test)]
-    pub fn ponder_manager(&self) -> ponder::PonderManager {
+    pub fn ponder_manager(&self) -> ponder::PonderManager<'_> {
         ponder::PonderManager {
             is_ponder: &self.inner.is_ponder,
             active_time_control: &self.inner.active_time_control,
@@ -423,7 +423,7 @@ impl TimeManager {
     }
 
     #[cfg(not(test))]
-    fn state_checker(&self) -> state::StateChecker {
+    fn state_checker(&self) -> state::StateChecker<'_> {
         state::StateChecker {
             active_time_control: &self.inner.active_time_control,
             last_pv_change_ms: &self.inner.last_pv_change_ms,
@@ -438,7 +438,7 @@ impl TimeManager {
     }
 
     #[cfg(test)]
-    pub fn state_checker(&self) -> state::StateChecker {
+    pub fn state_checker(&self) -> state::StateChecker<'_> {
         state::StateChecker {
             active_time_control: &self.inner.active_time_control,
             last_pv_change_ms: &self.inner.last_pv_change_ms,

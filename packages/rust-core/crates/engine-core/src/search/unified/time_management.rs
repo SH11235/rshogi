@@ -64,6 +64,8 @@ pub fn create_time_manager(
         Some(time_manager)
     } else if !matches!(limits.time_control, TimeControl::Infinite) || limits.depth.is_some() {
         // Normal time control or depth limit
+        // Note: Even for Infinite time control, we create a TimeManager if there's a depth limit.
+        // This allows unified handling of polling intervals and early termination when depth is reached.
         log::debug!("Creating TimeManager with time_control: {:?}", limits.time_control);
 
         // Convert SearchLimits to TimeLimits
