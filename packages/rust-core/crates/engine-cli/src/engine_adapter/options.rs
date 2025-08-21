@@ -10,8 +10,9 @@ use log::{debug, info, warn};
 
 use crate::engine_adapter::EngineAdapter;
 use crate::usi::{
-    clamp_periods, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS, OPT_BYOYOMI_OVERHEAD_MS,
-    OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_OVERHEAD_MS, OPT_USI_BYOYOMI_PERIODS,
+    clamp_periods, send_info_string, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS,
+    OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_OVERHEAD_MS,
+    OPT_USI_BYOYOMI_PERIODS,
 };
 use engine_core::time_management::constants::{
     DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
@@ -36,6 +37,7 @@ impl EngineAdapter {
                 ],
             ),
             EngineOption::filename("EvalFile", "".to_string()), // Add EvalFile option
+            EngineOption::button("ClearHash"),                  // Add ClearHash button
             EngineOption::spin(
                 OPT_BYOYOMI_PERIODS,
                 1,
@@ -95,9 +97,7 @@ impl EngineAdapter {
         match name {
             "USI_Hash" => {
                 if let Some(val) = value {
-                    let hash_size = val.parse::<usize>().map_err(|_| {
-                        anyhow!("Invalid hash size: '{}'. Must be a number between 1 and 1024", val)
-                    })?;
+                    let hash_size = Self::parse_u64_in_range("USI_Hash", val, 1, 1024)? as usize;
                     self.hash_size = hash_size;
 
                     // Apply to engine if it exists
@@ -270,6 +270,14 @@ impl EngineAdapter {
                     )?;
                 }
             }
+            "ClearHash" => {
+                if let Some(ref mut engine) = self.engine {
+                    engine.clear_hash();
+                    send_info_string("Hash table cleared")?;
+                } else {
+                    warn!("ClearHash: No engine available");
+                }
+            }
             _ => {
                 warn!("Unknown option '{name}' ignored for compatibility");
             }
@@ -320,7 +328,7 @@ mod tests {
         // Test invalid number
         let result = adapter.set_option("USI_Hash", Some("not_a_number"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid hash size"));
+        assert!(result.unwrap_err().to_string().contains("Invalid USI_Hash"));
 
         // Test empty value
         let result = adapter.set_option("USI_Hash", None);
@@ -343,6 +351,67 @@ mod tests {
         if let Some(ref engine) = adapter.engine {
             // Hash size should be set as pending in the engine
             assert_eq!(engine.get_hash_size(), 16); // Default until applied
+        }
+    }
+
+    #[test]
+    fn test_usi_hash_boundary_values() {
+        let mut adapter = EngineAdapter::new();
+
+        // Test minimum value (1)
+        assert!(adapter.set_option("USI_Hash", Some("1")).is_ok());
+        assert_eq!(adapter.hash_size, 1);
+
+        // Test maximum value (1024)
+        assert!(adapter.set_option("USI_Hash", Some("1024")).is_ok());
+        assert_eq!(adapter.hash_size, 1024);
+
+        // Test below minimum (0)
+        let result = adapter.set_option("USI_Hash", Some("0"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be between 1 and 1024"));
+
+        // Test above maximum (2048)
+        let result = adapter.set_option("USI_Hash", Some("2048"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be between 1 and 1024"));
+
+        // Test negative value (-1)
+        let result = adapter.set_option("USI_Hash", Some("-1"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid USI_Hash"));
+    }
+
+    #[test]
+    fn test_hash_size_applied_after_search() {
+        let mut adapter = EngineAdapter::new();
+
+        // Initialize with Material engine
+        adapter.set_option("EngineType", Some("Material")).unwrap();
+        adapter.initialize().unwrap();
+
+        // Set hash size
+        adapter.set_option("USI_Hash", Some("32")).unwrap();
+
+        // Set position
+        adapter.set_position(true, None, &[]).unwrap();
+
+        // Take engine and run a short search
+        if let Ok(mut engine) = adapter.take_engine() {
+            // Verify initial size
+            assert_eq!(engine.get_hash_size(), 16);
+
+            // Run a search (which should apply pending TT size)
+            let mut pos = engine_core::Position::startpos();
+            let limits = engine_core::search::SearchLimits::builder().depth(1).build();
+            let _ = engine.search(&mut pos, limits);
+
+            // Verify new size is applied
+            assert_eq!(engine.get_hash_size(), 32);
+
+            adapter.return_engine(engine);
+        } else {
+            panic!("Failed to take engine");
         }
     }
 }

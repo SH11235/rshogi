@@ -2,7 +2,7 @@
 //!
 //! Provides a simple interface for using different evaluators with the search engine
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -506,9 +506,14 @@ impl Engine {
 
     /// Set transposition table size in MB
     pub fn set_hash_size(&mut self, size_mb: usize) {
+        // Clamp to valid range (1-1024 MB)
+        let clamped_size = size_mb.clamp(1, 1024);
+        if clamped_size != size_mb {
+            warn!("Hash size {size_mb}MB clamped to {clamped_size}MB (valid range: 1-1024)");
+        }
         // Store in pending to be applied on next search
-        self.pending_tt_size = Some(size_mb.max(1));
-        info!("Hash size will be updated to {size_mb}MB on next search");
+        self.pending_tt_size = Some(clamped_size);
+        info!("Hash size will be updated to {clamped_size}MB on next search");
     }
 
     /// Apply pending TT size (called at search start)
@@ -551,7 +556,50 @@ impl Engine {
             // Recreate shared TT with new size
             self.shared_tt = Arc::new(ShardedTranspositionTable::new(new_size));
 
-            info!("Applied hash size: {}MB", self.tt_size_mb);
+            // Recreate the single-threaded searcher for the current engine type
+            match self.engine_type {
+                EngineType::Material => {
+                    if let Ok(mut guard) = self.material_searcher.lock() {
+                        *guard = Some(MaterialSearcher::new_with_tt_size(
+                            *self.material_evaluator,
+                            self.tt_size_mb,
+                        ));
+                    }
+                }
+                EngineType::Nnue => {
+                    let nnue_proxy = NNUEEvaluatorProxy {
+                        evaluator: self.nnue_evaluator.clone(),
+                    };
+                    if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+                        *guard =
+                            Some(NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb));
+                    }
+                }
+                EngineType::Enhanced => {
+                    if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+                        *guard = Some(MaterialEnhancedSearcher::new_with_tt_size(
+                            *self.material_evaluator,
+                            self.tt_size_mb,
+                        ));
+                    }
+                }
+                EngineType::EnhancedNnue => {
+                    let nnue_proxy = NNUEEvaluatorProxy {
+                        evaluator: self.nnue_evaluator.clone(),
+                    };
+                    if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+                        *guard = Some(NnueEnhancedSearcher::new_with_tt_size(
+                            nnue_proxy,
+                            self.tt_size_mb,
+                        ));
+                    }
+                }
+            }
+
+            info!(
+                "Applied hash size: {}MB, recreated {:?} searcher",
+                self.tt_size_mb, self.engine_type
+            );
         }
     }
 
@@ -691,6 +739,73 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Clear the transposition table
+    pub fn clear_hash(&mut self) {
+        // Since shared_tt is Arc<ShardedTranspositionTable>, we need to recreate it
+        // This will effectively clear all entries
+        self.shared_tt = Arc::new(ShardedTranspositionTable::new(self.tt_size_mb));
+
+        // Also need to clear searchers as they might have cached TT references
+        // Set them to None so they'll be recreated with the new TT on next search
+        if let Ok(mut guard) = self.material_searcher.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.material_parallel_searcher.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.nnue_parallel_searcher.lock() {
+            *guard = None;
+        }
+
+        // Recreate the single-threaded searcher for the current engine type
+        match self.engine_type {
+            EngineType::Material => {
+                if let Ok(mut guard) = self.material_searcher.lock() {
+                    *guard = Some(MaterialSearcher::new_with_tt_size(
+                        *self.material_evaluator,
+                        self.tt_size_mb,
+                    ));
+                }
+            }
+            EngineType::Nnue => {
+                let nnue_proxy = NNUEEvaluatorProxy {
+                    evaluator: self.nnue_evaluator.clone(),
+                };
+                if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+                    *guard = Some(NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb));
+                }
+            }
+            EngineType::Enhanced => {
+                if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+                    *guard = Some(MaterialEnhancedSearcher::new_with_tt_size(
+                        *self.material_evaluator,
+                        self.tt_size_mb,
+                    ));
+                }
+            }
+            EngineType::EnhancedNnue => {
+                let nnue_proxy = NNUEEvaluatorProxy {
+                    evaluator: self.nnue_evaluator.clone(),
+                };
+                if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+                    *guard =
+                        Some(NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb));
+                }
+            }
+        }
+
+        info!("Transposition table cleared and searchers recreated");
     }
 }
 
