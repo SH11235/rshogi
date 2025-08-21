@@ -205,3 +205,17 @@ pub fn wait_for_search_completion(
     }
     Ok(())
 }
+
+/// Helper function to send bestmove and finalize the search state
+/// This ensures current_search_is_ponder flag is always reset after sending bestmove
+pub fn send_bestmove_and_finalize(
+    best_move: String,
+    ponder: Option<String>,
+    search_state: &mut SearchState,
+    bestmove_sent: &mut bool,
+    current_search_is_ponder: &mut bool,
+) -> Result<()> {
+    let result = send_bestmove_once(best_move, ponder, search_state, bestmove_sent);
+    *current_search_is_ponder = false; // Reset ponder flag after sending bestmove
+    result
+}
