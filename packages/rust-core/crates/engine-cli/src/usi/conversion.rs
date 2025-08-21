@@ -29,6 +29,9 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
     for (i, move_str) in moves.iter().enumerate() {
         let mv = parse_usi_move(move_str).map_err(|e| anyhow!(e))?;
 
+        // Clear legal moves list before generating new moves
+        legal_moves.clear();
+
         // Generate all legal moves for current position
         move_gen.generate_all(&pos, &mut legal_moves);
 
