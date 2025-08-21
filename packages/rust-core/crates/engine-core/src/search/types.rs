@@ -7,6 +7,10 @@ use std::time::Duration;
 /// Info callback type for search progress reporting
 pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send + Sync>;
 
+/// Extended info callback type that includes NodeType information
+pub type ExtendedInfoCallback =
+    Arc<dyn Fn(u8, i32, u64, Duration, &[Move], NodeType) + Send + Sync>;
+
 /// Search statistics
 #[derive(Clone, Debug, Default)]
 pub struct SearchStats {
