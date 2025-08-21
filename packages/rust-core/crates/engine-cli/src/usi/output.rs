@@ -1,6 +1,7 @@
 //! USI protocol output formatting
 
 use crate::utils::lock_or_recover_generic;
+use engine_core::search::NodeType;
 use once_cell::sync::Lazy;
 use std::fmt;
 use std::io::{BufWriter, Write};
@@ -63,6 +64,9 @@ pub struct SearchInfo {
     /// Score in centipawns or mate
     pub score: Option<Score>,
 
+    /// Score bound type (exact, lowerbound, upperbound)
+    pub score_bound: Option<ScoreBound>,
+
     /// Current move being searched
     pub currmove: Option<String>,
 
@@ -89,9 +93,28 @@ pub enum Score {
     Cp(i32),
 
     /// Mate in N moves (positive = winning, negative = losing)
-    /// TODO: Implement mate detection and use this variant
-    #[allow(dead_code)]
     Mate(i32),
+}
+
+/// Score bound type for USI output
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScoreBound {
+    /// Exact score
+    Exact,
+    /// Lower bound (score is at least this value)
+    LowerBound,
+    /// Upper bound (score is at most this value)
+    UpperBound,
+}
+
+impl From<NodeType> for ScoreBound {
+    fn from(node_type: NodeType) -> Self {
+        match node_type {
+            NodeType::Exact => ScoreBound::Exact,
+            NodeType::LowerBound => ScoreBound::LowerBound,
+            NodeType::UpperBound => ScoreBound::UpperBound,
+        }
+    }
 }
 
 impl fmt::Display for UsiResponse {
@@ -144,10 +167,21 @@ impl fmt::Display for SearchInfo {
         }
 
         if let Some(score) = self.score {
-            match score {
-                Score::Cp(cp) => parts.push(format!("score cp {cp}")),
-                Score::Mate(mate) => parts.push(format!("score mate {mate}")),
+            let mut score_str = match score {
+                Score::Cp(cp) => format!("score cp {cp}"),
+                Score::Mate(mate) => format!("score mate {mate}"),
+            };
+
+            // Add bound type if present
+            if let Some(bound) = self.score_bound {
+                match bound {
+                    ScoreBound::LowerBound => score_str.push_str(" lowerbound"),
+                    ScoreBound::UpperBound => score_str.push_str(" upperbound"),
+                    ScoreBound::Exact => {} // No suffix for exact scores
+                }
             }
+
+            parts.push(score_str);
         }
 
         if let Some(multipv) = self.multipv {

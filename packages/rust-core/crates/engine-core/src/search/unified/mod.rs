@@ -24,7 +24,7 @@ use crate::{
         adaptive_prefetcher::AdaptivePrefetcher,
         history::{CounterMoveHistory, History},
         parallel::shared::DuplicationStats,
-        types::SearchStack,
+        types::{NodeType, SearchStack},
         SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable,
     },
     shogi::{Move, Position},
@@ -261,6 +261,7 @@ where
             best_move,
             score: best_score,
             stats: self.stats.clone(),
+            node_type: NodeType::Exact, // TODO: Track actual node type from root search
         }
     }
 

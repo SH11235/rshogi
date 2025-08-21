@@ -10,7 +10,7 @@ use engine_core::time_management::TimeControl;
 fn test_search_stack_integration() {
     // Create enhanced searcher with SearchStack
     let evaluator = MaterialEvaluator;
-    let mut searcher: UnifiedSearcher<MaterialEvaluator, true, true, 16> =
+    let mut searcher: UnifiedSearcher<MaterialEvaluator, true, true> =
         UnifiedSearcher::new(evaluator);
 
     // Create initial position
@@ -48,7 +48,7 @@ fn test_search_stack_integration() {
 fn test_search_stack_killers() {
     // Test that killer moves are properly stored in SearchStack
     let evaluator = MaterialEvaluator;
-    let mut searcher: UnifiedSearcher<MaterialEvaluator, true, true, 16> =
+    let mut searcher: UnifiedSearcher<MaterialEvaluator, true, true> =
         UnifiedSearcher::new(evaluator);
 
     // Create position
@@ -78,7 +78,7 @@ fn test_search_stack_killers() {
 fn test_search_stack_static_eval_cache() {
     // Test that static eval is cached in SearchStack
     let evaluator = MaterialEvaluator;
-    let mut searcher: UnifiedSearcher<MaterialEvaluator, true, true, 16> =
+    let mut searcher: UnifiedSearcher<MaterialEvaluator, true, true> =
         UnifiedSearcher::new(evaluator);
 
     // Create position

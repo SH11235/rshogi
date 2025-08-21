@@ -31,7 +31,7 @@ fn bench_tt_access_pattern(c: &mut Criterion) {
             b.iter(|| {
                 let mut pos = Position::from_sfen(sfen).unwrap();
                 let mut searcher =
-                    UnifiedSearcher::<MaterialEvaluator, true, true, 32>::new(MaterialEvaluator);
+                    UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
 
                 // Search to depth 5 which should generate significant TT traffic
                 let limits = SearchLimitsBuilder::default().depth(5).build();
@@ -45,7 +45,7 @@ fn bench_tt_access_pattern(c: &mut Criterion) {
             b.iter(|| {
                 let mut pos = Position::from_sfen(sfen).unwrap();
                 let mut searcher =
-                    UnifiedSearcher::<MaterialEvaluator, true, true, 32>::new(MaterialEvaluator);
+                    UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
 
                 // Fixed nodes to get consistent measurements
                 let limits = SearchLimitsBuilder::default().fixed_nodes(50000).build();
