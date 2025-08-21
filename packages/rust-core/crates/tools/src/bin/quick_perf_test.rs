@@ -26,8 +26,10 @@ fn main() {
         println!("Position {}/{}:", i + 1, positions.len());
 
         let mut pos = Position::from_sfen(sfen).expect("Valid SFEN");
-        let mut searcher =
-            UnifiedSearcher::<MaterialEvaluator, true, true, 16>::new(MaterialEvaluator);
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new_with_tt_size(
+            MaterialEvaluator,
+            16,
+        );
 
         let limits = SearchLimitsBuilder::default().depth(depth).build();
 

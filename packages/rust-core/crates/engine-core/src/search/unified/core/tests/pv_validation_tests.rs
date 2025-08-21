@@ -44,7 +44,7 @@ fn test_pv_move_validation() {
     // Test that invalid moves are not added to PV
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
     let pos = Position::startpos();
 
     // Create an invalid move (moving from empty square)
@@ -63,7 +63,7 @@ fn test_pv_null_move_rejection() {
     // Test that NULL moves are rejected from PV
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false, 0>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, false, false>::new(evaluator);
 
     // Try to add NULL move to PV
     searcher.pv_table.set_line(0, Move::NULL, &[]);
@@ -102,7 +102,7 @@ fn test_tt_move_validation_in_search() {
     // Test that TT moves are validated before use
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false, 1>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false>::new(evaluator);
 
     // Initialize TT
     searcher.tt = Some(Arc::new(ShardedTranspositionTable::new(1)));
@@ -187,7 +187,7 @@ fn test_hash_collision_move_validation() {
     // Test handling of hash collisions where TT returns wrong position's move
 
     let evaluator = MaterialEvaluator;
-    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false, 1>::new(evaluator);
+    let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false>::new(evaluator);
     searcher.tt = Some(Arc::new(ShardedTranspositionTable::new(1)));
 
     // Create two positions with potentially colliding hashes
