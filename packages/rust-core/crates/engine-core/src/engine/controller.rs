@@ -555,6 +555,7 @@ impl Engine {
 
             // Recreate shared TT with new size
             self.shared_tt = Arc::new(ShardedTranspositionTable::new(new_size));
+            let num_shards = self.shared_tt.num_shards();
 
             // Recreate the single-threaded searcher for the current engine type
             match self.engine_type {
@@ -597,8 +598,8 @@ impl Engine {
             }
 
             info!(
-                "Applied hash size: {}MB, recreated {:?} searcher",
-                self.tt_size_mb, self.engine_type
+                "Applied hash size: {}MB, shards: {}, recreated {:?} searcher",
+                self.tt_size_mb, num_shards, self.engine_type
             );
         }
     }
@@ -746,6 +747,12 @@ impl Engine {
         // Since shared_tt is Arc<ShardedTranspositionTable>, we need to recreate it
         // This will effectively clear all entries
         self.shared_tt = Arc::new(ShardedTranspositionTable::new(self.tt_size_mb));
+        let num_shards = self.shared_tt.num_shards();
+
+        info!(
+            "Hash table cleared (engine: {:?}, size: {}MB, shards: {})",
+            self.engine_type, self.tt_size_mb, num_shards
+        );
 
         // Also need to clear searchers as they might have cached TT references
         // Set them to None so they'll be recreated with the new TT on next search

@@ -268,11 +268,9 @@ impl EngineAdapter {
             "ClearHash" => {
                 if let Some(ref mut engine) = self.engine {
                     engine.clear_hash();
-                    let engine_type = engine.get_engine_type();
-                    let tt_size_mb = engine.get_hash_size();
-                    send_info_string(format!(
-                        "Hash table cleared (engine: {engine_type:?}, size: {tt_size_mb}MB)"
-                    ))?;
+                    // The engine's clear_hash() method already logs detailed info
+                    // We just send a simple confirmation to GUI
+                    send_info_string("Hash table cleared")?;
                 } else {
                     warn!("ClearHash: No engine available (search in progress)");
                     send_info_string("ClearHash skipped: search in progress")?;
