@@ -54,10 +54,17 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
         // Generate all legal moves for current position
         move_gen.generate_all(&pos, &mut legal_moves);
 
-        // Check if the parsed move is legal by comparing semantically
-        let is_legal = legal_moves.as_slice().iter().any(|&legal_mv| moves_equal(mv, legal_mv));
+        // Find the actual legal move that matches the parsed move
+        let legal_move = legal_moves
+            .as_slice()
+            .iter()
+            .find(|&&legal_mv| moves_equal(mv, legal_mv))
+            .copied();
 
-        if !is_legal {
+        if let Some(legal_mv) = legal_move {
+            // Use the actual legal move which has correct piece type and capture info
+            pos.do_move(legal_mv);
+        } else {
             // Additional debugging
             debug!(
                 "Parsed move details: from={:?}, to={:?}, drop={}, promote={}",
@@ -105,8 +112,6 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
                 legal_moves.len()
             ));
         }
-
-        pos.do_move(mv);
     }
 
     Ok(pos)
