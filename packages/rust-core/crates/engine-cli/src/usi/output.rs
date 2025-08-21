@@ -638,7 +638,7 @@ mod tests {
         };
         let resp = UsiResponse::Info(info);
         assert_eq!(resp.to_string(), "info depth 15 score mate 5 pv 3g3f");
-        
+
         // Test mate 0 output
         let info = SearchInfo {
             depth: Some(12),

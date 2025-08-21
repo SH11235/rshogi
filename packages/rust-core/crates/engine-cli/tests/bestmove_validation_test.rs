@@ -7,33 +7,15 @@ use engine_cli::engine_adapter::EngineAdapter;
 // Additional imports for new tests
 mod to_usi_score_tests {
     use engine_cli::usi::output::Score;
+    use engine_cli::utils::to_usi_score;
     use engine_core::search::constants::{MATE_SCORE, MAX_PLY};
-
-    /// Convert raw engine score to USI score format (Cp or Mate)
-    /// This is a copy of the private function for testing
-    fn to_usi_score(raw_score: i32) -> Score {
-        if raw_score.abs() >= MATE_SCORE - MAX_PLY as i32 {
-            // It's a mate score - calculate mate distance
-            let mate_in_half = MATE_SCORE - raw_score.abs();
-            // Calculate mate in moves (1 move = 2 plies)
-            // Use max(1) to avoid "mate 0" (some GUIs prefer "mate 1" for immediate mate)
-            let mate_in = ((mate_in_half + 1) / 2).max(1);
-            if raw_score > 0 {
-                Score::Mate(mate_in)
-            } else {
-                Score::Mate(-mate_in)
-            }
-        } else {
-            Score::Cp(raw_score)
-        }
-    }
 
     #[test]
     fn test_to_usi_score_mate_edges() {
         // Test mate score boundaries
-        // MATE_SCORE-0 should be mate 1 (not mate 0)
+        // MATE_SCORE-0 should be mate 0 (USI spec compliant)
         match to_usi_score(MATE_SCORE) {
-            Score::Mate(n) => assert_eq!(n, 1, "Immediate mate should be mate 1"),
+            Score::Mate(n) => assert_eq!(n, 0, "Immediate winning mate should be mate 0"),
             _ => panic!("Expected mate score"),
         }
 
@@ -57,7 +39,9 @@ mod to_usi_score_tests {
 
         // Negative mate scores
         match to_usi_score(-MATE_SCORE) {
-            Score::Mate(n) => assert_eq!(n, -1, "Being mated immediately should be mate -1 (USI allows negative mate)"),
+            Score::Mate(n) => {
+                assert_eq!(n, 0, "Immediate losing mate is also mate 0 (no -0 in USI)")
+            }
             _ => panic!("Expected negative mate score"),
         }
 
