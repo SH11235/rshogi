@@ -305,7 +305,13 @@ where
             };
 
             // Late move reduction using advanced pruning module
-            let gives_check = false; // TODO: implement gives_check detection
+            // Use lightweight pre-filter first, then accurate check if needed
+            let gives_check = if crate::search::unified::pruning::likely_could_give_check(pos, mv) {
+                pos.gives_check(mv)
+            } else {
+                false
+            };
+
             let reduction = if USE_PRUNING
                 && crate::search::unified::pruning::can_do_lmr(
                     depth,
