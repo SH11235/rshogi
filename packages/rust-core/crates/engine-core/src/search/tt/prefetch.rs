@@ -11,8 +11,8 @@ use std::arch::x86_64::{_mm_prefetch, _MM_HINT_NTA, _MM_HINT_T0, _MM_HINT_T1, _M
 /// Statistics for prefetch operations
 #[derive(Debug, Clone, Copy)]
 pub struct PrefetchStats {
-    pub calls: u64,    // Number of prefetch calls
-    pub hits: u64,     // Kept for compatibility (same as calls for now)
+    pub calls: u64, // Number of prefetch calls
+    pub hits: u64,  // Kept for compatibility (same as calls for now)
     pub misses: u64,
     pub hit_rate: f64,
     pub distance: usize,
