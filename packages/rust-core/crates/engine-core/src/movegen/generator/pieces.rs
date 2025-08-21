@@ -112,9 +112,12 @@ pub(super) fn generate_pawn_moves(gen: &mut MoveGenImpl, from: Square, promoted:
         }
     };
 
-    // Check if destination is occupied
-    if gen.pos.board.piece_on(to).is_some() {
-        return;
+    // Check if destination is occupied by our own piece (can't move there)
+    if let Some(piece) = gen.pos.board.piece_on(to) {
+        if piece.color == us {
+            return; // Blocked by our own piece
+        }
+        // Otherwise it's an enemy piece - we can capture it
     }
 
     gen.add_single_move(from, to, PieceType::Pawn);

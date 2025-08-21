@@ -75,8 +75,17 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             )?;
 
             let mut engine = lock_or_recover_adapter(ctx.engine);
-            engine.set_position(startpos, sfen.as_deref(), &moves)?;
-            log::info!("Position command completed");
+            match engine.set_position(startpos, sfen.as_deref(), &moves) {
+                Ok(()) => {
+                    log::info!("Position command completed");
+                }
+                Err(e) => {
+                    // Log error but don't crash - USI engines should be robust
+                    log::error!("Failed to set position: {e}");
+                    send_info_string(format!("Error: Failed to set position - {e}"))?;
+                    // Don't propagate the error - continue running
+                }
+            }
         }
 
         UsiCommand::Go(params) => {
