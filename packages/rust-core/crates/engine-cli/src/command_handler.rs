@@ -273,12 +273,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     ))?;
 
                     log::info!("Sending committed bestmove from session on stop: {best_move}");
-                    return send_bestmove_once(
-                        best_move,
-                        ponder,
-                        ctx.search_state,
-                        ctx.bestmove_sent,
-                    );
+                    let result =
+                        send_bestmove_once(best_move, ponder, ctx.search_state, ctx.bestmove_sent);
+                    *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
+                    return result;
                 }
             }
         }
@@ -345,6 +343,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         }
                         log::debug!("Sending emergency fallback bestmove: {move_str}");
                         send_bestmove_once(move_str, None, ctx.search_state, ctx.bestmove_sent)?;
+                        *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
                     }
                     Err(e) => {
                         log::error!("Emergency fallback move generation failed: {e}");
@@ -354,6 +353,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             ctx.search_state,
                             ctx.bestmove_sent,
                         )?;
+                        *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
                     }
                 }
                 break;
@@ -443,6 +443,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                             ctx.search_state,
                                             ctx.bestmove_sent,
                                         )?;
+                                        *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
                                         break;
                                     }
                                     Err(e) => {
@@ -482,6 +483,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     ctx.search_state,
                                     ctx.bestmove_sent,
                                 )?;
+                                *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
                             }
                             Err(e) => {
                                 log::error!("Fallback move generation failed: {e}");
@@ -491,6 +493,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     ctx.search_state,
                                     ctx.bestmove_sent,
                                 )?;
+                                *ctx.current_search_is_ponder = false; // Reset ponder flag after sending bestmove
                             }
                         }
                         break;
