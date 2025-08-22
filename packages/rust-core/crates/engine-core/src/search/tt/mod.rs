@@ -18,8 +18,9 @@ pub mod utils;
 #[cfg(test)]
 mod tests;
 
-use crate::shogi::Move;
+use crate::usi::move_to_usi;
 use crate::util;
+use crate::{movegen::generator::MoveGenImpl, shogi::Move};
 use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
 use flexible_bucket::FlexibleTTBucket;
@@ -798,21 +799,19 @@ impl TranspositionTable {
             };
 
             // Validate move is legal
-            // Since TT stores moves as 16-bit, we need to compare by USI string
-            let best_move_usi = crate::usi::move_to_usi(&best_move);
-            let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
+            // Since TT stores moves as 16-bit, we need to find the matching legal move
+            // with full piece type information
+            let mut move_gen = MoveGenImpl::new(pos);
             let legal_moves = move_gen.generate_all();
-            let legal_move = legal_moves
-                .as_slice()
-                .iter()
-                .find(|m| crate::usi::move_to_usi(m) == best_move_usi);
+            let legal_move =
+                legal_moves.as_slice().iter().find(|m| m.equals_without_piece_type(&best_move));
 
             let valid_move = match legal_move {
                 Some(m) => *m,
                 None => {
                     log::warn!(
                         "PV reconstruction: Illegal move {} at depth {}",
-                        best_move_usi,
+                        move_to_usi(&best_move),
                         pv.len()
                     );
                     break;
@@ -833,7 +832,7 @@ impl TranspositionTable {
             }
 
             // Check if we have no legal moves (mate)
-            let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
+            let mut move_gen = MoveGenImpl::new(pos);
             if move_gen.generate_all().is_empty() {
                 log::trace!("PV reconstruction: Mate position reached at depth {}", pv.len());
                 break;
@@ -928,17 +927,18 @@ mod pv_reconstruction_tests {
     use crate::{
         shogi::{Move, Position},
         usi::parse_usi_square,
+        PieceType,
     };
 
     /// Helper function to get a legal move from USI notation
     /// This ensures the move has proper piece type information from the move generator
     fn legal_usi(pos: &Position, usi: &str) -> Move {
-        let mut gen = crate::movegen::generator::MoveGenImpl::new(pos);
+        let mut gen = MoveGenImpl::new(pos);
         let moves = gen.generate_all();
         *moves
             .as_slice()
             .iter()
-            .find(|m| crate::usi::move_to_usi(m) == usi)
+            .find(|m| move_to_usi(m) == usi)
             .unwrap_or_else(|| panic!("USI move {} is not legal in the position", usi))
     }
 
@@ -965,11 +965,7 @@ mod pv_reconstruction_tests {
         assert!(entry.matches(test_hash), "Entry should match the hash");
         // TT stores moves as 16-bit, so piece type info is lost. Compare USI strings instead.
         let stored_move = entry.get_move().unwrap();
-        assert_eq!(
-            crate::usi::move_to_usi(&stored_move),
-            crate::usi::move_to_usi(&test_move),
-            "Move USI should match"
-        );
+        assert_eq!(move_to_usi(&stored_move), move_to_usi(&test_move), "Move USI should match");
         assert_eq!(entry.node_type(), NodeType::Exact, "Node type should be Exact");
 
         // Clear for actual test
@@ -977,35 +973,35 @@ mod pv_reconstruction_tests {
         tt.new_search();
 
         // Generate legal moves and find the ones we want
-        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let mut move_gen = MoveGenImpl::new(&pos);
         let moves = move_gen.generate_all();
 
         let move1 = moves
             .as_slice()
             .iter()
-            .find(|m| crate::usi::move_to_usi(m) == "7g7f")
+            .find(|m| move_to_usi(m) == "7g7f")
             .cloned()
             .expect("7g7f should be legal");
 
         let undo1 = pos.do_move(move1);
-        let mut move_gen2 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let mut move_gen2 = MoveGenImpl::new(&pos);
         let moves2 = move_gen2.generate_all();
 
         let move2 = moves2
             .as_slice()
             .iter()
-            .find(|m| crate::usi::move_to_usi(m) == "3c3d")
+            .find(|m| move_to_usi(m) == "3c3d")
             .cloned()
             .expect("3c3d should be legal after 7g7f");
 
         let undo2 = pos.do_move(move2);
-        let mut move_gen3 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let mut move_gen3 = MoveGenImpl::new(&pos);
         let moves3 = move_gen3.generate_all();
 
         let move3 = moves3
             .as_slice()
             .iter()
-            .find(|m| crate::usi::move_to_usi(m) == "6g6f")
+            .find(|m| move_to_usi(m) == "6g6f")
             .cloned()
             .expect("6g6f should be legal after 7g7f 3c3d");
 
@@ -1037,9 +1033,9 @@ mod pv_reconstruction_tests {
         // Should get all 3 moves since they're all EXACT
         assert_eq!(pv.len(), 3);
         // Compare USI strings since TT loses piece type info
-        assert_eq!(crate::usi::move_to_usi(&pv[0]), "7g7f");
-        assert_eq!(crate::usi::move_to_usi(&pv[1]), "3c3d");
-        assert_eq!(crate::usi::move_to_usi(&pv[2]), "6g6f");
+        assert_eq!(move_to_usi(&pv[0]), "7g7f");
+        assert_eq!(move_to_usi(&pv[1]), "3c3d");
+        assert_eq!(move_to_usi(&pv[2]), "6g6f");
     }
 
     #[test]
@@ -1054,24 +1050,24 @@ mod pv_reconstruction_tests {
         let mut pos = Position::startpos();
 
         // Generate legal moves and find the ones we want
-        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let mut move_gen = MoveGenImpl::new(&pos);
         let moves = move_gen.generate_all();
 
         let move1 = moves
             .as_slice()
             .iter()
-            .find(|m| crate::usi::move_to_usi(m) == "7g7f")
+            .find(|m| move_to_usi(m) == "7g7f")
             .cloned()
             .expect("7g7f should be legal");
 
         let undo1_temp = pos.do_move(move1);
-        let mut move_gen2 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let mut move_gen2 = MoveGenImpl::new(&pos);
         let moves2 = move_gen2.generate_all();
 
         let move2 = moves2
             .as_slice()
             .iter()
-            .find(|m| crate::usi::move_to_usi(m) == "3c3d")
+            .find(|m| move_to_usi(m) == "3c3d")
             .cloned()
             .expect("3c3d should be legal after 7g7f");
 
@@ -1098,7 +1094,7 @@ mod pv_reconstruction_tests {
         // Should only get first move since second is not EXACT
         assert_eq!(pv.len(), 1);
         // Compare USI strings since TT loses piece type info
-        assert_eq!(crate::usi::move_to_usi(&pv[0]), "7g7f");
+        assert_eq!(move_to_usi(&pv[0]), "7g7f");
     }
 
     #[test]
@@ -1187,7 +1183,7 @@ mod pv_reconstruction_tests {
             parse_usi_square("5e").unwrap(), // Empty square
             parse_usi_square("5d").unwrap(),
             false,
-            crate::shogi::board::PieceType::Pawn,
+            PieceType::Pawn,
             None,
         );
 
@@ -1211,11 +1207,7 @@ mod pv_reconstruction_tests {
         // PV should contain only the first legal move and stop at the illegal move
         assert_eq!(pv.len(), 1, "PV should stop at illegal move");
         // Compare USI strings since TT loses piece type info
-        assert_eq!(
-            crate::usi::move_to_usi(&pv[0]),
-            "7g7f",
-            "PV should contain the first legal move"
-        );
+        assert_eq!(move_to_usi(&pv[0]), "7g7f", "PV should contain the first legal move");
     }
 }
 
