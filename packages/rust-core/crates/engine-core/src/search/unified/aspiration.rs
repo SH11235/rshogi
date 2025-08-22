@@ -63,6 +63,7 @@ impl AspirationWindow {
     #[inline]
     fn ensure_valid_bounds(mut lo: i32, mut hi: i32, best_score: i32) -> (i32, i32) {
         // First, clamp to valid range
+        let best_score = best_score.clamp(-SEARCH_INF, SEARCH_INF);
         lo = lo.clamp(-SEARCH_INF, SEARCH_INF);
         hi = hi.clamp(-SEARCH_INF, SEARCH_INF);
 
@@ -658,7 +659,7 @@ mod tests {
         let aw = AspirationWindow::new();
 
         // Test best_score exactly at SEARCH_INF
-        // Note: SEARCH_INF is treated as a mate score, so window will be narrow
+        // Note: SEARCH_INF は mate 判定とは独立に「境界値」として扱われ、結果的に狭い窓になる
         let (alpha, beta) = aw.get_initial_bounds(3, SEARCH_INF);
         assert_eq!(beta, SEARCH_INF);
         assert!(alpha < beta);
