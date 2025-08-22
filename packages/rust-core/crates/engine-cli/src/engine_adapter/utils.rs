@@ -20,37 +20,6 @@ type EngineInfoCallback =
     Arc<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync>;
 
 impl EngineAdapter {
-    /// Log current position state for debugging
-    ///
-    /// This method is useful for tracking position changes during search
-    /// and detecting unexpected modifications.
-    ///
-    /// # Arguments
-    /// * `context` - A descriptive string indicating where this log is called from
-    pub fn log_position_state(&self, context: &str) {
-        if let Some(ref pos) = self.position {
-            debug!(
-                "{context}: position hash={:016x}, side_to_move={:?}, ply={}",
-                pos.hash, pos.side_to_move, pos.ply
-            );
-
-            // Check if position changed unexpectedly
-            if let (Some(start_hash), Some(start_side)) =
-                (self.search_start_position_hash, self.search_start_side_to_move)
-            {
-                if start_hash != pos.hash || start_side != pos.side_to_move {
-                    error!(
-                        "Position state changed during search! Start: hash={:016x}, side={:?} -> Current: hash={:016x}, side={:?}",
-                        start_hash,
-                        start_side,
-                        pos.hash,
-                        pos.side_to_move
-                    );
-                }
-            }
-        }
-    }
-
     /// Handle game over notification
     ///
     /// Clears the position and ponder state to prepare for a new game.

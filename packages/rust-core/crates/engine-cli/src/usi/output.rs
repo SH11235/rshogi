@@ -449,40 +449,10 @@ pub enum StdoutError {
     CriticalMessageFailed(#[from] std::io::Error),
 }
 
-/// Helper to send USI response to stdout with automatic flush (exits on error)
-///
-/// Use this in worker threads or contexts where error propagation is not feasible.
-/// This function will call `std::process::exit(1)` on critical errors.
-pub fn send_response_or_exit(response: UsiResponse) {
-    if let Err(e) = send_response_safe(response) {
-        match e {
-            StdoutError::BrokenPipe => {
-                log::error!("Broken pipe detected, GUI disconnected");
-                // Exit with code 1 (portable) instead of 141 (Unix-specific)
-                std::process::exit(1);
-            }
-            StdoutError::TooManyErrors(count) => {
-                log::error!("Too many stdout errors ({count}), exiting");
-                std::process::exit(1);
-            }
-            StdoutError::CriticalMessageFailed(io_err) => {
-                log::error!("Failed to send critical response: {io_err}");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
-/// Helper to send USI response, returning Result for error propagation
+/// Send USI response with error handling, returning Result for proper error propagation
 ///
 /// Use this in main thread and contexts where errors can be propagated up the call stack.
-/// For worker threads and fire-and-forget contexts, use `send_response_or_exit` instead.
 pub fn send_response(response: UsiResponse) -> Result<(), StdoutError> {
-    send_response_safe(response)
-}
-
-/// Send USI response with error handling, returning Result for proper error propagation
-pub fn send_response_safe(response: UsiResponse) -> Result<(), StdoutError> {
     use std::io;
 
     // Determine if this is a critical response

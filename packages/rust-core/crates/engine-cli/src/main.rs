@@ -371,128 +371,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             }
                         }
                     }
-                    Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
-                        // Only send bestmove if:
-                        // 1. We're still searching
-                        // 2. The search_id matches current search (prevents old search results)
-                        // 3. NOT a pure ponder search (USI protocol: no bestmove during ponder)
-                        if search_state.can_accept_bestmove() && search_id == current_search_id && !current_search_is_ponder {
-                            // Use BestmoveEmitter for centralized emission
-                            if let Some(ref emitter) = current_bestmove_emitter {
-                                // Log position state for debugging (debug level)
-                                if log::log_enabled!(log::Level::Debug) {
-                                    let adapter = lock_or_recover_adapter(&engine);
-                                    adapter.log_position_state("BestMove validation");
-                                }
-
-                                // Validate bestmove before sending
-                                let is_valid = {
-                                    let adapter = lock_or_recover_adapter(&engine);
-                                    adapter.is_legal_move(&best_move)
-                                };
-
-                                if is_valid {
-                                    log::info!("Validated bestmove ready: {best_move}");
-
-                                    // Determine stop reason based on current state
-                                    let reason = if search_state == SearchState::StopRequested {
-                                        TerminationReason::UserStop
-                                    } else {
-                                        TerminationReason::Completed
-                                    };
-
-                                    let meta = BestmoveMeta {
-                                        from: BestmoveSource::WorkerBestmove,
-                                        stop_info: StopInfo {
-                                            reason,
-                                            elapsed_ms: 0, // TODO: Get actual elapsed time if available
-                                            nodes: 0, // TODO: Get actual node count if available
-                                            depth_reached: 0, // TODO: Get actual depth if available
-                                            hard_timeout: false,
-                                        },
-                                        stats: BestmoveStats {
-                                            depth: 0, // TODO: Get actual depth from worker
-                                            seldepth: None,
-                                            score: "unknown".to_string(),
-                                            nodes: 0,
-                                            nps: 0,
-                                        },
-                                    };
-
-                                    emitter.emit(best_move, ponder_move, meta)?;
-                                    search_state = SearchState::Idle;
-                                                                        current_search_is_ponder = false;
-                                    current_bestmove_emitter = None;
-                                } else {
-                                    // Log detailed error information
-                                    log::error!("Invalid bestmove detected: {best_move}");
-                                    let adapter = lock_or_recover_adapter(&engine);
-                                    adapter.log_position_state("Invalid bestmove context");
-
-                                    // Try to generate a fallback move
-                                    log::warn!("Attempting to generate fallback move after invalid bestmove");
-                                    match generate_fallback_move(&engine, None, allow_null_move) {
-                                        Ok(fallback_move) => {
-                                            log::info!("Fallback move ready: {fallback_move}");
-
-                                            let meta = BestmoveMeta {
-                                                from: BestmoveSource::WorkerBestmoveInvalidFallback,
-                                                stop_info: StopInfo {
-                                                    reason: TerminationReason::Error,
-                                                    elapsed_ms: 0,
-                                                    nodes: 0,
-                                                    depth_reached: 0,
-                                                    hard_timeout: false,
-                                                },
-                                                stats: BestmoveStats {
-                                                    depth: 0,
-                                                    seldepth: None,
-                                                    score: "unknown".to_string(),
-                                                    nodes: 0,
-                                                    nps: 0,
-                                                },
-                                            };
-
-                                            emitter.emit(fallback_move, None, meta)?;
-                                            search_state = SearchState::Idle;
-                                                                                        current_search_is_ponder = false;
-                                            current_bestmove_emitter = None;
-                                        }
-                                        Err(e) => {
-                                            log::error!("Failed to generate fallback move: {e}");
-
-                                            let meta = BestmoveMeta {
-                                                from: BestmoveSource::ResignInvalidBestmove,
-                                                stop_info: StopInfo {
-                                                    reason: TerminationReason::Error,
-                                                    elapsed_ms: 0,
-                                                    nodes: 0,
-                                                    depth_reached: 0,
-                                                    hard_timeout: false,
-                                                },
-                                                stats: BestmoveStats {
-                                                    depth: 0,
-                                                    seldepth: None,
-                                                    score: "unknown".to_string(),
-                                                    nodes: 0,
-                                                    nps: 0,
-                                                },
-                                            };
-
-                                            emitter.emit("resign".to_string(), None, meta)?;
-                                            search_state = SearchState::Idle;
-                                                                                        current_search_is_ponder = false;
-                                            current_bestmove_emitter = None;
-                                        }
-                                    }
-                                }
-                            } else {
-                                log::error!("No BestmoveEmitter available for search {search_id}");
-                            }
-                        } else {
-                            log::debug!("Ignoring late/ponder bestmove: {best_move} (search_state={search_state:?}, search_id={search_id}, current={current_search_id}, is_ponder={current_search_is_ponder})");
-                        }
-                    }
+                    // WorkerMessage::BestMove has been completely removed.
+                    // All bestmove emissions now go through the session-based approach
+                    // (IterationComplete + SearchFinished messages)
                     Ok(WorkerMessage::PartialResult { .. }) => {
                         // Partial results are handled in stop command processing
                         log::trace!("PartialResult received in main loop");
@@ -712,12 +593,14 @@ mod tests {
                         .unwrap();
                 }
 
+                // WorkerMessage::BestMove has been removed - using SearchFinished instead
                 if i % 7 == 0 {
                     tx_clone
-                        .send(WorkerMessage::BestMove {
-                            best_move: format!("7g7f_{i}"),
-                            ponder_move: None,
+                        .send(WorkerMessage::SearchFinished {
+                            session_id: search_id,
+                            root_hash: 0,
                             search_id,
+                            stop_info: None,
                         })
                         .unwrap();
                 }
@@ -726,7 +609,7 @@ mod tests {
 
         // Process messages with state tracking
         let mut finished_per_search = [0; 3];
-        let mut bestmoves_per_search = [0; 3];
+        let mut search_finished_per_search = [0; 3];
 
         sender.join().unwrap();
 
@@ -738,8 +621,8 @@ mod tests {
                 } => {
                     finished_per_search[search_id as usize] += 1;
                 }
-                WorkerMessage::BestMove { search_id, .. } => {
-                    bestmoves_per_search[search_id as usize] += 1;
+                WorkerMessage::SearchFinished { search_id, .. } => {
+                    search_finished_per_search[search_id as usize] += 1;
                 }
                 _ => {}
             }
@@ -747,10 +630,10 @@ mod tests {
 
         // Verify all messages were received
         let total_finished: i32 = finished_per_search.iter().sum();
-        let total_bestmoves: i32 = bestmoves_per_search.iter().sum();
+        let total_search_finished: i32 = search_finished_per_search.iter().sum();
 
         assert!(total_finished > 0, "Should have received Finished messages");
-        assert!(total_bestmoves > 0, "Should have received BestMove messages");
+        assert!(total_search_finished > 0, "Should have received SearchFinished messages");
 
         // Each search should have received messages
         for (i, &count) in finished_per_search.iter().enumerate() {
