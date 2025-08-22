@@ -1,11 +1,13 @@
 //! Centralized bestmove emission with exactly-once guarantee
 //!
 //! This module ensures that bestmove is sent exactly once per search,
-//! and provides unified logging in LTSV format.
+//! and provides unified logging in tab-separated key=value format.
 
+use crate::types::BestmoveSource;
 use crate::usi::{send_info_string, send_response, UsiResponse};
 use engine_core::search::types::StopInfo;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// Statistics for bestmove emission
 pub struct BestmoveStats {
@@ -18,8 +20,8 @@ pub struct BestmoveStats {
 
 /// Metadata for bestmove emission
 pub struct BestmoveMeta {
-    /// Source of the bestmove ("session", "fallback", etc.)
-    pub from: &'static str,
+    /// Source of the bestmove
+    pub from: BestmoveSource,
     /// Stop information (required)
     pub stop_info: StopInfo,
     /// Search statistics
@@ -32,6 +34,8 @@ pub struct BestmoveEmitter {
     sent: AtomicBool,
     /// Search ID for this emitter
     search_id: u64,
+    /// Search start time for elapsed calculation
+    start_time: Instant,
 }
 
 impl BestmoveEmitter {
@@ -40,6 +44,7 @@ impl BestmoveEmitter {
         Self {
             sent: AtomicBool::new(false),
             search_id,
+            start_time: Instant::now(),
         }
     }
 
@@ -48,7 +53,7 @@ impl BestmoveEmitter {
         &self,
         best_move: String,
         ponder: Option<String>,
-        meta: BestmoveMeta,
+        mut meta: BestmoveMeta,
     ) -> anyhow::Result<()> {
         // Ensure exactly-once emission
         if self.sent.swap(true, Ordering::AcqRel) {
@@ -58,6 +63,20 @@ impl BestmoveEmitter {
                 best_move
             );
             return Ok(());
+        }
+
+        // Complement elapsed_ms and nps if needed
+        let actual_elapsed = self.start_time.elapsed();
+        let actual_elapsed_ms = actual_elapsed.as_millis() as u64;
+
+        // If elapsed_ms is 0, use actual elapsed time
+        if meta.stop_info.elapsed_ms == 0 && actual_elapsed_ms > 0 {
+            meta.stop_info.elapsed_ms = actual_elapsed_ms;
+        }
+
+        // Recalculate NPS if it's 0 and we have valid data
+        if meta.stats.nps == 0 && meta.stop_info.elapsed_ms > 0 && meta.stats.nodes > 0 {
+            meta.stats.nps = meta.stats.nodes.saturating_mul(1000) / meta.stop_info.elapsed_ms;
         }
 
         // Send USI bestmove response
@@ -77,7 +96,7 @@ impl BestmoveEmitter {
                     self.search_id
                 );
 
-                // Send unified LTSV log (single line for machine readability)
+                // Send unified tab-separated key=value log (single line for machine readability)
                 let stop_reason = meta.stop_info.reason.to_string();
                 let ponder_str = ponder.as_deref().unwrap_or("none");
 
@@ -113,7 +132,7 @@ impl BestmoveEmitter {
                 );
 
                 if let Err(e) = send_info_string(info_string) {
-                    log::warn!("Failed to send LTSV info after bestmove: {}", e);
+                    log::warn!("Failed to send tab-separated info after bestmove: {}", e);
                 }
                 Ok(())
             }
@@ -126,6 +145,9 @@ impl BestmoveEmitter {
                     e
                 );
                 // Reset sent flag since we failed to send
+                // Note: In current implementation, callers use `?` which makes this fatal,
+                // so retry won't happen. This is intentional for now but allows future
+                // non-fatal error handling if needed.
                 self.sent.store(false, Ordering::Release);
                 Err(anyhow::anyhow!("Failed to send bestmove: {}", e))
             }
@@ -146,7 +168,7 @@ mod tests {
 
     fn make_test_meta() -> BestmoveMeta {
         BestmoveMeta {
-            from: "test",
+            from: BestmoveSource::Test,
             stop_info: StopInfo {
                 reason: TerminationReason::TimeLimit,
                 elapsed_ms: 1000,

@@ -1,6 +1,5 @@
 use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::state::SearchState;
-use crate::usi;
 use crate::worker::{lock_or_recover_adapter, wait_for_worker_with_timeout, WorkerMessage};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
@@ -120,43 +119,6 @@ pub fn generate_fallback_move(
                 Ok("resign".to_string())
             }
         }
-    }
-}
-
-/// Calculate maximum expected search time from GoParams
-pub fn calculate_max_search_time(params: &usi::GoParams) -> Duration {
-    if params.infinite {
-        // For infinite search, use a large but reasonable timeout
-        return Duration::from_secs(3600); // 1 hour
-    }
-
-    if let Some(movetime) = params.movetime {
-        // Fixed time per move + margin
-        return Duration::from_millis(movetime + 1000);
-    }
-
-    // For time-based searches, estimate based on available time
-    let mut max_time = 0u64;
-
-    if let Some(wtime) = params.wtime {
-        max_time = max_time.max(wtime);
-    }
-    if let Some(btime) = params.btime {
-        max_time = max_time.max(btime);
-    }
-    if let Some(byoyomi) = params.byoyomi {
-        // Byoyomi could be used multiple times
-        let periods = params.periods.unwrap_or(1) as u64;
-        max_time = max_time.max(byoyomi * periods);
-    }
-
-    if max_time > 0 {
-        // Use half of available time + margin, with upper limit
-        // Cap at 10 seconds to avoid excessively long stop waits
-        Duration::from_millis((max_time / 2 + 2000).min(10000))
-    } else {
-        // Default timeout for depth/node limited searches
-        Duration::from_secs(10) // Reduced from 60s for better responsiveness
     }
 }
 

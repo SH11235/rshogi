@@ -65,7 +65,7 @@ impl SearchResult {
             score,
             stats,
             node_type: NodeType::Exact, // Default to Exact for backward compatibility
-            stop_info: None,            // Legacy compatibility
+            stop_info: Some(StopInfo::default()), // Default stop info instead of None
         }
     }
 
@@ -81,7 +81,7 @@ impl SearchResult {
             score,
             stats,
             node_type,
-            stop_info: None, // Legacy compatibility
+            stop_info: Some(StopInfo::default()), // Default stop info instead of None
         }
     }
 
@@ -122,7 +122,14 @@ impl SearchResult {
                 ..Default::default()
             },
             node_type: NodeType::Exact, // Default to Exact for legacy format
-            stop_info: None,            // Legacy compatibility
+            stop_info: Some(StopInfo {
+                // Construct from available data
+                reason: TerminationReason::Completed,
+                elapsed_ms: elapsed.as_millis() as u64,
+                nodes,
+                depth_reached: depth,
+                hard_timeout: false,
+            }),
         }
     }
 }
@@ -185,6 +192,18 @@ pub struct StopInfo {
     pub depth_reached: u8,
     /// Whether this was a hard timeout (no time for move recovery)
     pub hard_timeout: bool,
+}
+
+impl Default for StopInfo {
+    fn default() -> Self {
+        Self {
+            reason: TerminationReason::Completed,
+            elapsed_ms: 0,
+            nodes: 0,
+            depth_reached: 0,
+            hard_timeout: false,
+        }
+    }
 }
 
 /// Search state for tracking node types during search
