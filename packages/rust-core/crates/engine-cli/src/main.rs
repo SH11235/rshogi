@@ -198,7 +198,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                         from: BestmoveSource::Session,
                                                         stop_info: final_stop_info,
                                                         stats: BestmoveStats {
-                                                            depth: depth.into(),
+                                                            depth,
                                                             seldepth: None, // TODO: Get from session if available
                                                             score: score_str,
                                                             nodes,

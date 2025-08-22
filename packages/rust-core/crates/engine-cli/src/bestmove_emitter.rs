@@ -10,15 +10,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// Statistics for bestmove emission
+#[derive(Debug)]
 pub struct BestmoveStats {
-    pub depth: u32,
-    pub seldepth: Option<u32>,
+    pub depth: u8,
+    pub seldepth: Option<u8>,
     pub score: String,
     pub nodes: u64,
     pub nps: u64,
 }
 
 /// Metadata for bestmove emission
+#[derive(Debug)]
 pub struct BestmoveMeta {
     /// Source of the bestmove
     pub from: BestmoveSource,
@@ -90,13 +92,17 @@ impl BestmoveEmitter {
             Ok(()) => {
                 // Log after successful sending
                 log::info!(
-                    "Bestmove sent: {}, ponder: {:?} (search_id: {})",
+                    "Bestmove sent: {}, ponder: {:?} (search_id: {}, depth: {}, nps: {})",
                     best_move,
                     ponder,
-                    self.search_id
+                    self.search_id,
+                    meta.stats.depth,
+                    meta.stats.nps
                 );
 
                 // Send unified tab-separated key=value log (single line for machine readability)
+                // Note: The score field contains spaces (e.g., "cp 150", "mate 7") following USI protocol format.
+                // External parsers should use tab as the delimiter, not spaces.
                 let stop_reason = meta.stop_info.reason.to_string();
                 let ponder_str = ponder.as_deref().unwrap_or("none");
 
@@ -251,7 +257,7 @@ mod tests {
             let mut meta = make_test_meta();
             meta.stop_info.reason = reason;
 
-            // Verify Display format (which is used in LTSV)
+            // Verify Display format (used in logs with tab-separated key=value)
             let formatted = reason.to_string();
             assert!(!formatted.is_empty());
             assert!(formatted.chars().all(|c| c.is_alphabetic() || c == '_'));

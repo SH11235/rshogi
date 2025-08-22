@@ -45,6 +45,7 @@ pub type EngineInfoCallback =
 
 /// Source of bestmove emission
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BestmoveSource {
     /// Normal search session result
     Session,
