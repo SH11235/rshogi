@@ -259,7 +259,7 @@ where
                 self.stats.pv = pv.clone();
 
                 // Update score history for volatility calculation
-                self.aspiration_window.update_score(score);
+                self.aspiration_window.update_score(score, best_node_type);
 
                 // Try to reconstruct PV from TT if we have TT enabled
                 if USE_TT {
