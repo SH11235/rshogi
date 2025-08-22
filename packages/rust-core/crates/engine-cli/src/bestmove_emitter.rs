@@ -51,7 +51,7 @@ impl BestmoveEmitter {
         meta: BestmoveMeta,
     ) -> anyhow::Result<()> {
         // Ensure exactly-once emission
-        if self.sent.swap(true, Ordering::SeqCst) {
+        if self.sent.swap(true, Ordering::AcqRel) {
             log::debug!(
                 "Bestmove already sent for search {}, ignoring: {}",
                 self.search_id,
@@ -112,7 +112,9 @@ impl BestmoveEmitter {
                     ponder_str
                 );
 
-                send_info_string(info_string)?;
+                if let Err(e) = send_info_string(info_string) {
+                    log::warn!("Failed to send LTSV info after bestmove: {}", e);
+                }
                 Ok(())
             }
             Err(e) => {
@@ -124,7 +126,7 @@ impl BestmoveEmitter {
                     e
                 );
                 // Reset sent flag since we failed to send
-                self.sent.store(false, Ordering::SeqCst);
+                self.sent.store(false, Ordering::Release);
                 Err(anyhow::anyhow!("Failed to send bestmove: {}", e))
             }
         }

@@ -69,7 +69,7 @@ impl SearchSession {
     /// Update current iteration best
     pub fn update_current_best(
         &mut self,
-        depth: u32,
+        depth: u8,
         score: i32,
         pv: Vec<Move>,
         node_type: NodeType,
@@ -87,7 +87,7 @@ impl SearchSession {
 #[derive(Clone, Debug)]
 pub struct CommittedBest {
     /// Search depth
-    pub depth: u32,
+    pub depth: u8,
 
     /// Evaluation score (preserves cp/mate)
     pub score: Score,

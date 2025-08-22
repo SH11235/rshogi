@@ -227,7 +227,7 @@ impl EngineAdapter {
         Ok(ExtendedSearchResult {
             best_move: move_to_usi(&best_move),
             ponder_move,
-            depth: result.stats.depth as u32,
+            depth: result.stats.depth,
             score: result.score,
             pv,
             node_type: result.node_type,

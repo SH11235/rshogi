@@ -179,4 +179,3 @@ pub fn wait_for_search_completion(
     }
     Ok(())
 }
-
