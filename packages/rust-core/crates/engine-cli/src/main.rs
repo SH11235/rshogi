@@ -218,7 +218,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                             }
                                                 Err(e) => {
                                                     log::warn!("Session validation failed on finish: {e}");
-                                                    send_info_string("Warning: Bestmove validation failed, using fallback")?;
+                                                    if let Err(e) = send_info_string("Warning: Bestmove validation failed, using fallback") {
+                                                        log::warn!("Failed to send info string: {e}");
+                                                    }
                                                     // Try fallback move generation
                                                     match generate_fallback_move(&engine, None, allow_null_move) {
                                                         Ok(fallback_move) => {
@@ -541,7 +543,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         }
                     }
                     Ok(WorkerMessage::Error { message, search_id }) => {
-                        send_info_string(format!("Error (search_id: {search_id}): {message}"))?;
+                        if let Err(e) = send_info_string(format!("Error (search_id: {search_id}): {message}")) {
+                            log::warn!("Failed to send info string: {e}");
+                        }
                     }
                     Ok(WorkerMessage::EngineReturn(returned_engine)) => {
                         log::debug!("Engine returned from worker");
