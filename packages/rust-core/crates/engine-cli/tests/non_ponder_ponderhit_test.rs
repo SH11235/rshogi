@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -26,12 +27,18 @@ fn test_non_ponder_ponderhit_ignored() {
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
 
+    // Channel to collect bestmove messages
+    let (tx, rx) = mpsc::channel();
+
     // Capture stdout in background thread
     let stdout_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut lines = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             println!("<<< {line}");
+            if line.starts_with("bestmove") {
+                tx.send(line.clone()).ok();
+            }
             lines.push(line);
         }
         lines
@@ -51,19 +58,25 @@ fn test_non_ponder_ponderhit_ignored() {
     println!("\n--- Starting normal search (not ponder) ---");
     send_command(&mut stdin, "go depth 2");
 
-    // Wait for bestmove
-    thread::sleep(Duration::from_millis(300));
+    // Wait for first bestmove with timeout
+    let bestmove1 = rx.recv_timeout(Duration::from_secs(3)).expect("Should receive first bestmove");
+    println!("Received first bestmove: {bestmove1}");
 
     // Send ponderhit while in idle state (should be ignored)
     println!("\n--- Sending ponderhit in idle state (should be ignored) ---");
     send_command(&mut stdin, "ponderhit");
 
+    // Small delay to ensure ponderhit is processed
     thread::sleep(Duration::from_millis(100));
 
     // Start another search to verify engine is still functional
     println!("\n--- Starting another search ---");
     send_command(&mut stdin, "go depth 1");
-    thread::sleep(Duration::from_millis(300));
+
+    // Wait for second bestmove with timeout
+    let bestmove2 =
+        rx.recv_timeout(Duration::from_secs(3)).expect("Should receive second bestmove");
+    println!("Received second bestmove: {bestmove2}");
 
     // Clean up
     send_command(&mut stdin, "quit");
@@ -84,12 +97,18 @@ fn test_ponderhit_during_normal_search() {
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
 
+    // Channel to collect bestmove messages
+    let (tx, rx) = mpsc::channel();
+
     // Capture stdout
     let stdout_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut lines = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             println!("<<< {line}");
+            if line.starts_with("bestmove") {
+                tx.send(line.clone()).ok();
+            }
             lines.push(line);
         }
         lines
@@ -121,7 +140,11 @@ fn test_ponderhit_during_normal_search() {
     println!("\n--- Stopping search ---");
     send_command(&mut stdin, "stop");
 
-    thread::sleep(Duration::from_millis(200));
+    // Wait for bestmove from stop command
+    let bestmove = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("Should receive bestmove from stop");
+    println!("Received bestmove from stop: {bestmove}");
 
     // Clean up
     send_command(&mut stdin, "quit");
