@@ -53,6 +53,8 @@ pub struct SearchResult {
     pub stats: SearchStats,
     /// Node type (Exact, LowerBound, UpperBound)
     pub node_type: NodeType,
+    /// Information about why the search stopped (None for legacy compatibility)
+    pub stop_info: Option<StopInfo>,
 }
 
 impl SearchResult {
@@ -63,6 +65,7 @@ impl SearchResult {
             score,
             stats,
             node_type: NodeType::Exact, // Default to Exact for backward compatibility
+            stop_info: None,            // Legacy compatibility
         }
     }
 
@@ -78,6 +81,24 @@ impl SearchResult {
             score,
             stats,
             node_type,
+            stop_info: None, // Legacy compatibility
+        }
+    }
+
+    /// Create a new search result with node type and stop info
+    pub fn with_stop_info(
+        best_move: Option<Move>,
+        score: i32,
+        stats: SearchStats,
+        node_type: NodeType,
+        stop_info: StopInfo,
+    ) -> Self {
+        Self {
+            best_move,
+            score,
+            stats,
+            node_type,
+            stop_info: Some(stop_info),
         }
     }
 
@@ -101,6 +122,7 @@ impl SearchResult {
                 ..Default::default()
             },
             node_type: NodeType::Exact, // Default to Exact for legacy format
+            stop_info: None,            // Legacy compatibility
         }
     }
 }
@@ -114,6 +136,40 @@ pub enum NodeType {
     UpperBound,
     /// Lower bound (Cut node, fail high)  
     LowerBound,
+}
+
+/// Reason for search termination
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminationReason {
+    /// Time limit reached (soft or hard)
+    TimeLimit,
+    /// Node count limit reached
+    NodeLimit,
+    /// Maximum depth limit reached
+    DepthLimit,
+    /// User requested stop
+    UserStop,
+    /// Mate found
+    Mate,
+    /// Search completed normally (all iterations finished)
+    Completed,
+    /// Error occurred during search
+    Error,
+}
+
+/// Information about why the search stopped
+#[derive(Debug, Clone)]
+pub struct StopInfo {
+    /// The reason for termination
+    pub reason: TerminationReason,
+    /// Elapsed time in milliseconds
+    pub elapsed_ms: u64,
+    /// Total nodes searched
+    pub nodes: u64,
+    /// Maximum depth reached
+    pub depth_reached: u8,
+    /// Whether this was a hard timeout (no time for move recovery)
+    pub hard_timeout: bool,
 }
 
 /// Search state for tracking node types during search

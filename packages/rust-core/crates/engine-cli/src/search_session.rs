@@ -96,5 +96,7 @@ pub struct CommittedBest {
     pub pv: SmallVec<[Move; 32]>,
 
     /// Node type (Exact, LowerBound, UpperBound)
+    /// TODO: Use this for USI bound output (lowerbound/upperbound keywords)
+    #[allow(dead_code)]
     pub node_type: NodeType,
 }

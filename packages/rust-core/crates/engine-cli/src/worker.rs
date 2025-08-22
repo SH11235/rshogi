@@ -8,6 +8,7 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use engine_core::engine::controller::Engine;
 use engine_core::search::constants::MATE_SCORE;
+use engine_core::search::types::StopInfo;
 use engine_core::search::SearchLimits;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -29,6 +30,7 @@ pub enum WorkerMessage {
         session_id: u64,
         root_hash: u64,
         search_id: u64,
+        stop_info: Option<StopInfo>,
     },
 
     // Legacy messages (to be phased out)
@@ -522,6 +524,7 @@ pub fn search_worker(
                     session_id: session.id,
                     root_hash: session.root_hash,
                     search_id,
+                    stop_info: extended_result.stop_info,
                 }) {
                     log::error!("Failed to send search finished: {e}");
                 }

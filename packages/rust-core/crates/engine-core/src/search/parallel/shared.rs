@@ -5,6 +5,7 @@
 #[cfg(feature = "ybwc")]
 use crate::shogi::Position;
 use crate::{
+    search::types::TerminationReason,
     shogi::{Move, PieceType, Square},
     Color,
 };
@@ -439,6 +440,8 @@ impl SharedHistory {
     }
 }
 
+use crate::search::common::SharedStopInfo;
+
 /// Shared search state for parallel threads
 pub struct SharedSearchState {
     /// Best move found so far (encoded as u32)
@@ -461,6 +464,9 @@ pub struct SharedSearchState {
 
     /// Stop flag for all threads
     pub stop_flag: Arc<AtomicBool>,
+
+    /// Shared stop info for recording termination reason
+    pub stop_info: Arc<SharedStopInfo>,
 
     /// Shared history table
     pub history: Arc<SharedHistory>,
@@ -495,6 +501,7 @@ impl SharedSearchState {
             nodes_searched: AtomicU64::new(0),
             qnodes_searched: Arc::new(AtomicU64::new(0)),
             stop_flag,
+            stop_info: SharedStopInfo::new_arc(),
             history: Arc::new(SharedHistory::new()),
             duplication_stats: Arc::new(DuplicationStats::new()),
             #[cfg(feature = "ybwc")]
@@ -610,6 +617,30 @@ impl SharedSearchState {
 
     /// Set stop flag
     pub fn set_stop(&self) {
+        self.stop_flag.store(true, Ordering::Release);
+    }
+
+    /// Set stop flag with reason
+    pub fn set_stop_with_reason(
+        &self,
+        reason: TerminationReason,
+        elapsed_ms: u64,
+        nodes: u64,
+        depth: u8,
+        hard_timeout: bool,
+    ) {
+        use crate::search::types::StopInfo;
+
+        // Try to set stop info first (only first call succeeds)
+        self.stop_info.try_set(StopInfo {
+            reason,
+            elapsed_ms,
+            nodes,
+            depth_reached: depth,
+            hard_timeout,
+        });
+
+        // Then set the stop flag
         self.stop_flag.store(true, Ordering::Release);
     }
 
