@@ -191,13 +191,7 @@ impl ShardedTranspositionTable {
     /// Check if exact cut flag is set
     pub fn has_exact_cut(&self, hash: u64) -> bool {
         let shard_idx = self.shard_index(hash);
-        // Check if the entry exists and has the exact cut flag
-        if let Some(entry) = self.shards[shard_idx].probe(hash) {
-            // Check if this is an exact node
-            entry.node_type() == NodeType::Exact
-        } else {
-            false
-        }
+        self.shards[shard_idx].has_exact_cut(hash)
     }
 
     /// Check if garbage collection should be triggered
@@ -261,7 +255,7 @@ impl ShardedTranspositionTable {
                     log::trace!("PV reconstruction: Found entry for hash {hash:016x}");
                     e
                 }
-                Some(e) => {
+                Some(_) => {
                     log::trace!("PV reconstruction: Entry found but hash mismatch for {hash:016x}");
                     break;
                 }
@@ -290,24 +284,34 @@ impl ShardedTranspositionTable {
                 }
             };
 
-            // Validate move is legal (generate all legal moves and check membership)
+            // Validate move is legal
+            // Since TT stores moves as 16-bit, we need to compare by USI string
+            let best_move_usi = crate::usi::move_to_usi(&best_move);
             let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
             let legal_moves = move_gen.generate_all();
-            if !legal_moves.as_slice().contains(&best_move) {
-                log::warn!(
-                    "PV reconstruction: Illegal move {} at depth {}",
-                    crate::usi::move_to_usi(&best_move),
-                    pv.len()
-                );
-                break;
-            }
+            let legal_move = legal_moves
+                .as_slice()
+                .iter()
+                .find(|m| crate::usi::move_to_usi(m) == best_move_usi);
 
-            // Add move to PV
-            pv.push(best_move);
+            let valid_move = match legal_move {
+                Some(m) => *m,
+                None => {
+                    log::warn!(
+                        "PV reconstruction: Illegal move {} at depth {}",
+                        best_move_usi,
+                        pv.len()
+                    );
+                    break;
+                }
+            };
+
+            // Add move to PV (use the valid move with piece type info)
+            pv.push(valid_move);
 
             // Make the move
-            let undo_info = pos.do_move(best_move);
-            undo_stack.push((best_move, undo_info));
+            let undo_info = pos.do_move(valid_move);
+            undo_stack.push((valid_move, undo_info));
 
             // Check for terminal positions
             if pos.is_draw() {
@@ -349,6 +353,18 @@ mod tests {
         usi::parse_usi_square,
     };
 
+    /// Helper function to get a legal move from USI notation
+    /// This ensures the move has proper piece type information from the move generator
+    fn legal_usi(pos: &Position, usi: &str) -> Move {
+        let mut gen = crate::movegen::generator::MoveGenImpl::new(pos);
+        let moves = gen.generate_all();
+        *moves
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == usi)
+            .unwrap_or_else(|| panic!("USI move {} is not legal in the position", usi))
+    }
+
     #[test]
     fn test_sharded_tt_basic() {
         let tt = ShardedTranspositionTable::new(16);
@@ -384,8 +400,20 @@ mod tests {
         let hash = 0xFEDCBA9876543210;
         tt.store(hash, None, 200, 100, 8, NodeType::Exact);
 
-        // Should have exact cut since we stored an Exact node
+        // Initially should not have exact cut flag (ABDADA flag is separate from NodeType)
+        assert!(!tt.has_exact_cut(hash));
+
+        // Set exact cut flag
+        assert!(tt.set_exact_cut(hash));
+
+        // Now should have exact cut flag
         assert!(tt.has_exact_cut(hash));
+
+        // Clear exact cut flag
+        assert!(tt.clear_exact_cut(hash));
+
+        // Should no longer have exact cut flag
+        assert!(!tt.has_exact_cut(hash));
 
         // Non-existent hash should not have exact cut
         assert!(!tt.has_exact_cut(0x1111111111111111));
@@ -479,6 +507,58 @@ mod tests {
             // Also verify total size is correct
             assert_eq!(tt.size_mb(), size, "Size {}MB: actual size mismatch", size);
         }
+    }
+
+    #[test]
+    fn test_sharded_pv_reconstruction_stops_on_illegal_move() {
+        // Test that PV reconstruction stops when TT contains an illegal move
+        let mut tt = ShardedTranspositionTable::new(8);
+
+        // Initialize TT for new search (sets age)
+        tt.new_search();
+
+        // Create a position
+        let mut pos = Position::startpos();
+
+        // Get a legal move
+        let move1 = legal_usi(&pos, "7g7f");
+
+        // Create an illegal move (moving a piece that doesn't exist)
+        // This simulates TT corruption or a hash collision
+        let illegal_move = Move::normal_with_piece(
+            parse_usi_square("5e").unwrap(), // Empty square
+            parse_usi_square("5d").unwrap(),
+            false,
+            crate::shogi::board::PieceType::Pawn,
+            None,
+        );
+
+        // Store first move
+        let hash1 = pos.zobrist_hash;
+        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
+
+        // Make first move
+        let undo1 = pos.do_move(move1);
+        let hash2 = pos.zobrist_hash;
+
+        // Store illegal move for second position (might go to a different shard)
+        tt.store(hash2, Some(illegal_move), 50, 25, 9, NodeType::Exact);
+
+        // Undo to get back to start
+        pos.undo_move(move1, undo1);
+
+        // Reconstruct PV
+        let mut temp_pos = pos.clone();
+        let pv = tt.reconstruct_pv_from_tt(&mut temp_pos, 10);
+
+        // PV should contain only the first legal move and stop at the illegal move
+        assert_eq!(pv.len(), 1, "PV should stop at illegal move");
+        // Compare USI strings since TT loses piece type info
+        assert_eq!(
+            crate::usi::move_to_usi(&pv[0]),
+            "7g7f",
+            "PV should contain the first legal move"
+        );
     }
 
     #[test]
@@ -578,9 +658,10 @@ mod tests {
 
         // Should get all 3 moves
         assert_eq!(pv.len(), 3, "Should reconstruct 3 moves from TT");
-        assert_eq!(pv[0], move1);
-        assert_eq!(pv[1], move2);
-        assert_eq!(pv[2], move3);
+        // Compare USI strings since TT loses piece type info
+        assert_eq!(crate::usi::move_to_usi(&pv[0]), "7g7f");
+        assert_eq!(crate::usi::move_to_usi(&pv[1]), "3c3d");
+        assert_eq!(crate::usi::move_to_usi(&pv[2]), "6g6f");
     }
 
     #[test]
@@ -652,8 +733,9 @@ mod tests {
 
         // Should only get first 2 moves (stops at non-EXACT)
         assert_eq!(pv.len(), 2, "Should stop at non-EXACT node");
-        assert_eq!(pv[0], move1);
-        assert_eq!(pv[1], move2);
+        // Compare USI strings since TT loses piece type info
+        assert_eq!(crate::usi::move_to_usi(&pv[0]), "7g7f");
+        assert_eq!(crate::usi::move_to_usi(&pv[1]), "3c3d");
     }
 
     #[test]

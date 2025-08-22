@@ -515,6 +515,47 @@ impl TranspositionTable {
         false // Entry not found
     }
 
+    /// Check if ABDADA exact cut flag is set for the given hash
+    pub fn has_exact_cut(&self, hash: u64) -> bool {
+        let idx = self.bucket_index(hash);
+
+        if let Some(ref flexible_buckets) = self.flexible_buckets {
+            let bucket = &flexible_buckets[idx];
+            let entries_per_bucket = bucket.size.entries();
+
+            // Find the entry with matching key
+            for i in 0..entries_per_bucket {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
+                if stored_key == hash {
+                    // Entry found, check ABDADA flag
+                    let data = bucket.entries[data_idx].load(Ordering::Acquire);
+                    return (data & ABDADA_CUT_FLAG) != 0;
+                }
+            }
+        } else {
+            // Legacy bucket implementation
+            let bucket = &self.buckets[idx];
+
+            // Find the entry with matching key
+            for i in 0..BUCKET_SIZE {
+                let key_idx = i * 2;
+                let data_idx = key_idx + 1;
+
+                let stored_key = bucket.entries[key_idx].load(Ordering::Acquire);
+                if stored_key == hash {
+                    // Entry found, check ABDADA flag
+                    let data = bucket.entries[data_idx].load(Ordering::Acquire);
+                    return (data & ABDADA_CUT_FLAG) != 0;
+                }
+            }
+        }
+
+        false // Entry not found or flag not set
+    }
+
     /// Store entry in transposition table
     pub fn store(
         &self,
@@ -723,8 +764,15 @@ impl TranspositionTable {
 
             // Probe TT
             let entry = match self.probe(hash) {
-                Some(e) if e.matches(hash) => e,
-                _ => {
+                Some(e) if e.matches(hash) => {
+                    log::trace!("PV reconstruction: Found TT entry for hash {hash:016x}");
+                    e
+                }
+                Some(e) => {
+                    log::trace!("PV reconstruction: TT entry hash mismatch. Entry hash: {:016x}, Looking for: {hash:016x}", e.key());
+                    break;
+                }
+                None => {
                     log::trace!("PV reconstruction: No TT entry for hash {hash:016x}");
                     break;
                 }
@@ -749,24 +797,34 @@ impl TranspositionTable {
                 }
             };
 
-            // Validate move is legal (generate all legal moves and check membership)
+            // Validate move is legal
+            // Since TT stores moves as 16-bit, we need to compare by USI string
+            let best_move_usi = crate::usi::move_to_usi(&best_move);
             let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
             let legal_moves = move_gen.generate_all();
-            if !legal_moves.as_slice().contains(&best_move) {
-                log::warn!(
-                    "PV reconstruction: Illegal move {} at depth {}",
-                    crate::usi::move_to_usi(&best_move),
-                    pv.len()
-                );
-                break;
-            }
+            let legal_move = legal_moves
+                .as_slice()
+                .iter()
+                .find(|m| crate::usi::move_to_usi(m) == best_move_usi);
 
-            // Add move to PV
-            pv.push(best_move);
+            let valid_move = match legal_move {
+                Some(m) => *m,
+                None => {
+                    log::warn!(
+                        "PV reconstruction: Illegal move {} at depth {}",
+                        best_move_usi,
+                        pv.len()
+                    );
+                    break;
+                }
+            };
+
+            // Add move to PV (use the valid move with piece type info)
+            pv.push(valid_move);
 
             // Make the move
-            let undo_info = pos.do_move(best_move);
-            undo_stack.push((best_move, undo_info));
+            let undo_info = pos.do_move(valid_move);
+            undo_stack.push((valid_move, undo_info));
 
             // Check for terminal positions
             if pos.is_draw() {
@@ -872,6 +930,18 @@ mod pv_reconstruction_tests {
         usi::parse_usi_square,
     };
 
+    /// Helper function to get a legal move from USI notation
+    /// This ensures the move has proper piece type information from the move generator
+    fn legal_usi(pos: &Position, usi: &str) -> Move {
+        let mut gen = crate::movegen::generator::MoveGenImpl::new(pos);
+        let moves = gen.generate_all();
+        *moves
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == usi)
+            .unwrap_or_else(|| panic!("USI move {} is not legal in the position", usi))
+    }
+
     #[test]
     fn test_reconstruct_pv_from_tt_exact_only() {
         // Create a TT with some capacity
@@ -882,6 +952,29 @@ mod pv_reconstruction_tests {
 
         // Create a position
         let mut pos = Position::startpos();
+
+        // First, test basic TT functionality
+        let test_hash = pos.zobrist_hash;
+        let test_move = legal_usi(&pos, "7g7f");
+        tt.store(test_hash, Some(test_move), 100, 50, 10, NodeType::Exact);
+
+        // Verify the entry was stored
+        let probe_result = tt.probe(test_hash);
+        assert!(probe_result.is_some(), "TT probe should find the entry");
+        let entry = probe_result.unwrap();
+        assert!(entry.matches(test_hash), "Entry should match the hash");
+        // TT stores moves as 16-bit, so piece type info is lost. Compare USI strings instead.
+        let stored_move = entry.get_move().unwrap();
+        assert_eq!(
+            crate::usi::move_to_usi(&stored_move),
+            crate::usi::move_to_usi(&test_move),
+            "Move USI should match"
+        );
+        assert_eq!(entry.node_type(), NodeType::Exact, "Node type should be Exact");
+
+        // Clear for actual test
+        tt.clear();
+        tt.new_search();
 
         // Generate legal moves and find the ones we want
         let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
@@ -943,9 +1036,10 @@ mod pv_reconstruction_tests {
 
         // Should get all 3 moves since they're all EXACT
         assert_eq!(pv.len(), 3);
-        assert_eq!(pv[0], move1);
-        assert_eq!(pv[1], move2);
-        assert_eq!(pv[2], move3);
+        // Compare USI strings since TT loses piece type info
+        assert_eq!(crate::usi::move_to_usi(&pv[0]), "7g7f");
+        assert_eq!(crate::usi::move_to_usi(&pv[1]), "3c3d");
+        assert_eq!(crate::usi::move_to_usi(&pv[2]), "6g6f");
     }
 
     #[test]
@@ -1003,26 +1097,38 @@ mod pv_reconstruction_tests {
 
         // Should only get first move since second is not EXACT
         assert_eq!(pv.len(), 1);
-        assert_eq!(pv[0], move1);
+        // Compare USI strings since TT loses piece type info
+        assert_eq!(crate::usi::move_to_usi(&pv[0]), "7g7f");
     }
 
     #[test]
     fn test_reconstruct_pv_handles_cycles() {
         // Create a TT
-        let tt = TranspositionTable::new(1);
+        let mut tt = TranspositionTable::new(1);
+
+        // Initialize TT for new search (sets age)
+        tt.new_search();
 
         // Create a position
         let mut pos = Position::startpos();
 
-        // Create moves that lead to a cycle
-        let move1 =
-            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
-        let move2 =
-            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
-        let move3 =
-            Move::normal(parse_usi_square("7f").unwrap(), parse_usi_square("7g").unwrap(), false);
-        let move4 =
-            Move::normal(parse_usi_square("3d").unwrap(), parse_usi_square("3c").unwrap(), false);
+        // Get legal moves that can create a cycle (using pieces that can move back)
+        // Using Gold general (5i5h, then 5h5i is possible)
+        let move1 = legal_usi(&pos, "5i5h");
+
+        let undo1 = pos.do_move(move1);
+        let move2 = legal_usi(&pos, "5a5b");
+
+        let undo2 = pos.do_move(move2);
+        let move3 = legal_usi(&pos, "5h5i"); // Gold can move back
+
+        let undo3 = pos.do_move(move3);
+        let move4 = legal_usi(&pos, "5b5a"); // Gold can move back
+
+        // Undo moves to get back to earlier positions for storing
+        pos.undo_move(move3, undo3);
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
 
         // Store entries that would create a cycle
         let hash1 = pos.zobrist_hash;
@@ -1059,6 +1165,57 @@ mod pv_reconstruction_tests {
         // In this case, after move1, move2, move3, move4, we would be back at a position
         // we've already seen (the position after move1), so it should stop there
         assert!(pv.len() >= 4, "PV should have at least 4 moves, got {}", pv.len());
+    }
+
+    #[test]
+    fn test_reconstruct_pv_stops_on_illegal_tt_move() {
+        // Test that PV reconstruction stops when TT contains an illegal move
+        let mut tt = TranspositionTable::new(1);
+
+        // Initialize TT for new search (sets age)
+        tt.new_search();
+
+        // Create a position
+        let mut pos = Position::startpos();
+
+        // Get a legal move
+        let move1 = legal_usi(&pos, "7g7f");
+
+        // Create an illegal move (moving a piece that doesn't exist)
+        // This simulates TT corruption or a hash collision
+        let illegal_move = Move::normal_with_piece(
+            parse_usi_square("5e").unwrap(), // Empty square
+            parse_usi_square("5d").unwrap(),
+            false,
+            crate::shogi::board::PieceType::Pawn,
+            None,
+        );
+
+        // Store first move
+        let hash1 = pos.zobrist_hash;
+        tt.store(hash1, Some(move1), 100, 50, 10, NodeType::Exact);
+
+        // Make first move
+        let undo1 = pos.do_move(move1);
+        let hash2 = pos.zobrist_hash;
+
+        // Store illegal move for second position
+        tt.store(hash2, Some(illegal_move), 50, 25, 9, NodeType::Exact);
+
+        // Undo to get back to start
+        pos.undo_move(move1, undo1);
+
+        // Reconstruct PV
+        let pv = tt.reconstruct_pv_from_tt(&mut pos, 10);
+
+        // PV should contain only the first legal move and stop at the illegal move
+        assert_eq!(pv.len(), 1, "PV should stop at illegal move");
+        // Compare USI strings since TT loses piece type info
+        assert_eq!(
+            crate::usi::move_to_usi(&pv[0]),
+            "7g7f",
+            "PV should contain the first legal move"
+        );
     }
 }
 
