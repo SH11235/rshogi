@@ -52,6 +52,15 @@ pub trait TTOperations<const USE_TT: bool> {
             if let Some(ref tt) = self.tt() {
                 // Adjust mate scores to be relative to root position
                 let adjusted_score = crate::search::common::adjust_mate_score_for_tt(score, ply);
+
+                // Safety check: ensure adjusted score fits in i16
+                debug_assert!(
+                    adjusted_score >= i16::MIN as i32 && adjusted_score <= i16::MAX as i32,
+                    "Adjusted mate score {} out of i16 range at ply {}",
+                    adjusted_score,
+                    ply
+                );
+
                 // Store entry (duplication tracking temporarily disabled)
                 tt.store(hash, best_move, adjusted_score as i16, 0, depth, node_type);
 
