@@ -98,13 +98,20 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
         }
 
         UsiCommand::PonderHit => {
-            // Handle ponder hit
-            let mut engine = lock_or_recover_adapter(ctx.engine);
-            // Mark that we're no longer in pure ponder mode
-            *ctx.current_search_is_ponder = false;
-            match engine.ponder_hit() {
-                Ok(()) => log::debug!("Ponder hit successfully processed"),
-                Err(e) => log::debug!("Ponder hit ignored: {e}"),
+            // Handle ponder hit only if we're actively searching
+            if ctx.search_state.is_searching() && *ctx.search_state != SearchState::StopRequested {
+                let mut engine = lock_or_recover_adapter(ctx.engine);
+                // Mark that we're no longer in pure ponder mode
+                *ctx.current_search_is_ponder = false;
+                match engine.ponder_hit() {
+                    Ok(()) => log::debug!("Ponder hit successfully processed"),
+                    Err(e) => log::debug!("Ponder hit ignored: {e}"),
+                }
+            } else {
+                log::debug!(
+                    "Ponder hit ignored - not in active search state (state: {:?})",
+                    *ctx.search_state
+                );
             }
         }
 
@@ -114,12 +121,22 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
         }
 
         UsiCommand::GameOver { result } => {
-            // Stop any ongoing search
+            // Stop any ongoing search and ensure worker is properly cleaned up
             ctx.stop_flag.store(true, Ordering::Release);
+
+            // Wait for any ongoing search to complete before notifying game over
+            wait_for_search_completion(
+                ctx.search_state,
+                ctx.stop_flag,
+                ctx.worker_handle,
+                ctx.worker_rx,
+                ctx.engine,
+            )?;
 
             // Notify engine of game result
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.game_over(result);
+            log::debug!("Game over processed, worker cleaned up");
         }
 
         UsiCommand::UsiNewGame => {
@@ -417,6 +434,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 }
                 Ok(WorkerMessage::Info(info)) => {
                     // Forward info messages
+                    // TODO: Add search_id to Info messages to filter out stale messages from previous searches
+                    // This would prevent old search info from appearing during new searches
                     let _ = send_response(UsiResponse::Info(info));
                 }
                 Ok(WorkerMessage::PartialResult {
