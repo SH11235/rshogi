@@ -36,7 +36,7 @@ fn create_bestmove_meta(
             hard_timeout,
         },
         stats: BestmoveStats {
-            depth: depth.into(),
+            depth,
             seldepth: None,
             score: score.unwrap_or_else(|| "unknown".to_string()),
             nodes,
