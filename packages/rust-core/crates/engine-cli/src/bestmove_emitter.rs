@@ -24,8 +24,6 @@ pub struct BestmoveMeta {
     pub stop_info: StopInfo,
     /// Search statistics
     pub stats: BestmoveStats,
-    /// Search ID for tracking
-    pub search_id: u64,
 }
 
 /// Bestmove emitter with exactly-once guarantee
@@ -62,55 +60,74 @@ impl BestmoveEmitter {
             return Ok(());
         }
 
-        // Log before sending (while we still own the values)
-        log::info!(
-            "Bestmove sent: {}, ponder: {:?} (search_id: {})",
-            best_move,
-            ponder,
-            self.search_id
-        );
-
         // Send USI bestmove response
-        send_response(UsiResponse::BestMove {
+        let result = send_response(UsiResponse::BestMove {
             best_move: best_move.clone(),
             ponder: ponder.clone(),
-        })?;
+        });
 
-        // Send unified LTSV log (single line for machine readability)
-        let stop_reason = format!("{:?}", meta.stop_info.reason).to_lowercase();
-        let ponder_str = ponder.as_deref().unwrap_or("none");
+        // Handle send result
+        match result {
+            Ok(()) => {
+                // Log after successful sending
+                log::info!(
+                    "Bestmove sent: {}, ponder: {:?} (search_id: {})",
+                    best_move,
+                    ponder,
+                    self.search_id
+                );
 
-        let info_string = format!(
-            "kind=bestmove_sent \
-             search_id={} \
-             bestmove_from={} \
-             stop_reason={} \
-             depth={} \
-             seldepth={} \
-             score={} \
-             nodes={} \
-             nps={} \
-             elapsed_ms={} \
-             hard_timeout={} \
-             bestmove={} \
-             ponder={}",
-            meta.search_id,
-            meta.from,
-            stop_reason,
-            meta.stats.depth,
-            meta.stats.seldepth.unwrap_or(0),
-            meta.stats.score,
-            meta.stats.nodes,
-            meta.stats.nps,
-            meta.stop_info.elapsed_ms,
-            meta.stop_info.hard_timeout,
-            best_move,
-            ponder_str
-        );
+                // Send unified LTSV log (single line for machine readability)
+                let stop_reason = meta.stop_info.reason.to_string();
+                let ponder_str = ponder.as_deref().unwrap_or("none");
 
-        send_info_string(info_string)?;
+                let seldepth_str =
+                    meta.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
 
-        Ok(())
+                let info_string = format!(
+                    "kind=bestmove_sent\t\
+                     search_id={}\t\
+                     bestmove_from={}\t\
+                     stop_reason={}\t\
+                     depth={}\t\
+                     seldepth={}\t\
+                     score={}\t\
+                     nodes={}\t\
+                     nps={}\t\
+                     elapsed_ms={}\t\
+                     hard_timeout={}\t\
+                     bestmove={}\t\
+                     ponder={}",
+                    self.search_id,
+                    meta.from,
+                    stop_reason,
+                    meta.stats.depth,
+                    seldepth_str,
+                    meta.stats.score,
+                    meta.stats.nodes,
+                    meta.stats.nps,
+                    meta.stop_info.elapsed_ms,
+                    meta.stop_info.hard_timeout,
+                    best_move,
+                    ponder_str
+                );
+
+                send_info_string(info_string)?;
+                Ok(())
+            }
+            Err(e) => {
+                // Log error if send failed
+                log::error!(
+                    "Failed to send bestmove: {} (search_id: {}, error: {})",
+                    best_move,
+                    self.search_id,
+                    e
+                );
+                // Reset sent flag since we failed to send
+                self.sent.store(false, Ordering::SeqCst);
+                Err(anyhow::anyhow!("Failed to send bestmove: {}", e))
+            }
+        }
     }
 
     /// Check if bestmove has been sent
@@ -148,7 +165,6 @@ mod tests {
                 nodes: 10000,
                 nps: 10000,
             },
-            search_id: 1,
         }
     }
 

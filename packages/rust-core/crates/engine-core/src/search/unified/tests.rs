@@ -244,13 +244,13 @@ fn test_early_stop_returns_valid_score() {
     // Test that stopping the search very early returns a valid score, not -SEARCH_INF + ply
     let evaluator = MaterialEvaluator;
     let mut searcher = UnifiedSearcher::<_, true, true>::new(evaluator);
-    
+
     // Create a stop flag that we'll set immediately
     let stop_flag = Arc::new(AtomicBool::new(false));
-    
+
     // Set limits with the stop flag
     let limits = SearchLimitsBuilder::default()
-        .depth(10)  // High depth limit
+        .depth(10) // High depth limit
         .stop_flag(stop_flag.clone())
         .build();
 
@@ -264,13 +264,16 @@ fn test_early_stop_returns_valid_score() {
     // The score should not be an adjusted value like -SEARCH_INF + 6
     assert!(
         result.score == -SEARCH_INF || result.score > -SEARCH_INF + 1000,
-        "Score should be either -SEARCH_INF or a reasonable evaluation, not {}", 
+        "Score should be either -SEARCH_INF or a reasonable evaluation, not {}",
         result.score
     );
-    
+
     // When depth 1 completes, ensure we got a reasonable score
     if result.stats.depth >= 1 {
-        assert!(result.score > -SEARCH_INF + 1000, "Completed depth should have reasonable score");
+        assert!(
+            result.score > -SEARCH_INF + 1000,
+            "Completed depth should have reasonable score"
+        );
     }
 }
 
@@ -286,11 +289,8 @@ fn test_interrupted_aspiration_window_score() {
         let mut searcher = UnifiedSearcher::<_, true, true>::new(MaterialEvaluator);
         let mut pos = Position::startpos();
         let stop_flag = Arc::new(AtomicBool::new(false));
-        
-        let limits = SearchLimitsBuilder::default()
-            .depth(10)
-            .stop_flag(stop_flag.clone())
-            .build();
+
+        let limits = SearchLimitsBuilder::default().depth(10).stop_flag(stop_flag.clone()).build();
 
         // Set stop flag after delay
         let stop_flag_clone = stop_flag.clone();
@@ -305,7 +305,7 @@ fn test_interrupted_aspiration_window_score() {
         }
 
         let result = searcher.search(&mut pos, limits);
-        
+
         // Verify the score is reasonable
         assert!(
             result.score == -SEARCH_INF || result.score > -SEARCH_INF + 1000 || result.score < SEARCH_INF - 1000,
@@ -314,7 +314,7 @@ fn test_interrupted_aspiration_window_score() {
             delay,
             result.stats.depth
         );
-        
+
         // The specific bug was returning -SEARCH_INF + 6
         assert_ne!(
             result.score,

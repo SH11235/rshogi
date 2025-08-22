@@ -27,12 +27,10 @@ fn test_bestmove_meta_construction() {
         from: "session",
         stop_info,
         stats,
-        search_id: 42,
     };
 
     // Verify fields
     assert_eq!(meta.from, "session");
-    assert_eq!(meta.search_id, 42);
     assert_eq!(meta.stop_info.reason, TerminationReason::TimeLimit);
     assert_eq!(meta.stats.depth, 18);
     assert_eq!(meta.stats.score, "cp 125");
@@ -71,7 +69,6 @@ fn test_bestmove_from_sources() {
             from: source,
             stop_info,
             stats,
-            search_id: 1,
         };
 
         assert_eq!(meta.from, source);
