@@ -134,16 +134,22 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 ctx.engine,
             )?;
 
+            // Log the previous search ID for debugging
+            log::debug!("Reset state after gameover: prev_search_id={}", *ctx.current_search_id);
+
             // Clear all search-related state for clean baseline
             *ctx.current_session = None;
             *ctx.bestmove_sent = false;
             *ctx.current_search_is_ponder = false;
-            *ctx.current_search_id = 0; // Reset search ID
+            // Reset to 0 so any late worker messages (old search_id) will be ignored
+            *ctx.current_search_id = 0;
+            // Explicitly set to Idle (defensive, wait_for_search_completion should have done this)
+            *ctx.search_state = SearchState::Idle;
 
             // Notify engine of game result
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.game_over(result);
-            log::debug!("Game over processed, worker cleaned up, state reset");
+            log::debug!("Game over processed, worker cleaned up, state reset to Idle");
         }
 
         UsiCommand::UsiNewGame => {
@@ -440,10 +446,11 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     }
                 }
                 Ok(WorkerMessage::Info(info)) => {
-                    // Forward info messages only during active search
+                    // Forward info messages during active search (including StopRequested state)
                     // TODO: Add search_id to Info messages to filter out stale messages from previous searches
                     // This would prevent old search info from appearing during new searches
-                    // For now, we only forward info messages when actively searching as a temporary measure
+                    // Note: is_searching() returns true for both Searching and StopRequested states,
+                    // allowing GUIs to receive final info messages during stop processing
                     if ctx.search_state.is_searching() {
                         let _ = send_response(UsiResponse::Info(info));
                     } else {
