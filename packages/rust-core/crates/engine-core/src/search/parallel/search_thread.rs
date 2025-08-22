@@ -326,6 +326,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                 stats: search_result.stats,
                 best_move: Some(root_move),
                 node_type: search_result.node_type,
+                stop_info: search_result.stop_info, // Preserve stop info from sub-search
             }
         } else {
             // At depth 1, just evaluate the position
@@ -349,6 +350,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                 },
                 best_move: Some(root_move),
                 node_type: crate::search::NodeType::Exact, // Depth 1 evaluation is exact
+                stop_info: None,                           // TODO: Will be populated in Phase 2
             }
         };
 

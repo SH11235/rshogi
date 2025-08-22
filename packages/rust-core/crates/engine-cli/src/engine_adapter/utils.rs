@@ -231,6 +231,7 @@ impl EngineAdapter {
             score: result.score,
             pv,
             node_type: result.node_type,
+            stop_info: result.stop_info,
         })
     }
 

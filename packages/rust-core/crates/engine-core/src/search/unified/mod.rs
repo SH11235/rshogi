@@ -325,6 +325,7 @@ where
             score: best_score,
             stats: self.stats.clone(),
             node_type: best_node_type,
+            stop_info: None, // TODO: Will be populated in Phase 2
         }
     }
 

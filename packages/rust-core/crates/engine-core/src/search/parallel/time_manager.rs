@@ -38,6 +38,8 @@ pub fn start_time_manager(
             // Don't stop if we haven't done any real work yet
             if nodes > 100 && time_manager.should_stop(nodes) {
                 info!("Time limit reached after {nodes} nodes, stopping search");
+                // TODO: Need to pass proper values for elapsed_ms, depth, hard_timeout
+                // For now, use set_stop() until we have proper context
                 shared_state.set_stop();
                 break;
             }

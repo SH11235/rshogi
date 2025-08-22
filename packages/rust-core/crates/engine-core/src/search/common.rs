@@ -1,8 +1,9 @@
 //! Common utilities for search algorithms
 
 use super::constants::*;
+use super::types::{StopInfo, TerminationReason};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 /// Common search context trait for shared functionality
@@ -32,8 +33,42 @@ pub trait SearchContext {
     }
 }
 
+/// Shared stop information that can be set once
+pub struct SharedStopInfo {
+    inner: OnceLock<StopInfo>,
+}
+
+impl SharedStopInfo {
+    /// Create a new shared stop info
+    pub fn new() -> Self {
+        Self {
+            inner: OnceLock::new(),
+        }
+    }
+
+    /// Try to set stop info (only first call succeeds)
+    pub fn try_set(&self, info: StopInfo) -> bool {
+        self.inner.set(info).is_ok()
+    }
+
+    /// Get the stop info if set
+    pub fn get(&self) -> Option<&StopInfo> {
+        self.inner.get()
+    }
+
+    /// Create an Arc<SharedStopInfo>
+    pub fn new_arc() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+}
+
+impl Default for SharedStopInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Common search limit checking functionality
-#[derive(Default)]
 pub struct LimitChecker {
     /// External stop flag
     pub stop_flag: Option<Arc<AtomicBool>>,
@@ -41,12 +76,29 @@ pub struct LimitChecker {
     pub time_limit: Option<Instant>,
     /// Node limit
     pub node_limit: Option<u64>,
+    /// Shared stop info for recording termination reason
+    pub stop_info: Arc<SharedStopInfo>,
 }
 
 impl LimitChecker {
     /// Create a new limit checker
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            stop_flag: None,
+            time_limit: None,
+            node_limit: None,
+            stop_info: SharedStopInfo::new_arc(),
+        }
+    }
+
+    /// Create with shared stop info
+    pub fn with_stop_info(stop_info: Arc<SharedStopInfo>) -> Self {
+        Self {
+            stop_flag: None,
+            time_limit: None,
+            node_limit: None,
+            stop_info,
+        }
     }
 
     /// Check if any limit has been exceeded
@@ -74,6 +126,72 @@ impl LimitChecker {
         }
 
         false
+    }
+
+    /// Check if any limit has been exceeded and record the reason
+    #[inline(always)]
+    pub fn should_stop_with_reason(
+        &self,
+        nodes: u64,
+        current_time: Instant,
+        start_time: Instant,
+        depth: u8,
+        hard_timeout: bool,
+    ) -> bool {
+        // Priority order: UserStop > TimeLimit > NodeLimit > DepthLimit
+
+        // Check external stop flag (highest priority)
+        if let Some(ref stop_flag) = self.stop_flag {
+            if stop_flag.load(Ordering::Acquire) {
+                let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                self.stop_info.try_set(StopInfo {
+                    reason: TerminationReason::UserStop,
+                    elapsed_ms,
+                    nodes,
+                    depth_reached: depth,
+                    hard_timeout: false,
+                });
+                return true;
+            }
+        }
+
+        // Check time limit
+        if let Some(time_limit) = self.time_limit {
+            if current_time >= time_limit {
+                let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                self.stop_info.try_set(StopInfo {
+                    reason: TerminationReason::TimeLimit,
+                    elapsed_ms,
+                    nodes,
+                    depth_reached: depth,
+                    hard_timeout,
+                });
+                return true;
+            }
+        }
+
+        // Check node limit
+        if let Some(max_nodes) = self.node_limit {
+            if nodes >= max_nodes {
+                let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                self.stop_info.try_set(StopInfo {
+                    reason: TerminationReason::NodeLimit,
+                    elapsed_ms,
+                    nodes,
+                    depth_reached: depth,
+                    hard_timeout: false,
+                });
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+impl Default for LimitChecker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -387,5 +505,114 @@ mod tests {
         let retrieved_at_ply7 = adjust_mate_score_from_tt(tt_stored, 7);
         assert_eq!(retrieved_at_ply7, MATE_SCORE);
         assert_eq!(get_mate_distance(retrieved_at_ply7), Some(0));
+    }
+
+    #[test]
+    fn test_shared_stop_info_once_only() {
+        use super::SharedStopInfo;
+        use crate::search::types::{StopInfo, TerminationReason};
+
+        let shared = SharedStopInfo::new();
+
+        // First set should succeed
+        let info1 = StopInfo {
+            reason: TerminationReason::TimeLimit,
+            elapsed_ms: 1000,
+            nodes: 10000,
+            depth_reached: 10,
+            hard_timeout: false,
+        };
+        assert!(shared.try_set(info1.clone()));
+
+        // Verify it was set
+        let retrieved = shared.get().unwrap();
+        assert_eq!(retrieved.reason, TerminationReason::TimeLimit);
+        assert_eq!(retrieved.elapsed_ms, 1000);
+
+        // Second set should be ignored
+        let info2 = StopInfo {
+            reason: TerminationReason::NodeLimit,
+            elapsed_ms: 2000,
+            nodes: 20000,
+            depth_reached: 20,
+            hard_timeout: true,
+        };
+        assert!(!shared.try_set(info2));
+
+        // Should still have the first value
+        let retrieved = shared.get().unwrap();
+        assert_eq!(retrieved.reason, TerminationReason::TimeLimit);
+        assert_eq!(retrieved.elapsed_ms, 1000);
+    }
+
+    #[test]
+    fn test_shared_stop_info_concurrent() {
+        use super::SharedStopInfo;
+        use crate::search::types::{StopInfo, TerminationReason};
+        use std::sync::Arc;
+        use std::thread;
+
+        let shared = Arc::new(SharedStopInfo::new());
+        let num_threads = 10;
+        let mut handles = vec![];
+
+        // Spawn multiple threads trying to set different stop reasons
+        for i in 0..num_threads {
+            let shared_clone = Arc::clone(&shared);
+            let handle = thread::spawn(move || {
+                let reason = match i % 4 {
+                    0 => TerminationReason::TimeLimit,
+                    1 => TerminationReason::NodeLimit,
+                    2 => TerminationReason::UserStop,
+                    _ => TerminationReason::DepthLimit,
+                };
+                let info = StopInfo {
+                    reason,
+                    elapsed_ms: (i as u64 + 1) * 100,
+                    nodes: (i as u64 + 1) * 1000,
+                    depth_reached: i as u8 + 1,
+                    hard_timeout: i % 2 == 0,
+                };
+                shared_clone.try_set(info);
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Exactly one value should be set
+        let result = shared.get();
+        assert!(result.is_some(), "One thread should have set a value");
+
+        // The value should be one of the attempted values
+        let info = result.unwrap();
+        assert!(info.elapsed_ms >= 100 && info.elapsed_ms <= 1000);
+        assert!(info.nodes >= 1000 && info.nodes <= 10000);
+    }
+
+    #[test]
+    fn test_stop_reason_priority() {
+        use crate::search::types::TerminationReason;
+
+        // Test that priority ordering works as expected
+        // Higher priority reasons should override lower ones
+        let priorities = vec![
+            (TerminationReason::Error, 7),
+            (TerminationReason::UserStop, 6),
+            (TerminationReason::TimeLimit, 5),
+            (TerminationReason::NodeLimit, 4),
+            (TerminationReason::DepthLimit, 3),
+            (TerminationReason::Mate, 2),
+            (TerminationReason::Completed, 1),
+        ];
+
+        // Verify priorities are distinct
+        let mut seen_priorities = std::collections::HashSet::new();
+        for (reason, priority) in &priorities {
+            assert!(seen_priorities.insert(priority), "Duplicate priority for {:?}", reason);
+        }
     }
 }
