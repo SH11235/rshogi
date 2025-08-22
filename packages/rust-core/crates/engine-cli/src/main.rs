@@ -191,7 +191,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                         reason: TerminationReason::Completed,
                                                         elapsed_ms,
                                                         nodes,
-                                                        depth_reached: depth as u8,
+                                                        depth_reached: depth,
                                                         hard_timeout: false,
                                                     });
 
@@ -200,7 +200,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                         from: "session",
                                                         stop_info: final_stop_info,
                                                         stats: BestmoveStats {
-                                                            depth,
+                                                            depth: depth.into(),
                                                             seldepth: None, // TODO: Get from session if available
                                                             score: score_str,
                                                             nodes,

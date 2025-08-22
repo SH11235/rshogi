@@ -343,4 +343,15 @@ mod tests {
         assert_eq!(result.stats.nodes, 1000);
         assert_eq!(result.stats.depth, 5);
     }
+
+    #[test]
+    fn test_termination_reason_display() {
+        assert_eq!(TerminationReason::TimeLimit.to_string(), "time_limit");
+        assert_eq!(TerminationReason::NodeLimit.to_string(), "node_limit");
+        assert_eq!(TerminationReason::DepthLimit.to_string(), "depth_limit");
+        assert_eq!(TerminationReason::UserStop.to_string(), "user_stop");
+        assert_eq!(TerminationReason::Mate.to_string(), "mate");
+        assert_eq!(TerminationReason::Completed.to_string(), "completed");
+        assert_eq!(TerminationReason::Error.to_string(), "error");
+    }
 }
