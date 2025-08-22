@@ -17,8 +17,11 @@ pub fn detect_game_phase_for_search(pos: &Position, ply: u32) -> GamePhase {
 
 /// Calculate phase score using the new module
 ///
-/// Returns a value from 0-128 for compatibility with existing code
+/// Returns a value from 0-128 for compatibility with existing code.
+/// Note: This is a legacy compatibility function where 128 = full material (opening phase)
+/// and 0 = no material (endgame phase).
 #[must_use]
+#[inline]
 pub fn calculate_phase_score(pos: &Position, ply: u32) -> u8 {
     use crate::game_phase::{compute_signals, PhaseParameters};
 
@@ -28,8 +31,16 @@ pub fn calculate_phase_score(pos: &Position, ply: u32) -> u8 {
     // Get combined score (0.0 - 1.0)
     let score = signals.combined_score(params.w_material, params.w_ply);
 
+    // Safety: Clamp to valid range before conversion
+    let clamped = score.clamp(0.0, 1.0);
+
     // Convert to 0-128 scale (inverted because old system uses 128 = full material)
-    ((1.0 - score) * 128.0) as u8
+    let inverted = 1.0 - clamped;
+    let scaled = inverted * 128.0;
+    let rounded = scaled.round() as i32;
+
+    // Final safety clamp to ensure we're in u8 range
+    rounded.clamp(0, 128) as u8
 }
 
 #[cfg(test)]
