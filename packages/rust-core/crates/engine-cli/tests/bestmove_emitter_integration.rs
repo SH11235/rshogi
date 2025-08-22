@@ -1,6 +1,7 @@
 //! Integration tests for bestmove emitter
 
 use engine_cli::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
+use engine_cli::types::BestmoveSource;
 use engine_core::search::types::{StopInfo, TerminationReason};
 use std::thread;
 
@@ -24,13 +25,13 @@ fn test_bestmove_meta_construction() {
     };
 
     let meta = BestmoveMeta {
-        from: "session",
+        from: BestmoveSource::Session,
         stop_info,
         stats,
     };
 
     // Verify fields
-    assert_eq!(meta.from, "session");
+    assert_eq!(meta.from, BestmoveSource::Session);
     assert_eq!(meta.stop_info.reason, TerminationReason::TimeLimit);
     assert_eq!(meta.stats.depth, 18);
     assert_eq!(meta.stats.score, "cp 125");
@@ -40,12 +41,12 @@ fn test_bestmove_meta_construction() {
 fn test_bestmove_from_sources() {
     // Test different bestmove sources
     let sources = vec![
-        "session",
-        "emergency_fallback",
-        "resign",
-        "resign_no_position",
-        "emergency_fallback_no_session",
-        "resign_fallback_failed",
+        BestmoveSource::Session,
+        BestmoveSource::EmergencyFallback,
+        BestmoveSource::Resign,
+        BestmoveSource::ResignNoPosition,
+        BestmoveSource::EmergencyFallbackNoSession,
+        BestmoveSource::ResignFallbackFailed,
     ];
 
     for source in sources {
