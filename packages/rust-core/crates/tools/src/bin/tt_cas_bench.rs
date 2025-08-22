@@ -7,7 +7,7 @@ use clap::{Arg, Command};
 use engine_core::{
     movegen::MoveGen,
     search::tt::{DetailedTTMetrics, NodeType, TranspositionTable},
-    shogi::{board::Position, MoveList},
+    shogi::{MoveList, Position},
 };
 use std::sync::{
     atomic::{AtomicU64, Ordering},

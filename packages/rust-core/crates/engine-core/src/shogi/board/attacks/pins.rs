@@ -3,7 +3,8 @@
 //! This module handles detection of pieces that are pinned to the king.
 
 use crate::shogi::attacks;
-use crate::shogi::board::{Bitboard, Color, PieceType, Position};
+use crate::shogi::board::{Bitboard, Color, PieceType};
+use crate::shogi::position::Position;
 
 impl Position {
     /// Get blockers for king (simplified version)

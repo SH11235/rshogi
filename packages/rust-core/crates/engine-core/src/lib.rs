@@ -11,13 +11,13 @@ pub mod time_management;
 pub mod usi;
 pub mod util;
 
-pub use engine::zobrist;
 pub use evaluation::{evaluate, nnue};
 pub use game_phase::GamePhase;
 pub use movegen::MoveGen;
 pub use opening_book::{BookMove, MoveEncoder, OpeningBookReader, PositionHasher};
 pub use search::history::History;
 pub use search::TranspositionTable;
+pub use shogi::position::ZobristTable;
 pub use shogi::{Bitboard, Board, Color, Piece, PieceType, Position, Square};
 pub use time_management::{TimeControl, TimeLimits, TimeManager, TimeParameters};
 pub use util::sync_compat::{Arc, AtomicU64, Ordering};

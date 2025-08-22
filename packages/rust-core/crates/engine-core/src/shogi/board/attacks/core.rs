@@ -4,7 +4,8 @@
 //! non-sliding and sliding piece attacks.
 
 use super::{non_sliding, sliding};
-use crate::shogi::board::{Bitboard, Color, PieceType, Position, Square};
+use crate::shogi::board::{Bitboard, Color, PieceType, Square};
+use crate::shogi::position::Position;
 
 impl Position {
     /// Check if specific color is in check

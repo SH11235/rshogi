@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn test_integration_with_transposition_table() {
         use crate::search::tt::TranspositionTable;
-        use crate::shogi::board::Position;
+        use crate::shogi::position::Position;
 
         let prefetcher = AdaptivePrefetcher::new();
         let tt = TranspositionTable::new(16);
