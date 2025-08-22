@@ -16,10 +16,9 @@
 //! Non-power-of-2 sizes may result in actual memory usage that differs from
 //! the requested size due to internal bucket alignment in TranspositionTable.
 
+use super::tt::pv_reconstruction::{reconstruct_pv_generic, TTProbe};
 use super::tt::{NodeType, TTEntry, TTEntryParams, TranspositionTable};
-use crate::{
-    movegen::generator::MoveGenImpl, search::MAX_PLY, shogi::Move, usi::move_to_usi, Position,
-};
+use crate::shogi::{Move, Position};
 use std::sync::Arc;
 
 /// Maximum number of shards (should be power of 2 for efficient modulo)
@@ -228,125 +227,27 @@ impl ShardedTranspositionTable {
     /// # Returns
     /// * Vector of moves forming the PV (empty if no PV found)
     pub fn reconstruct_pv_from_tt(&self, pos: &mut Position, max_depth: u8) -> Vec<Move> {
-        use crate::shogi::UndoInfo;
-        use std::collections::HashSet;
-
-        let mut pv = Vec::new();
-        let mut visited_hashes = HashSet::new();
-        let mut undo_stack: Vec<(Move, UndoInfo)> = Vec::new();
-
-        // Limit PV length to prevent excessive reconstruction
-        let max_pv_length = max_depth.min(MAX_PLY as u8) as usize;
-
-        for _ in 0..max_pv_length {
-            let hash = pos.zobrist_hash;
-
-            // Check for cycles
-            if !visited_hashes.insert(hash) {
-                log::debug!("PV reconstruction: Cycle detected at hash {hash:016x}");
-                break;
-            }
-
-            // Probe TT using sharded probe (automatically selects correct shard)
-            let entry = match self.probe(hash) {
-                Some(e) if e.matches(hash) => {
-                    log::trace!("PV reconstruction: Found entry for hash {hash:016x}");
-                    e
-                }
-                Some(_) => {
-                    log::trace!("PV reconstruction: Entry found but hash mismatch for {hash:016x}");
-                    break;
-                }
-                None => {
-                    log::trace!("PV reconstruction: No TT entry for hash {hash:016x}");
-                    break;
-                }
-            };
-
-            // Only follow EXACT entries
-            if entry.node_type() != NodeType::Exact {
-                log::trace!(
-                    "PV reconstruction: Stopping at non-EXACT node (type: {:?}) at depth {}",
-                    entry.node_type(),
-                    pv.len()
-                );
-                break;
-            }
-
-            // Get the best move
-            let best_move = match entry.get_move() {
-                Some(mv) => mv,
-                None => {
-                    log::trace!("PV reconstruction: No move in TT entry at depth {}", pv.len());
-                    break;
-                }
-            };
-
-            // Validate move is legal
-            // Since TT stores moves as 16-bit, we need to find the matching legal move
-            // with full piece type information
-            let mut move_gen = MoveGenImpl::new(pos);
-            let legal_moves = move_gen.generate_all();
-            let legal_move =
-                legal_moves.as_slice().iter().find(|m| m.equals_without_piece_type(&best_move));
-
-            let valid_move = match legal_move {
-                Some(m) => *m,
-                None => {
-                    log::warn!(
-                        "PV reconstruction: Illegal move {} at depth {}",
-                        move_to_usi(&best_move),
-                        pv.len()
-                    );
-                    break;
-                }
-            };
-
-            // Add move to PV (use the valid move with piece type info)
-            pv.push(valid_move);
-
-            // Make the move
-            let undo_info = pos.do_move(valid_move);
-            undo_stack.push((valid_move, undo_info));
-
-            // Check for terminal positions
-            if pos.is_draw() {
-                log::trace!("PV reconstruction: Draw position reached at depth {}", pv.len());
-                break;
-            }
-
-            // Check if we have no legal moves (mate)
-            let mut next_move_gen = MoveGenImpl::new(pos);
-            if next_move_gen.generate_all().is_empty() {
-                log::trace!("PV reconstruction: Mate position reached at depth {}", pv.len());
-                break;
-            }
-        }
-
-        // Undo all moves
-        for (mv, undo_info) in undo_stack.into_iter().rev() {
-            pos.undo_move(mv, undo_info);
-        }
-
-        log::debug!(
-            "PV reconstruction: Found {} moves from TT (max_depth: {})",
-            pv.len(),
-            max_depth
-        );
-
-        pv
+        reconstruct_pv_generic(self, pos, max_depth)
     }
 }
 
 /// Thread-safe reference to sharded TT
 pub type SharedShardedTT = Arc<ShardedTranspositionTable>;
 
+// Implement TTProbe trait for ShardedTranspositionTable
+impl TTProbe for ShardedTranspositionTable {
+    fn probe(&self, hash: u64) -> Option<TTEntry> {
+        self.probe(hash)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        movegen::generator::MoveGenImpl,
         shogi::{Move, Position},
-        usi::parse_usi_square,
+        usi::{move_to_usi, parse_usi_square},
     };
 
     /// Helper function to get a legal move from USI notation
