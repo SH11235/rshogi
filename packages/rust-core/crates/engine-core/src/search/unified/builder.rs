@@ -128,6 +128,7 @@ where
             adaptive_prefetcher,
             duplication_stats: self.duplication_stats,
             previous_pv: Vec::new(),
+            prev_root_hash: None,
         }
     }
 

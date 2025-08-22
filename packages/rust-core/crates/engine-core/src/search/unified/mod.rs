@@ -102,6 +102,9 @@ where
 
     /// Previous iteration's PV for move ordering
     previous_pv: Vec<Move>,
+
+    /// Previous root position hash (to detect position changes)
+    prev_root_hash: Option<u64>,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool> UnifiedSearcher<E, USE_TT, USE_PRUNING>
@@ -144,7 +147,11 @@ where
         self.aspiration_window.clear();
 
         // Clear previous PV if starting a new search from a different position
-        // (we'll update it at the end of each iteration)
+        if self.prev_root_hash != Some(pos.zobrist_hash) {
+            log::debug!("Root position changed, clearing previous PV");
+            self.previous_pv.clear();
+            self.prev_root_hash = Some(pos.zobrist_hash);
+        }
 
         let start_time = Instant::now();
 
