@@ -7,6 +7,7 @@ mod helpers;
 mod search_session;
 mod state;
 mod stdin_reader;
+mod types;
 mod usi;
 mod utils;
 mod worker;
@@ -26,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use stdin_reader::spawn_stdin_reader;
+use types::BestmoveSource;
 use usi::{
     ensure_flush_on_exit, flush_final, send_info_string, send_response, UsiCommand, UsiResponse,
 };
@@ -92,7 +94,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     // Store active worker thread handle
     let mut worker_handle: Option<JoinHandle<()>> = None;
     let mut search_state = SearchState::Idle;
-    let mut current_search_timeout = helpers::MIN_JOIN_TIMEOUT;
     let mut search_id_counter = 0u64;
     let mut current_search_id = 0u64;
     let mut current_search_is_ponder = false; // Track if current search is ponder
@@ -122,7 +123,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 worker_rx: &worker_rx,
                 worker_handle: &mut worker_handle,
                 search_state: &mut search_state,
-                current_search_timeout: &mut current_search_timeout,
                 search_id_counter: &mut search_id_counter,
                 current_search_id: &mut current_search_id,
                 current_search_is_ponder: &mut current_search_is_ponder,
@@ -195,7 +195,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                                     // Emit bestmove with metadata
                                                     let meta = BestmoveMeta {
-                                                        from: "session",
+                                                        from: BestmoveSource::Session,
                                                         stop_info: final_stop_info,
                                                         stats: BestmoveStats {
                                                             depth: depth.into(),
@@ -231,7 +231,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                             });
 
                                                             let meta = BestmoveMeta {
-                                                                from: "emergency_fallback",
+                                                                from: BestmoveSource::EmergencyFallback,
                                                                 stop_info: final_stop_info,
                                                                 stats: BestmoveStats {
                                                                     depth: 0,
@@ -259,7 +259,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                             });
 
                                                             let meta = BestmoveMeta {
-                                                                from: "resign",
+                                                                from: BestmoveSource::Resign,
                                                                 stop_info: final_stop_info,
                                                                 stats: BestmoveStats {
                                                                     depth: 0,
@@ -288,7 +288,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                             });
 
                                             let meta = BestmoveMeta {
-                                                from: "resign_no_position",
+                                                from: BestmoveSource::ResignNoPosition,
                                                 stop_info: final_stop_info,
                                                 stats: BestmoveStats {
                                                     depth: 0,
@@ -318,7 +318,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                 });
 
                                                 let meta = BestmoveMeta {
-                                                    from: "emergency_fallback_no_session",
+                                                    from: BestmoveSource::EmergencyFallbackNoSession,
                                                     stop_info: final_stop_info,
                                                     stats: BestmoveStats {
                                                         depth: 0,
@@ -346,7 +346,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                 });
 
                                                 let meta = BestmoveMeta {
-                                                    from: "resign_fallback_failed",
+                                                    from: BestmoveSource::ResignFallbackFailed,
                                                     stop_info: final_stop_info,
                                                     stats: BestmoveStats {
                                                         depth: 0,
@@ -402,7 +402,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                     };
 
                                     let meta = BestmoveMeta {
-                                        from: "worker_bestmove",
+                                        from: BestmoveSource::WorkerBestmove,
                                         stop_info: StopInfo {
                                             reason,
                                             elapsed_ms: 0, // TODO: Get actual elapsed time if available
@@ -436,7 +436,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                             log::info!("Fallback move ready: {fallback_move}");
 
                                             let meta = BestmoveMeta {
-                                                from: "worker_bestmove_invalid_fallback",
+                                                from: BestmoveSource::WorkerBestmoveInvalidFallback,
                                                 stop_info: StopInfo {
                                                     reason: TerminationReason::Error,
                                                     elapsed_ms: 0,
@@ -462,7 +462,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                             log::error!("Failed to generate fallback move: {e}");
 
                                             let meta = BestmoveMeta {
-                                                from: "resign_invalid_bestmove",
+                                                from: BestmoveSource::ResignInvalidBestmove,
                                                 stop_info: StopInfo {
                                                     reason: TerminationReason::Error,
                                                     elapsed_ms: 0,
