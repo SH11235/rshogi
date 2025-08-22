@@ -162,16 +162,21 @@ pub fn is_endgame(total_pieces: u32) -> bool {
 #[inline]
 pub fn get_mate_distance(score: i32) -> Option<i32> {
     if is_mate_score(score) {
-        Some(MATE_SCORE - score.abs())
+        // Ensure non-negative result (guard against invalid scores)
+        Some((MATE_SCORE - score.abs()).max(0))
     } else {
         None
     }
 }
 
-/// Validate that a mate score makes sense for the given ply
+/// Validate that a root-relative mate score makes sense for the given ply
+///
+/// For root-relative mate scores, the mate distance from root must be at least
+/// the current ply (can't find mate closer than current position from root).
+///
 /// Returns true if the mate distance is reasonable
 #[inline]
-pub fn validate_mate_score(score: i32, ply: u8) -> bool {
+pub fn validate_root_relative_mate_score(score: i32, ply: u8) -> bool {
     if let Some(distance) = get_mate_distance(score) {
         // Mate distance should be at least the current ply
         // (can't find mate closer than current position)
@@ -291,20 +296,20 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_mate_score() {
+    fn test_validate_root_relative_mate_score() {
         // Valid mate scores
-        assert!(validate_mate_score(MATE_SCORE - 10, 5)); // Mate in 10 plies from ply 5
-        assert!(validate_mate_score(MATE_SCORE - 10, 10)); // Mate in 10 plies from ply 10
-        assert!(validate_mate_score(-MATE_SCORE + 15, 10)); // Being mated in 15 plies from ply 10
+        assert!(validate_root_relative_mate_score(MATE_SCORE - 10, 5)); // Mate in 10 plies from ply 5
+        assert!(validate_root_relative_mate_score(MATE_SCORE - 10, 10)); // Mate in 10 plies from ply 10
+        assert!(validate_root_relative_mate_score(-MATE_SCORE + 15, 10)); // Being mated in 15 plies from ply 10
 
         // Invalid mate scores (mate distance < current ply)
-        assert!(!validate_mate_score(MATE_SCORE - 5, 10)); // Can't mate in 5 plies from ply 10
-        assert!(!validate_mate_score(-MATE_SCORE + 5, 10)); // Can't be mated in 5 plies from ply 10
+        assert!(!validate_root_relative_mate_score(MATE_SCORE - 5, 10)); // Can't mate in 5 plies from ply 10
+        assert!(!validate_root_relative_mate_score(-MATE_SCORE + 5, 10)); // Can't be mated in 5 plies from ply 10
 
         // Non-mate scores are always valid
-        assert!(validate_mate_score(100, 50));
-        assert!(validate_mate_score(-100, 50));
-        assert!(validate_mate_score(0, 100));
+        assert!(validate_root_relative_mate_score(100, 50));
+        assert!(validate_root_relative_mate_score(-100, 50));
+        assert!(validate_root_relative_mate_score(0, 100));
     }
 
     #[test]
