@@ -3,10 +3,12 @@
 //! This module handles making and unmaking moves on the position,
 //! including proper hash updates and state management.
 
-use crate::shogi::board::{Piece, PieceType, Position, UndoInfo};
+use crate::shogi::board::{Piece, PieceType};
 use crate::shogi::moves::Move;
 use crate::shogi::piece_constants::piece_type_to_hand_index;
-use crate::zobrist::ZOBRIST;
+
+use super::zobrist::ZOBRIST;
+use super::{Position, UndoInfo};
 
 impl Position {
     /// Make a move on the position

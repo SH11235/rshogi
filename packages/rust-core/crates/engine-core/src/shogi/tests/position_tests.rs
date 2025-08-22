@@ -1,8 +1,8 @@
 //! Tests for Position struct and move handling
 
+use crate::shogi::position::ZobristHashing;
 use crate::shogi::{Color, Move, Piece, PieceType, Position, Square};
 use crate::usi::{move_to_usi, parse_usi_move, parse_usi_square};
-use crate::zobrist::ZobristHashing;
 
 #[test]
 fn test_do_move_normal_move() {

@@ -3,8 +3,9 @@
 //! These tests measure the performance of critical board operations
 //! to ensure they meet performance requirements for game engines.
 
-use crate::shogi::board::{Color, Piece, PieceType, Position};
+use crate::shogi::board::{Color, Piece, PieceType};
 use crate::shogi::moves::Move;
+use crate::shogi::position::Position;
 use crate::usi::parse_usi_square;
 use std::time::Instant;
 

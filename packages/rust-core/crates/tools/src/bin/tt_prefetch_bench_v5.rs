@@ -4,7 +4,7 @@ use clap::{Arg, Command};
 use engine_core::{
     movegen::MoveGen,
     search::tt::{NodeType, TranspositionTable},
-    shogi::{board::Position, MoveList},
+    shogi::{MoveList, Position},
 };
 use std::time::{Duration, Instant};
 

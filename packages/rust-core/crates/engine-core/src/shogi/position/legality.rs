@@ -1,7 +1,10 @@
 //! Position extensions for move legality checking
 
-use super::attacks;
-use super::{Bitboard, Color, Move, PieceType, Position, Square};
+use crate::shogi::attacks;
+use crate::shogi::board::{Bitboard, Color, PieceType, Square};
+use crate::shogi::moves::Move;
+
+use super::Position;
 
 // Extension for Position to check legal moves
 impl Position {

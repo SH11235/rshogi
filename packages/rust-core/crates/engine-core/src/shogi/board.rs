@@ -4,11 +4,10 @@
 //! to maintain backwards compatibility.
 
 // Submodules
-mod attacks;
+pub mod attacks;
 mod bitboard;
 mod board_repr;
-mod position;
-mod see;
+pub mod see;
 mod types;
 
 // Performance test module
@@ -18,5 +17,4 @@ mod performance_tests;
 // Re-export all public items from submodules
 pub use self::bitboard::*;
 pub use self::board_repr::*;
-pub use self::position::*;
 pub use self::types::*;

@@ -320,7 +320,7 @@ pub fn parse_sfen(sfen: &str) -> Result<Position, UsiParseError> {
     pos.ply = (move_count - 1) * 2 + if side_to_move == Color::White { 1 } else { 0 };
 
     // Compute zobrist hash for the position
-    use crate::zobrist::ZobristHashing;
+    use crate::shogi::position::ZobristHashing;
     pos.hash = ZobristHashing::zobrist_hash(&pos);
     pos.zobrist_hash = pos.hash;
 
