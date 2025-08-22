@@ -7,6 +7,7 @@ use crate::search::constants::{
     ASPIRATION_RETRY_LIMIT, ASPIRATION_WINDOW_DELTA, ASPIRATION_WINDOW_EXPANSION,
     ASPIRATION_WINDOW_INITIAL, ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT, MATE_SCORE, SEARCH_INF,
 };
+use crate::search::types::NodeType;
 
 /// Minimum aspiration window size to ensure non-empty bounds
 const MIN_ASPIRATION_WINDOW: i32 = 2;
@@ -92,10 +93,15 @@ impl AspirationWindow {
     }
 
     /// Update score history and recalculate volatility
-    pub fn update_score(&mut self, score: i32) {
-        self.score_history.push(score);
-        if self.score_history.len() > 1 {
-            self.score_volatility = self.calculate_score_volatility();
+    /// Only EXACT node scores are added to maintain PV stability accuracy
+    pub fn update_score(&mut self, score: i32, node_type: NodeType) {
+        // Only add EXACT node scores to history
+        // This prevents boundary values (LOWERBOUND/UPPERBOUND) from affecting volatility
+        if node_type == NodeType::Exact {
+            self.score_history.push(score);
+            if self.score_history.len() > 1 {
+                self.score_volatility = self.calculate_score_volatility();
+            }
         }
     }
 
@@ -349,10 +355,10 @@ mod tests {
         assert_eq!(aw.calculate_score_volatility(), 0);
 
         // Add some scores
-        aw.update_score(100);
-        aw.update_score(110);
-        aw.update_score(95);
-        aw.update_score(120);
+        aw.update_score(100, NodeType::Exact);
+        aw.update_score(110, NodeType::Exact);
+        aw.update_score(95, NodeType::Exact);
+        aw.update_score(120, NodeType::Exact);
 
         // Should calculate average deviation
         let volatility = aw.score_volatility;
@@ -365,9 +371,9 @@ mod tests {
         let mut aw = AspirationWindow::new();
 
         // Test with extreme score differences (near mate scores)
-        aw.update_score(100);
-        aw.update_score(30000); // Near mate score
-        aw.update_score(-30000); // Opponent mate
+        aw.update_score(100, NodeType::Exact);
+        aw.update_score(30000, NodeType::Exact); // Near mate score
+        aw.update_score(-30000, NodeType::Exact); // Opponent mate
 
         // Should handle extreme values without overflow
         let volatility = aw.score_volatility;
@@ -401,8 +407,8 @@ mod tests {
         assert_eq!(beta, SEARCH_INF);
 
         // Add history for depth > 1
-        aw.update_score(100);
-        aw.update_score(105);
+        aw.update_score(100, NodeType::Exact);
+        aw.update_score(105, NodeType::Exact);
 
         // Should use aspiration window
         let (alpha, beta) = aw.get_initial_bounds(3, 105);
@@ -437,11 +443,11 @@ mod tests {
         let mut aw = AspirationWindow::new();
 
         // Add mix of normal and mate scores
-        aw.update_score(100);
-        aw.update_score(120);
-        aw.update_score(MATE_SCORE - 10); // Mate score - should be excluded
-        aw.update_score(110);
-        aw.update_score(-MATE_SCORE + 5); // Losing mate - should be excluded
+        aw.update_score(100, NodeType::Exact);
+        aw.update_score(120, NodeType::Exact);
+        aw.update_score(MATE_SCORE - 10, NodeType::Exact); // Mate score - should be excluded
+        aw.update_score(110, NodeType::Exact);
+        aw.update_score(-MATE_SCORE + 5, NodeType::Exact); // Losing mate - should be excluded
 
         // Volatility should only consider the normal scores (100, 120, 110)
         let volatility = aw.score_volatility;
@@ -450,9 +456,9 @@ mod tests {
 
         // Test with only mate scores
         let mut aw_mate_only = AspirationWindow::new();
-        aw_mate_only.update_score(MATE_SCORE - 5);
-        aw_mate_only.update_score(MATE_SCORE - 3);
-        aw_mate_only.update_score(MATE_SCORE - 1);
+        aw_mate_only.update_score(MATE_SCORE - 5, NodeType::Exact);
+        aw_mate_only.update_score(MATE_SCORE - 3, NodeType::Exact);
+        aw_mate_only.update_score(MATE_SCORE - 1, NodeType::Exact);
 
         // Volatility should be 0 when all scores are mate scores
         assert_eq!(aw_mate_only.score_volatility, 0);
@@ -543,9 +549,9 @@ mod tests {
         let mut aw = AspirationWindow::new();
 
         // Add some history to get non-trivial window calculation
-        aw.update_score(100);
-        aw.update_score(200);
-        aw.update_score(150);
+        aw.update_score(100, NodeType::Exact);
+        aw.update_score(200, NodeType::Exact);
+        aw.update_score(150, NodeType::Exact);
 
         // Test normal score near boundary
         let near_boundary = SEARCH_INF - 100;
@@ -557,9 +563,9 @@ mod tests {
         assert!(alpha < beta);
 
         // Test with volatile history
-        aw.update_score(1000);
-        aw.update_score(-1000);
-        aw.update_score(2000);
+        aw.update_score(1000, NodeType::Exact);
+        aw.update_score(-1000, NodeType::Exact);
+        aw.update_score(2000, NodeType::Exact);
 
         let (alpha2, beta2) = aw.get_initial_bounds(7, 0);
         assert!(alpha2 >= -SEARCH_INF);
@@ -744,5 +750,46 @@ mod tests {
         let (lo, hi) = AspirationWindow::center_min_window(-SEARCH_INF + 1);
         assert_eq!(hi - lo, MIN_ASPIRATION_WINDOW);
         assert!(lo >= -SEARCH_INF && hi <= SEARCH_INF);
+    }
+
+    #[test]
+    fn test_boundary_node_type_filtering() {
+        let mut aw = AspirationWindow::new();
+
+        // Add EXACT scores
+        aw.update_score(100, NodeType::Exact);
+        aw.update_score(110, NodeType::Exact);
+        assert_eq!(aw.history_len(), 2);
+
+        // Add boundary value scores - these should be ignored
+        aw.update_score(200, NodeType::LowerBound); // Fail-high score
+        aw.update_score(-50, NodeType::UpperBound); // Fail-low score
+        assert_eq!(aw.history_len(), 2, "Boundary values should not be added to history");
+
+        // Add another EXACT score
+        aw.update_score(105, NodeType::Exact);
+        assert_eq!(aw.history_len(), 3);
+
+        // Volatility should only consider EXACT scores (100, 110, 105)
+        let volatility = aw.score_volatility;
+        assert!(volatility > 0, "Should have some volatility from EXACT scores");
+        assert!(volatility < 20, "Volatility should be moderate for close EXACT scores");
+    }
+
+    #[test]
+    fn test_volatility_with_only_boundary_nodes() {
+        let mut aw = AspirationWindow::new();
+
+        // Add only boundary value scores
+        aw.update_score(100, NodeType::LowerBound);
+        aw.update_score(200, NodeType::UpperBound);
+        aw.update_score(150, NodeType::LowerBound);
+
+        // No scores should be in history
+        assert_eq!(aw.history_len(), 0, "No boundary values should be in history");
+        assert_eq!(aw.score_volatility, 0, "Volatility should be 0 with no EXACT scores");
+
+        // Calculate window should return initial value
+        assert_eq!(aw.calculate_window(5), ASPIRATION_WINDOW_INITIAL);
     }
 }
