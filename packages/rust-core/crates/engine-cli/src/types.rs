@@ -4,12 +4,6 @@
 //! including search results, ponder state, and callback types.
 
 use std::fmt;
-use std::sync::Arc;
-
-
-/// Type alias for engine info callback
-pub type EngineInfoCallback =
-    Arc<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync>;
 
 /// Source of bestmove emission
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
