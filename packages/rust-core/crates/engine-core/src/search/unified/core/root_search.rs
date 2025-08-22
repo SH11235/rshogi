@@ -88,17 +88,18 @@ where
 
     // Search each move
     for (move_idx, &mv) in ordered_slice.iter().enumerate() {
-        // Validate move before executing (important for TT moves)
-        if !pos.is_pseudo_legal(mv) {
-            #[cfg(debug_assertions)]
-            {
-                if std::env::var("SHOGI_DEBUG_SEARCH").is_ok() {
-                    eprintln!("WARNING: Skipping illegal move in search at depth {depth}");
-                    eprintln!("Move: {}", crate::usi::move_to_usi(&mv));
-                    eprintln!("Position: {}", crate::usi::position_to_sfen(pos));
-                }
-            }
-            continue;
+        // In debug builds, validate that all moves from move generator are legal
+        // (this should always be true, so we just assert it)
+        #[cfg(debug_assertions)]
+        {
+            // Since moves come from generate_all(), they should all be legal
+            // TT move is not injected into the list, so this check is purely defensive
+            debug_assert!(
+                pos.is_pseudo_legal(mv),
+                "Move from generate_all() should be pseudo-legal: {} in position {}",
+                crate::usi::move_to_usi(&mv),
+                crate::usi::position_to_sfen(pos)
+            );
         }
 
         // Make move
