@@ -24,7 +24,7 @@ pub const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Total worst-case time: ~100ms (dominated by quick_search)
 pub fn generate_fallback_move(
     engine: &Arc<Mutex<EngineAdapter>>,
-    partial_result: Option<(String, u32, i32)>,
+    partial_result: Option<(String, u8, i32)>,
     allow_null_move: bool,
 ) -> Result<String> {
     // Stage 1: Use partial result if available (instant)
