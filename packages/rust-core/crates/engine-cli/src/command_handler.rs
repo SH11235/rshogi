@@ -280,6 +280,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             search_session::Score::Mate(mate) => format!("mate {mate}"),
                         })
                         .unwrap_or_else(|| "unknown".to_string());
+                    // Check if this is a ponder search
+                    if *ctx.current_search_is_ponder {
+                        log::info!("Stop during ponder - not sending bestmove (session available)");
+                        *ctx.search_state = SearchState::Idle;
+                        *ctx.current_search_is_ponder = false;
+                        return Ok(());
+                    }
+
                     send_info_string(format!(
                         "bestmove_from=session_on_stop depth={depth} score={score_str}"
                     ))?;
@@ -342,6 +350,15 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 // Even for ponder search, send bestmove on timeout
 
                 // Use emergency fallback (session already tried at the beginning)
+                // Check if this is a ponder search
+                if *ctx.current_search_is_ponder {
+                    log::info!("Stop during ponder - timeout without bestmove");
+                    *ctx.search_state = SearchState::Idle;
+                    *ctx.current_search_is_ponder = false;
+                    break;
+                }
+
+                // For normal searches, use fallback
                 match generate_fallback_move(
                     ctx.engine,
                     partial_result.clone(),
@@ -388,7 +405,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 }) => {
                     // Only accept if it's for current search
                     if search_id == *ctx.current_search_id {
-                        // Always send bestmove, even for ponder searches
+                        // Check if this is a ponder search
+                        if *ctx.current_search_is_ponder {
+                            log::info!("Stop during ponder - not sending bestmove from worker");
+                            *ctx.search_state = SearchState::Idle;
+                            *ctx.current_search_is_ponder = false;
+                            break;
+                        }
+                        // Send bestmove for normal searches
                         send_bestmove_and_finalize(
                             best_move,
                             ponder_move,
@@ -452,6 +476,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                 }
                                             })
                                             .unwrap_or_else(|| "unknown".to_string());
+                                        // Check if this is a ponder search
+                                        if *ctx.current_search_is_ponder {
+                                            log::info!("Stop during ponder - not sending bestmove (SearchFinished)");
+                                            *ctx.search_state = SearchState::Idle;
+                                            *ctx.current_search_is_ponder = false;
+                                            break;
+                                        }
+
                                         send_info_string(format!("bestmove_from=session_in_stop_handler depth={depth} score={score_str}"))?;
 
                                         log::info!(
@@ -487,8 +519,17 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 }) => {
                     // Only process if it's for current search
                     if search_id == *ctx.current_search_id {
-                        // Use fallback strategy for both normal and ponder searches
                         log::warn!("Worker finished without bestmove (from_guard: {from_guard})");
+
+                        // Check if this is a ponder search
+                        if *ctx.current_search_is_ponder {
+                            log::info!("Stop during ponder - worker finished without bestmove");
+                            *ctx.search_state = SearchState::Idle;
+                            *ctx.current_search_is_ponder = false;
+                            break;
+                        }
+
+                        // Use fallback strategy for normal searches
                         match generate_fallback_move(
                             ctx.engine,
                             partial_result.clone(),
