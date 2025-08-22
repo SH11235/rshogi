@@ -8,6 +8,9 @@ use crate::search::constants::{
     ASPIRATION_WINDOW_INITIAL, ASPIRATION_WINDOW_MAX_VOLATILITY_ADJUSTMENT, MATE_SCORE, SEARCH_INF,
 };
 
+/// Minimum aspiration window size to ensure non-empty bounds
+const MIN_ASPIRATION_WINDOW: i32 = 2;
+
 /// Manages aspiration window calculation and score history
 #[derive(Debug, Clone)]
 pub struct AspirationWindow {
@@ -125,9 +128,33 @@ impl AspirationWindow {
 
             // Ensure non-empty window (lo < hi)
             if lo >= hi {
-                // Create minimum window of 2 centipawns centered on best_score
-                lo = best_score.saturating_sub(1).max(-SEARCH_INF);
-                hi = best_score.saturating_add(1).min(SEARCH_INF);
+                // Handle boundary cases where best_score might be outside valid range
+                if best_score >= SEARCH_INF {
+                    // Best score exceeds upper bound - create window at boundary
+                    lo = SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW);
+                    hi = SEARCH_INF;
+                } else if best_score <= -SEARCH_INF {
+                    // Best score exceeds lower bound - create window at boundary
+                    lo = -SEARCH_INF;
+                    hi = (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW);
+                } else {
+                    // Best score is within range - create minimum window centered on it
+                    lo = best_score.saturating_sub(MIN_ASPIRATION_WINDOW / 2).max(-SEARCH_INF);
+                    hi = best_score.saturating_add(MIN_ASPIRATION_WINDOW / 2).min(SEARCH_INF);
+
+                    // Final guard: ensure window is still valid after clamping
+                    if lo >= hi {
+                        // We're at a boundary - adjust to ensure non-empty window
+                        if hi == SEARCH_INF {
+                            lo = SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW);
+                        } else if lo == -SEARCH_INF {
+                            hi = (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW);
+                        } else {
+                            // Fallback: expand upward by minimum window
+                            hi = lo.saturating_add(MIN_ASPIRATION_WINDOW).min(SEARCH_INF);
+                        }
+                    }
+                }
             }
 
             (lo, hi)
@@ -141,11 +168,33 @@ impl AspirationWindow {
 
             // Ensure non-empty window (lo < hi) - though this should rarely happen for normal scores
             if lo >= hi {
-                // Create minimum window of 2 centipawns centered on best_score
-                (
-                    best_score.saturating_sub(1).max(-SEARCH_INF),
-                    best_score.saturating_add(1).min(SEARCH_INF),
-                )
+                // Handle boundary cases where best_score might be outside valid range
+                if best_score >= SEARCH_INF {
+                    // Best score exceeds upper bound - create window at boundary
+                    (SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW), SEARCH_INF)
+                } else if best_score <= -SEARCH_INF {
+                    // Best score exceeds lower bound - create window at boundary
+                    (-SEARCH_INF, (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW))
+                } else {
+                    // Best score is within range - create minimum window centered on it
+                    let lo = best_score.saturating_sub(MIN_ASPIRATION_WINDOW / 2).max(-SEARCH_INF);
+                    let hi = best_score.saturating_add(MIN_ASPIRATION_WINDOW / 2).min(SEARCH_INF);
+
+                    // Final guard: ensure window is still valid after clamping
+                    if lo >= hi {
+                        // We're at a boundary - adjust to ensure non-empty window
+                        if hi == SEARCH_INF {
+                            (SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW), SEARCH_INF)
+                        } else if lo == -SEARCH_INF {
+                            (-SEARCH_INF, (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW))
+                        } else {
+                            // Fallback: expand upward by minimum window
+                            (lo, lo.saturating_add(MIN_ASPIRATION_WINDOW).min(SEARCH_INF))
+                        }
+                    } else {
+                        (lo, hi)
+                    }
+                }
             } else {
                 (lo, hi)
             }
@@ -162,18 +211,25 @@ impl AspirationWindow {
         if score <= alpha {
             // Fail low - score is worse than expected, expand alpha downward
             // Calculate expansion based on distance from previous best score
-            let expansion =
-                ((alpha - best_score).abs() as f32 * ASPIRATION_WINDOW_EXPANSION) as i32;
+            // Use i64 to avoid overflow when calculating absolute difference
+            let diff_alpha =
+                ((alpha as i64) - (best_score as i64)).abs().min(i32::MAX as i64) as i32;
+            let expansion = ((diff_alpha as f32) * ASPIRATION_WINDOW_EXPANSION) as i32;
             // Ensure minimum expansion of DELTA to guarantee progress
-            new_alpha = (alpha - expansion.max(ASPIRATION_WINDOW_DELTA)).max(-SEARCH_INF);
+            // Use saturating arithmetic to prevent overflow
+            new_alpha =
+                alpha.saturating_sub(expansion.max(ASPIRATION_WINDOW_DELTA)).max(-SEARCH_INF);
         }
 
         if score >= beta {
             // Fail high - score is better than expected, expand beta upward
             // Calculate expansion based on distance from previous best score
-            let expansion = ((beta - best_score).abs() as f32 * ASPIRATION_WINDOW_EXPANSION) as i32;
+            // Use i64 to avoid overflow when calculating absolute difference
+            let diff_beta = ((beta as i64) - (best_score as i64)).abs().min(i32::MAX as i64) as i32;
+            let expansion = ((diff_beta as f32) * ASPIRATION_WINDOW_EXPANSION) as i32;
             // Ensure minimum expansion of DELTA to guarantee progress
-            new_beta = (beta + expansion.max(ASPIRATION_WINDOW_DELTA)).min(SEARCH_INF);
+            // Use saturating arithmetic to prevent overflow
+            new_beta = beta.saturating_add(expansion.max(ASPIRATION_WINDOW_DELTA)).min(SEARCH_INF);
         }
 
         (new_alpha, new_beta)
@@ -401,8 +457,18 @@ mod tests {
         // Verify window is non-empty
         assert!(alpha < beta);
 
-        // Verify best_score is within the window
-        assert!(alpha <= extreme_mate && extreme_mate <= beta);
+        // Verify best_score is within the window (if it's within valid range)
+        if extreme_mate <= SEARCH_INF && extreme_mate >= -SEARCH_INF {
+            assert!(alpha <= extreme_mate && extreme_mate <= beta);
+        } else {
+            // When best_score exceeds bounds, verify window is at boundary with minimum size
+            assert_eq!(beta - alpha, MIN_ASPIRATION_WINDOW);
+            if extreme_mate > SEARCH_INF {
+                assert_eq!(beta, SEARCH_INF);
+            } else {
+                assert_eq!(alpha, -SEARCH_INF);
+            }
+        }
 
         // Test extreme losing mate
         let extreme_losing = -MATE_SCORE + 1;
@@ -411,7 +477,19 @@ mod tests {
         assert!(alpha2 >= -SEARCH_INF);
         assert!(beta2 <= SEARCH_INF);
         assert!(alpha2 < beta2);
-        assert!(alpha2 <= extreme_losing && extreme_losing <= beta2);
+
+        // Verify best_score is within the window (if it's within valid range)
+        if extreme_losing <= SEARCH_INF && extreme_losing >= -SEARCH_INF {
+            assert!(alpha2 <= extreme_losing && extreme_losing <= beta2);
+        } else {
+            // When best_score exceeds bounds, verify window is at boundary with minimum size
+            assert_eq!(beta2 - alpha2, MIN_ASPIRATION_WINDOW);
+            if extreme_losing > SEARCH_INF {
+                assert_eq!(beta2, SEARCH_INF);
+            } else {
+                assert_eq!(alpha2, -SEARCH_INF);
+            }
+        }
     }
 
     #[test]
@@ -427,15 +505,21 @@ mod tests {
         // Window must be non-empty
         assert!(alpha < beta, "Window must be non-empty: alpha={alpha}, beta={beta}");
 
-        // Minimum window size should be at least 2
-        assert!(beta - alpha >= 2, "Window size must be at least 2");
+        // Minimum window size should be at least MIN_ASPIRATION_WINDOW
+        assert!(
+            beta - alpha >= MIN_ASPIRATION_WINDOW,
+            "Window size must be at least {MIN_ASPIRATION_WINDOW}"
+        );
 
         // Test negative boundary
         let neg_boundary_score = -SEARCH_INF + 1;
         let (alpha2, beta2) = aw.get_initial_bounds(3, neg_boundary_score);
 
         assert!(alpha2 < beta2, "Window must be non-empty: alpha={alpha2}, beta={beta2}");
-        assert!(beta2 - alpha2 >= 2, "Window size must be at least 2");
+        assert!(
+            beta2 - alpha2 >= MIN_ASPIRATION_WINDOW,
+            "Window size must be at least {MIN_ASPIRATION_WINDOW}"
+        );
     }
 
     #[test]
@@ -465,5 +549,92 @@ mod tests {
         assert!(alpha2 >= -SEARCH_INF);
         assert!(beta2 <= SEARCH_INF);
         assert!(alpha2 < beta2);
+    }
+
+    #[test]
+    fn test_expand_window_with_various_score_differences() {
+        let aw = AspirationWindow::new();
+
+        // Test case 1: alpha << best_score (fail-low with alpha much lower than best_score)
+        let alpha = -1000;
+        let beta = -500;
+        let best_score = 0;
+        let score = -1100; // fail-low
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Expansion should be based on |alpha - best_score| = 1000
+        let expected_expansion =
+            ((1000.0 * ASPIRATION_WINDOW_EXPANSION) as i32).max(ASPIRATION_WINDOW_DELTA);
+        assert_eq!(new_alpha, alpha.saturating_sub(expected_expansion).max(-SEARCH_INF));
+        assert_eq!(new_beta, beta); // Beta should remain unchanged
+        assert!(new_alpha < alpha); // Alpha should have expanded downward
+
+        // Test case 2: beta >> best_score (fail-high with beta much higher than best_score)
+        let alpha = 500;
+        let beta = 1000;
+        let best_score = 0;
+        let score = 1100; // fail-high
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Expansion should be based on |beta - best_score| = 1000
+        let expected_expansion =
+            ((1000.0 * ASPIRATION_WINDOW_EXPANSION) as i32).max(ASPIRATION_WINDOW_DELTA);
+        assert_eq!(new_alpha, alpha); // Alpha should remain unchanged
+        assert_eq!(new_beta, beta.saturating_add(expected_expansion).min(SEARCH_INF));
+        assert!(new_beta > beta); // Beta should have expanded upward
+
+        // Test case 3: alpha > best_score (fail-low with alpha higher than best_score)
+        let alpha = 100;
+        let beta = 200;
+        let best_score = 50;
+        let score = 90; // fail-low
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Expansion should be based on |alpha - best_score| = 50
+        assert!(new_alpha < alpha); // Alpha should have expanded downward
+        assert_eq!(new_beta, beta); // Beta should remain unchanged
+
+        // Test case 4: beta < best_score (fail-high with beta lower than best_score)
+        let alpha = -200;
+        let beta = -100;
+        let best_score = -50;
+        let score = -90; // fail-high
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Expansion should be based on |beta - best_score| = 50
+        assert_eq!(new_alpha, alpha); // Alpha should remain unchanged
+        assert!(new_beta > beta); // Beta should have expanded upward
+    }
+
+    #[test]
+    fn test_expand_window_overflow_safety() {
+        let aw = AspirationWindow::new();
+
+        // Test with extreme values near i32::MIN/MAX
+        // Note: We need to stay within SEARCH_INF bounds
+        let alpha = -SEARCH_INF / 2;
+        let beta = -SEARCH_INF / 2 + 1000;
+        let best_score = SEARCH_INF / 2;
+        let score = alpha - 100; // fail-low
+
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Should not panic and should produce valid results
+        assert!(new_alpha <= alpha);
+        assert!(new_alpha >= -SEARCH_INF);
+        assert_eq!(new_beta, beta);
+
+        // Test opposite extreme
+        let alpha = SEARCH_INF / 2 - 1000;
+        let beta = SEARCH_INF / 2;
+        let best_score = -SEARCH_INF / 2;
+        let score = beta + 100; // fail-high
+
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Should not panic and should produce valid results
+        assert_eq!(new_alpha, alpha);
+        assert!(new_beta >= beta);
+        assert!(new_beta <= SEARCH_INF);
     }
 }
