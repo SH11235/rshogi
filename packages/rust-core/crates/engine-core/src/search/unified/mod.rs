@@ -168,7 +168,7 @@ where
 
         // Iterative deepening
         let mut best_move = None;
-        let mut best_score: i32 = -SEARCH_INF;  // Initialize to worst possible score
+        let mut best_score: i32 = -SEARCH_INF; // Initialize to worst possible score
         let mut best_node_type = NodeType::Exact;
         let mut depth = 1;
 

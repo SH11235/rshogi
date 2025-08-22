@@ -18,7 +18,7 @@ use command_handler::{handle_command, CommandContext};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
 use engine_core::search::types::{StopInfo, TerminationReason};
-use helpers::{generate_fallback_move, send_bestmove_and_finalize};
+use helpers::generate_fallback_move;
 use search_session::SearchSession;
 use state::SearchState;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -206,7 +206,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                             nodes,
                                                             nps,
                                                         },
-                                                        search_id,
                                                     };
 
                                                     log::info!("Session bestmove ready: {best_move}, ponder: {ponder:?}");
@@ -241,7 +240,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                                     nodes: 0,
                                                                     nps: 0,
                                                                 },
-                                                                search_id,
                                                             };
 
                                                             log::info!("Fallback move ready: {fallback_move}");
@@ -270,7 +268,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                                     nodes: 0,
                                                                     nps: 0,
                                                                 },
-                                                                search_id,
                                                             };
 
                                                             emitter.emit("resign".to_string(), None, meta)?;
@@ -301,7 +298,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                     nodes: 0,
                                                     nps: 0,
                                                 },
-                                                search_id,
                                             };
 
                                             emitter.emit("resign".to_string(), None, meta)?;
@@ -332,7 +328,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                         nodes: 0,
                                                         nps: 0,
                                                     },
-                                                    search_id,
                                                 };
 
                                                 log::info!("Emergency fallback move: {fallback_move}");
@@ -361,7 +356,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                         nodes: 0,
                                                         nps: 0,
                                                     },
-                                                    search_id,
                                                 };
 
                                                 emitter.emit("resign".to_string(), None, meta)?;
@@ -385,59 +379,118 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         // 2. The search_id matches current search (prevents old search results)
                         // 3. NOT a pure ponder search (USI protocol: no bestmove during ponder)
                         if search_state.can_accept_bestmove() && !bestmove_sent && search_id == current_search_id && !current_search_is_ponder {
-                            // Log position state for debugging (debug level)
-                            if log::log_enabled!(log::Level::Debug) {
-                                let adapter = lock_or_recover_adapter(&engine);
-                                adapter.log_position_state("BestMove validation");
-                            }
+                            // Use BestmoveEmitter for centralized emission
+                            if let Some(ref emitter) = current_bestmove_emitter {
+                                // Log position state for debugging (debug level)
+                                if log::log_enabled!(log::Level::Debug) {
+                                    let adapter = lock_or_recover_adapter(&engine);
+                                    adapter.log_position_state("BestMove validation");
+                                }
 
-                            // Validate bestmove before sending
-                            let is_valid = {
-                                let adapter = lock_or_recover_adapter(&engine);
-                                adapter.is_legal_move(&best_move)
-                            };
+                                // Validate bestmove before sending
+                                let is_valid = {
+                                    let adapter = lock_or_recover_adapter(&engine);
+                                    adapter.is_legal_move(&best_move)
+                                };
 
-                            if is_valid {
-                                log::info!("Validated bestmove ready: {best_move}");
-                                send_bestmove_and_finalize(
-                                    best_move,
-                                    ponder_move,
-                                    &mut search_state,
-                                    &mut bestmove_sent,
-                                    &mut current_search_is_ponder,
-                                )?
-                            } else {
-                                // Log detailed error information
-                                log::error!("Invalid bestmove detected: {best_move}");
-                                let adapter = lock_or_recover_adapter(&engine);
-                                adapter.log_position_state("Invalid bestmove context");
+                                if is_valid {
+                                    log::info!("Validated bestmove ready: {best_move}");
 
-                                // Try to generate a fallback move
-                                log::warn!("Attempting to generate fallback move after invalid bestmove");
-                                match generate_fallback_move(&engine, None, allow_null_move) {
-                                    Ok(fallback_move) => {
-                                        log::info!("Fallback move ready: {fallback_move}");
-                                        send_bestmove_and_finalize(
-                                            fallback_move,
-                                            None,
-                                            &mut search_state,
-                                            &mut bestmove_sent,
-                                            &mut current_search_is_ponder,
-                                        )?
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to generate fallback move: {e}");
-                                        send_bestmove_and_finalize(
-                                            "resign".to_string(),
-                                            None,
-                                            &mut search_state,
-                                            &mut bestmove_sent,
-                                            &mut current_search_is_ponder,
-                                        )?
+                                    // Determine stop reason based on current state
+                                    let reason = if search_state == SearchState::StopRequested {
+                                        TerminationReason::UserStop
+                                    } else {
+                                        TerminationReason::Completed
+                                    };
+
+                                    let meta = BestmoveMeta {
+                                        from: "worker_bestmove",
+                                        stop_info: StopInfo {
+                                            reason,
+                                            elapsed_ms: 0, // TODO: Get actual elapsed time if available
+                                            nodes: 0, // TODO: Get actual node count if available
+                                            depth_reached: 0, // TODO: Get actual depth if available
+                                            hard_timeout: false,
+                                        },
+                                        stats: BestmoveStats {
+                                            depth: 0, // TODO: Get actual depth from worker
+                                            seldepth: None,
+                                            score: "unknown".to_string(),
+                                            nodes: 0,
+                                            nps: 0,
+                                        },
+                                    };
+
+                                    emitter.emit(best_move, ponder_move, meta)?;
+                                    search_state = SearchState::Idle;
+                                    bestmove_sent = true;
+                                    current_search_is_ponder = false;
+                                } else {
+                                    // Log detailed error information
+                                    log::error!("Invalid bestmove detected: {best_move}");
+                                    let adapter = lock_or_recover_adapter(&engine);
+                                    adapter.log_position_state("Invalid bestmove context");
+
+                                    // Try to generate a fallback move
+                                    log::warn!("Attempting to generate fallback move after invalid bestmove");
+                                    match generate_fallback_move(&engine, None, allow_null_move) {
+                                        Ok(fallback_move) => {
+                                            log::info!("Fallback move ready: {fallback_move}");
+
+                                            let meta = BestmoveMeta {
+                                                from: "worker_bestmove_invalid_fallback",
+                                                stop_info: StopInfo {
+                                                    reason: TerminationReason::Error,
+                                                    elapsed_ms: 0,
+                                                    nodes: 0,
+                                                    depth_reached: 0,
+                                                    hard_timeout: false,
+                                                },
+                                                stats: BestmoveStats {
+                                                    depth: 0,
+                                                    seldepth: None,
+                                                    score: "unknown".to_string(),
+                                                    nodes: 0,
+                                                    nps: 0,
+                                                },
+                                            };
+
+                                            emitter.emit(fallback_move, None, meta)?;
+                                            search_state = SearchState::Idle;
+                                            bestmove_sent = true;
+                                            current_search_is_ponder = false;
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to generate fallback move: {e}");
+
+                                            let meta = BestmoveMeta {
+                                                from: "resign_invalid_bestmove",
+                                                stop_info: StopInfo {
+                                                    reason: TerminationReason::Error,
+                                                    elapsed_ms: 0,
+                                                    nodes: 0,
+                                                    depth_reached: 0,
+                                                    hard_timeout: false,
+                                                },
+                                                stats: BestmoveStats {
+                                                    depth: 0,
+                                                    seldepth: None,
+                                                    score: "unknown".to_string(),
+                                                    nodes: 0,
+                                                    nps: 0,
+                                                },
+                                            };
+
+                                            emitter.emit("resign".to_string(), None, meta)?;
+                                            search_state = SearchState::Idle;
+                                            bestmove_sent = true;
+                                            current_search_is_ponder = false;
+                                        }
                                     }
                                 }
+                            } else {
+                                log::error!("No BestmoveEmitter available for search {search_id}");
                             }
-                            // Ponder flag is managed in command_handler.rs
                         } else {
                             log::warn!("Ignoring late/ponder bestmove: {best_move} (search_state={search_state:?}, bestmove_sent={bestmove_sent}, search_id={search_id}, current={current_search_id}, is_ponder={current_search_is_ponder})");
                         }
