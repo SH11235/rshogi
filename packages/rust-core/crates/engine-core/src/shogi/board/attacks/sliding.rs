@@ -6,7 +6,8 @@
 //! - Lance
 
 use crate::shogi::attacks;
-use crate::shogi::board::{Bitboard, Color, PieceType, Position, Square};
+use crate::shogi::board::{Bitboard, Color, PieceType, Square};
+use crate::shogi::position::Position;
 
 impl Position {
     /// Get lance attackers to a square using optimized bitboard operations

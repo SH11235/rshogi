@@ -3,9 +3,11 @@
 //! This module provides methods for validating moves and querying
 //! the position state (check, repetition, draw, etc).
 
-use crate::shogi::board::{Color, Piece, PieceType, Position, Square};
+use crate::shogi::board::{Color, Piece, PieceType, Square};
 use crate::shogi::moves::Move;
 use crate::shogi::piece_constants::piece_type_to_hand_index;
+
+use super::Position;
 
 impl Position {
     /// Reference implementation: Check if square is attacked by any piece of given color

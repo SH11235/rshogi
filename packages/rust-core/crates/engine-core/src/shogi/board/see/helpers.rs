@@ -4,8 +4,9 @@
 //! piece value calculations, and x-ray attack updates.
 
 use crate::shogi::attacks;
-use crate::shogi::board::{Bitboard, Color, Piece, PieceType, Position, Square};
+use crate::shogi::board::{Bitboard, Color, Piece, PieceType, Square};
 use crate::shogi::piece_constants::SEE_PIECE_VALUES;
+use crate::shogi::position::Position;
 
 use super::pin_info::SeePinInfo;
 

@@ -4,7 +4,7 @@
 mod tests {
     use crate::{
         movegen::generator::MoveGenImpl,
-        shogi::{board::Position, Color, Piece, PieceType, Square},
+        shogi::{position::Position, Color, Piece, PieceType, Square},
     };
 
     #[test]

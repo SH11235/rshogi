@@ -1,6 +1,7 @@
 //! Tests for attack detection functionality
 
-use crate::shogi::board::{Color, Piece, PieceType, Position, Square};
+use crate::shogi::board::{Color, Piece, PieceType, Square};
+use crate::shogi::position::Position;
 use crate::usi::parse_usi_square;
 
 #[test]

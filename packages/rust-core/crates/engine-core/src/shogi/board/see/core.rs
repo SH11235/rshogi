@@ -4,9 +4,10 @@
 //! for evaluating capture sequences and determining whether a capture is likely
 //! to be profitable.
 
-use crate::shogi::board::{Color, Position};
+use crate::shogi::board::Color;
 use crate::shogi::moves::Move;
 use crate::shogi::piece_constants::{SEE_GAIN_ARRAY_SIZE, SEE_MAX_DEPTH};
+use crate::shogi::position::Position;
 
 impl Position {
     /// Static Exchange Evaluation (SEE)

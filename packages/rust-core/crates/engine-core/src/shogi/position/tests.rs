@@ -1,7 +1,9 @@
 //! Tests for Position functionality
 
-use crate::shogi::board::{Color, PieceType, Position};
+use crate::shogi::board::{Color, PieceType};
 use crate::usi::parse_usi_square;
+
+use super::Position;
 
 #[test]
 fn test_startpos() {

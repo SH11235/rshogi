@@ -1,7 +1,8 @@
 //! Tests for Static Exchange Evaluation (SEE)
 
-use crate::shogi::board::{Color, Piece, PieceType, Position};
+use crate::shogi::board::{Color, Piece, PieceType};
 use crate::shogi::moves::Move;
+use crate::shogi::position::Position;
 use crate::usi::parse_usi_square;
 
 #[test]

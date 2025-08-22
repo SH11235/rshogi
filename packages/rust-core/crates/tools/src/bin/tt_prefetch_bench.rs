@@ -5,8 +5,8 @@
 use engine_core::movegen::MoveGen;
 use engine_core::search::adaptive_prefetcher::AdaptivePrefetcher;
 use engine_core::search::tt::{NodeType, TranspositionTable};
-use engine_core::shogi::board::Position;
 use engine_core::shogi::MoveList;
+use engine_core::shogi::Position;
 use std::time::Instant;
 
 fn perft(pos: &mut Position, depth: u32, tt: &TranspositionTable, use_prefetch: bool) -> u64 {

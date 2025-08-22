@@ -7,11 +7,15 @@
 //! - `core` - Position struct and basic methods
 //! - `moves` - Move execution and undo functionality
 //! - `validation` - Move validation and position queries
+//! - `legality` - Move legality checking
+//! - `zobrist` - Zobrist hashing for position identification
 
 // Private modules
 mod core;
+mod legality;
 mod moves;
 mod validation;
+mod zobrist;
 
 // Tests module
 #[cfg(test)]
@@ -19,3 +23,6 @@ mod tests;
 
 // Re-export Position and UndoInfo
 pub use self::core::{Position, UndoInfo};
+
+// Re-export zobrist types
+pub use self::zobrist::{ZobristHashing, ZobristTable};

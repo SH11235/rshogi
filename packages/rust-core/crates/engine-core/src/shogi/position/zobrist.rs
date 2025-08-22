@@ -8,8 +8,10 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::{
     shogi::board::{BOARD_SQUARES, MAX_PIECE_INDEX},
-    Color, Piece, PieceType, Position, Square,
+    Color, Piece, PieceType, Square,
 };
+
+use super::Position;
 
 /// Maximum number of pieces that can be held in hand (18 pieces max)
 const MAX_HAND_COUNT: usize = 18;

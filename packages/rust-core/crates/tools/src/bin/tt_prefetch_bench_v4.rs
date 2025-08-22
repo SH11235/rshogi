@@ -10,11 +10,9 @@ use engine_core::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     movegen::MoveGen,
     search::tt::{NodeType, TranspositionTable},
-    shogi::{
-        board::Position,
-        moves::{Move, MoveList},
-    },
+    shogi::moves::{Move, MoveList},
     usi::parse_sfen,
+    Position,
 };
 use std::sync::Arc;
 use std::time::Instant;
