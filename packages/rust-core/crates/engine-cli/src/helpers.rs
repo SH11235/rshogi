@@ -215,6 +215,14 @@ pub fn send_bestmove_and_finalize(
     bestmove_sent: &mut bool,
     current_search_is_ponder: &mut bool,
 ) -> Result<()> {
+    // Guard: Never send bestmove during ponder (double safety)
+    if *current_search_is_ponder {
+        log::debug!("Suppressing bestmove during ponder (safety guard)");
+        *search_state = SearchState::Idle;
+        *current_search_is_ponder = false;
+        return Ok(());
+    }
+
     let result = send_bestmove_once(best_move, ponder, search_state, bestmove_sent);
     *current_search_is_ponder = false; // Reset ponder flag after sending bestmove
     result
