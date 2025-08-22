@@ -157,7 +157,7 @@ where
 
         // Create TimeManager if needed
         self.time_manager =
-            time_management::create_time_manager(&limits, pos.side_to_move, pos.ply);
+            time_management::create_time_manager(&limits, pos.side_to_move, pos.ply, pos);
 
         // Get actual depth limit from limits (not from context which defaults to 127)
         let max_depth = limits.depth.unwrap_or(127);

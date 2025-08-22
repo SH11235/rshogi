@@ -20,7 +20,7 @@ pub mod unified;
 mod test_utils;
 
 // Re-export commonly used items
-pub use crate::time_management::GamePhase;
+pub use crate::game_phase::GamePhase;
 pub use common::{is_mate_score, mate_distance_pruning, mate_score, LimitChecker, SearchContext};
 pub use constants::*;
 pub use limits::{SearchLimits, SearchLimitsBuilder};
