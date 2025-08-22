@@ -14,12 +14,10 @@ use crate::{
     Position,
 };
 
-#[cfg(test)]
-use super::game_phase_integration::calculate_phase_score;
 use super::game_phase_integration::{detect_game_phase_for_search, GamePhase};
 
-// Phase thresholds moved to game_phase module
-// The new module uses a different approach with continuous signals
+// Game phase detection is now handled by the game_phase module
+// See docs/game-phase-module-guide.md for details
 
 /// Type alias for unified searchers
 type MaterialSearcher = UnifiedSearcher<MaterialEvaluator, true, false>;
@@ -188,14 +186,6 @@ impl Engine {
             tt_size_mb: default_tt_size,
             pending_tt_size: None,
         }
-    }
-
-    /// Calculate material phase score (0-128)
-    // material_phase_score is now only used in tests
-    #[cfg(test)]
-    fn material_phase_score(&self, pos: &Position) -> u8 {
-        // Use the new game_phase module for phase score calculation
-        calculate_phase_score(pos, pos.ply as u32)
     }
 
     /// Detect game phase based on position
@@ -781,9 +771,6 @@ impl Evaluator for NNUEEvaluatorProxy {
 }
 
 #[cfg(test)]
-mod phase_baseline_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     // use std::sync::atomic::AtomicBool; // Commented out - used in test that's temporarily disabled
@@ -1008,40 +995,6 @@ mod tests {
     */
 
     #[test]
-    fn test_material_phase_score() {
-        let engine = Engine::new(EngineType::Material);
-
-        // Starting position - with new system, score depends on both material and ply
-        let pos = Position::startpos();
-        let score = engine.material_phase_score(&pos);
-        eprintln!("Start position score: {}", score);
-        // The new system returns values based on combined signals
-        // Start position (ply=0) should have high score
-        assert!(score > 100, "Start position should have high score, got {}", score);
-
-        // Create a position with fewer pieces
-        let mut endgame_pos = Position::empty();
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('5', 'i').unwrap(),
-            Piece::new(PieceType::King, Color::Black),
-        );
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('5', 'a').unwrap(),
-            Piece::new(PieceType::King, Color::White),
-        );
-        endgame_pos.board.put_piece(
-            Square::from_usi_chars('4', 'h').unwrap(),
-            Piece::new(PieceType::Gold, Color::Black),
-        );
-
-        // Should have low phase score
-        let score = engine.material_phase_score(&endgame_pos);
-        eprintln!("Endgame position score: {}", score);
-        // With only 1 gold and kings, score should be medium to low
-        assert!(score < 50, "Endgame position should have lower score, got {}", score);
-    }
-
-    #[test]
     fn test_game_phase_detection() {
         let engine = Engine::new(EngineType::Material);
 
@@ -1186,57 +1139,6 @@ mod tests {
         // After applying pending changes
         engine.apply_pending_tt_size();
         assert_eq!(engine.get_hash_size(), 32);
-    }
-
-    #[test]
-    fn test_material_phase_score_with_promoted_pieces() {
-        let engine = Engine::new(EngineType::Material);
-
-        // Test with promoted pieces
-        let mut pos = Position::empty();
-
-        // Add kings (required)
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'i').unwrap(),
-            Piece::new(PieceType::King, Color::Black),
-        );
-        pos.board.put_piece(
-            Square::from_usi_chars('5', 'a').unwrap(),
-            Piece::new(PieceType::King, Color::White),
-        );
-
-        // Add normal rook (weight 4)
-        pos.board.put_piece(
-            Square::from_usi_chars('2', 'h').unwrap(),
-            Piece::new(PieceType::Rook, Color::Black),
-        );
-
-        // Add promoted rook (should also count as weight 4)
-        pos.board.put_piece(
-            Square::from_usi_chars('8', 'b').unwrap(),
-            Piece::promoted(PieceType::Rook, Color::White),
-        );
-
-        // With new system, the score calculation is different
-        let score = engine.material_phase_score(&pos);
-        eprintln!("Position with 2 rooks score: {}", score);
-        // With 2 rooks, should have medium-low score
-        assert!(score > 30 && score < 70, "Expected score between 30-70, got {}", score);
-
-        // Add more promoted pieces
-        pos.board.put_piece(
-            Square::from_usi_chars('7', 'c').unwrap(),
-            Piece::promoted(PieceType::Silver, Color::Black),
-        );
-        pos.board.put_piece(
-            Square::from_usi_chars('3', 'f').unwrap(),
-            Piece::promoted(PieceType::Pawn, Color::White),
-        );
-
-        // With more pieces, score should be higher
-        let score = engine.material_phase_score(&pos);
-        eprintln!("Position with 2 rooks + silver score: {}", score);
-        assert!(score > 40 && score < 80, "Expected score between 40-80, got {}", score);
     }
 
     #[test]

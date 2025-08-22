@@ -13,6 +13,7 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 - [**ABDADA実装**](abdada-implementation.md) - 並列探索の重複作業削減技術
 - [**座標系の説明**](coordinate-system.md) - 将棋盤の座標表現
 - [**SIMD アーキテクチャ**](simd-architecture.md) - SIMD最適化の設計
+- [**ゲームフェーズモジュール**](../crates/engine-core/docs/game-phase-module-guide.md) - 統一されたゲームフェーズ検出システム
 
 ### 📊 Performance & Benchmarking
 - [**パフォーマンスドキュメント総合**](performance/README.md) - パフォーマンス関連ドキュメントのインデックス
@@ -50,6 +51,7 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 |---------|------------|------|----------|------|
 | **Architecture** | unified-searcher-design.md | ✅ Active | 2025-08 | 実装完了 |
 | **Architecture** | abdada-implementation.md | ✅ Active | 2025-08 | 実装済み |
+| **Architecture** | game-phase-module-guide.md | ✅ Active | 2025-08 | Phase 4実装完了 |
 | **Performance** | parallel-benchmark-guide.md | ✅ Active | 2025-08-09 | 新機能反映済み |
 | **Performance** | parallel-search-improvement.md | ✅ Completed | 2025-08-09 | Phase 6まで完了 |
 | **Performance** | tt-optimization-summary.md | ✅ Active | 2025-08-09 | 3文書を統合 |
