@@ -513,52 +513,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
             // Check for bestmove message
             match ctx.worker_rx.try_recv() {
-                Ok(WorkerMessage::BestMove {
-                    best_move,
-                    ponder_move,
-                    search_id,
-                }) => {
-                    // Only accept if it's for current search
-                    if search_id == *ctx.current_search_id {
-                        // Validate bestmove before sending
-                        let adapter = lock_or_recover_adapter(ctx.engine);
-                        if !adapter.is_legal_move(&best_move) {
-                            log::error!(
-                                "Invalid bestmove from worker in stop handler: {best_move}"
-                            );
-                            // Fall through to timeout/fallback handling
-                            drop(adapter);
-                        } else {
-                            drop(adapter);
-                            // Use BestmoveEmitter for centralized emission
-                            if let Some(ref emitter) = ctx.current_bestmove_emitter {
-                                let meta = create_bestmove_meta(
-                                    BestmoveSource::WorkerOnStop,
-                                    TerminationReason::UserStop,
-                                    elapsed.as_millis() as u64,
-                                    0, // TODO: Get actual depth from worker
-                                    None,
-                                    0, // TODO: Get actual node count
-                                    false,
-                                );
-
-                                emitter.emit(best_move, ponder_move, meta)?;
-                                *ctx.search_state = SearchState::Idle;
-                                *ctx.current_search_is_ponder = false;
-                                *ctx.current_bestmove_emitter = None;
-                            } else {
-                                log::error!("BestmoveEmitter not available for worker bestmove; sending bestmove directly");
-                                send_response(UsiResponse::BestMove {
-                                    best_move,
-                                    ponder: ponder_move,
-                                })?;
-                                *ctx.search_state = SearchState::Idle;
-                                *ctx.current_search_is_ponder = false;
-                            }
-                            break;
-                        }
-                    }
-                }
+                // WorkerMessage::BestMove has been completely removed.
+                // All bestmove emissions now go through the session-based approach
                 Ok(WorkerMessage::Info(info)) => {
                     // Forward info messages during active search (including StopRequested state)
                     // TODO: Add search_id to Info messages to filter out stale messages from previous searches

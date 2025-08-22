@@ -2,13 +2,13 @@ use crate::engine_adapter::EngineAdapter;
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
 use crate::usi::output::{Score, SearchInfo};
-use crate::usi::{self, send_info_string, send_response_or_exit, UsiResponse};
+use crate::usi::{self, send_info_string};
 use crate::utils::lock_or_recover_generic;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use engine_core::engine::controller::Engine;
 use engine_core::search::constants::MATE_SCORE;
-use engine_core::search::types::StopInfo;
+use engine_core::search::types::{StopInfo, TerminationReason};
 use engine_core::search::SearchLimits;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -33,12 +33,6 @@ pub enum WorkerMessage {
         stop_info: Option<StopInfo>,
     },
 
-    // Legacy messages (to be phased out)
-    BestMove {
-        best_move: String,
-        ponder_move: Option<String>,
-        search_id: u64,
-    },
     /// Partial result available during search
     PartialResult {
         current_best: String,
@@ -257,28 +251,79 @@ pub fn search_worker(
 
                         // Try to generate emergency move before resigning (only if not pondering)
                         if !params.ponder {
+                            // Get position hash for session
+                            let position_hash = adapter.get_position().map(|p| p.hash).unwrap_or(0);
+
                             match adapter.generate_emergency_move() {
                                 Ok(emergency_move) => {
                                     log::info!(
                                         "Generated emergency move after preparation error: {emergency_move}"
                                     );
-                                    if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                        best_move: emergency_move,
-                                        ponder_move: None,
+
+                                    // Create emergency session
+                                    let emergency_session = create_emergency_session(
+                                        search_id,
+                                        position_hash,
+                                        emergency_move,
+                                        false,
+                                    );
+
+                                    // Send session update
+                                    if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                        session: Box::new(emergency_session.clone()),
                                         search_id,
                                     }) {
-                                        log::error!("Failed to send emergency move: {e}");
+                                        log::error!("Failed to send emergency session: {e}");
+                                    }
+
+                                    // Send search finished
+                                    if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                        session_id: emergency_session.id,
+                                        root_hash: emergency_session.root_hash,
+                                        search_id,
+                                        stop_info: Some(StopInfo {
+                                            reason: TerminationReason::Error,
+                                            elapsed_ms: 0,
+                                            nodes: 0,
+                                            depth_reached: 1,
+                                            hard_timeout: false,
+                                        }),
+                                    }) {
+                                        log::error!("Failed to send search finished: {e}");
                                     }
                                 }
                                 Err(_) => {
                                     // Only resign if no legal moves available
-                                    if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                        best_move: "resign".to_string(),
-                                        ponder_move: None,
+                                    let resign_session = create_emergency_session(
+                                        search_id,
+                                        position_hash,
+                                        "resign".to_string(),
+                                        true,
+                                    );
+
+                                    // Send session update
+                                    if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                        session: Box::new(resign_session.clone()),
                                         search_id,
                                     }) {
+                                        log::error!("Failed to send resign session: {e}");
+                                    }
+
+                                    // Send search finished
+                                    if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                        session_id: resign_session.id,
+                                        root_hash: resign_session.root_hash,
+                                        search_id,
+                                        stop_info: Some(StopInfo {
+                                            reason: TerminationReason::Error,
+                                            elapsed_ms: 0,
+                                            nodes: 0,
+                                            depth_reached: 0,
+                                            hard_timeout: false,
+                                        }),
+                                    }) {
                                         log::error!(
-                                            "Failed to send resign after preparation error: {e}"
+                                            "Failed to send search finished after resign: {e}"
                                         );
                                     }
                                 }
@@ -307,27 +352,79 @@ pub fn search_worker(
                 // Try to generate emergency move from adapter (only if not pondering)
                 if !params.ponder {
                     log::info!("Attempting to generate emergency move after engine take failure");
+
+                    // Get position hash for session
+                    let position_hash = adapter.get_position().map(|p| p.hash).unwrap_or(0);
+
                     match adapter.generate_emergency_move() {
                         Ok(emergency_move) => {
                             log::info!(
                                 "Generated emergency move after engine take error: {emergency_move}"
                             );
-                            if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                best_move: emergency_move,
-                                ponder_move: None,
+
+                            // Create emergency session
+                            let emergency_session = create_emergency_session(
+                                search_id,
+                                position_hash,
+                                emergency_move,
+                                false,
+                            );
+
+                            // Send session update
+                            if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                session: Box::new(emergency_session.clone()),
                                 search_id,
                             }) {
-                                log::error!("Failed to send emergency move: {e}");
+                                log::error!("Failed to send emergency session: {e}");
+                            }
+
+                            // Send search finished
+                            if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                session_id: emergency_session.id,
+                                root_hash: emergency_session.root_hash,
+                                search_id,
+                                stop_info: Some(StopInfo {
+                                    reason: TerminationReason::Error,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 1,
+                                    hard_timeout: false,
+                                }),
+                            }) {
+                                log::error!("Failed to send search finished: {e}");
                             }
                         }
                         Err(_) => {
                             // Only resign if no legal moves available
-                            if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                best_move: "resign".to_string(),
-                                ponder_move: None,
+                            let resign_session = create_emergency_session(
+                                search_id,
+                                position_hash,
+                                "resign".to_string(),
+                                true,
+                            );
+
+                            // Send session update
+                            if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                session: Box::new(resign_session.clone()),
                                 search_id,
                             }) {
-                                log::error!("Failed to send resign after engine take error: {e}");
+                                log::error!("Failed to send resign session: {e}");
+                            }
+
+                            // Send search finished
+                            if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                session_id: resign_session.id,
+                                root_hash: resign_session.root_hash,
+                                search_id,
+                                stop_info: Some(StopInfo {
+                                    reason: TerminationReason::Error,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 0,
+                                    hard_timeout: false,
+                                }),
+                            }) {
+                                log::error!("Failed to send search finished after resign: {e}");
                             }
                         }
                     }
@@ -569,22 +666,70 @@ pub fn search_worker(
                     match emergency_result {
                         Ok(emergency_move) => {
                             log::info!("Generated emergency move after stop: {emergency_move}");
-                            if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                best_move: emergency_move,
-                                ponder_move: None,
+
+                            // Create emergency session
+                            let emergency_session = create_emergency_session(
+                                search_id,
+                                position.hash,
+                                emergency_move,
+                                false,
+                            );
+
+                            // Send session update
+                            if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                session: Box::new(emergency_session.clone()),
                                 search_id,
                             }) {
-                                log::error!("Failed to send emergency move: {e}");
+                                log::error!("Failed to send emergency session: {e}");
+                            }
+
+                            // Send search finished
+                            if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                session_id: emergency_session.id,
+                                root_hash: emergency_session.root_hash,
+                                search_id,
+                                stop_info: Some(StopInfo {
+                                    reason: TerminationReason::UserStop,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 1,
+                                    hard_timeout: false,
+                                }),
+                            }) {
+                                log::error!("Failed to send search finished: {e}");
                             }
                         }
                         Err(_) => {
                             // Only resign if no legal moves
-                            if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                best_move: "resign".to_string(),
-                                ponder_move: None,
+                            let resign_session = create_emergency_session(
+                                search_id,
+                                position.hash,
+                                "resign".to_string(),
+                                true,
+                            );
+
+                            // Send session update
+                            if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                session: Box::new(resign_session.clone()),
                                 search_id,
                             }) {
-                                log::error!("Failed to send resign after stop: {e}");
+                                log::error!("Failed to send resign session: {e}");
+                            }
+
+                            // Send search finished
+                            if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                session_id: resign_session.id,
+                                root_hash: resign_session.root_hash,
+                                search_id,
+                                stop_info: Some(StopInfo {
+                                    reason: TerminationReason::UserStop,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 0,
+                                    hard_timeout: false,
+                                }),
+                            }) {
+                                log::error!("Failed to send search finished after resign: {e}");
                             }
                         }
                     }
@@ -616,22 +761,70 @@ pub fn search_worker(
                             log::info!(
                                 "Generated emergency move after search error: {emergency_move}"
                             );
-                            if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                best_move: emergency_move,
-                                ponder_move: None,
+
+                            // Create emergency session
+                            let emergency_session = create_emergency_session(
+                                search_id,
+                                position.hash,
+                                emergency_move,
+                                false,
+                            );
+
+                            // Send session update
+                            if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                session: Box::new(emergency_session.clone()),
                                 search_id,
                             }) {
-                                log::error!("Failed to send emergency move: {e}");
+                                log::error!("Failed to send emergency session: {e}");
+                            }
+
+                            // Send search finished
+                            if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                session_id: emergency_session.id,
+                                root_hash: emergency_session.root_hash,
+                                search_id,
+                                stop_info: Some(StopInfo {
+                                    reason: TerminationReason::Error,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 1,
+                                    hard_timeout: false,
+                                }),
+                            }) {
+                                log::error!("Failed to send search finished: {e}");
                             }
                         }
                         Err(_) => {
                             // Only resign if no legal moves
-                            if let Err(e) = tx.send(WorkerMessage::BestMove {
-                                best_move: "resign".to_string(),
-                                ponder_move: None,
+                            let resign_session = create_emergency_session(
+                                search_id,
+                                position.hash,
+                                "resign".to_string(),
+                                true,
+                            );
+
+                            // Send session update
+                            if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                                session: Box::new(resign_session.clone()),
                                 search_id,
                             }) {
-                                log::error!("Failed to send resign after error: {e}");
+                                log::error!("Failed to send resign session: {e}");
+                            }
+
+                            // Send search finished
+                            if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                                session_id: resign_session.id,
+                                root_hash: resign_session.root_hash,
+                                search_id,
+                                stop_info: Some(StopInfo {
+                                    reason: TerminationReason::Error,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 0,
+                                    hard_timeout: false,
+                                }),
+                            }) {
+                                log::error!("Failed to send search finished after resign: {e}");
                             }
                         }
                     }
@@ -657,6 +850,35 @@ pub fn search_worker(
     }
 
     log::debug!("Search worker finished");
+}
+
+/// Create an emergency search session for fallback moves
+fn create_emergency_session(
+    search_id: u64,
+    position_hash: u64,
+    best_move: String,
+    is_resign: bool,
+) -> SearchSession {
+    let mut session = SearchSession::new(search_id, position_hash);
+
+    // Parse the move (if not resign)
+    let moves = if is_resign {
+        vec![]
+    } else {
+        match engine_core::usi::parse_usi_move(&best_move) {
+            Ok(m) => vec![m],
+            Err(_) => vec![], // Invalid move format
+        }
+    };
+
+    // Set a minimal depth and score for emergency moves
+    let depth = 1;
+    let score = if is_resign { -30000 } else { 0 }; // Large negative score for resign
+
+    session.update_current_best(depth, score, moves, engine_core::search::NodeType::Exact);
+    session.commit_iteration();
+
+    session
 }
 
 /// Wait for worker thread to finish with timeout
@@ -706,22 +928,8 @@ pub fn wait_for_worker_with_timeout(
                         // Info messages during shutdown can be ignored
                         log::trace!("Received info during shutdown: {info:?}");
                     }
-                    Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
-                        // During shutdown, we may accept late bestmoves
-                        // For safety, we could check search_id here but during shutdown
-                        // we're more lenient since we're trying to clean up
-                        if search_state.can_accept_bestmove() {
-                            log::debug!("Accepting bestmove during shutdown (search_id: {search_id})");
-                            send_response_or_exit(UsiResponse::BestMove {
-                                best_move,
-                                ponder: ponder_move,
-                            });
-                            // Mark search as finished when bestmove is received
-                            *search_state = SearchState::Idle;
-                        } else {
-                            log::warn!("Ignoring late bestmove during shutdown: {best_move} (search_id: {search_id})");
-                        }
-                    }
+                    // WorkerMessage::BestMove has been completely removed.
+                    // All bestmove emissions now go through the session-based approach
                     Ok(WorkerMessage::PartialResult { .. }) => {
                         // Partial results during shutdown can be ignored
                         log::trace!("PartialResult during shutdown - ignoring");
