@@ -1,7 +1,6 @@
 use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::helpers::{
-    calculate_max_search_time, generate_fallback_move, send_bestmove_and_finalize,
-    wait_for_search_completion,
+    calculate_max_search_time, generate_fallback_move, wait_for_search_completion,
 };
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
@@ -368,14 +367,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         *ctx.current_search_is_ponder = false;
                         return Ok(());
                     } else {
-                        // Fallback to old method if emitter not available
-                        return send_bestmove_and_finalize(
-                            best_move,
-                            ponder,
-                            ctx.search_state,
-                            ctx.bestmove_sent,
-                            ctx.current_search_is_ponder,
-                        );
+                        log::error!("BestmoveEmitter not available for current search");
+                        return Err(anyhow!("BestmoveEmitter not initialized"));
                     }
                 }
             }
@@ -477,14 +470,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             *ctx.bestmove_sent = true;
                             *ctx.current_search_is_ponder = false;
                         } else {
-                            // Fallback to old method if emitter not available
-                            send_bestmove_and_finalize(
-                                move_str,
-                                None,
-                                ctx.search_state,
-                                ctx.bestmove_sent,
-                                ctx.current_search_is_ponder,
-                            )?;
+                            log::error!("BestmoveEmitter not available for timeout fallback");
+                            return Err(anyhow!("BestmoveEmitter not initialized"));
                         }
                     }
                     Err(e) => {
@@ -518,14 +505,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             *ctx.bestmove_sent = true;
                             *ctx.current_search_is_ponder = false;
                         } else {
-                            // Fallback to old method if emitter not available
-                            send_bestmove_and_finalize(
-                                "resign".to_string(),
-                                None,
-                                ctx.search_state,
-                                ctx.bestmove_sent,
-                                ctx.current_search_is_ponder,
-                            )?;
+                            log::error!("BestmoveEmitter not available for resign");
+                            return Err(anyhow!("BestmoveEmitter not initialized"));
                         }
                     }
                 }
@@ -569,14 +550,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             *ctx.bestmove_sent = true;
                             *ctx.current_search_is_ponder = false;
                         } else {
-                            // Fallback to old method if emitter not available
-                            send_bestmove_and_finalize(
-                                best_move,
-                                ponder_move,
-                                ctx.search_state,
-                                ctx.bestmove_sent,
-                                ctx.current_search_is_ponder,
-                            )?;
+                            log::error!("BestmoveEmitter not available for worker bestmove");
+                            return Err(anyhow!("BestmoveEmitter not initialized"));
                         }
                         break;
                     }
@@ -636,13 +611,42 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                         log::info!(
                                             "Sending bestmove from stop handler: {best_move}"
                                         );
-                                        send_bestmove_and_finalize(
-                                            best_move,
-                                            ponder,
-                                            ctx.search_state,
-                                            ctx.bestmove_sent,
-                                            ctx.current_search_is_ponder,
-                                        )?;
+                                        
+                                        if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                                            use crate::bestmove_emitter::{BestmoveMeta, BestmoveStats};
+                                            use engine_core::search::types::{StopInfo, TerminationReason};
+                                            
+                                            let meta = BestmoveMeta {
+                                                from: "session_in_search_finished",
+                                                stop_info: StopInfo {
+                                                    reason: TerminationReason::UserStop,
+                                                    elapsed_ms: elapsed.as_millis() as u64,
+                                                    nodes: 0,      // TODO: Get actual node count
+                                                    depth_reached: depth as u8,
+                                                    hard_timeout: false,
+                                                },
+                                                stats: BestmoveStats {
+                                                    depth,
+                                                    seldepth: None,
+                                                    score: session.committed_best.as_ref()
+                                                        .map(|b| match &b.score {
+                                                            crate::search_session::Score::Cp(cp) => format!("cp {cp}"),
+                                                            crate::search_session::Score::Mate(mate) => format!("mate {mate}")
+                                                        })
+                                                        .unwrap_or_else(|| "unknown".to_string()),
+                                                    nodes: 0,
+                                                    nps: 0,
+                                                },
+                                            };
+                                            
+                                            emitter.emit(best_move, ponder, meta)?;
+                                            *ctx.search_state = SearchState::Idle;
+                                            *ctx.bestmove_sent = true;
+                                            *ctx.current_search_is_ponder = false;
+                                        } else {
+                                            log::error!("BestmoveEmitter not available for SearchFinished");
+                                            return Err(anyhow!("BestmoveEmitter not initialized"));
+                                        }
                                         break;
                                     }
                                     Err(e) => {
@@ -680,13 +684,43 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 } else {
                                     log::debug!("Using emergency fallback on finish");
                                 }
-                                send_bestmove_and_finalize(
-                                    move_str,
-                                    None,
-                                    ctx.search_state,
-                                    ctx.bestmove_sent,
-                                    ctx.current_search_is_ponder,
-                                )?;
+                                
+                                if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                                    use crate::bestmove_emitter::{BestmoveMeta, BestmoveStats};
+                                    use engine_core::search::types::{StopInfo, TerminationReason};
+                                    
+                                    let meta = BestmoveMeta {
+                                        from: if partial_result.is_some() {
+                                            "partial_result_on_finish"
+                                        } else {
+                                            "emergency_fallback_on_finish"
+                                        },
+                                        stop_info: StopInfo {
+                                            reason: TerminationReason::UserStop,
+                                            elapsed_ms: elapsed.as_millis() as u64,
+                                            nodes: 0,      // TODO: Get actual node count
+                                            depth_reached: partial_result.as_ref().map(|(_, d, _)| *d as u8).unwrap_or(0),
+                                            hard_timeout: false,
+                                        },
+                                        stats: BestmoveStats {
+                                            depth: partial_result.as_ref().map(|(_, d, _)| *d).unwrap_or(0),
+                                            seldepth: None,
+                                            score: partial_result.as_ref()
+                                                .map(|(_, _, s)| format!("cp {s}"))
+                                                .unwrap_or_else(|| "unknown".to_string()),
+                                            nodes: 0,
+                                            nps: 0,
+                                        },
+                                    };
+                                    
+                                    emitter.emit(move_str, None, meta)?;
+                                    *ctx.search_state = SearchState::Idle;
+                                    *ctx.bestmove_sent = true;
+                                    *ctx.current_search_is_ponder = false;
+                                } else {
+                                    log::error!("BestmoveEmitter not available for finish handler");
+                                    return Err(anyhow!("BestmoveEmitter not initialized"));
+                                }
                             }
                             Err(e) => {
                                 let position_info = {
@@ -700,13 +734,37 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     "Fallback move generation failed in position {}: {e}",
                                     position_info
                                 );
-                                send_bestmove_and_finalize(
-                                    "resign".to_string(),
-                                    None,
-                                    ctx.search_state,
-                                    ctx.bestmove_sent,
-                                    ctx.current_search_is_ponder,
-                                )?;
+                                
+                                if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                                    use crate::bestmove_emitter::{BestmoveMeta, BestmoveStats};
+                                    use engine_core::search::types::{StopInfo, TerminationReason};
+                                    
+                                    let meta = BestmoveMeta {
+                                        from: "resign_on_finish",
+                                        stop_info: StopInfo {
+                                            reason: TerminationReason::Error,
+                                            elapsed_ms: elapsed.as_millis() as u64,
+                                            nodes: 0,
+                                            depth_reached: 0,
+                                            hard_timeout: false,
+                                        },
+                                        stats: BestmoveStats {
+                                            depth: 0,
+                                            seldepth: None,
+                                            score: "unknown".to_string(),
+                                            nodes: 0,
+                                            nps: 0,
+                                        },
+                                    };
+                                    
+                                    emitter.emit("resign".to_string(), None, meta)?;
+                                    *ctx.search_state = SearchState::Idle;
+                                    *ctx.bestmove_sent = true;
+                                    *ctx.current_search_is_ponder = false;
+                                } else {
+                                    log::error!("BestmoveEmitter not available for resign on finish");
+                                    return Err(anyhow!("BestmoveEmitter not initialized"));
+                                }
                             }
                         }
                         break;
