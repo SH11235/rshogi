@@ -264,9 +264,9 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         *ctx.search_state = SearchState::StopRequested;
         ctx.stop_flag.store(true, Ordering::Release);
 
-        // Clean up state
-        *ctx.search_state = SearchState::Idle;
-        *ctx.current_search_is_ponder = false;
+        // Keep state as StopRequested and ponder flag as true
+        // They will be cleaned up when the worker is properly joined
+        log::debug!("Ponder stop: keeping StopRequested state for proper cleanup");
 
         return Ok(());
     }
