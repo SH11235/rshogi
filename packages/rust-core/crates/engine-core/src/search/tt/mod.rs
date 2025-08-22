@@ -749,8 +749,10 @@ impl TranspositionTable {
                 }
             };
 
-            // Validate move is legal
-            if !pos.is_pseudo_legal(best_move) {
+            // Validate move is legal (generate all legal moves and check membership)
+            let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
+            let legal_moves = move_gen.generate_all();
+            if !legal_moves.as_slice().contains(&best_move) {
                 log::warn!(
                     "PV reconstruction: Illegal move {} at depth {}",
                     crate::usi::move_to_usi(&best_move),
@@ -873,18 +875,50 @@ mod pv_reconstruction_tests {
     #[test]
     fn test_reconstruct_pv_from_tt_exact_only() {
         // Create a TT with some capacity
-        let tt = TranspositionTable::new(1); // 1MB
+        let mut tt = TranspositionTable::new(1); // 1MB
+
+        // Initialize TT for new search (sets age)
+        tt.new_search();
 
         // Create a position
         let mut pos = Position::startpos();
 
-        // Create some test moves
-        let move1 =
-            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
-        let move2 =
-            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
-        let move3 =
-            Move::normal(parse_usi_square("6g").unwrap(), parse_usi_square("6f").unwrap(), false);
+        // Generate legal moves and find the ones we want
+        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves = move_gen.generate_all();
+
+        let move1 = moves
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "7g7f")
+            .cloned()
+            .expect("7g7f should be legal");
+
+        let undo1 = pos.do_move(move1);
+        let mut move_gen2 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves2 = move_gen2.generate_all();
+
+        let move2 = moves2
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "3c3d")
+            .cloned()
+            .expect("3c3d should be legal after 7g7f");
+
+        let undo2 = pos.do_move(move2);
+        let mut move_gen3 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves3 = move_gen3.generate_all();
+
+        let move3 = moves3
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "6g6f")
+            .cloned()
+            .expect("6g6f should be legal after 7g7f 3c3d");
+
+        // Undo to get back to start
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
 
         // Store some entries in TT
         let hash1 = pos.zobrist_hash;
@@ -917,16 +951,38 @@ mod pv_reconstruction_tests {
     #[test]
     fn test_reconstruct_pv_stops_at_non_exact() {
         // Create a TT
-        let tt = TranspositionTable::new(1);
+        let mut tt = TranspositionTable::new(1);
+
+        // Initialize TT for new search (sets age)
+        tt.new_search();
 
         // Create a position
         let mut pos = Position::startpos();
 
-        // Create test moves
-        let move1 =
-            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
-        let move2 =
-            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
+        // Generate legal moves and find the ones we want
+        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves = move_gen.generate_all();
+
+        let move1 = moves
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "7g7f")
+            .cloned()
+            .expect("7g7f should be legal");
+
+        let undo1_temp = pos.do_move(move1);
+        let mut move_gen2 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves2 = move_gen2.generate_all();
+
+        let move2 = moves2
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "3c3d")
+            .cloned()
+            .expect("3c3d should be legal after 7g7f");
+
+        // Undo to get back to start
+        pos.undo_move(move1, undo1_temp);
 
         // Store first move as EXACT
         let hash1 = pos.zobrist_hash;

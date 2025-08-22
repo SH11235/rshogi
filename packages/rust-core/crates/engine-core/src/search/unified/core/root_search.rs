@@ -61,10 +61,21 @@ where
         }
     }
 
+    // Get TT move for root position if available
+    let tt_move = if USE_TT {
+        searcher
+            .tt
+            .as_ref()
+            .and_then(|tt| tt.probe(pos.zobrist_hash))
+            .and_then(|e| e.get_move())
+    } else {
+        None
+    };
+
     // Order moves - avoid Vec to SmallVec conversion
     let (ordered_slice, _owned_moves);
     if USE_TT || USE_PRUNING {
-        let moves_vec = searcher.ordering.order_moves_at_root(pos, &moves, None, previous_pv);
+        let moves_vec = searcher.ordering.order_moves_at_root(pos, &moves, tt_move, previous_pv);
         _owned_moves = Some(moves_vec);
         let vec_ref = _owned_moves.as_ref().unwrap();
         ordered_slice = &vec_ref[..];
