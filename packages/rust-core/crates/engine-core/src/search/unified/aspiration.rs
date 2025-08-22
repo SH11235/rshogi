@@ -76,13 +76,43 @@ impl AspirationWindow {
     ///
     /// Returns (alpha, beta) window around the best score
     pub fn get_initial_bounds(&self, depth: u8, best_score: i32) -> (i32, i32) {
-        if depth > 1 && best_score.abs() < MATE_SCORE {
-            // Calculate dynamic window based on score history
+        if depth <= 1 {
+            // First depth - use full window
+            return (-SEARCH_INF, SEARCH_INF);
+        }
+
+        // Check if this is a mate score
+        let mate_threshold = MATE_SCORE - crate::search::constants::MAX_PLY as i32;
+        if best_score.abs() >= mate_threshold {
+            // For mate scores, use a special narrow window
+            // The window size depends on how close the mate is
+            let mate_distance = MATE_SCORE - best_score.abs();
+
+            // Use narrower windows for closer mates
+            let window = if mate_distance <= 10 {
+                // Very close to mate - use minimal window
+                5
+            } else if mate_distance <= 20 {
+                // Near mate - use small window
+                10
+            } else {
+                // Distant mate - use moderate window
+                20
+            };
+
+            // For winning mates, we primarily care about finding shorter mates
+            // For losing mates, we primarily care about finding longer mates
+            if best_score > 0 {
+                // We're winning - look for better (shorter) mates
+                (best_score - window, best_score + window * 2)
+            } else {
+                // We're losing - look for ways to delay mate
+                (best_score - window * 2, best_score + window)
+            }
+        } else {
+            // Normal (non-mate) score - use dynamic window based on score history
             let window = self.calculate_window(depth);
             (best_score - window, best_score + window)
-        } else {
-            // First depth or mate score - use full window
-            (-SEARCH_INF, SEARCH_INF)
         }
     }
 
@@ -132,6 +162,7 @@ impl AspirationWindow {
 
         // Calculate average deviation over recent depths
         let mut total_deviation = 0i64; // Use i64 to prevent overflow
+        let mut valid_comparisons = 0;
         let history_len = self.score_history.len();
         let start = history_len.saturating_sub(5); // Look at last 5 depths
 
@@ -141,24 +172,38 @@ impl AspirationWindow {
         }
 
         for i in (start + 1)..history_len {
-            // Calculate absolute difference between consecutive scores
-            // Safety: bounds are guaranteed by the check above
-            let diff = (self.score_history[i] as i64 - self.score_history[i - 1] as i64).abs();
+            let prev_score = self.score_history[i - 1];
+            let curr_score = self.score_history[i];
 
-            // Cap individual differences at 1000 centipawns to handle mate scores
-            // and prevent extreme volatility from skewing the average
+            // Special handling for mate scores - they should not contribute to volatility
+            // A mate score is when abs(score) >= MATE_SCORE - MAX_PLY
+            let mate_threshold = MATE_SCORE - crate::search::constants::MAX_PLY as i32;
+            let prev_is_mate = prev_score.abs() >= mate_threshold;
+            let curr_is_mate = curr_score.abs() >= mate_threshold;
+
+            // Skip if either score is a mate score
+            if prev_is_mate || curr_is_mate {
+                continue;
+            }
+
+            // Calculate absolute difference between consecutive scores
+            let diff = (curr_score as i64 - prev_score as i64).abs();
+
+            // Cap individual differences at 1000 centipawns to handle extreme scores
+            // and prevent outliers from skewing the average
             let capped_diff = diff.min(1000);
             total_deviation += capped_diff;
+            valid_comparisons += 1;
         }
 
         // Average deviation with proper rounding
-        let count = (history_len - start - 1) as i64;
-        if count > 0 {
-            // Add count/2 for proper rounding before integer division
-            let avg = (total_deviation + count / 2) / count;
+        if valid_comparisons > 0 {
+            // Add valid_comparisons/2 for proper rounding before integer division
+            let avg = (total_deviation + valid_comparisons / 2) / valid_comparisons;
             // Ensure result fits in i32 and is non-negative
             avg.min(i32::MAX as i64).max(0) as i32
         } else {
+            // If all recent scores were mate scores, return 0 volatility
             0
         }
     }
@@ -256,5 +301,52 @@ mod tests {
         assert!(alpha > -SEARCH_INF);
         assert!(beta < SEARCH_INF);
         assert_eq!(beta - alpha, 2 * aw.calculate_window(3));
+    }
+
+    #[test]
+    fn test_mate_score_bounds() {
+        let aw = AspirationWindow::new();
+
+        // Test very close winning mate (mate in 5 plies)
+        let (alpha, beta) = aw.get_initial_bounds(3, MATE_SCORE - 5);
+        assert_eq!(alpha, MATE_SCORE - 5 - 5); // Window of 5 below score
+        assert_eq!(beta, MATE_SCORE - 5 + 10); // Window of 10 above score (2x)
+        assert_eq!(beta - alpha, 15); // Total window should be 15
+
+        // Test distant winning mate (mate in 25 plies)
+        let (alpha, beta) = aw.get_initial_bounds(3, MATE_SCORE - 25);
+        assert!(beta - alpha <= 60); // Moderate window for distant mate
+
+        // Test losing mate (being mated in 10 plies)
+        let (alpha, beta) = aw.get_initial_bounds(3, -MATE_SCORE + 10);
+        assert_eq!(alpha, -MATE_SCORE + 10 - 10); // Window of 10 below score (2x for window=5)
+        assert_eq!(beta, -MATE_SCORE + 10 + 5); // Window of 5 above score
+        assert_eq!(beta - alpha, 15); // Total window should be 15
+    }
+
+    #[test]
+    fn test_mate_score_volatility_exclusion() {
+        let mut aw = AspirationWindow::new();
+
+        // Add mix of normal and mate scores
+        aw.update_score(100);
+        aw.update_score(120);
+        aw.update_score(MATE_SCORE - 10); // Mate score - should be excluded
+        aw.update_score(110);
+        aw.update_score(-MATE_SCORE + 5); // Losing mate - should be excluded
+
+        // Volatility should only consider the normal scores (100, 120, 110)
+        let volatility = aw.score_volatility;
+        assert!(volatility > 0);
+        assert!(volatility < 50); // Should be moderate, not extreme
+
+        // Test with only mate scores
+        let mut aw_mate_only = AspirationWindow::new();
+        aw_mate_only.update_score(MATE_SCORE - 5);
+        aw_mate_only.update_score(MATE_SCORE - 3);
+        aw_mate_only.update_score(MATE_SCORE - 1);
+
+        // Volatility should be 0 when all scores are mate scores
+        assert_eq!(aw_mate_only.score_volatility, 0);
     }
 }

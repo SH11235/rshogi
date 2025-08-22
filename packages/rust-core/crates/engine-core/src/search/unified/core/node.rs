@@ -138,7 +138,12 @@ where
                     if let Some(entry) = tt_entry {
                         // Only trust the early cutoff if the entry has sufficient depth and matches key
                         if entry.matches(hash) && entry.depth() >= depth.saturating_sub(1) {
-                            return entry.score() as i32;
+                            // Adjust mate scores from TT (stored relative to root) to current ply
+                            let adjusted_score = crate::search::common::adjust_mate_score_from_tt(
+                                entry.score() as i32,
+                                ply as u8,
+                            );
+                            return adjusted_score;
                         }
                     }
                     // Even without a good score, stop searching this node
@@ -519,7 +524,7 @@ where
             let mut boosted_depth = crate::search::tt_filter::boost_tt_depth(depth, node_type);
             // Apply additional boost for PV nodes
             boosted_depth = crate::search::tt_filter::boost_pv_depth(boosted_depth, is_pv);
-            searcher.store_tt(hash, boosted_depth, best_score, node_type, best_move);
+            searcher.store_tt(hash, boosted_depth, best_score, node_type, best_move, ply as u8);
         }
     }
 
