@@ -329,13 +329,54 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     log::debug!("Validated bestmove from session on stop: depth={depth}");
 
                     log::info!("Sending committed bestmove from session on stop: {best_move}");
-                    return send_bestmove_and_finalize(
-                        best_move,
-                        ponder,
-                        ctx.search_state,
-                        ctx.bestmove_sent,
-                        ctx.current_search_is_ponder,
-                    );
+
+                    // Use BestmoveEmitter for centralized emission
+                    if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                        use crate::bestmove_emitter::{BestmoveMeta, BestmoveStats};
+                        use engine_core::search::types::{StopInfo, TerminationReason};
+
+                        let meta = BestmoveMeta {
+                            from: "session_on_stop",
+                            stop_info: StopInfo {
+                                reason: TerminationReason::UserStop,
+                                elapsed_ms: 0, // TODO: Get actual elapsed time
+                                nodes: 0,      // TODO: Get actual node count
+                                depth_reached: depth as u8,
+                                hard_timeout: false,
+                            },
+                            stats: BestmoveStats {
+                                depth,
+                                seldepth: None,
+                                score: session
+                                    .committed_best
+                                    .as_ref()
+                                    .map(|b| match &b.score {
+                                        crate::search_session::Score::Cp(cp) => format!("cp {cp}"),
+                                        crate::search_session::Score::Mate(mate) => {
+                                            format!("mate {mate}")
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                                nodes: 0,
+                                nps: 0,
+                            },
+                        };
+
+                        emitter.emit(best_move, ponder, meta)?;
+                        *ctx.search_state = SearchState::Idle;
+                        *ctx.bestmove_sent = true;
+                        *ctx.current_search_is_ponder = false;
+                        return Ok(());
+                    } else {
+                        // Fallback to old method if emitter not available
+                        return send_bestmove_and_finalize(
+                            best_move,
+                            ponder,
+                            ctx.search_state,
+                            ctx.bestmove_sent,
+                            ctx.current_search_is_ponder,
+                        );
+                    }
                 }
             }
         }
@@ -397,23 +438,95 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             log::debug!("Using emergency fallback after timeout");
                         }
                         log::debug!("Sending emergency fallback bestmove: {move_str}");
-                        send_bestmove_and_finalize(
-                            move_str,
-                            None,
-                            ctx.search_state,
-                            ctx.bestmove_sent,
-                            ctx.current_search_is_ponder,
-                        )?;
+
+                        // Use BestmoveEmitter for centralized emission
+                        if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                            use crate::bestmove_emitter::{BestmoveMeta, BestmoveStats};
+                            use engine_core::search::types::{StopInfo, TerminationReason};
+
+                            let meta = BestmoveMeta {
+                                from: if partial_result.is_some() {
+                                    "partial_result_timeout"
+                                } else {
+                                    "emergency_fallback_timeout"
+                                },
+                                stop_info: StopInfo {
+                                    reason: TerminationReason::TimeLimit,
+                                    elapsed_ms: elapsed.as_millis() as u64,
+                                    nodes: 0, // TODO: Get actual node count
+                                    depth_reached: partial_result
+                                        .as_ref()
+                                        .map(|(_, d, _)| *d as u8)
+                                        .unwrap_or(0),
+                                    hard_timeout: true,
+                                },
+                                stats: BestmoveStats {
+                                    depth: partial_result.as_ref().map(|(_, d, _)| *d).unwrap_or(0),
+                                    seldepth: None,
+                                    score: partial_result
+                                        .as_ref()
+                                        .map(|(_, _, s)| format!("cp {s}"))
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    nodes: 0,
+                                    nps: 0,
+                                },
+                            };
+
+                            emitter.emit(move_str, None, meta)?;
+                            *ctx.search_state = SearchState::Idle;
+                            *ctx.bestmove_sent = true;
+                            *ctx.current_search_is_ponder = false;
+                        } else {
+                            // Fallback to old method if emitter not available
+                            send_bestmove_and_finalize(
+                                move_str,
+                                None,
+                                ctx.search_state,
+                                ctx.bestmove_sent,
+                                ctx.current_search_is_ponder,
+                            )?;
+                        }
                     }
                     Err(e) => {
                         log::error!("Emergency fallback move generation failed: {e}");
-                        send_bestmove_and_finalize(
-                            "resign".to_string(),
-                            None,
-                            ctx.search_state,
-                            ctx.bestmove_sent,
-                            ctx.current_search_is_ponder,
-                        )?;
+
+                        // Use BestmoveEmitter for centralized emission
+                        if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                            use crate::bestmove_emitter::{BestmoveMeta, BestmoveStats};
+                            use engine_core::search::types::{StopInfo, TerminationReason};
+
+                            let meta = BestmoveMeta {
+                                from: "resign_timeout",
+                                stop_info: StopInfo {
+                                    reason: TerminationReason::Error,
+                                    elapsed_ms: elapsed.as_millis() as u64,
+                                    nodes: 0,
+                                    depth_reached: 0,
+                                    hard_timeout: true,
+                                },
+                                stats: BestmoveStats {
+                                    depth: 0,
+                                    seldepth: None,
+                                    score: "unknown".to_string(),
+                                    nodes: 0,
+                                    nps: 0,
+                                },
+                            };
+
+                            emitter.emit("resign".to_string(), None, meta)?;
+                            *ctx.search_state = SearchState::Idle;
+                            *ctx.bestmove_sent = true;
+                            *ctx.current_search_is_ponder = false;
+                        } else {
+                            // Fallback to old method if emitter not available
+                            send_bestmove_and_finalize(
+                                "resign".to_string(),
+                                None,
+                                ctx.search_state,
+                                ctx.bestmove_sent,
+                                ctx.current_search_is_ponder,
+                            )?;
+                        }
                     }
                 }
                 break;
@@ -428,14 +541,43 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 }) => {
                     // Only accept if it's for current search
                     if search_id == *ctx.current_search_id {
-                        // Send bestmove for normal searches
-                        send_bestmove_and_finalize(
-                            best_move,
-                            ponder_move,
-                            ctx.search_state,
-                            ctx.bestmove_sent,
-                            ctx.current_search_is_ponder,
-                        )?;
+                        // Use BestmoveEmitter for centralized emission
+                        if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                            use crate::bestmove_emitter::{BestmoveMeta, BestmoveStats};
+                            use engine_core::search::types::{StopInfo, TerminationReason};
+
+                            let meta = BestmoveMeta {
+                                from: "worker_on_stop",
+                                stop_info: StopInfo {
+                                    reason: TerminationReason::UserStop,
+                                    elapsed_ms: elapsed.as_millis() as u64,
+                                    nodes: 0,         // TODO: Get actual node count
+                                    depth_reached: 0, // TODO: Get actual depth from worker
+                                    hard_timeout: false,
+                                },
+                                stats: BestmoveStats {
+                                    depth: 0, // TODO: Get actual depth from worker
+                                    seldepth: None,
+                                    score: "unknown".to_string(),
+                                    nodes: 0,
+                                    nps: 0,
+                                },
+                            };
+
+                            emitter.emit(best_move, ponder_move, meta)?;
+                            *ctx.search_state = SearchState::Idle;
+                            *ctx.bestmove_sent = true;
+                            *ctx.current_search_is_ponder = false;
+                        } else {
+                            // Fallback to old method if emitter not available
+                            send_bestmove_and_finalize(
+                                best_move,
+                                ponder_move,
+                                ctx.search_state,
+                                ctx.bestmove_sent,
+                                ctx.current_search_is_ponder,
+                            )?;
+                        }
                         break;
                     }
                 }

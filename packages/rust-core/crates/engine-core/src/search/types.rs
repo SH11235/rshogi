@@ -157,6 +157,21 @@ pub enum TerminationReason {
     Error,
 }
 
+impl std::fmt::Display for TerminationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            TerminationReason::TimeLimit => "time_limit",
+            TerminationReason::NodeLimit => "node_limit",
+            TerminationReason::DepthLimit => "depth_limit",
+            TerminationReason::UserStop => "user_stop",
+            TerminationReason::Mate => "mate",
+            TerminationReason::Completed => "completed",
+            TerminationReason::Error => "error",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Information about why the search stopped
 #[derive(Debug, Clone)]
 pub struct StopInfo {
