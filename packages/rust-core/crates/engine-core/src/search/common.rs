@@ -222,7 +222,7 @@ pub fn mate_score(ply: u8, is_giving_mate: bool) -> i32 {
 /// Check if a score represents a mate
 #[inline]
 pub fn is_mate_score(score: i32) -> bool {
-    score.abs() >= MATE_SCORE - MAX_PLY as i32
+    score.abs() >= MATE_SCORE - MAX_PLY as i32 && score.abs() < SEARCH_INF
 }
 
 /// Adjust mate score when storing in transposition table
