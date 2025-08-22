@@ -220,18 +220,121 @@ impl ShardedTranspositionTable {
 
     /// Reconstruct PV from transposition table using only EXACT entries
     ///
-    /// This delegates to the appropriate shard based on the root position hash
+    /// This function follows the best moves stored in EXACT TT entries to build
+    /// a principal variation. It stops at the first non-EXACT entry to ensure
+    /// PV reliability. Unlike delegating to a single shard, this implementation
+    /// properly handles PV chains that span multiple shards.
+    ///
+    /// # Arguments
+    /// * `pos` - Current position to start reconstruction from
+    /// * `max_depth` - Maximum depth to search (prevents infinite loops)
+    ///
+    /// # Returns
+    /// * Vector of moves forming the PV (empty if no PV found)
     pub fn reconstruct_pv_from_tt(
         &self,
         pos: &mut crate::shogi::Position,
         max_depth: u8,
     ) -> Vec<Move> {
-        // Determine which shard to use based on the root position
-        let root_hash = pos.zobrist_hash;
-        let shard_idx = self.shard_index(root_hash);
+        use crate::shogi::UndoInfo;
+        use std::collections::HashSet;
 
-        // Delegate to the shard's implementation
-        self.shards[shard_idx].reconstruct_pv_from_tt(pos, max_depth)
+        let mut pv = Vec::new();
+        let mut visited_hashes = HashSet::new();
+        let mut undo_stack: Vec<(Move, UndoInfo)> = Vec::new();
+
+        // Limit PV length to prevent excessive reconstruction
+        let max_pv_length = max_depth.min(crate::search::constants::MAX_PLY as u8) as usize;
+
+        for _ in 0..max_pv_length {
+            let hash = pos.zobrist_hash;
+
+            // Check for cycles
+            if !visited_hashes.insert(hash) {
+                log::debug!("PV reconstruction: Cycle detected at hash {hash:016x}");
+                break;
+            }
+
+            // Probe TT using sharded probe (automatically selects correct shard)
+            let entry = match self.probe(hash) {
+                Some(e) if e.matches(hash) => {
+                    log::trace!("PV reconstruction: Found entry for hash {hash:016x}");
+                    e
+                }
+                Some(e) => {
+                    log::trace!("PV reconstruction: Entry found but hash mismatch for {hash:016x}");
+                    break;
+                }
+                None => {
+                    log::trace!("PV reconstruction: No TT entry for hash {hash:016x}");
+                    break;
+                }
+            };
+
+            // Only follow EXACT entries
+            if entry.node_type() != NodeType::Exact {
+                log::trace!(
+                    "PV reconstruction: Stopping at non-EXACT node (type: {:?}) at depth {}",
+                    entry.node_type(),
+                    pv.len()
+                );
+                break;
+            }
+
+            // Get the best move
+            let best_move = match entry.get_move() {
+                Some(mv) => mv,
+                None => {
+                    log::trace!("PV reconstruction: No move in TT entry at depth {}", pv.len());
+                    break;
+                }
+            };
+
+            // Validate move is legal (generate all legal moves and check membership)
+            let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
+            let legal_moves = move_gen.generate_all();
+            if !legal_moves.as_slice().contains(&best_move) {
+                log::warn!(
+                    "PV reconstruction: Illegal move {} at depth {}",
+                    crate::usi::move_to_usi(&best_move),
+                    pv.len()
+                );
+                break;
+            }
+
+            // Add move to PV
+            pv.push(best_move);
+
+            // Make the move
+            let undo_info = pos.do_move(best_move);
+            undo_stack.push((best_move, undo_info));
+
+            // Check for terminal positions
+            if pos.is_draw() {
+                log::trace!("PV reconstruction: Draw position reached at depth {}", pv.len());
+                break;
+            }
+
+            // Check if we have no legal moves (mate)
+            let mut next_move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
+            if next_move_gen.generate_all().is_empty() {
+                log::trace!("PV reconstruction: Mate position reached at depth {}", pv.len());
+                break;
+            }
+        }
+
+        // Undo all moves
+        for (mv, undo_info) in undo_stack.into_iter().rev() {
+            pos.undo_move(mv, undo_info);
+        }
+
+        log::debug!(
+            "PV reconstruction: Found {} moves from TT (max_depth: {})",
+            pv.len(),
+            max_depth
+        );
+
+        pv
     }
 }
 
@@ -241,6 +344,10 @@ pub type SharedShardedTT = Arc<ShardedTranspositionTable>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        shogi::{Move, Position},
+        usi::parse_usi_square,
+    };
 
     #[test]
     fn test_sharded_tt_basic() {
@@ -372,6 +479,181 @@ mod tests {
             // Also verify total size is correct
             assert_eq!(tt.size_mb(), size, "Size {}MB: actual size mismatch", size);
         }
+    }
+
+    #[test]
+    fn test_sharded_pv_reconstruction_across_shards() {
+        // Test that PV reconstruction works when moves hash to different shards
+        let mut tt = ShardedTranspositionTable::new(16); // 16 shards
+
+        // Initialize TT for new search (sets age)
+        tt.new_search();
+
+        // Create a position and get moves from move generator
+        let mut pos = Position::startpos();
+
+        // Generate legal moves and find the ones we want
+        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves = move_gen.generate_all();
+
+        // Find specific moves by their USI representation
+        let move1 = moves
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "7g7f")
+            .cloned()
+            .expect("7g7f should be legal");
+
+        // Make move1 and generate White's moves
+        let undo1 = pos.do_move(move1);
+        let mut move_gen2 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves2 = move_gen2.generate_all();
+
+        // Find a White move (3c3d is a common response)
+        let move2 = moves2
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "3c3d")
+            .cloned()
+            .expect("3c3d should be legal for White after 7g7f");
+
+        // Make move2 and generate Black's next moves
+        let undo2 = pos.do_move(move2);
+        let mut move_gen3 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves3 = move_gen3.generate_all();
+
+        let move3 = moves3
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "6g6f")
+            .cloned()
+            .expect("6g6f should be legal for Black after 7g7f 3c3d");
+
+        // Undo to get back to start
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
+
+        // Store entries for each position in the sequence
+        let hash1 = pos.zobrist_hash;
+        log::debug!("Storing hash1: {:#x} with move1", hash1);
+        tt.store(hash1, Some(move1), 1000, 500, 10, NodeType::Exact);
+
+        // Verify storage
+        if let Some(entry) = tt.probe(hash1) {
+            log::debug!(
+                "Probed hash1 successfully, matches: {}, move: {:?}",
+                entry.matches(hash1),
+                entry.get_move()
+            );
+        } else {
+            log::debug!("Failed to probe hash1!");
+        }
+
+        let undo1 = pos.do_move(move1);
+        let hash2 = pos.zobrist_hash;
+        tt.store(hash2, Some(move2), 900, 450, 9, NodeType::Exact);
+
+        let undo2 = pos.do_move(move2);
+        let hash3 = pos.zobrist_hash;
+        tt.store(hash3, Some(move3), 800, 400, 8, NodeType::Exact);
+
+        // Undo moves to get back to starting position
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
+
+        // Verify that these hashes might go to different shards (not guaranteed but likely)
+        let shard1 = tt.shard_index(hash1);
+        let shard2 = tt.shard_index(hash2);
+        let shard3 = tt.shard_index(hash3);
+
+        // At least one should be different with high probability
+        let different_shards = (shard1 != shard2) || (shard2 != shard3) || (shard1 != shard3);
+        if different_shards {
+            log::debug!("PV spans shards: {} -> {} -> {}", shard1, shard2, shard3);
+        }
+
+        // Reconstruct PV
+        let mut temp_pos = pos.clone();
+        let pv = tt.reconstruct_pv_from_tt(&mut temp_pos, 10);
+
+        // Should get all 3 moves
+        assert_eq!(pv.len(), 3, "Should reconstruct 3 moves from TT");
+        assert_eq!(pv[0], move1);
+        assert_eq!(pv[1], move2);
+        assert_eq!(pv[2], move3);
+    }
+
+    #[test]
+    fn test_sharded_pv_reconstruction_stops_at_non_exact() {
+        // Test that PV reconstruction stops at non-EXACT nodes
+        let mut tt = ShardedTranspositionTable::new(8);
+
+        // Initialize TT for new search (sets age)
+        tt.new_search();
+
+        let mut pos = Position::startpos();
+
+        // Generate legal moves and find the ones we want
+        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves = move_gen.generate_all();
+
+        let move1 = moves
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "7g7f")
+            .cloned()
+            .expect("7g7f should be legal");
+
+        let undo1 = pos.do_move(move1);
+        let mut move_gen2 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves2 = move_gen2.generate_all();
+
+        let move2 = moves2
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "3c3d")
+            .cloned()
+            .expect("3c3d should be legal after 7g7f");
+
+        let undo2 = pos.do_move(move2);
+        let mut move_gen3 = crate::movegen::generator::MoveGenImpl::new(&pos);
+        let moves3 = move_gen3.generate_all();
+
+        let move3 = moves3
+            .as_slice()
+            .iter()
+            .find(|m| crate::usi::move_to_usi(m) == "6g6f")
+            .cloned()
+            .expect("6g6f should be legal after 7g7f 3c3d");
+
+        // Undo to get back to start
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
+
+        // Store first two as EXACT, third as LOWER_BOUND
+        let hash1 = pos.zobrist_hash;
+        tt.store(hash1, Some(move1), 1000, 500, 10, NodeType::Exact);
+
+        let undo1 = pos.do_move(move1);
+        let hash2 = pos.zobrist_hash;
+        tt.store(hash2, Some(move2), 900, 450, 9, NodeType::Exact);
+
+        let undo2 = pos.do_move(move2);
+        let hash3 = pos.zobrist_hash;
+        tt.store(hash3, Some(move3), 800, 400, 8, NodeType::LowerBound); // Not EXACT
+
+        // Undo moves
+        pos.undo_move(move2, undo2);
+        pos.undo_move(move1, undo1);
+
+        // Reconstruct PV
+        let mut temp_pos = pos.clone();
+        let pv = tt.reconstruct_pv_from_tt(&mut temp_pos, 10);
+
+        // Should only get first 2 moves (stops at non-EXACT)
+        assert_eq!(pv.len(), 2, "Should stop at non-EXACT node");
+        assert_eq!(pv[0], move1);
+        assert_eq!(pv[1], move2);
     }
 
     #[test]
