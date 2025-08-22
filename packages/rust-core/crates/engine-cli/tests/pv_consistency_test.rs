@@ -21,6 +21,7 @@ fn test_extended_search_result_pv_consistency() {
         score: 100,
         pv: pv.clone(),
         node_type: NodeType::Exact,
+        stop_info: None,
     };
 
     // Verify consistency

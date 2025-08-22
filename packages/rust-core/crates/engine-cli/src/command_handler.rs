@@ -3,7 +3,7 @@ use crate::helpers::{
     calculate_max_search_time, generate_fallback_move, send_bestmove_and_finalize,
     wait_for_search_completion,
 };
-use crate::search_session::{self, SearchSession};
+use crate::search_session::SearchSession;
 use crate::state::SearchState;
 use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use crate::bestmove_emitter::BestmoveEmitter;
 
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
@@ -29,6 +31,7 @@ pub struct CommandContext<'a> {
     pub current_search_id: &'a mut u64,
     pub current_search_is_ponder: &'a mut bool,
     pub current_session: &'a mut Option<SearchSession>,
+    pub current_bestmove_emitter: &'a mut Option<BestmoveEmitter>,
     pub allow_null_move: bool,
 }
 
@@ -233,6 +236,9 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     let search_id = *ctx.current_search_id;
     log::info!("Starting new search with ID: {search_id}, ponder: {}", params.ponder);
 
+    // Create new BestmoveEmitter for this search
+    *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(search_id));
+
     // Calculate timeout for this search
     *ctx.current_search_timeout = calculate_max_search_time(&params);
 
@@ -318,19 +324,9 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 if let Ok((best_move, ponder)) =
                     adapter.validate_and_get_bestmove(session, position)
                 {
-                    // Send info string about bestmove source
+                    // Log bestmove validation (source info now handled by BestmoveEmitter)
                     let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-                    let score_str = session
-                        .committed_best
-                        .as_ref()
-                        .map(|b| match &b.score {
-                            search_session::Score::Cp(cp) => format!("cp {cp}"),
-                            search_session::Score::Mate(mate) => format!("mate {mate}"),
-                        })
-                        .unwrap_or_else(|| "unknown".to_string());
-                    send_info_string(format!(
-                        "bestmove_from=session_on_stop depth={depth} score={score_str}"
-                    ))?;
+                    log::debug!("Validated bestmove from session on stop: depth={depth}");
 
                     log::info!("Sending committed bestmove from session on stop: {best_move}");
                     return send_bestmove_and_finalize(
@@ -394,13 +390,11 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     ctx.allow_null_move,
                 ) {
                     Ok(move_str) => {
-                        // Send info string about fallback source
+                        // Log fallback source (info now handled by BestmoveEmitter)
                         if let Some((_, depth, score)) = partial_result {
-                            send_info_string(format!(
-                                "bestmove_from=partial_result depth={depth} score={score}"
-                            ))?;
+                            log::debug!("Using partial result: depth={depth}, score={score}");
                         } else {
-                            send_info_string("bestmove_from=emergency_fallback_timeout")?;
+                            log::debug!("Using emergency fallback after timeout");
                         }
                         log::debug!("Sending emergency fallback bestmove: {move_str}");
                         send_bestmove_and_finalize(
@@ -478,6 +472,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     session_id: _,
                     root_hash: _,
                     search_id,
+                    stop_info: _,
                 }) => {
                     // Handle SearchFinished in stop command context
                     if search_id == *ctx.current_search_id {
@@ -488,25 +483,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             if let Some(position) = adapter.get_position() {
                                 match adapter.validate_and_get_bestmove(session, position) {
                                     Ok((best_move, ponder)) => {
-                                        // Send info string about bestmove source
+                                        // Log bestmove validation (source info now handled by BestmoveEmitter)
                                         let depth = session
                                             .committed_best
                                             .as_ref()
                                             .map(|b| b.depth)
                                             .unwrap_or(0);
-                                        let score_str = session
-                                            .committed_best
-                                            .as_ref()
-                                            .map(|b| match &b.score {
-                                                search_session::Score::Cp(cp) => {
-                                                    format!("cp {cp}")
-                                                }
-                                                search_session::Score::Mate(mate) => {
-                                                    format!("mate {mate}")
-                                                }
-                                            })
-                                            .unwrap_or_else(|| "unknown".to_string());
-                                        send_info_string(format!("bestmove_from=session_in_stop_handler depth={depth} score={score_str}"))?;
+                                        log::debug!("Validated bestmove from session in stop handler: depth={depth}");
 
                                         log::info!(
                                             "Sending bestmove from stop handler: {best_move}"
@@ -549,11 +532,11 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             ctx.allow_null_move,
                         ) {
                             Ok(move_str) => {
-                                // Send info string about fallback source
+                                // Log fallback source (info now handled by BestmoveEmitter)
                                 if let Some((_, depth, score)) = partial_result {
-                                    send_info_string(format!("bestmove_from=partial_result_on_finish depth={depth} score={score}"))?;
+                                    log::debug!("Using partial result on finish: depth={depth}, score={score}");
                                 } else {
-                                    send_info_string("bestmove_from=emergency_fallback_on_finish")?;
+                                    log::debug!("Using emergency fallback on finish");
                                 }
                                 send_bestmove_and_finalize(
                                     move_str,

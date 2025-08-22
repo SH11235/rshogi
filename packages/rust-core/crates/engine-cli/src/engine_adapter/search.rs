@@ -17,8 +17,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::engine_adapter::{EngineAdapter, EngineError};
-use crate::search_session::{Score, SearchSession};
-use crate::usi::{send_info_string, GoParams};
+use crate::search_session::SearchSession;
+use crate::usi::GoParams;
 
 impl EngineAdapter {
     /// Take the engine out for searching
@@ -158,14 +158,9 @@ impl EngineAdapter {
             None
         };
 
-        // Send info about the source
+        // Log bestmove validation (source info now handled by BestmoveEmitter)
         let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-        let score_str = match score {
-            Score::Cp(cp) => format!("cp {cp}"),
-            Score::Mate(mate) => format!("mate {mate}"),
-        };
-
-        let _ = send_info_string(format!("bestmove_from=session depth={depth} score={score_str}"));
+        log::debug!("Validated bestmove from session: depth={depth}, score={:?}", score);
 
         Ok((best_move_str, ponder_move_str))
     }

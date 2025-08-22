@@ -1,5 +1,6 @@
 // USI (Universal Shogi Interface) adapter
 
+mod bestmove_emitter;
 mod command_handler;
 mod engine_adapter;
 mod helpers;
@@ -11,11 +12,12 @@ mod utils;
 mod worker;
 
 use anyhow::Result;
+use bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
 use clap::Parser;
 use command_handler::{handle_command, CommandContext};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
-use engine_core::usi::move_to_usi;
+use engine_core::search::types::{StopInfo, TerminationReason};
 use helpers::{generate_fallback_move, send_bestmove_and_finalize};
 use search_session::SearchSession;
 use state::SearchState;
@@ -24,7 +26,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use stdin_reader::spawn_stdin_reader;
-use usi::output::SearchInfo;
 use usi::{
     ensure_flush_on_exit, flush_final, send_info_string, send_response, UsiCommand, UsiResponse,
 };
@@ -97,6 +98,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_search_id = 0u64;
     let mut current_search_is_ponder = false; // Track if current search is ponder
     let mut current_session: Option<SearchSession> = None; // Current search session
+    let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
 
     // Main event loop
     let mut should_quit = false;
@@ -127,6 +129,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 current_search_id: &mut current_search_id,
                 current_search_is_ponder: &mut current_search_is_ponder,
                 current_session: &mut current_session,
+                current_bestmove_emitter: &mut current_bestmove_emitter,
                 allow_null_move,
             };
             handle_command(cmd, &mut ctx)?;
@@ -155,130 +158,221 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             log::trace!("Ignoring iteration from old search: {search_id} (current: {current_search_id})");
                         }
                     }
-                    Ok(WorkerMessage::SearchFinished { session_id, root_hash, search_id }) => {
+                    Ok(WorkerMessage::SearchFinished { session_id, root_hash, search_id, stop_info }) => {
                         // Mark search as finished
                         if search_id == current_search_id && search_state.can_accept_bestmove() {
                             log::info!("Search {search_id} finished (session_id: {session_id}, root_hash: {root_hash:016x})");
 
                             // Send bestmove immediately if not ponder
                             if !current_search_is_ponder {
-                                // Try to use session-based bestmove
-                                if let Some(ref session) = current_session {
-                                    log::debug!("Using session for bestmove generation");
-                                    let adapter = lock_or_recover_adapter(&engine);
-                                    if let Some(position) = adapter.get_position() {
-                                        match adapter.validate_and_get_bestmove(session, position) {
-                                            Ok((best_move, ponder)) => {
-                                                // Send info string about bestmove source
-                                                let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-                                                let score_str = session.committed_best.as_ref()
-                                                    .map(|b| match &b.score {
-                                                        search_session::Score::Cp(cp) => format!("cp {cp}"),
-                                                        search_session::Score::Mate(mate) => format!("mate {mate}"),
-                                                    })
-                                                    .unwrap_or_else(|| "unknown".to_string());
-                                                send_info_string(format!("bestmove_from=session depth={depth} score={score_str}"))?;
+                                if let Some(ref emitter) = current_bestmove_emitter {
+                                    // Try to use session-based bestmove
+                                    if let Some(ref session) = current_session {
+                                        log::debug!("Using session for bestmove generation");
+                                        let adapter = lock_or_recover_adapter(&engine);
+                                        if let Some(position) = adapter.get_position() {
+                                            match adapter.validate_and_get_bestmove(session, position) {
+                                                Ok((best_move, ponder)) => {
+                                                    // Prepare bestmove metadata
+                                                    let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
+                                                    let nodes = stop_info.as_ref().map(|s| s.nodes).unwrap_or(0);
+                                                    let elapsed_ms = stop_info.as_ref().map(|s| s.elapsed_ms).unwrap_or(0);
+                                                    let nps = if elapsed_ms > 0 { nodes * 1000 / elapsed_ms } else { 0 };
 
-                                                // Also output a final PV info line to ensure consistency with bestmove
-                                                if let Some(committed) = session.committed_best.as_ref() {
-                                                    let pv_usi: Vec<String> = committed.pv.iter().map(move_to_usi).collect();
+                                                    let score_str = session.committed_best.as_ref()
+                                                        .map(|b| match &b.score {
+                                                            search_session::Score::Cp(cp) => format!("cp {cp}"),
+                                                            search_session::Score::Mate(mate) => format!("mate {mate}"),
+                                                        })
+                                                        .unwrap_or_else(|| "unknown".to_string());
 
-                                                    // Convert engine NodeType to USI ScoreBound
-                                                    let score_bound = match committed.node_type {
-                                                        engine_core::search::NodeType::Exact => None, // Exact scores don't need bound flag
-                                                        engine_core::search::NodeType::LowerBound => Some(usi::output::ScoreBound::LowerBound),
-                                                        engine_core::search::NodeType::UpperBound => Some(usi::output::ScoreBound::UpperBound),
+                                                    // Use stop_info or create default one
+                                                    let final_stop_info = stop_info.unwrap_or(StopInfo {
+                                                        reason: TerminationReason::Completed,
+                                                        elapsed_ms,
+                                                        nodes,
+                                                        depth_reached: depth as u8,
+                                                        hard_timeout: false,
+                                                    });
+
+                                                    // Emit bestmove with metadata
+                                                    let meta = BestmoveMeta {
+                                                        from: "session",
+                                                        stop_info: final_stop_info,
+                                                        stats: BestmoveStats {
+                                                            depth,
+                                                            seldepth: None, // TODO: Get from session if available
+                                                            score: score_str,
+                                                            nodes,
+                                                            nps,
+                                                        },
+                                                        search_id,
                                                     };
 
-                                                    // Convert score to USI format
-                                                    let usi_score = match &committed.score {
-                                                        search_session::Score::Cp(cp) => Some(usi::output::Score::Cp(*cp)),
-                                                        search_session::Score::Mate(mate) => Some(usi::output::Score::Mate(*mate)),
-                                                    };
+                                                    log::info!("Session bestmove ready: {best_move}, ponder: {ponder:?}");
+                                                    emitter.emit(best_move, ponder, meta)?;
 
-                                                    let info = SearchInfo {
-                                                        depth: Some(committed.depth),
-                                                        pv: pv_usi,
-                                                        score: usi_score,
-                                                        score_bound,
-                                                        ..Default::default()
-                                                    };
-                                                    let _ = send_response(UsiResponse::Info(info));
-                                                }
-
-                                                log::info!("Session bestmove ready: {best_move}, ponder: {ponder:?}");
-                                                send_bestmove_and_finalize(
-                                                    best_move,
-                                                    ponder,
-                                                    &mut search_state,
-                                                    &mut bestmove_sent,
-                                                    &mut current_search_is_ponder,
-                                                )?
+                                                    // Update state
+                                                    search_state = SearchState::Idle;
+                                                    bestmove_sent = true;
+                                                    current_search_is_ponder = false;
                                             }
-                                            Err(e) => {
-                                                log::warn!("Session validation failed on finish: {e}");
-                                                send_info_string("Warning: Bestmove validation failed, using fallback")?;
-                                                // Try fallback move generation
-                                                match generate_fallback_move(&engine, None, allow_null_move) {
-                                                    Ok(fallback_move) => {
-                                                        send_info_string("bestmove_from=emergency_fallback")?;
-                                                        log::info!("Fallback move ready: {fallback_move}");
-                                                        send_bestmove_and_finalize(
-                                                            fallback_move,
-                                                            None,
-                                                            &mut search_state,
-                                                            &mut bestmove_sent,
-                                                            &mut current_search_is_ponder,
-                                                        )?
-                                                    }
-                                                    Err(e) => {
-                                                        log::error!("Fallback move generation failed: {e}");
-                                                        send_bestmove_and_finalize(
-                                                            "resign".to_string(),
-                                                            None,
-                                                            &mut search_state,
-                                                            &mut bestmove_sent,
-                                                            &mut current_search_is_ponder,
-                                                        )?
+                                                Err(e) => {
+                                                    log::warn!("Session validation failed on finish: {e}");
+                                                    send_info_string("Warning: Bestmove validation failed, using fallback")?;
+                                                    // Try fallback move generation
+                                                    match generate_fallback_move(&engine, None, allow_null_move) {
+                                                        Ok(fallback_move) => {
+                                                            let final_stop_info = stop_info.unwrap_or(StopInfo {
+                                                                reason: TerminationReason::Error,
+                                                                elapsed_ms: 0,
+                                                                nodes: 0,
+                                                                depth_reached: 0,
+                                                                hard_timeout: false,
+                                                            });
+
+                                                            let meta = BestmoveMeta {
+                                                                from: "emergency_fallback",
+                                                                stop_info: final_stop_info,
+                                                                stats: BestmoveStats {
+                                                                    depth: 0,
+                                                                    seldepth: None,
+                                                                    score: "unknown".to_string(),
+                                                                    nodes: 0,
+                                                                    nps: 0,
+                                                                },
+                                                                search_id,
+                                                            };
+
+                                                            log::info!("Fallback move ready: {fallback_move}");
+                                                            emitter.emit(fallback_move, None, meta)?;
+                                                            search_state = SearchState::Idle;
+                                                            bestmove_sent = true;
+                                                            current_search_is_ponder = false;
+                                                        }
+                                                        Err(e) => {
+                                                            log::error!("Fallback move generation failed: {e}");
+                                                            let final_stop_info = stop_info.unwrap_or(StopInfo {
+                                                                reason: TerminationReason::Error,
+                                                                elapsed_ms: 0,
+                                                                nodes: 0,
+                                                                depth_reached: 0,
+                                                                hard_timeout: false,
+                                                            });
+
+                                                            let meta = BestmoveMeta {
+                                                                from: "resign",
+                                                                stop_info: final_stop_info,
+                                                                stats: BestmoveStats {
+                                                                    depth: 0,
+                                                                    seldepth: None,
+                                                                    score: "unknown".to_string(),
+                                                                    nodes: 0,
+                                                                    nps: 0,
+                                                                },
+                                                                search_id,
+                                                            };
+
+                                                            emitter.emit("resign".to_string(), None, meta)?;
+                                                            search_state = SearchState::Idle;
+                                                            bestmove_sent = true;
+                                                            current_search_is_ponder = false;
+                                                        }
                                                     }
                                                 }
-                                            }
+                                        }
+                                        } else {
+                                            log::error!("No position available for bestmove validation");
+                                            let final_stop_info = stop_info.unwrap_or(StopInfo {
+                                                reason: TerminationReason::Error,
+                                                elapsed_ms: 0,
+                                                nodes: 0,
+                                                depth_reached: 0,
+                                                hard_timeout: false,
+                                            });
+
+                                            let meta = BestmoveMeta {
+                                                from: "resign_no_position",
+                                                stop_info: final_stop_info,
+                                                stats: BestmoveStats {
+                                                    depth: 0,
+                                                    seldepth: None,
+                                                    score: "unknown".to_string(),
+                                                    nodes: 0,
+                                                    nps: 0,
+                                                },
+                                                search_id,
+                                            };
+
+                                            emitter.emit("resign".to_string(), None, meta)?;
+                                            search_state = SearchState::Idle;
+                                            bestmove_sent = true;
+                                            current_search_is_ponder = false;
                                         }
                                     } else {
-                                        log::error!("No position available for bestmove validation");
-                                        send_bestmove_and_finalize(
-                                            "resign".to_string(),
-                                            None,
-                                            &mut search_state,
-                                            &mut bestmove_sent,
-                                            &mut current_search_is_ponder,
-                                        )?
+                                        log::warn!("No session available on search finish");
+                                        // Try emergency move generation
+                                        match generate_fallback_move(&engine, None, allow_null_move) {
+                                            Ok(fallback_move) => {
+                                                let final_stop_info = stop_info.unwrap_or(StopInfo {
+                                                    reason: TerminationReason::Error,
+                                                    elapsed_ms: 0,
+                                                    nodes: 0,
+                                                    depth_reached: 0,
+                                                    hard_timeout: false,
+                                                });
+
+                                                let meta = BestmoveMeta {
+                                                    from: "emergency_fallback_no_session",
+                                                    stop_info: final_stop_info,
+                                                    stats: BestmoveStats {
+                                                        depth: 0,
+                                                        seldepth: None,
+                                                        score: "unknown".to_string(),
+                                                        nodes: 0,
+                                                        nps: 0,
+                                                    },
+                                                    search_id,
+                                                };
+
+                                                log::info!("Emergency fallback move: {fallback_move}");
+                                                emitter.emit(fallback_move, None, meta)?;
+                                                search_state = SearchState::Idle;
+                                                bestmove_sent = true;
+                                                current_search_is_ponder = false;
+                                            }
+                                            Err(e) => {
+                                                log::error!("Emergency fallback move failed: {e}");
+                                                let final_stop_info = stop_info.unwrap_or(StopInfo {
+                                                    reason: TerminationReason::Error,
+                                                    elapsed_ms: 0,
+                                                    nodes: 0,
+                                                    depth_reached: 0,
+                                                    hard_timeout: false,
+                                                });
+
+                                                let meta = BestmoveMeta {
+                                                    from: "resign_fallback_failed",
+                                                    stop_info: final_stop_info,
+                                                    stats: BestmoveStats {
+                                                        depth: 0,
+                                                        seldepth: None,
+                                                        score: "unknown".to_string(),
+                                                        nodes: 0,
+                                                        nps: 0,
+                                                    },
+                                                    search_id,
+                                                };
+
+                                                emitter.emit("resign".to_string(), None, meta)?;
+                                                search_state = SearchState::Idle;
+                                                bestmove_sent = true;
+                                                current_search_is_ponder = false;
+                                            }
+                                        }
                                     }
                                 } else {
-                                    log::warn!("No session available on search finish");
-                                    // Try emergency move generation
-                                    match generate_fallback_move(&engine, None, allow_null_move) {
-                                        Ok(fallback_move) => {
-                                            send_info_string("bestmove_from=emergency_fallback_no_session")?;
-                                            send_bestmove_and_finalize(
-                                                fallback_move,
-                                                None,
-                                                &mut search_state,
-                                                &mut bestmove_sent,
-                                                &mut current_search_is_ponder,
-                                            )?
-                                        }
-                                        Err(e) => {
-                                            log::error!("Emergency fallback move failed: {e}");
-                                            send_bestmove_and_finalize(
-                                                "resign".to_string(),
-                                                None,
-                                                &mut search_state,
-                                                &mut bestmove_sent,
-                                                &mut current_search_is_ponder,
-                                            )?
-                                        }
-                                    }
+                                    log::error!("No BestmoveEmitter available for search {search_id}");
                                 }
                             } else {
                                 log::debug!("Ponder search finished, not sending bestmove (USI protocol)");
