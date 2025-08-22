@@ -16,6 +16,7 @@ const MIN_ASPIRATION_WINDOW: i32 = 2;
 #[derive(Debug, Clone)]
 pub struct AspirationWindow {
     /// Evaluation history for each depth (for dynamic aspiration window)
+    /// Only EXACT root scores are stored - boundary values (LOWERBOUND/UPPERBOUND) are excluded
     score_history: Vec<i32>,
 
     /// Score volatility measurement for window adjustment
@@ -63,8 +64,8 @@ impl AspirationWindow {
     /// This helper clamps bounds to valid range and ensures non-empty window
     #[inline]
     fn ensure_valid_bounds(mut lo: i32, mut hi: i32, best_score: i32) -> (i32, i32) {
-        // First, clamp to valid range
-        let best_score = best_score.clamp(-SEARCH_INF, SEARCH_INF);
+        // First, clamp all values to valid range
+        let clamped_best_score = best_score.clamp(-SEARCH_INF, SEARCH_INF);
         lo = lo.clamp(-SEARCH_INF, SEARCH_INF);
         hi = hi.clamp(-SEARCH_INF, SEARCH_INF);
 
@@ -74,15 +75,15 @@ impl AspirationWindow {
         }
 
         // Window is invalid - need to fix it
-        if best_score >= SEARCH_INF {
+        if clamped_best_score == SEARCH_INF {
             // Best score at upper boundary
             (SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW), SEARCH_INF)
-        } else if best_score <= -SEARCH_INF {
+        } else if clamped_best_score == -SEARCH_INF {
             // Best score at lower boundary
             (-SEARCH_INF, (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW))
         } else {
             // Best score is within range - center minimum window on it
-            Self::center_min_window(best_score)
+            Self::center_min_window(clamped_best_score)
         }
     }
 
@@ -94,6 +95,11 @@ impl AspirationWindow {
 
     /// Update score history and recalculate volatility
     /// Only EXACT node scores are added to maintain PV stability accuracy
+    ///
+    /// # Parameters
+    /// - `score`: The root score from the current iteration
+    /// - `node_type`: The final node type classification for this iteration's root search
+    ///   (not the TT entry type, but the result of the aspiration window search)
     pub fn update_score(&mut self, score: i32, node_type: NodeType) {
         // Only add EXACT node scores to history
         // This prevents boundary values (LOWERBOUND/UPPERBOUND) from affecting volatility
@@ -670,7 +676,8 @@ mod tests {
         assert_eq!(beta, SEARCH_INF);
         assert!(alpha < beta);
         assert!(alpha >= -SEARCH_INF);
-        // Since SEARCH_INF is a mate score, window size depends on mate distance logic
+        // SEARCH_INF is the search evaluation upper bound; it results in a narrow window
+        // because it's treated as an extreme value in the mate distance logic
 
         // Test best_score exactly at -SEARCH_INF
         let (alpha, beta) = aw.get_initial_bounds(3, -SEARCH_INF);
@@ -791,5 +798,95 @@ mod tests {
 
         // Calculate window should return initial value
         assert_eq!(aw.calculate_window(5), ASPIRATION_WINDOW_INITIAL);
+    }
+
+    #[test]
+    fn test_boundary_to_exact_transition() {
+        let mut aw = AspirationWindow::new();
+
+        // Start with boundary nodes
+        aw.update_score(100, NodeType::LowerBound);
+        aw.update_score(110, NodeType::UpperBound);
+
+        // Verify initial state - no history, initial window
+        assert_eq!(aw.history_len(), 0, "No scores in history after boundary nodes");
+        assert_eq!(
+            aw.calculate_window(3),
+            ASPIRATION_WINDOW_INITIAL,
+            "Should use initial window with no EXACT scores"
+        );
+
+        // Add first EXACT score
+        aw.update_score(105, NodeType::Exact);
+        assert_eq!(aw.history_len(), 1, "One EXACT score in history");
+        assert_eq!(
+            aw.calculate_window(3),
+            ASPIRATION_WINDOW_INITIAL,
+            "Should still use initial window with only 1 score"
+        );
+
+        // Add more boundary nodes - should not affect history
+        aw.update_score(120, NodeType::LowerBound);
+        aw.update_score(90, NodeType::UpperBound);
+        assert_eq!(aw.history_len(), 1, "History unchanged after more boundary nodes");
+
+        // Add second EXACT score - this should trigger dynamic window calculation
+        aw.update_score(108, NodeType::Exact);
+        assert_eq!(aw.history_len(), 2, "Two EXACT scores in history");
+
+        // Now calculate_window should use dynamic calculation for depth > 2
+        let window = aw.calculate_window(3);
+        assert!(
+            window >= ASPIRATION_WINDOW_INITIAL,
+            "Dynamic window should be at least initial value"
+        );
+
+        // Volatility should be based only on the two EXACT scores (105, 108)
+        assert!(aw.score_volatility > 0, "Should have some volatility");
+        assert!(aw.score_volatility < 10, "Volatility should be small for close scores");
+    }
+
+    #[test]
+    fn test_score_volatility_invariance_with_boundaries() {
+        let mut aw = AspirationWindow::new();
+
+        // Add two EXACT scores to establish baseline volatility
+        aw.update_score(100, NodeType::Exact);
+        aw.update_score(120, NodeType::Exact);
+        let baseline_volatility = aw.score_volatility;
+        let baseline_history_len = aw.history_len();
+
+        assert!(baseline_volatility > 0, "Should have volatility from EXACT scores");
+        assert_eq!(baseline_history_len, 2, "Should have 2 scores in history");
+
+        // Add many boundary nodes - volatility should remain unchanged
+        for i in 0..20 {
+            let score = 50 + i * 10; // Widely varying scores
+            let node_type = if i % 2 == 0 {
+                NodeType::LowerBound
+            } else {
+                NodeType::UpperBound
+            };
+            aw.update_score(score, node_type);
+        }
+
+        // Verify invariance
+        assert_eq!(
+            aw.score_volatility, baseline_volatility,
+            "Volatility should be unchanged after boundary nodes"
+        );
+        assert_eq!(
+            aw.history_len(),
+            baseline_history_len,
+            "History length should be unchanged after boundary nodes"
+        );
+
+        // Add one more EXACT score - volatility should change
+        aw.update_score(110, NodeType::Exact);
+        assert_ne!(
+            aw.score_volatility, baseline_volatility,
+            "Volatility should change after new EXACT score"
+        );
+        assert_eq!(aw.history_len(), 3, "Should have 3 EXACT scores in history");
     }
 }

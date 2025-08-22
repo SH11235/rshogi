@@ -243,6 +243,8 @@ where
 
                 // Check for timeout during re-search
                 if self.context.should_stop() {
+                    // Note: final_node_type is already set based on the last search result
+                    // This ensures we use the evaluation from the interrupted search
                     break;
                 }
             }
