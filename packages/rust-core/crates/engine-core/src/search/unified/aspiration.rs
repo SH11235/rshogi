@@ -30,6 +30,60 @@ impl AspirationWindow {
         }
     }
 
+    /// Create a minimum window centered on the given score
+    ///
+    /// This helper ensures the window width is exactly MIN_ASPIRATION_WINDOW,
+    /// even when MIN is odd (by splitting asymmetrically)
+    #[inline]
+    fn center_min_window(best_score: i32) -> (i32, i32) {
+        let lower = MIN_ASPIRATION_WINDOW / 2;
+        let upper = MIN_ASPIRATION_WINDOW - lower; // Ensures lower + upper = MIN
+
+        let lo = best_score.saturating_sub(lower).max(-SEARCH_INF);
+        let hi = best_score.saturating_add(upper).min(SEARCH_INF);
+
+        if lo >= hi {
+            // Handle boundary cases where clamping collapsed the window
+            if hi == SEARCH_INF {
+                (SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW), SEARCH_INF)
+            } else if lo == -SEARCH_INF {
+                (-SEARCH_INF, (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW))
+            } else {
+                // Fallback: expand upward by minimum window
+                (lo, lo.saturating_add(MIN_ASPIRATION_WINDOW).min(SEARCH_INF))
+            }
+        } else {
+            (lo, hi)
+        }
+    }
+
+    /// Ensure bounds are valid and maintain minimum window size
+    ///
+    /// This helper clamps bounds to valid range and ensures non-empty window
+    #[inline]
+    fn ensure_valid_bounds(mut lo: i32, mut hi: i32, best_score: i32) -> (i32, i32) {
+        // First, clamp to valid range
+        lo = lo.clamp(-SEARCH_INF, SEARCH_INF);
+        hi = hi.clamp(-SEARCH_INF, SEARCH_INF);
+
+        // Check if window is valid
+        if lo < hi && hi - lo >= MIN_ASPIRATION_WINDOW {
+            return (lo, hi);
+        }
+
+        // Window is invalid - need to fix it
+        if best_score >= SEARCH_INF {
+            // Best score at upper boundary
+            (SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW), SEARCH_INF)
+        } else if best_score <= -SEARCH_INF {
+            // Best score at lower boundary
+            (-SEARCH_INF, (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW))
+        } else {
+            // Best score is within range - center minimum window on it
+            Self::center_min_window(best_score)
+        }
+    }
+
     /// Clear the aspiration window state
     pub fn clear(&mut self) {
         self.score_history.clear();
@@ -121,83 +175,44 @@ impl AspirationWindow {
                 )
             };
 
-            // Clamp bounds to valid range to ensure mate scores are not excluded
-            // This prevents issues when asymmetric windows exceed SEARCH_INF
-            let mut lo = lo.clamp(-SEARCH_INF, SEARCH_INF);
-            let mut hi = hi.clamp(-SEARCH_INF, SEARCH_INF);
+            // Ensure bounds are valid and maintain minimum window size
+            let (lo, hi) = Self::ensure_valid_bounds(lo, hi, best_score);
 
-            // Ensure non-empty window (lo < hi)
-            if lo >= hi {
-                // Handle boundary cases where best_score might be outside valid range
-                if best_score >= SEARCH_INF {
-                    // Best score exceeds upper bound - create window at boundary
-                    lo = SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW);
-                    hi = SEARCH_INF;
-                } else if best_score <= -SEARCH_INF {
-                    // Best score exceeds lower bound - create window at boundary
-                    lo = -SEARCH_INF;
-                    hi = (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW);
-                } else {
-                    // Best score is within range - create minimum window centered on it
-                    lo = best_score.saturating_sub(MIN_ASPIRATION_WINDOW / 2).max(-SEARCH_INF);
-                    hi = best_score.saturating_add(MIN_ASPIRATION_WINDOW / 2).min(SEARCH_INF);
-
-                    // Final guard: ensure window is still valid after clamping
-                    if lo >= hi {
-                        // We're at a boundary - adjust to ensure non-empty window
-                        if hi == SEARCH_INF {
-                            lo = SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW);
-                        } else if lo == -SEARCH_INF {
-                            hi = (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW);
-                        } else {
-                            // Fallback: expand upward by minimum window
-                            hi = lo.saturating_add(MIN_ASPIRATION_WINDOW).min(SEARCH_INF);
-                        }
-                    }
-                }
-            }
+            // Debug assertions to verify invariants
+            debug_assert!(lo < hi, "Window must be non-empty: lo={lo}, hi={hi}");
+            debug_assert!(
+                hi - lo >= MIN_ASPIRATION_WINDOW,
+                "Window size must be at least {MIN_ASPIRATION_WINDOW}"
+            );
+            debug_assert!(
+                lo >= -SEARCH_INF && hi <= SEARCH_INF,
+                "Bounds must be within valid range"
+            );
 
             (lo, hi)
         } else {
             // Normal (non-mate) score - use dynamic window based on score history
             let window = self.calculate_window(depth);
 
-            // Use saturating arithmetic and clamp to prevent overflow
-            let lo = best_score.saturating_sub(window).clamp(-SEARCH_INF, SEARCH_INF);
-            let hi = best_score.saturating_add(window).clamp(-SEARCH_INF, SEARCH_INF);
+            // Use saturating arithmetic to prevent overflow
+            let lo = best_score.saturating_sub(window);
+            let hi = best_score.saturating_add(window);
 
-            // Ensure non-empty window (lo < hi) - though this should rarely happen for normal scores
-            if lo >= hi {
-                // Handle boundary cases where best_score might be outside valid range
-                if best_score >= SEARCH_INF {
-                    // Best score exceeds upper bound - create window at boundary
-                    (SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW), SEARCH_INF)
-                } else if best_score <= -SEARCH_INF {
-                    // Best score exceeds lower bound - create window at boundary
-                    (-SEARCH_INF, (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW))
-                } else {
-                    // Best score is within range - create minimum window centered on it
-                    let lo = best_score.saturating_sub(MIN_ASPIRATION_WINDOW / 2).max(-SEARCH_INF);
-                    let hi = best_score.saturating_add(MIN_ASPIRATION_WINDOW / 2).min(SEARCH_INF);
+            // Ensure bounds are valid and maintain minimum window size
+            let (lo, hi) = Self::ensure_valid_bounds(lo, hi, best_score);
 
-                    // Final guard: ensure window is still valid after clamping
-                    if lo >= hi {
-                        // We're at a boundary - adjust to ensure non-empty window
-                        if hi == SEARCH_INF {
-                            (SEARCH_INF.saturating_sub(MIN_ASPIRATION_WINDOW), SEARCH_INF)
-                        } else if lo == -SEARCH_INF {
-                            (-SEARCH_INF, (-SEARCH_INF).saturating_add(MIN_ASPIRATION_WINDOW))
-                        } else {
-                            // Fallback: expand upward by minimum window
-                            (lo, lo.saturating_add(MIN_ASPIRATION_WINDOW).min(SEARCH_INF))
-                        }
-                    } else {
-                        (lo, hi)
-                    }
-                }
-            } else {
-                (lo, hi)
-            }
+            // Debug assertions to verify invariants
+            debug_assert!(lo < hi, "Window must be non-empty: lo={lo}, hi={hi}");
+            debug_assert!(
+                hi - lo >= MIN_ASPIRATION_WINDOW,
+                "Window size must be at least {MIN_ASPIRATION_WINDOW}"
+            );
+            debug_assert!(
+                lo >= -SEARCH_INF && hi <= SEARCH_INF,
+                "Bounds must be within valid range"
+            );
+
+            (lo, hi)
         }
     }
 
@@ -636,5 +651,97 @@ mod tests {
         assert_eq!(new_alpha, alpha);
         assert!(new_beta >= beta);
         assert!(new_beta <= SEARCH_INF);
+    }
+
+    #[test]
+    fn test_search_inf_boundary_cases() {
+        let aw = AspirationWindow::new();
+
+        // Test best_score exactly at SEARCH_INF
+        // Note: SEARCH_INF is treated as a mate score, so window will be narrow
+        let (alpha, beta) = aw.get_initial_bounds(3, SEARCH_INF);
+        assert_eq!(beta, SEARCH_INF);
+        assert!(alpha < beta);
+        assert!(alpha >= -SEARCH_INF);
+        // Since SEARCH_INF is a mate score, window size depends on mate distance logic
+
+        // Test best_score exactly at -SEARCH_INF
+        let (alpha, beta) = aw.get_initial_bounds(3, -SEARCH_INF);
+        assert_eq!(alpha, -SEARCH_INF);
+        assert!(alpha < beta);
+        assert!(beta <= SEARCH_INF);
+
+        // Test best_score at a non-mate boundary value
+        let non_mate_boundary = MATE_SCORE - crate::search::constants::MAX_PLY as i32 - 100;
+        let (alpha, beta) = aw.get_initial_bounds(3, non_mate_boundary);
+        assert!(alpha < beta);
+        assert!(alpha >= -SEARCH_INF);
+        assert!(beta <= SEARCH_INF);
+        assert!(beta - alpha >= MIN_ASPIRATION_WINDOW);
+
+        // Test negative non-mate boundary
+        let (alpha, beta) = aw.get_initial_bounds(3, -non_mate_boundary);
+        assert!(alpha < beta);
+        assert!(alpha >= -SEARCH_INF);
+        assert!(beta <= SEARCH_INF);
+        assert!(beta - alpha >= MIN_ASPIRATION_WINDOW);
+    }
+
+    #[test]
+    fn test_expand_window_delta_dominance() {
+        let aw = AspirationWindow::new();
+
+        // Test case where diff is very small (DELTA should dominate)
+        let alpha = 100;
+        let beta = 200;
+        let best_score = 95; // Very close to alpha
+        let score = 90; // fail-low
+
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Expansion should be at least ASPIRATION_WINDOW_DELTA
+        let actual_expansion = alpha - new_alpha;
+        assert!(actual_expansion >= ASPIRATION_WINDOW_DELTA);
+        assert_eq!(new_beta, beta); // Beta unchanged
+
+        // Test with very small diff on fail-high
+        let alpha = 100;
+        let beta = 200;
+        let best_score = 205; // Very close to beta
+        let score = 210; // fail-high
+
+        let (new_alpha, new_beta) = aw.expand_window(score, alpha, beta, best_score);
+
+        // Expansion should be at least ASPIRATION_WINDOW_DELTA
+        let actual_expansion = new_beta - beta;
+        assert!(actual_expansion >= ASPIRATION_WINDOW_DELTA);
+        assert_eq!(new_alpha, alpha); // Alpha unchanged
+    }
+
+    #[test]
+    fn test_center_min_window_odd_min() {
+        // Test that center_min_window works correctly even if MIN is odd
+        // This test verifies the helper function directly
+        let best_score = 100;
+        let (lo, hi) = AspirationWindow::center_min_window(best_score);
+
+        // Window width should be exactly MIN_ASPIRATION_WINDOW
+        assert_eq!(hi - lo, MIN_ASPIRATION_WINDOW);
+
+        // Window should contain best_score (if possible)
+        if best_score >= -SEARCH_INF + MIN_ASPIRATION_WINDOW / 2
+            && best_score <= SEARCH_INF - MIN_ASPIRATION_WINDOW / 2
+        {
+            assert!(lo <= best_score && best_score <= hi);
+        }
+
+        // Test at boundaries
+        let (lo, hi) = AspirationWindow::center_min_window(SEARCH_INF - 1);
+        assert_eq!(hi - lo, MIN_ASPIRATION_WINDOW);
+        assert!(lo >= -SEARCH_INF && hi <= SEARCH_INF);
+
+        let (lo, hi) = AspirationWindow::center_min_window(-SEARCH_INF + 1);
+        assert_eq!(hi - lo, MIN_ASPIRATION_WINDOW);
+        assert!(lo >= -SEARCH_INF && hi <= SEARCH_INF);
     }
 }
