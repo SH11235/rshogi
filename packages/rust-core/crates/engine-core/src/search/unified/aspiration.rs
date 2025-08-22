@@ -104,19 +104,51 @@ impl AspirationWindow {
             // For losing mates, we primarily care about finding longer mates
             let (lo, hi) = if best_score > 0 {
                 // We're winning - look for better (shorter) mates
-                (best_score - window, best_score + window * 2)
+                // Use saturating arithmetic to prevent overflow
+                (
+                    best_score.saturating_sub(window),
+                    best_score.saturating_add(window.saturating_mul(2)),
+                )
             } else {
                 // We're losing - look for ways to delay mate
-                (best_score - window * 2, best_score + window)
+                // Use saturating arithmetic to prevent overflow
+                (
+                    best_score.saturating_sub(window.saturating_mul(2)),
+                    best_score.saturating_add(window),
+                )
             };
 
             // Clamp bounds to valid range to ensure mate scores are not excluded
             // This prevents issues when asymmetric windows exceed SEARCH_INF
-            (lo.clamp(-SEARCH_INF, SEARCH_INF), hi.clamp(-SEARCH_INF, SEARCH_INF))
+            let mut lo = lo.clamp(-SEARCH_INF, SEARCH_INF);
+            let mut hi = hi.clamp(-SEARCH_INF, SEARCH_INF);
+
+            // Ensure non-empty window (lo < hi)
+            if lo >= hi {
+                // Create minimum window of 2 centipawns centered on best_score
+                lo = best_score.saturating_sub(1).max(-SEARCH_INF);
+                hi = best_score.saturating_add(1).min(SEARCH_INF);
+            }
+
+            (lo, hi)
         } else {
             // Normal (non-mate) score - use dynamic window based on score history
             let window = self.calculate_window(depth);
-            (best_score - window, best_score + window)
+
+            // Use saturating arithmetic and clamp to prevent overflow
+            let lo = best_score.saturating_sub(window).clamp(-SEARCH_INF, SEARCH_INF);
+            let hi = best_score.saturating_add(window).clamp(-SEARCH_INF, SEARCH_INF);
+
+            // Ensure non-empty window (lo < hi) - though this should rarely happen for normal scores
+            if lo >= hi {
+                // Create minimum window of 2 centipawns centered on best_score
+                (
+                    best_score.saturating_sub(1).max(-SEARCH_INF),
+                    best_score.saturating_add(1).min(SEARCH_INF),
+                )
+            } else {
+                (lo, hi)
+            }
         }
     }
 
@@ -352,5 +384,86 @@ mod tests {
 
         // Volatility should be 0 when all scores are mate scores
         assert_eq!(aw_mate_only.score_volatility, 0);
+    }
+
+    #[test]
+    fn test_aspiration_window_clamping() {
+        let aw = AspirationWindow::new();
+
+        // Test extreme mate score that would exceed SEARCH_INF without clamping
+        let extreme_mate = MATE_SCORE - 1; // Very close mate
+        let (alpha, beta) = aw.get_initial_bounds(3, extreme_mate);
+
+        // Verify bounds are within valid range
+        assert!(alpha >= -SEARCH_INF);
+        assert!(beta <= SEARCH_INF);
+
+        // Verify window is non-empty
+        assert!(alpha < beta);
+
+        // Verify best_score is within the window
+        assert!(alpha <= extreme_mate && extreme_mate <= beta);
+
+        // Test extreme losing mate
+        let extreme_losing = -MATE_SCORE + 1;
+        let (alpha2, beta2) = aw.get_initial_bounds(3, extreme_losing);
+
+        assert!(alpha2 >= -SEARCH_INF);
+        assert!(beta2 <= SEARCH_INF);
+        assert!(alpha2 < beta2);
+        assert!(alpha2 <= extreme_losing && extreme_losing <= beta2);
+    }
+
+    #[test]
+    fn test_non_empty_window_guarantee() {
+        let aw = AspirationWindow::new();
+
+        // Create a pathological case where clamping might create empty window
+        // This would happen if best_score is at boundary and window calculation
+        // tries to extend beyond limits
+        let boundary_score = SEARCH_INF - 1;
+        let (alpha, beta) = aw.get_initial_bounds(3, boundary_score);
+
+        // Window must be non-empty
+        assert!(alpha < beta, "Window must be non-empty: alpha={alpha}, beta={beta}");
+
+        // Minimum window size should be at least 2
+        assert!(beta - alpha >= 2, "Window size must be at least 2");
+
+        // Test negative boundary
+        let neg_boundary_score = -SEARCH_INF + 1;
+        let (alpha2, beta2) = aw.get_initial_bounds(3, neg_boundary_score);
+
+        assert!(alpha2 < beta2, "Window must be non-empty: alpha={alpha2}, beta={beta2}");
+        assert!(beta2 - alpha2 >= 2, "Window size must be at least 2");
+    }
+
+    #[test]
+    fn test_normal_score_clamping() {
+        let mut aw = AspirationWindow::new();
+
+        // Add some history to get non-trivial window calculation
+        aw.update_score(100);
+        aw.update_score(200);
+        aw.update_score(150);
+
+        // Test normal score near boundary
+        let near_boundary = SEARCH_INF - 100;
+        let (alpha, beta) = aw.get_initial_bounds(4, near_boundary);
+
+        // Verify bounds are clamped
+        assert!(alpha >= -SEARCH_INF);
+        assert!(beta <= SEARCH_INF);
+        assert!(alpha < beta);
+
+        // Test with volatile history
+        aw.update_score(1000);
+        aw.update_score(-1000);
+        aw.update_score(2000);
+
+        let (alpha2, beta2) = aw.get_initial_bounds(7, 0);
+        assert!(alpha2 >= -SEARCH_INF);
+        assert!(beta2 <= SEARCH_INF);
+        assert!(alpha2 < beta2);
     }
 }
