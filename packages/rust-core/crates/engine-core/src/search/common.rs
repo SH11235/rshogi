@@ -346,4 +346,46 @@ mod tests {
         // Verify the stored value doesn't exceed -MATE_SCORE
         assert!(tt_losing > -MATE_SCORE);
     }
+
+    #[test]
+    fn test_tt_mate_score_transposition_across_ply() {
+        // Test case: Root (ply=0) finds mate in 7, descendant (ply=5) gets TT hit
+        // This tests that mate scores are correctly adjusted across different plies
+
+        // At root (ply=0), we find mate in 7 plies
+        let root_ply = 0;
+        let mate_in_7_from_root = MATE_SCORE - 7;
+
+        // Store in TT (already root-relative since ply=0)
+        let tt_stored = adjust_mate_score_for_tt(mate_in_7_from_root, root_ply);
+        assert_eq!(tt_stored, MATE_SCORE - 7); // No adjustment needed at root
+
+        // Later, at ply=5, we get a TT hit
+        let descendant_ply = 5;
+        let retrieved_at_ply5 = adjust_mate_score_from_tt(tt_stored, descendant_ply);
+
+        // From ply=5, it should be mate in 2 (7 - 5 = 2)
+        assert_eq!(retrieved_at_ply5, MATE_SCORE - 2);
+        assert_eq!(get_mate_distance(retrieved_at_ply5), Some(2));
+
+        // Test with losing mate: being mated in 7 from root
+        let mated_in_7_from_root = -MATE_SCORE + 7;
+        let tt_stored_losing = adjust_mate_score_for_tt(mated_in_7_from_root, root_ply);
+        assert_eq!(tt_stored_losing, -MATE_SCORE + 7); // No adjustment at root
+
+        // At ply=5, being mated in 2
+        let retrieved_losing_at_ply5 = adjust_mate_score_from_tt(tt_stored_losing, descendant_ply);
+        assert_eq!(retrieved_losing_at_ply5, -MATE_SCORE + 2);
+        assert_eq!(get_mate_distance(retrieved_losing_at_ply5), Some(2));
+
+        // Edge case: What if we're at ply=6? Mate in 1
+        let retrieved_at_ply6 = adjust_mate_score_from_tt(tt_stored, 6);
+        assert_eq!(retrieved_at_ply6, MATE_SCORE - 1);
+        assert_eq!(get_mate_distance(retrieved_at_ply6), Some(1));
+
+        // Edge case: What if we're at ply=7? Mate in 0 (immediate mate)
+        let retrieved_at_ply7 = adjust_mate_score_from_tt(tt_stored, 7);
+        assert_eq!(retrieved_at_ply7, MATE_SCORE);
+        assert_eq!(get_mate_distance(retrieved_at_ply7), Some(0));
+    }
 }

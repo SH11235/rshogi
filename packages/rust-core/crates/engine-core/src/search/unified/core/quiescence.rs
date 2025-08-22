@@ -34,6 +34,13 @@ use super::move_ordering::victim_score;
 ///
 /// # Returns
 /// The evaluation score of the position after resolving captures
+///
+/// # Note on Transposition Table Usage
+/// This implementation currently does not use the transposition table (TT).
+/// If TT support is added in the future, ensure that mate scores are properly
+/// adjusted using `adjust_mate_score_for_tt` when storing and
+/// `adjust_mate_score_from_tt` when retrieving, similar to the implementation
+/// in `alpha_beta` and `search_node` functions.
 pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
     pos: &mut Position,
