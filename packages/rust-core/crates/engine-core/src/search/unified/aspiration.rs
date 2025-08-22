@@ -102,13 +102,17 @@ impl AspirationWindow {
 
             // For winning mates, we primarily care about finding shorter mates
             // For losing mates, we primarily care about finding longer mates
-            if best_score > 0 {
+            let (lo, hi) = if best_score > 0 {
                 // We're winning - look for better (shorter) mates
                 (best_score - window, best_score + window * 2)
             } else {
                 // We're losing - look for ways to delay mate
                 (best_score - window * 2, best_score + window)
-            }
+            };
+
+            // Clamp bounds to valid range to ensure mate scores are not excluded
+            // This prevents issues when asymmetric windows exceed SEARCH_INF
+            (lo.clamp(-SEARCH_INF, SEARCH_INF), hi.clamp(-SEARCH_INF, SEARCH_INF))
         } else {
             // Normal (non-mate) score - use dynamic window based on score history
             let window = self.calculate_window(depth);
