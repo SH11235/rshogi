@@ -2,6 +2,8 @@
 //!
 //! This module provides unified game phase detection logic used by both
 //! the search engine and time management components.
+//!
+//! For detailed architecture and usage, see `docs/game-phase-module-guide.md`
 
 pub mod classify;
 pub mod config;

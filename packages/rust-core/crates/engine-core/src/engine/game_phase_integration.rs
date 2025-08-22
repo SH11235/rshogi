@@ -15,34 +15,6 @@ pub fn detect_game_phase_for_search(pos: &Position, ply: u32) -> GamePhase {
     detect_game_phase(pos, ply, Profile::Search)
 }
 
-/// Calculate phase score using the new module
-///
-/// Returns a value from 0-128 for compatibility with existing code.
-/// Note: This is a legacy compatibility function where 128 = full material (opening phase)
-/// and 0 = no material (endgame phase).
-#[must_use]
-#[inline]
-pub fn calculate_phase_score(pos: &Position, ply: u32) -> u8 {
-    use crate::game_phase::{compute_signals, PhaseParameters};
-
-    let params = PhaseParameters::for_profile(Profile::Search);
-    let signals = compute_signals(pos, ply, &params.phase_weights, &params);
-
-    // Get combined score (0.0 - 1.0)
-    let score = signals.combined_score(params.w_material, params.w_ply);
-
-    // Safety: Clamp to valid range before conversion
-    let clamped = score.clamp(0.0, 1.0);
-
-    // Convert to 0-128 scale (inverted because old system uses 128 = full material)
-    let inverted = 1.0 - clamped;
-    let scaled = inverted * 128.0;
-    let rounded = scaled.round() as i32;
-
-    // Final safety clamp to ensure we're in u8 range
-    rounded.clamp(0, 128) as u8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,19 +30,5 @@ mod tests {
         // End game position
         let endgame_pos = parse_sfen("4k4/9/9/9/9/9/9/9/4K4 b Rb 100").unwrap();
         assert_eq!(detect_game_phase_for_search(&endgame_pos, 200), GamePhase::EndGame);
-    }
-
-    #[test]
-    fn test_calculate_phase_score() {
-        // Start position should have high score (near 128)
-        let pos =
-            parse_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1").unwrap();
-        let score = calculate_phase_score(&pos, 0);
-        assert!(score > 100, "Start position should have high phase score, got {}", score);
-
-        // End game position should have low score
-        let endgame_pos = parse_sfen("4k4/9/9/9/9/9/9/9/4K4 b Rb 100").unwrap();
-        let score = calculate_phase_score(&endgame_pos, 200);
-        assert!(score < 32, "End game position should have low phase score, got {}", score);
     }
 }
