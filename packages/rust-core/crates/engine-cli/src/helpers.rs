@@ -217,7 +217,8 @@ pub fn send_bestmove_and_finalize(
 ) -> Result<()> {
     // Guard: Never send bestmove during ponder (double safety)
     if *current_search_is_ponder {
-        log::debug!("Suppressing bestmove during ponder (safety guard)");
+        log::warn!("Suppressing bestmove during ponder (safety guard) - this should not happen in normal operation");
+        log::debug!("Call stack indicates improper bestmove attempt during ponder search");
         // Don't change state here - let proper cleanup handle it
         return Ok(());
     }
