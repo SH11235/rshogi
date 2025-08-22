@@ -125,6 +125,10 @@ mod tests {
 
         pos.board.rebuild_occupancy_bitboards();
 
+        // Compute hash after placing pieces
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+
         let evaluator = MaterialEvaluator;
         let limits = SearchLimitsBuilder::default().depth(3).build();
         let mut searcher = Searcher::new(evaluator);

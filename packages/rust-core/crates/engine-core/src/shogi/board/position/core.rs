@@ -203,7 +203,7 @@ impl Position {
     }
 
     /// Compute Zobrist hash
-    pub(super) fn compute_hash(&self) -> u64 {
+    pub(crate) fn compute_hash(&self) -> u64 {
         use crate::zobrist::ZobristHashing;
         ZobristHashing::zobrist_hash(self)
     }
