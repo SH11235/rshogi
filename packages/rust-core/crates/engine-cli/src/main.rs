@@ -92,7 +92,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     // Store active worker thread handle
     let mut worker_handle: Option<JoinHandle<()>> = None;
     let mut search_state = SearchState::Idle;
-    let mut bestmove_sent = false; // Track if bestmove has been sent for current search
     let mut current_search_timeout = helpers::MIN_JOIN_TIMEOUT;
     let mut search_id_counter = 0u64;
     let mut current_search_id = 0u64;
@@ -123,7 +122,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 worker_rx: &worker_rx,
                 worker_handle: &mut worker_handle,
                 search_state: &mut search_state,
-                bestmove_sent: &mut bestmove_sent,
                 current_search_timeout: &mut current_search_timeout,
                 search_id_counter: &mut search_id_counter,
                 current_search_id: &mut current_search_id,
@@ -177,7 +175,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                     let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
                                                     let nodes = stop_info.as_ref().map(|s| s.nodes).unwrap_or(0);
                                                     let elapsed_ms = stop_info.as_ref().map(|s| s.elapsed_ms).unwrap_or(0);
-                                                    let nps = if elapsed_ms > 0 { nodes * 1000 / elapsed_ms } else { 0 };
+                                                    let nps = if elapsed_ms > 0 { nodes.saturating_mul(1000) / elapsed_ms } else { 0 };
 
                                                     let score_str = session.committed_best.as_ref()
                                                         .map(|b| match &b.score {
@@ -213,8 +211,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                                     // Update state
                                                     search_state = SearchState::Idle;
-                                                    bestmove_sent = true;
-                                                    current_search_is_ponder = false;
+                                                                                                        current_search_is_ponder = false;
+                                                    current_bestmove_emitter = None;
                                             }
                                                 Err(e) => {
                                                     log::warn!("Session validation failed on finish: {e}");
@@ -247,8 +245,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                             log::info!("Fallback move ready: {fallback_move}");
                                                             emitter.emit(fallback_move, None, meta)?;
                                                             search_state = SearchState::Idle;
-                                                            bestmove_sent = true;
-                                                            current_search_is_ponder = false;
+                                                                                                                        current_search_is_ponder = false;
+                                                            current_bestmove_emitter = None;
                                                         }
                                                         Err(e) => {
                                                             log::error!("Fallback move generation failed: {e}");
@@ -274,8 +272,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                                             emitter.emit("resign".to_string(), None, meta)?;
                                                             search_state = SearchState::Idle;
-                                                            bestmove_sent = true;
-                                                            current_search_is_ponder = false;
+                                                                                                                        current_search_is_ponder = false;
                                                         }
                                                     }
                                                 }
@@ -304,8 +301,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                             emitter.emit("resign".to_string(), None, meta)?;
                                             search_state = SearchState::Idle;
-                                            bestmove_sent = true;
-                                            current_search_is_ponder = false;
+                                                                                        current_search_is_ponder = false;
+                                            current_bestmove_emitter = None;
                                         }
                                     } else {
                                         log::warn!("No session available on search finish");
@@ -335,8 +332,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                 log::info!("Emergency fallback move: {fallback_move}");
                                                 emitter.emit(fallback_move, None, meta)?;
                                                 search_state = SearchState::Idle;
-                                                bestmove_sent = true;
-                                                current_search_is_ponder = false;
+                                                                                                current_search_is_ponder = false;
+                                                current_bestmove_emitter = None;
                                             }
                                             Err(e) => {
                                                 log::error!("Emergency fallback move failed: {e}");
@@ -362,8 +359,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                                 emitter.emit("resign".to_string(), None, meta)?;
                                                 search_state = SearchState::Idle;
-                                                bestmove_sent = true;
-                                                current_search_is_ponder = false;
+                                                                                                current_search_is_ponder = false;
                                             }
                                         }
                                     }
@@ -377,10 +373,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                     }
                     Ok(WorkerMessage::BestMove { best_move, ponder_move, search_id }) => {
                         // Only send bestmove if:
-                        // 1. We're still searching AND haven't sent one yet
+                        // 1. We're still searching
                         // 2. The search_id matches current search (prevents old search results)
                         // 3. NOT a pure ponder search (USI protocol: no bestmove during ponder)
-                        if search_state.can_accept_bestmove() && !bestmove_sent && search_id == current_search_id && !current_search_is_ponder {
+                        if search_state.can_accept_bestmove() && search_id == current_search_id && !current_search_is_ponder {
                             // Use BestmoveEmitter for centralized emission
                             if let Some(ref emitter) = current_bestmove_emitter {
                                 // Log position state for debugging (debug level)
@@ -425,8 +421,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                     emitter.emit(best_move, ponder_move, meta)?;
                                     search_state = SearchState::Idle;
-                                    bestmove_sent = true;
-                                    current_search_is_ponder = false;
+                                                                        current_search_is_ponder = false;
+                                    current_bestmove_emitter = None;
                                 } else {
                                     // Log detailed error information
                                     log::error!("Invalid bestmove detected: {best_move}");
@@ -459,8 +455,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                             emitter.emit(fallback_move, None, meta)?;
                                             search_state = SearchState::Idle;
-                                            bestmove_sent = true;
-                                            current_search_is_ponder = false;
+                                                                                        current_search_is_ponder = false;
+                                            current_bestmove_emitter = None;
                                         }
                                         Err(e) => {
                                             log::error!("Failed to generate fallback move: {e}");
@@ -485,8 +481,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                             emitter.emit("resign".to_string(), None, meta)?;
                                             search_state = SearchState::Idle;
-                                            bestmove_sent = true;
-                                            current_search_is_ponder = false;
+                                                                                        current_search_is_ponder = false;
+                                            current_bestmove_emitter = None;
                                         }
                                     }
                                 }
@@ -494,7 +490,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 log::error!("No BestmoveEmitter available for search {search_id}");
                             }
                         } else {
-                            log::warn!("Ignoring late/ponder bestmove: {best_move} (search_state={search_state:?}, bestmove_sent={bestmove_sent}, search_id={search_id}, current={current_search_id}, is_ponder={current_search_is_ponder})");
+                            log::debug!("Ignoring late/ponder bestmove: {best_move} (search_state={search_state:?}, search_id={search_id}, current={current_search_id}, is_ponder={current_search_is_ponder})");
                         }
                     }
                     Ok(WorkerMessage::PartialResult { .. }) => {

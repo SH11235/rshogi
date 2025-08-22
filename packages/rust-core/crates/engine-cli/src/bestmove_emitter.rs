@@ -137,7 +137,6 @@ impl BestmoveEmitter {
     pub fn is_sent(&self) -> bool {
         self.sent.load(Ordering::Acquire)
     }
-
 }
 
 #[cfg(test)]
