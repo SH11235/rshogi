@@ -98,8 +98,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
         }
 
         UsiCommand::PonderHit => {
-            // Handle ponder hit only if we're actively searching
-            if ctx.search_state.is_searching() && *ctx.search_state != SearchState::StopRequested {
+            // Handle ponder hit only if we're actively pondering
+            if *ctx.current_search_is_ponder && *ctx.search_state == SearchState::Searching {
                 let mut engine = lock_or_recover_adapter(ctx.engine);
                 // Mark that we're no longer in pure ponder mode
                 *ctx.current_search_is_ponder = false;
@@ -109,8 +109,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 }
             } else {
                 log::debug!(
-                    "Ponder hit ignored - not in active search state (state: {:?})",
-                    *ctx.search_state
+                    "Ponder hit ignored (state={:?}, is_ponder={})",
+                    *ctx.search_state,
+                    *ctx.current_search_is_ponder
                 );
             }
         }
@@ -133,10 +134,16 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 ctx.engine,
             )?;
 
+            // Clear all search-related state for clean baseline
+            *ctx.current_session = None;
+            *ctx.bestmove_sent = false;
+            *ctx.current_search_is_ponder = false;
+            *ctx.current_search_id = 0; // Reset search ID
+
             // Notify engine of game result
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.game_over(result);
-            log::debug!("Game over processed, worker cleaned up");
+            log::debug!("Game over processed, worker cleaned up, state reset");
         }
 
         UsiCommand::UsiNewGame => {
@@ -433,10 +440,15 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     }
                 }
                 Ok(WorkerMessage::Info(info)) => {
-                    // Forward info messages
+                    // Forward info messages only during active search
                     // TODO: Add search_id to Info messages to filter out stale messages from previous searches
                     // This would prevent old search info from appearing during new searches
-                    let _ = send_response(UsiResponse::Info(info));
+                    // For now, we only forward info messages when actively searching as a temporary measure
+                    if ctx.search_state.is_searching() {
+                        let _ = send_response(UsiResponse::Info(info));
+                    } else {
+                        log::trace!("Suppressed Info message - not in searching state");
+                    }
                 }
                 Ok(WorkerMessage::PartialResult {
                     current_best,
