@@ -109,26 +109,45 @@ pub fn is_mate_score(score: i32) -> bool {
 
 /// Adjust mate score when storing in transposition table
 /// Mate scores are relative to root, not to current position
+///
+/// When storing:
+/// - Winning mate: score represents "mate in N plies from current position"
+///   To convert to root-relative: subtract current ply (mate gets further from root)
+/// - Losing mate: score represents "mated in N plies from current position"  
+///   To convert to root-relative: add current ply (mate gets further from root)
 #[inline]
 pub fn adjust_mate_score_for_tt(score: i32, ply: u8) -> i32 {
-    if score >= MATE_SCORE - MAX_PLY as i32 {
-        score + ply as i32
-    } else if score <= -MATE_SCORE + MAX_PLY as i32 {
+    if !is_mate_score(score) {
+        score
+    } else if score > 0 {
+        // Winning mate: MATE_SCORE - distance_from_current
+        // Root-relative: MATE_SCORE - (distance_from_current + ply)
         score - ply as i32
     } else {
-        score
+        // Losing mate: -MATE_SCORE + distance_from_current
+        // Root-relative: -MATE_SCORE + (distance_from_current + ply)
+        score + ply as i32
     }
 }
 
 /// Adjust mate score when retrieving from transposition table
+/// Converts from root-relative back to current-position-relative
+///
+/// When retrieving:
+/// - Winning mate: stored as "mate in N plies from root"
+///   To convert to current-relative: add current ply (mate gets closer)
+/// - Losing mate: stored as "mated in N plies from root"
+///   To convert to current-relative: subtract current ply (mate gets closer)
 #[inline]
 pub fn adjust_mate_score_from_tt(score: i32, ply: u8) -> i32 {
-    if score >= MATE_SCORE - MAX_PLY as i32 {
-        score - ply as i32
-    } else if score <= -MATE_SCORE + MAX_PLY as i32 {
+    if !is_mate_score(score) {
+        score
+    } else if score > 0 {
+        // Winning mate: root-relative to current-relative
         score + ply as i32
     } else {
-        score
+        // Losing mate: root-relative to current-relative
+        score - ply as i32
     }
 }
 
@@ -204,17 +223,17 @@ mod tests {
     fn test_tt_score_adjustment() {
         let ply = 10;
 
-        // Positive mate score
-        let score = MATE_SCORE - 20;
+        // Positive mate score (winning mate)
+        let score = MATE_SCORE - 20; // Mate in 20 plies from current position
         let adjusted = adjust_mate_score_for_tt(score, ply);
-        assert_eq!(adjusted, score + ply as i32);
-        assert_eq!(adjust_mate_score_from_tt(adjusted, ply), score);
+        assert_eq!(adjusted, score - ply as i32); // Should subtract ply for root-relative
+        assert_eq!(adjust_mate_score_from_tt(adjusted, ply), score); // Round-trip test
 
-        // Negative mate score
-        let score = -MATE_SCORE + 20;
+        // Negative mate score (losing mate)
+        let score = -MATE_SCORE + 20; // Mated in 20 plies from current position
         let adjusted = adjust_mate_score_for_tt(score, ply);
-        assert_eq!(adjusted, score - ply as i32);
-        assert_eq!(adjust_mate_score_from_tt(adjusted, ply), score);
+        assert_eq!(adjusted, score + ply as i32); // Should add ply for root-relative
+        assert_eq!(adjust_mate_score_from_tt(adjusted, ply), score); // Round-trip test
 
         // Normal score (not mate)
         let score = 100;
@@ -286,5 +305,40 @@ mod tests {
         assert!(validate_mate_score(100, 50));
         assert!(validate_mate_score(-100, 50));
         assert!(validate_mate_score(0, 100));
+    }
+
+    #[test]
+    fn test_tt_mate_score_semantics() {
+        // Test that TT-stored values are root-relative
+
+        // Scenario: At ply 10, we find mate in 20 plies
+        let ply = 10;
+        let current_mate_score = MATE_SCORE - 20; // Mate in 20 from current position
+
+        // When storing to TT, it should be converted to root-relative
+        let tt_score = adjust_mate_score_for_tt(current_mate_score, ply);
+        // Root-relative: mate in 30 plies from root (20 + 10)
+        assert_eq!(tt_score, MATE_SCORE - 30);
+
+        // Verify the stored value doesn't exceed MATE_SCORE
+        assert!(tt_score < MATE_SCORE);
+
+        // When retrieving from TT at the same ply, should get original score back
+        let retrieved = adjust_mate_score_from_tt(tt_score, ply);
+        assert_eq!(retrieved, current_mate_score);
+
+        // When retrieving from TT at a different ply (e.g., ply 5)
+        let retrieved_at_ply5 = adjust_mate_score_from_tt(tt_score, 5);
+        // Should be mate in 25 plies from ply 5 (30 - 5)
+        assert_eq!(retrieved_at_ply5, MATE_SCORE - 25);
+
+        // Test negative mate scores
+        let losing_mate = -MATE_SCORE + 20; // Being mated in 20 plies
+        let tt_losing = adjust_mate_score_for_tt(losing_mate, ply);
+        // Root-relative: being mated in 30 plies from root
+        assert_eq!(tt_losing, -MATE_SCORE + 30);
+
+        // Verify the stored value doesn't exceed -MATE_SCORE
+        assert!(tt_losing > -MATE_SCORE);
     }
 }
