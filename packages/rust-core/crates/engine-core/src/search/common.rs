@@ -138,6 +138,31 @@ pub fn is_endgame(total_pieces: u32) -> bool {
     total_pieces <= 20
 }
 
+/// Get mate distance from a mate score
+/// Returns None if not a mate score
+#[inline]
+pub fn get_mate_distance(score: i32) -> Option<i32> {
+    if is_mate_score(score) {
+        Some(MATE_SCORE - score.abs())
+    } else {
+        None
+    }
+}
+
+/// Validate that a mate score makes sense for the given ply
+/// Returns true if the mate distance is reasonable
+#[inline]
+pub fn validate_mate_score(score: i32, ply: u8) -> bool {
+    if let Some(distance) = get_mate_distance(score) {
+        // Mate distance should be at least the current ply
+        // (can't find mate closer than current position)
+        distance >= ply as i32
+    } else {
+        // Not a mate score - always valid
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +250,41 @@ mod tests {
 
         stop_flag.store(true, Ordering::Release);
         assert!(checker.should_stop(100, start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_get_mate_distance() {
+        // Test positive mate scores
+        assert_eq!(get_mate_distance(MATE_SCORE), Some(0)); // Mate in 0
+        assert_eq!(get_mate_distance(MATE_SCORE - 5), Some(5)); // Mate in 5 plies
+        assert_eq!(get_mate_distance(MATE_SCORE - 20), Some(20)); // Mate in 20 plies
+
+        // Test negative mate scores
+        assert_eq!(get_mate_distance(-MATE_SCORE), Some(0)); // Being mated in 0
+        assert_eq!(get_mate_distance(-MATE_SCORE + 5), Some(5)); // Being mated in 5 plies
+        assert_eq!(get_mate_distance(-MATE_SCORE + 20), Some(20)); // Being mated in 20 plies
+
+        // Test non-mate scores
+        assert_eq!(get_mate_distance(100), None);
+        assert_eq!(get_mate_distance(-100), None);
+        assert_eq!(get_mate_distance(1000), None);
+        assert_eq!(get_mate_distance(-1000), None);
+    }
+
+    #[test]
+    fn test_validate_mate_score() {
+        // Valid mate scores
+        assert!(validate_mate_score(MATE_SCORE - 10, 5)); // Mate in 10 plies from ply 5
+        assert!(validate_mate_score(MATE_SCORE - 10, 10)); // Mate in 10 plies from ply 10
+        assert!(validate_mate_score(-MATE_SCORE + 15, 10)); // Being mated in 15 plies from ply 10
+
+        // Invalid mate scores (mate distance < current ply)
+        assert!(!validate_mate_score(MATE_SCORE - 5, 10)); // Can't mate in 5 plies from ply 10
+        assert!(!validate_mate_score(-MATE_SCORE + 5, 10)); // Can't be mated in 5 plies from ply 10
+
+        // Non-mate scores are always valid
+        assert!(validate_mate_score(100, 50));
+        assert!(validate_mate_score(-100, 50));
+        assert!(validate_mate_score(0, 100));
     }
 }

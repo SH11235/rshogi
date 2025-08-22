@@ -46,11 +46,14 @@ pub trait TTOperations<const USE_TT: bool> {
         score: i32,
         node_type: NodeType,
         best_move: Option<Move>,
+        ply: u8,
     ) {
         if USE_TT {
             if let Some(ref tt) = self.tt() {
+                // Adjust mate scores to be relative to root position
+                let adjusted_score = crate::search::common::adjust_mate_score_for_tt(score, ply);
                 // Store entry (duplication tracking temporarily disabled)
-                tt.store(hash, best_move, score as i16, 0, depth, node_type);
+                tt.store(hash, best_move, adjusted_score as i16, 0, depth, node_type);
 
                 // // Update duplication statistics based on store result
                 // if let Some(ref stats) = self.duplication_stats {
