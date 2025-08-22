@@ -138,23 +138,28 @@ where
 
                 if tt_entry.depth() >= depth {
                     let tt_score = tt_entry.score();
+                    // Adjust mate scores from TT (stored relative to root) to current ply
+                    let adjusted_score = crate::search::common::adjust_mate_score_from_tt(
+                        tt_score as i32,
+                        ply as u8,
+                    );
                     match tt_entry.node_type() {
                         // EXACT entries contain the true score for this position
-                        crate::search::tt::NodeType::Exact => return tt_score as i32,
+                        crate::search::tt::NodeType::Exact => return adjusted_score,
                         // LOWERBOUND means the true score is >= tt_score
                         // We can use it for cutoff if it's >= beta
                         crate::search::tt::NodeType::LowerBound => {
-                            if tt_score as i32 >= beta {
-                                return tt_score as i32;
+                            if adjusted_score >= beta {
+                                return adjusted_score;
                             }
                             // We can also improve alpha since we know score >= tt_score
-                            alpha = alpha.max(tt_score as i32);
+                            alpha = alpha.max(adjusted_score);
                         }
                         // UPPERBOUND means the true score is <= tt_score
                         // We can use it for cutoff if it's <= alpha
                         crate::search::tt::NodeType::UpperBound => {
-                            if tt_score as i32 <= alpha {
-                                return tt_score as i32;
+                            if adjusted_score <= alpha {
+                                return adjusted_score;
                             }
                         }
                     }
