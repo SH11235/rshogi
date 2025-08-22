@@ -79,12 +79,13 @@ pub fn generate_fallback_move(
             Ok(move_str)
         }
         Err(EngineError::NoLegalMoves) => {
-            let sfen = engine
-                .lock()
-                .unwrap()
-                .get_position()
-                .map(position_to_sfen)
-                .unwrap_or_else(|| "<no position>".to_string());
+            let sfen = {
+                let adapter = lock_or_recover_adapter(engine);
+                adapter
+                    .get_position()
+                    .map(position_to_sfen)
+                    .unwrap_or_else(|| "<no position>".to_string())
+            };
             log::error!(
                 "No legal moves available in position {sfen} - position is checkmate or stalemate"
             );
@@ -102,12 +103,13 @@ pub fn generate_fallback_move(
             }
         }
         Err(e) => {
-            let sfen = engine
-                .lock()
-                .unwrap()
-                .get_position()
-                .map(position_to_sfen)
-                .unwrap_or_else(|| "<no position>".to_string());
+            let sfen = {
+                let adapter = lock_or_recover_adapter(engine);
+                adapter
+                    .get_position()
+                    .map(position_to_sfen)
+                    .unwrap_or_else(|| "<no position>".to_string())
+            };
             log::error!("Failed to generate fallback move in position {sfen}: {e}");
             if allow_null_move {
                 // Return null move for better GUI compatibility
