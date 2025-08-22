@@ -1,9 +1,8 @@
 use crate::engine_adapter::{EngineAdapter, EngineError};
-use crate::helpers::{
-    calculate_max_search_time, generate_fallback_move, wait_for_search_completion,
-};
+use crate::helpers::{generate_fallback_move, wait_for_search_completion};
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
+use crate::types::BestmoveSource;
 use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
@@ -19,7 +18,7 @@ use engine_core::search::types::{StopInfo, TerminationReason};
 
 /// Helper to construct BestmoveMeta with common defaults
 fn create_bestmove_meta(
-    from: &'static str,
+    from: BestmoveSource,
     reason: TerminationReason,
     elapsed_ms: u64,
     depth: u8,
@@ -41,7 +40,11 @@ fn create_bestmove_meta(
             seldepth: None,
             score: score.unwrap_or_else(|| "unknown".to_string()),
             nodes,
-            nps: 0,
+            nps: if elapsed_ms > 0 {
+                nodes.saturating_mul(1000) / elapsed_ms
+            } else {
+                0
+            },
         },
     }
 }
@@ -54,7 +57,6 @@ pub struct CommandContext<'a> {
     pub worker_rx: &'a Receiver<WorkerMessage>,
     pub worker_handle: &'a mut Option<JoinHandle<()>>,
     pub search_state: &'a mut SearchState,
-    pub current_search_timeout: &'a mut Duration,
     pub search_id_counter: &'a mut u64,
     pub current_search_id: &'a mut u64,
     pub current_search_is_ponder: &'a mut bool,
@@ -265,9 +267,6 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     // Create new BestmoveEmitter for this search
     *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(search_id));
 
-    // Calculate timeout for this search
-    *ctx.current_search_timeout = calculate_max_search_time(&params);
-
     // Track if this is a ponder search
     *ctx.current_search_is_ponder = params.ponder;
 
@@ -341,7 +340,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
         // Debug: Verify stop flag was actually set
         let stop_value = ctx.stop_flag.load(Ordering::Acquire);
-        log::info!("Stop flag verification: {stop_value}");
+        log::debug!("Stop flag verification: {stop_value}");
 
         // First try to use committed best from session immediately
         if let Some(ref session) = *ctx.current_session {
@@ -364,7 +363,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         });
 
                         let meta = create_bestmove_meta(
-                            "session_on_stop",
+                            BestmoveSource::SessionOnStop,
                             TerminationReason::UserStop,
                             0, // TODO: Get actual elapsed time
                             depth,
@@ -450,9 +449,9 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         // Use BestmoveEmitter for centralized emission
                         if let Some(ref emitter) = ctx.current_bestmove_emitter {
                             let (from, depth, score_str) = if let Some((_, d, s)) = partial_result {
-                                ("partial_result_timeout", d, Some(format!("cp {s}")))
+                                (BestmoveSource::PartialResultTimeout, d, Some(format!("cp {s}")))
                             } else {
-                                ("emergency_fallback_timeout", 0, None)
+                                (BestmoveSource::EmergencyFallbackTimeout, 0, None)
                             };
 
                             let meta = create_bestmove_meta(
@@ -485,7 +484,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         // Use BestmoveEmitter for centralized emission
                         if let Some(ref emitter) = ctx.current_bestmove_emitter {
                             let meta = create_bestmove_meta(
-                                "resign_timeout",
+                                BestmoveSource::ResignTimeout,
                                 TerminationReason::Error,
                                 elapsed.as_millis() as u64,
                                 0,
@@ -534,7 +533,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             // Use BestmoveEmitter for centralized emission
                             if let Some(ref emitter) = ctx.current_bestmove_emitter {
                                 let meta = create_bestmove_meta(
-                                    "worker_on_stop",
+                                    BestmoveSource::WorkerOnStop,
                                     TerminationReason::UserStop,
                                     elapsed.as_millis() as u64,
                                     0, // TODO: Get actual depth from worker
@@ -630,7 +629,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                 });
 
                                             let meta = create_bestmove_meta(
-                                                "session_in_search_finished",
+                                                BestmoveSource::SessionInSearchFinished,
                                                 TerminationReason::UserStop,
                                                 elapsed.as_millis() as u64,
                                                 depth,
@@ -695,9 +694,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 if let Some(ref emitter) = ctx.current_bestmove_emitter {
                                     let (from, depth, score_str) =
                                         if let Some((_, d, s)) = partial_result {
-                                            ("partial_result_on_finish", d, Some(format!("cp {s}")))
+                                            (
+                                                BestmoveSource::PartialResultOnFinish,
+                                                d,
+                                                Some(format!("cp {s}")),
+                                            )
                                         } else {
-                                            ("emergency_fallback_on_finish", 0, None)
+                                            (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
                                         };
 
                                     let meta = create_bestmove_meta(
@@ -739,7 +742,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                                 if let Some(ref emitter) = ctx.current_bestmove_emitter {
                                     let meta = create_bestmove_meta(
-                                        "resign_on_finish",
+                                        BestmoveSource::ResignOnFinish,
                                         TerminationReason::Error,
                                         elapsed.as_millis() as u64,
                                         0,
