@@ -138,11 +138,6 @@ impl BestmoveEmitter {
         self.sent.load(Ordering::Acquire)
     }
 
-    /// Reset for testing (not for production use)
-    #[cfg(test)]
-    pub fn reset(&self) {
-        self.sent.store(false, Ordering::Release);
-    }
 }
 
 #[cfg(test)]
@@ -179,11 +174,11 @@ mod tests {
 
         // Note: In test, we can't actually send USI responses
         // So we just test the logic
-        assert!(!emitter.sent.swap(true, Ordering::SeqCst));
+        assert!(!emitter.sent.swap(true, Ordering::AcqRel));
         assert!(emitter.is_sent());
 
         // Second emit should be blocked
-        assert!(emitter.sent.swap(true, Ordering::SeqCst));
+        assert!(emitter.sent.swap(true, Ordering::AcqRel));
     }
 
     #[test]
@@ -196,11 +191,11 @@ mod tests {
         let mut handles = vec![];
 
         // Spawn multiple threads trying to emit simultaneously
-        for i in 0..num_threads {
+        for _ in 0..num_threads {
             let emitter_clone = Arc::clone(&emitter);
             let handle = thread::spawn(move || {
                 // Each thread tries to emit
-                !emitter_clone.sent.swap(true, Ordering::SeqCst)
+                !emitter_clone.sent.swap(true, Ordering::AcqRel)
             });
             handles.push(handle);
         }
@@ -235,10 +230,12 @@ mod tests {
             let mut meta = make_test_meta();
             meta.stop_info.reason = reason;
 
-            // Verify format matches expected pattern
-            let formatted = format!("{:?}", reason).to_lowercase();
+            // Verify Display format (which is used in LTSV)
+            let formatted = reason.to_string();
             assert!(!formatted.is_empty());
             assert!(formatted.chars().all(|c| c.is_alphabetic() || c == '_'));
+            // All reasons should be snake_case
+            assert_eq!(formatted, formatted.to_lowercase());
         }
     }
 }
