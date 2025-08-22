@@ -250,6 +250,27 @@ impl Move {
     pub fn from_usi(usi: &str) -> Result<Self, String> {
         crate::usi::parse_usi_move(usi).map_err(|e| e.to_string())
     }
+
+    /// Compare moves ignoring piece type information (for TT comparison)
+    ///
+    /// This is useful when comparing moves from TT (stored as 16-bit) with
+    /// moves from move generator (which have full piece type information).
+    /// Only compares from/to/promote/drop information.
+    #[inline]
+    pub fn equals_without_piece_type(&self, other: &Move) -> bool {
+        // Lower 16 bits contain all the essential move information:
+        // - bits 0-6: destination square
+        // - bits 7-13: source square (or piece type for drops)
+        // - bit 14: promotion flag
+        // - bit 15: drop flag
+        (self.data & 0xFFFF) == (other.data & 0xFFFF)
+    }
+
+    /// Get the 16-bit key representation of this move (TT format)
+    #[inline]
+    pub fn to_tt_key(self) -> u16 {
+        (self.data & 0xFFFF) as u16
+    }
 }
 
 impl std::fmt::Display for Move {
@@ -733,5 +754,59 @@ mod tests {
         // But piece type info is lost
         assert_eq!(u16_decoded.piece_type(), None);
         assert_eq!(u16_decoded.captured_piece_type(), None);
+    }
+
+    #[test]
+    fn test_equals_without_piece_type() {
+        // Test the new comparison method
+        let from = parse_usi_square("7g").unwrap();
+        let to = parse_usi_square("7f").unwrap();
+
+        // Create moves with different piece type info
+        let m1 = Move::normal(from, to, false); // No piece type
+        let m2 = Move::normal_with_piece(from, to, false, PieceType::Pawn, None);
+        let m3 = Move::normal_with_piece(from, to, false, PieceType::Gold, None);
+
+        // All should be equal when ignoring piece type
+        assert!(m1.equals_without_piece_type(&m2));
+        assert!(m2.equals_without_piece_type(&m3));
+        assert!(m1.equals_without_piece_type(&m3));
+
+        // But not equal with normal equality
+        assert_ne!(m1, m2);
+        assert_ne!(m2, m3);
+
+        // Different moves should not be equal
+        let m4 =
+            Move::normal(parse_usi_square("2g").unwrap(), parse_usi_square("2f").unwrap(), false);
+        assert!(!m1.equals_without_piece_type(&m4));
+
+        // Test promotion flag
+        let m5 = Move::normal(from, to, true);
+        assert!(!m1.equals_without_piece_type(&m5));
+
+        // Test drop moves
+        let d1 = Move::drop(PieceType::Pawn, to);
+        let d2 = Move::drop(PieceType::Pawn, to);
+        let d3 = Move::drop(PieceType::Gold, to);
+
+        assert!(d1.equals_without_piece_type(&d2));
+        assert!(!d1.equals_without_piece_type(&d3)); // Different drop piece type
+        assert!(!d1.equals_without_piece_type(&m1)); // Drop vs normal move
+    }
+
+    #[test]
+    fn test_to_tt_key() {
+        // Test TT key generation
+        let m1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let key1 = m1.to_tt_key();
+
+        // Creating from u16 should give same TT key
+        let m2 = Move::from_u16(key1);
+        assert_eq!(m2.to_tt_key(), key1);
+
+        // Should be equal without piece type
+        assert!(m1.equals_without_piece_type(&m2));
     }
 }
