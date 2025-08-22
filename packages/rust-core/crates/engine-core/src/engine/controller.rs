@@ -205,9 +205,17 @@ impl Engine {
     }
 
     /// Calculate active threads based on game phase
+    #[cfg(test)]
     #[allow(clippy::manual_div_ceil)] // For compatibility with Rust < 1.73
     fn calculate_active_threads(&self, position: &Position) -> usize {
         let phase = self.detect_game_phase(position);
+        self.calculate_active_threads_from_phase(phase)
+    }
+
+    /// Calculate active threads from a known phase
+    #[inline]
+    #[allow(clippy::manual_div_ceil)] // For compatibility with Rust < 1.73
+    fn calculate_active_threads_from_phase(&self, phase: GamePhase) -> usize {
         let base_threads = self.num_threads;
 
         match phase {
@@ -224,15 +232,20 @@ impl Engine {
         // Apply pending TT size if any
         self.apply_pending_tt_size();
 
-        // Calculate active threads for this phase
-        let active_threads = self.calculate_active_threads(pos);
+        // Detect phase once and use for both thread calculation and logging
+        let phase = self.detect_game_phase(pos);
+        let active_threads = self.calculate_active_threads_from_phase(phase);
+
         debug!(
             "Engine::search called with engine_type: {:?}, parallel: {}, active_threads: {} (phase: {:?})",
             self.engine_type,
             self.use_parallel,
             active_threads,
-            self.detect_game_phase(pos)
+            phase
         );
+
+        // Additional debug log for tuning support
+        debug!("phase={:?} ply={} threads={}", phase, pos.ply, active_threads);
 
         // Use parallel search if enabled and supported
         if self.use_parallel {
