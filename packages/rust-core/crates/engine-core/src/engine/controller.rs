@@ -842,6 +842,9 @@ impl Evaluator for NNUEEvaluatorProxy {
 }
 
 #[cfg(test)]
+mod phase_baseline_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     // use std::sync::atomic::AtomicBool; // Commented out - used in test that's temporarily disabled
