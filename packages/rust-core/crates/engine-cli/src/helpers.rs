@@ -1,6 +1,6 @@
 use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::state::SearchState;
-use crate::usi::{self, send_response, UsiResponse};
+use crate::usi;
 use crate::worker::{lock_or_recover_adapter, wait_for_worker_with_timeout, WorkerMessage};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
@@ -121,32 +121,6 @@ pub fn generate_fallback_move(
     }
 }
 
-/// Unified function to send bestmove response and update state atomically
-pub fn send_bestmove_once(
-    best_move: String,
-    ponder: Option<String>,
-    search_state: &mut SearchState,
-    bestmove_sent: &mut bool,
-) -> Result<()> {
-    // Check if already sent
-    if *bestmove_sent {
-        log::debug!("Bestmove already sent, ignoring duplicate: {best_move}");
-        return Ok(());
-    }
-
-    // Log before sending (while we still own the values)
-    log::info!("Bestmove sent: {best_move}, ponder: {ponder:?}");
-
-    // Send the response
-    send_response(UsiResponse::BestMove { best_move, ponder })?;
-
-    // Update state atomically
-    *search_state = SearchState::Idle;
-    *bestmove_sent = true;
-
-    Ok(())
-}
-
 /// Calculate maximum expected search time from GoParams
 pub fn calculate_max_search_time(params: &usi::GoParams) -> Duration {
     if params.infinite {
@@ -206,27 +180,3 @@ pub fn wait_for_search_completion(
     Ok(())
 }
 
-/// Helper function to send bestmove and finalize the search state
-/// This ensures current_search_is_ponder flag is always reset after sending bestmove
-pub fn send_bestmove_and_finalize(
-    best_move: String,
-    ponder: Option<String>,
-    search_state: &mut SearchState,
-    bestmove_sent: &mut bool,
-    current_search_is_ponder: &mut bool,
-) -> Result<()> {
-    // Guard: Never send bestmove during ponder (double safety)
-    if *current_search_is_ponder {
-        log::warn!("Suppressing bestmove during ponder (safety guard) - this should not happen in normal operation");
-        log::debug!("Call stack indicates improper bestmove attempt during ponder search");
-        // Don't change state here - let proper cleanup handle it
-        return Ok(());
-    }
-
-    let result = send_bestmove_once(best_move, ponder, search_state, bestmove_sent);
-    // Only reset ponder flag after successfully sending bestmove
-    if result.is_ok() {
-        *current_search_is_ponder = false;
-    }
-    result
-}
