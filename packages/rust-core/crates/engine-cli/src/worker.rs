@@ -42,7 +42,7 @@ pub enum WorkerMessage {
     /// Partial result available during search
     PartialResult {
         current_best: String,
-        depth: u32,
+        depth: u8,
         score: i32,
         search_id: u64,
     },
@@ -188,7 +188,7 @@ pub fn search_worker(
     // Set up info callback with partial result tracking
     let tx_info = tx.clone();
     let tx_partial = tx.clone();
-    let last_partial_depth = Arc::new(Mutex::new(0u32));
+    let last_partial_depth = Arc::new(Mutex::new(0u8));
     let info_callback = move |info: SearchInfo| {
         // Always send the info message
         let _ = tx_info.send(WorkerMessage::Info(info.clone()));
@@ -200,8 +200,9 @@ pub fn search_worker(
             // Check if we should send a partial result
             let should_send = {
                 let mut last_depth = lock_or_recover_generic(&last_partial_depth);
-                if depth >= *last_depth + 5 || (depth >= 10 && depth > *last_depth) {
-                    *last_depth = depth;
+                let depth_u8 = depth as u8;
+                if depth_u8 >= *last_depth + 5 || (depth_u8 >= 10 && depth_u8 > *last_depth) {
+                    *last_depth = depth_u8;
                     true
                 } else {
                     false
@@ -220,7 +221,7 @@ pub fn search_worker(
                     );
                     let _ = tx_partial.send(WorkerMessage::PartialResult {
                         current_best: pv.clone(),
-                        depth,
+                        depth: depth as u8,
                         score: score_value,
                         search_id,
                     });
@@ -368,7 +369,7 @@ pub fn search_worker(
     let tx_for_iteration = tx.clone();
 
     // Track last committed depth to avoid committing same depth multiple times
-    let last_committed_depth = Arc::new(Mutex::new(0u32));
+    let last_committed_depth = Arc::new(Mutex::new(0u8));
     let last_committed_depth_cb = last_committed_depth.clone();
 
     // Create info callback that updates session
@@ -380,13 +381,14 @@ pub fn search_worker(
         if !info.pv.is_empty() {
             // Only commit when depth increases (not for same depth updates)
             let depth = info.depth.unwrap_or(0);
+            let depth_u8 = depth as u8;
             {
                 let mut last = lock_or_recover_generic(&last_committed_depth_cb);
-                if depth <= *last {
+                if depth_u8 <= *last {
                     // Same or lower depth - skip commit
                     return;
                 }
-                *last = depth;
+                *last = depth_u8;
             }
             // Note: The info.pv contains USI strings which lose piece type information.
             // This is a limitation of the current architecture where SearchInfo uses strings.
@@ -436,7 +438,7 @@ pub fn search_worker(
                         // from the info callback, so we default to Exact. The actual NodeType
                         // will be set when the final search result is available.
                         session_guard.update_current_best(
-                            info.depth.unwrap_or(0),
+                            info.depth.unwrap_or(0) as u8,
                             raw_score,
                             pv_moves,
                             engine_core::search::NodeType::Exact,
