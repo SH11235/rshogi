@@ -14,7 +14,7 @@ use crate::{
     Position,
 };
 
-use super::game_phase_integration::{detect_game_phase_for_search, GamePhase};
+use crate::game_phase::{detect_game_phase, GamePhase, Profile};
 
 // Game phase detection is now handled by the game_phase module
 // See docs/game-phase-module-guide.md for details
@@ -191,7 +191,7 @@ impl Engine {
     /// Detect game phase based on position
     fn detect_game_phase(&self, position: &Position) -> GamePhase {
         // Use the new game_phase module with Search profile
-        detect_game_phase_for_search(position, position.ply as u32)
+        detect_game_phase(position, position.ply as u32, Profile::Search)
     }
 
     /// Calculate active threads based on game phase
