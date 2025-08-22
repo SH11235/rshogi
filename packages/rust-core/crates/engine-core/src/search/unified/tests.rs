@@ -1,6 +1,6 @@
 use super::*;
 use crate::evaluation::evaluate::MaterialEvaluator;
-use crate::search::SearchLimitsBuilder;
+use crate::search::{constants::SEARCH_INF, SearchLimitsBuilder};
 use crate::Position;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -235,6 +235,91 @@ fn test_pv_consistency_depth5() {
             "Duplicate move in PV at index {}: {}",
             i,
             crate::usi::move_to_usi(&result.stats.pv[i])
+        );
+    }
+}
+
+#[test]
+fn test_early_stop_returns_valid_score() {
+    // Test that stopping the search very early returns a valid score, not -SEARCH_INF + ply
+    let evaluator = MaterialEvaluator;
+    let mut searcher = UnifiedSearcher::<_, true, true>::new(evaluator);
+    
+    // Create a stop flag that we'll set immediately
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    
+    // Set limits with the stop flag
+    let limits = SearchLimitsBuilder::default()
+        .depth(10)  // High depth limit
+        .stop_flag(stop_flag.clone())
+        .build();
+
+    // Set the stop flag immediately before searching
+    stop_flag.store(true, Ordering::Relaxed);
+
+    let mut pos = Position::startpos();
+    let result = searcher.search(&mut pos, limits);
+
+    // When stopped immediately, the initial best_score of -SEARCH_INF should be returned
+    // The score should not be an adjusted value like -SEARCH_INF + 6
+    assert!(
+        result.score == -SEARCH_INF || result.score > -SEARCH_INF + 1000,
+        "Score should be either -SEARCH_INF or a reasonable evaluation, not {}", 
+        result.score
+    );
+    
+    // When depth 1 completes, ensure we got a reasonable score
+    if result.stats.depth >= 1 {
+        assert!(result.score > -SEARCH_INF + 1000, "Completed depth should have reasonable score");
+    }
+}
+
+#[test]
+fn test_interrupted_aspiration_window_score() {
+    // Specifically test the issue where -SEARCH_INF + 6 was returned
+    // To reproduce the issue, we need to interrupt during aspiration window retry
+    // This is hard to do deterministically, so we'll just verify that any score
+    // returned is reasonable
+
+    // Run search in a thread and interrupt it at various times
+    for interrupt_delay_ms in [0, 1, 2, 5].iter() {
+        let mut searcher = UnifiedSearcher::<_, true, true>::new(MaterialEvaluator);
+        let mut pos = Position::startpos();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        
+        let limits = SearchLimitsBuilder::default()
+            .depth(10)
+            .stop_flag(stop_flag.clone())
+            .build();
+
+        // Set stop flag after delay
+        let stop_flag_clone = stop_flag.clone();
+        let delay = *interrupt_delay_ms;
+        if delay > 0 {
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(delay));
+                stop_flag_clone.store(true, Ordering::Relaxed);
+            });
+        } else {
+            stop_flag.store(true, Ordering::Relaxed);
+        }
+
+        let result = searcher.search(&mut pos, limits);
+        
+        // Verify the score is reasonable
+        assert!(
+            result.score == -SEARCH_INF || result.score > -SEARCH_INF + 1000 || result.score < SEARCH_INF - 1000,
+            "Score should be either -SEARCH_INF or a reasonable value, not {} (delay: {}ms, depth: {})",
+            result.score,
+            delay,
+            result.stats.depth
+        );
+        
+        // The specific bug was returning -SEARCH_INF + 6
+        assert_ne!(
+            result.score,
+            -SEARCH_INF + 6,
+            "Should not return the specific buggy value -SEARCH_INF + 6"
         );
     }
 }

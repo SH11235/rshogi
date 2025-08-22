@@ -22,6 +22,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
+        constants::SEARCH_INF,
         history::{CounterMoveHistory, History},
         parallel::shared::DuplicationStats,
         types::{NodeType, SearchStack},
@@ -167,7 +168,7 @@ where
 
         // Iterative deepening
         let mut best_move = None;
-        let mut best_score: i32 = 0;
+        let mut best_score: i32 = -SEARCH_INF;  // Initialize to worst possible score
         let mut best_node_type = NodeType::Exact;
         let mut depth = 1;
 
