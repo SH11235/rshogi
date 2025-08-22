@@ -24,6 +24,7 @@ pub struct PhaseOutput {
 }
 
 /// Classify phase with hysteresis to prevent oscillation
+#[inline]
 pub fn classify(
     previous: Option<GamePhase>,
     signals: &PhaseSignals,

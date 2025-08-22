@@ -72,11 +72,13 @@ fn calculate_fischer_time(
         return (50, 100); // Minimal time to return a move
     }
 
-    let moves_left = moves_to_go.unwrap_or_else(|| estimate_moves_remaining(ply));
+    let moves_left =
+        moves_to_go.unwrap_or_else(|| super::estimate_moves_remaining_by_phase(game_phase, ply));
 
     // Base allocation: (remaining_time / moves_left) + increment * usage_factor
-    // Use integer arithmetic to avoid rounding errors: 0.8 = 8/10
-    let increment_bonus = if params.increment_usage == 0.8 {
+    // Use integer arithmetic to avoid rounding errors when close to default value (0.8)
+    let approx_default = (params.increment_usage - 0.8).abs() < 1e-6;
+    let increment_bonus = if approx_default {
         (increment_ms * 8) / 10
     } else {
         ((increment_ms as f64 * params.increment_usage) + 0.5) as u64 // Round to nearest
@@ -136,25 +138,14 @@ fn calculate_byoyomi_time(
 /// Estimate remaining moves in the game
 #[cfg(test)]
 pub fn estimate_moves_remaining(ply: u32) -> u32 {
-    estimate_moves_remaining_impl(ply)
-}
-
-/// Estimate remaining moves in the game
-#[cfg(not(test))]
-fn estimate_moves_remaining(ply: u32) -> u32 {
-    estimate_moves_remaining_impl(ply)
-}
-
-fn estimate_moves_remaining_impl(ply: u32) -> u32 {
+    // For tests, use a simple ply-based estimation
     let moves_played = ply / 2;
-
-    // Use a curve based on typical game progression
     if moves_played < 30 {
-        60 // Opening: expect longer game
+        60
     } else if moves_played < 80 {
-        40 // Middle game
+        40
     } else {
-        20 // Endgame: minimum 20 moves buffer
+        20
     }
 }
 

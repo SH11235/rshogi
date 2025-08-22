@@ -2,6 +2,9 @@
 
 use crate::shogi::PieceType;
 
+/// Minimum band width between thresholds to ensure stable classification
+const MIN_BAND: f32 = 0.03;
+
 /// Phase detection parameters
 #[derive(Debug, Clone)]
 pub struct PhaseParameters {
@@ -11,12 +14,12 @@ pub struct PhaseParameters {
     /// Note: w_material + w_ply should equal 1.0
     pub w_ply: f32,
 
-    /// Threshold for entering opening phase (0.0 - 1.0)
-    /// Higher values mean more material needed to be considered opening
+    /// Upper threshold (Middle→End boundary, 0.0 - 1.0)
+    /// Higher values make EndGame classification less likely
     pub opening_threshold: f32,
 
-    /// Threshold for entering endgame phase (0.0 - 1.0)
-    /// Lower values mean less material needed to be considered endgame
+    /// Lower threshold (Opening→Middle boundary, 0.0 - 1.0)
+    /// Lower values make Opening classification less likely
     pub endgame_threshold: f32,
 
     /// Hysteresis for phase transitions to prevent oscillation
@@ -105,7 +108,7 @@ impl PhaseParameters {
 
     /// Parameters optimized for search (material-heavy)
     fn search_profile() -> Self {
-        Self {
+        let params = Self {
             w_material: 0.7,
             w_ply: 0.3,
             opening_threshold: 0.525, // Maps to ~(1-32/128)*0.7 = 0.525 in old system
@@ -114,21 +117,47 @@ impl PhaseParameters {
             ply_opening: 40,
             ply_endgame: 80,
             phase_weights: PhaseWeights::default(),
-        }
+        };
+        assert!(
+            params.opening_threshold > params.endgame_threshold,
+            "Opening threshold must be higher than endgame threshold"
+        );
+        assert!(
+            params.opening_threshold - params.endgame_threshold >= MIN_BAND,
+            "Band between thresholds must be at least {MIN_BAND}"
+        );
+        assert!(
+            (params.w_material + params.w_ply - 1.0).abs() < 0.001,
+            "Weights must sum to 1.0"
+        );
+        params
     }
 
     /// Parameters optimized for time management (ply-heavy)
     fn time_profile() -> Self {
-        Self {
+        let params = Self {
             w_material: 0.3,
             w_ply: 0.7,
-            opening_threshold: 0.33, // Earlier transition to middle game
-            endgame_threshold: 0.67, // Earlier transition to endgame
+            opening_threshold: 0.50, // Upper threshold (Middle→End boundary)
+            endgame_threshold: 0.20, // Lower threshold (Opening→Middle boundary)
             hysteresis: 0.05,
             ply_opening: 30,
             ply_endgame: 80,
             phase_weights: PhaseWeights::default(),
-        }
+        };
+        assert!(
+            params.opening_threshold > params.endgame_threshold,
+            "Opening threshold must be higher than endgame threshold"
+        );
+        assert!(
+            params.opening_threshold - params.endgame_threshold >= MIN_BAND,
+            "Band between thresholds must be at least {MIN_BAND}"
+        );
+        assert!(
+            (params.w_material + params.w_ply - 1.0).abs() < 0.001,
+            "Weights must sum to 1.0"
+        );
+        params
     }
 
     /// Create custom parameters
@@ -138,10 +167,14 @@ impl PhaseParameters {
         opening_threshold: f32,
         endgame_threshold: f32,
     ) -> Self {
-        debug_assert!((w_material + w_ply - 1.0).abs() < 0.001, "Weights should sum to 1.0");
-        debug_assert!(
+        assert!((w_material + w_ply - 1.0).abs() < 0.001, "Weights should sum to 1.0");
+        assert!(
             opening_threshold > endgame_threshold,
             "Opening threshold should be higher than endgame"
+        );
+        assert!(
+            opening_threshold - endgame_threshold >= MIN_BAND,
+            "Band between thresholds must be at least {MIN_BAND}"
         );
 
         Self {

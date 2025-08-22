@@ -15,6 +15,7 @@ pub struct PhaseSignals {
 }
 
 /// Compute phase signals from position
+#[inline]
 pub fn compute_signals(
     pos: &Position,
     ply: u32,
