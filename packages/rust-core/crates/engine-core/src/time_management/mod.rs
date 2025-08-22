@@ -25,16 +25,11 @@ use std::time::Instant;
 
 use crate::Color;
 
-/// Game phase enum
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GamePhase {
-    /// Opening phase (0-20 moves)
-    Opening,
-    /// Middle game (21-60 moves)
-    MiddleGame,
-    /// End game (61+ moves or few pieces)
-    EndGame,
-}
+// Use the new game_phase module integration
+mod game_phase_integration;
+pub use game_phase_integration::{
+    detect_game_phase_for_time, estimate_moves_remaining_by_phase, GamePhase,
+};
 
 mod allocation;
 mod byoyomi;

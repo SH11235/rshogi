@@ -4,6 +4,7 @@ mod byoyomi_tests;
 mod concurrent_tests;
 mod integration_tests;
 mod monotonic_test;
+mod phase_integration_tests;
 mod ponder_tests;
 mod pv_stability_tests;
 

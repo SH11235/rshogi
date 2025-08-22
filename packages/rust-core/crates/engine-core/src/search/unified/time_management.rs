@@ -6,31 +6,10 @@
 use crate::{
     search::SearchLimits,
     shogi::Color,
-    time_management::{GamePhase, TimeControl, TimeLimits, TimeManager},
+    time_management::{detect_game_phase_for_time, TimeControl, TimeLimits, TimeManager},
+    Position,
 };
 use std::sync::Arc;
-
-/// Estimate the current game phase based on move count
-///
-/// This is a simple heuristic based on the number of moves played:
-/// - Opening: 0-30 moves (序盤)
-/// - Middle game: 31-70 moves (中盤)
-/// - End game: 71+ moves (終盤)
-///
-/// These boundaries are based on typical shogi game statistics where
-/// most games end around 100-120 moves.
-pub fn estimate_game_phase(ply: u16) -> GamePhase {
-    // Convert ply to moves (2 ply = 1 full move)
-    let moves = ply / 2;
-
-    if moves <= 30 {
-        GamePhase::Opening
-    } else if moves <= 70 {
-        GamePhase::MiddleGame
-    } else {
-        GamePhase::EndGame
-    }
-}
 
 /// Create a TimeManager instance based on search limits
 ///
@@ -39,8 +18,17 @@ pub fn create_time_manager(
     limits: &SearchLimits,
     side_to_move: Color,
     ply: u16,
+    position: &Position,
 ) -> Option<Arc<TimeManager>> {
-    let game_phase = estimate_game_phase(ply);
+    let game_phase = detect_game_phase_for_time(position, ply as u32);
+
+    // Log phase and estimated moves for debugging
+    log::debug!(
+        "phase={:?}, ply={}, est_moves_left={}",
+        game_phase,
+        ply,
+        crate::time_management::estimate_moves_remaining_by_phase(game_phase, ply as u32)
+    );
 
     // Special handling for Ponder mode
     if matches!(limits.time_control, TimeControl::Ponder(_)) {
@@ -90,47 +78,51 @@ pub fn create_time_manager(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_phase::GamePhase;
     use crate::search::SearchLimitsBuilder;
+    use crate::usi::parse_sfen;
 
     #[test]
-    fn test_game_phase_estimation() {
-        // Test with ply values (remember: 2 ply = 1 move)
-        // Opening: 0-30 moves
-        assert_eq!(estimate_game_phase(0), GamePhase::Opening); // 0 moves
-        assert_eq!(estimate_game_phase(30), GamePhase::Opening); // 15 moves
-        assert_eq!(estimate_game_phase(60), GamePhase::Opening); // 30 moves
-        assert_eq!(estimate_game_phase(61), GamePhase::Opening); // 30 moves (61/2 = 30)
+    fn test_game_phase_detection_with_position() {
+        // Test with actual positions
+        let start_pos =
+            parse_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1").unwrap();
 
-        // Middle game: 31-70 moves
-        assert_eq!(estimate_game_phase(62), GamePhase::MiddleGame); // 31 moves
-        assert_eq!(estimate_game_phase(100), GamePhase::MiddleGame); // 50 moves
-        assert_eq!(estimate_game_phase(140), GamePhase::MiddleGame); // 70 moves
-        assert_eq!(estimate_game_phase(141), GamePhase::MiddleGame); // 70 moves (141/2 = 70)
+        // Start position should be Opening
+        assert_eq!(detect_game_phase_for_time(&start_pos, 0), GamePhase::Opening);
 
-        // End game: 71+ moves
-        assert_eq!(estimate_game_phase(142), GamePhase::EndGame); // 71 moves
-        assert_eq!(estimate_game_phase(200), GamePhase::EndGame); // 100 moves
-        assert_eq!(estimate_game_phase(240), GamePhase::EndGame); // 120 moves
+        // End game position
+        let endgame_pos = parse_sfen("4k4/9/9/9/9/9/9/9/4K4 b Rb 100").unwrap();
+        assert_eq!(detect_game_phase_for_time(&endgame_pos, 200), GamePhase::EndGame);
+
+        // Middle game position
+        let middle_pos =
+            parse_sfen("ln1gkg1nl/1r4s2/p1pppp1pp/1p4p2/9/2P6/PP1PPPPPP/7R1/LN1GKGSNL w Bb 30")
+                .unwrap();
+        assert_eq!(detect_game_phase_for_time(&middle_pos, 60), GamePhase::MiddleGame);
     }
 
     #[test]
     fn test_create_time_manager_infinite() {
         let limits = SearchLimitsBuilder::default().build();
-        let tm = create_time_manager(&limits, Color::Black, 0);
+        let pos = Position::startpos();
+        let tm = create_time_manager(&limits, Color::Black, 0, &pos);
         assert!(tm.is_none());
     }
 
     #[test]
     fn test_create_time_manager_with_depth() {
         let limits = SearchLimitsBuilder::default().depth(10).build();
-        let tm = create_time_manager(&limits, Color::Black, 0);
+        let pos = Position::startpos();
+        let tm = create_time_manager(&limits, Color::Black, 0, &pos);
         assert!(tm.is_some());
     }
 
     #[test]
     fn test_create_time_manager_with_time() {
         let limits = SearchLimitsBuilder::default().fixed_time_ms(1000).build();
-        let tm = create_time_manager(&limits, Color::Black, 50);
+        let pos = Position::startpos();
+        let tm = create_time_manager(&limits, Color::Black, 50, &pos);
         assert!(tm.is_some());
     }
 }
