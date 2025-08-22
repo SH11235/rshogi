@@ -49,6 +49,8 @@ mod test_utils;
 mod tests;
 
 pub use allocation::calculate_time_allocation;
+#[cfg(test)]
+pub use allocation::estimate_moves_remaining;
 pub use byoyomi::ByoyomiState;
 pub use parameters::{constants, TimeParameterError, TimeParameters, TimeParametersBuilder};
 pub use types::{ByoyomiInfo, TimeControl, TimeInfo, TimeLimits, TimeState};

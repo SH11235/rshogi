@@ -134,7 +134,18 @@ fn calculate_byoyomi_time(
 }
 
 /// Estimate remaining moves in the game
+#[cfg(test)]
+pub fn estimate_moves_remaining(ply: u32) -> u32 {
+    estimate_moves_remaining_impl(ply)
+}
+
+/// Estimate remaining moves in the game
+#[cfg(not(test))]
 fn estimate_moves_remaining(ply: u32) -> u32 {
+    estimate_moves_remaining_impl(ply)
+}
+
+fn estimate_moves_remaining_impl(ply: u32) -> u32 {
     let moves_played = ply / 2;
 
     // Use a curve based on typical game progression
