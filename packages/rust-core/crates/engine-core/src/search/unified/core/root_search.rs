@@ -107,6 +107,10 @@ where
 
         // Note: Node counting is done in alpha_beta() to avoid double counting
 
+        // Save child hash for PV owner validation
+        // This is the Zobrist hash of the child position after making the move
+        let child_hash = pos.zobrist_hash;
+
         // Prefetch TT entry for the new position (root moves are always important)
         if USE_TT && !searcher.disable_prefetch {
             searcher.prefetch_tt(pos.zobrist_hash);
@@ -170,46 +174,92 @@ where
             // Get PV from recursive search
             let child_pv = searcher.pv_table.get_line(1);
 
-            // In release builds, trust the child PV without validation
-            // This avoids expensive cloning and move validation in hot path
-            #[cfg(not(debug_assertions))]
-            {
-                pv.extend_from_slice(&child_pv);
+            // Debug logging for PV construction at root
+            #[cfg(debug_assertions)]
+            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                eprintln!(
+                    "[ROOT PV] depth={depth}, move_idx={move_idx}, best_move={}, score={score}",
+                    crate::usi::move_to_usi(&mv)
+                );
+                if !child_pv.is_empty() {
+                    eprintln!(
+                        "  Child PV (ply=1): {}",
+                        child_pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" ")
+                    );
+                } else {
+                    eprintln!("  Child PV (ply=1): <empty>");
+                }
             }
 
-            // In debug builds or with SHOGI_DEBUG_PV, validate child PV moves
-            #[cfg(debug_assertions)]
-            {
-                if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                    // Validate child PV moves before extending
-                    // This prevents propagating invalid moves from TT pollution
-                    let mut valid_child_pv = Vec::new();
-                    let mut temp_pos = pos.clone();
-                    let undo_info = temp_pos.do_move(mv);
-                    let mut undo_infos = Vec::new();
+            // Only extend with child PV if it was written by the correct position
+            let child_owner = searcher.pv_table.owner(1);
+            if child_owner.is_some() {
+                // Only count as a check if there was actually a child PV to verify
+                crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_checks, 1);
+            }
+            if child_owner == Some(child_hash) {
+                // In release builds, trust the child PV without validation
+                // This avoids expensive cloning and move validation in hot path
+                #[cfg(not(debug_assertions))]
+                {
+                    pv.extend_from_slice(&child_pv);
+                }
 
-                    for &child_mv in child_pv {
-                        if temp_pos.is_pseudo_legal(child_mv) {
-                            valid_child_pv.push(child_mv);
-                            let child_undo = temp_pos.do_move(child_mv);
-                            undo_infos.push((child_mv, child_undo));
-                        } else {
-                            eprintln!("[WARNING] Invalid move in child PV at root, truncating");
-                            eprintln!("  Move: {}", crate::usi::move_to_usi(&child_mv));
-                            eprintln!("  Position: {}", crate::usi::position_to_sfen(&temp_pos));
-                            break;
+                // In debug builds or with SHOGI_DEBUG_PV, validate child PV moves
+                #[cfg(debug_assertions)]
+                {
+                    if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                        // Validate child PV moves before extending
+                        // This prevents propagating invalid moves from TT pollution
+                        let mut valid_child_pv = Vec::new();
+                        let mut temp_pos = pos.clone();
+                        let undo_info = temp_pos.do_move(mv);
+                        let mut undo_infos = Vec::new();
+
+                        for &child_mv in child_pv {
+                            if temp_pos.is_pseudo_legal(child_mv) {
+                                valid_child_pv.push(child_mv);
+                                let child_undo = temp_pos.do_move(child_mv);
+                                undo_infos.push((child_mv, child_undo));
+                            } else {
+                                eprintln!("[WARNING] Invalid move in child PV at root, truncating");
+                                eprintln!("  Move: {}", crate::usi::move_to_usi(&child_mv));
+                                eprintln!(
+                                    "  Position: {}",
+                                    crate::usi::position_to_sfen(&temp_pos)
+                                );
+                                break;
+                            }
                         }
-                    }
 
-                    // Undo all child moves in reverse order
-                    for (child_mv, child_undo) in undo_infos.iter().rev() {
-                        temp_pos.undo_move(*child_mv, child_undo.clone());
+                        // Undo all child moves in reverse order
+                        for (child_mv, child_undo) in undo_infos.iter().rev() {
+                            temp_pos.undo_move(*child_mv, child_undo.clone());
+                        }
+                        temp_pos.undo_move(mv, undo_info);
+                        pv.extend_from_slice(&valid_child_pv);
+                    } else {
+                        // Debug build but no SHOGI_DEBUG_PV - just use child PV as-is
+                        pv.extend_from_slice(child_pv);
                     }
-                    temp_pos.undo_move(mv, undo_info);
-                    pv.extend_from_slice(&valid_child_pv);
-                } else {
-                    // Debug build but no SHOGI_DEBUG_PV - just use child PV as-is
-                    pv.extend_from_slice(child_pv);
+                }
+            } else {
+                // Owner mismatch - child PV is from a different position
+                // Only keep the head move (current best move)
+                if child_owner.is_some() {
+                    // Only count as a mismatch if there was a child PV (not empty)
+                    crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_mismatches, 1);
+                }
+                #[cfg(debug_assertions)]
+                if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                    eprintln!(
+                        "[ROOT PV MIX] Detected PV mix at root: child owner mismatch for move {}",
+                        crate::usi::move_to_usi(&mv)
+                    );
+                    if let Some(actual) = searcher.pv_table.owner(1) {
+                        eprintln!("  Expected child hash: {child_hash:016x}");
+                        eprintln!("  Actual child owner: {actual:016x}");
+                    }
                 }
             }
 
@@ -221,18 +271,34 @@ where
 
     // Validate PV before returning
     if !pv.is_empty() {
-        // Minimal O(1) sanity check even in release builds
-        if pv.contains(&Move::NULL) || pv.len() > crate::search::constants::MAX_PLY {
-            pv.clear(); // Discard corrupted PV
-        } else {
-            // Full validation only in debug builds
-            #[cfg(debug_assertions)]
-            {
-                // First check occupancy invariants (doesn't rely on move generator)
-                super::pv_validation::pv_local_sanity(pos, &pv);
-                // Then check legal moves
-                super::pv_validation::assert_pv_legal(pos, &pv);
+        // Debug logging for final PV construction
+        #[cfg(debug_assertions)]
+        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+            eprintln!(
+                "[ROOT FINAL PV] depth={depth}, score={best_score}, pv_len={}, pv={}",
+                pv.len(),
+                pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" ")
+            );
+
+            // Check for suspicious moves in PV
+            if pv.len() >= 8 {
+                if let Some(&mv) = pv.get(7) {
+                    eprintln!("  PV[7] (8th move) = {}", crate::usi::move_to_usi(&mv));
+                }
             }
+        }
+
+        // Use centralized PV trimming function
+        // This ensures all PVs are validated consistently
+        pv = super::pv::trim_legal_pv(pos.clone(), &pv);
+
+        // Full validation only in debug builds
+        #[cfg(debug_assertions)]
+        {
+            // First check occupancy invariants (doesn't rely on move generator)
+            super::pv_validation::pv_local_sanity(pos, &pv);
+            // Then check legal moves
+            super::pv_validation::assert_pv_legal(pos, &pv);
         }
     }
 
