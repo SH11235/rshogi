@@ -134,7 +134,7 @@ impl ZobristHashing for Position {
         let mut hash = 0u64;
 
         // Hash pieces on board
-        for sq_idx in 0..81 {
+        for sq_idx in 0..(BOARD_SQUARES as u8) {
             let sq = Square(sq_idx);
             if let Some(piece) = self.board.piece_on(sq) {
                 hash ^= ZOBRIST.piece_square_hash(piece, sq);
