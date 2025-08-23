@@ -36,7 +36,7 @@ pub enum ThreadState {
 /// Calculate flush threshold based on search depth
 /// Deeper searches use larger thresholds to reduce flush frequency
 #[inline]
-fn calculate_flush_threshold(depth: u8) -> u32 {
+fn calculate_flush_threshold(depth: u8) -> u64 {
     match depth {
         0..=6 => 25_000,    // Shallow search: flush more frequently
         7..=12 => 50_000,   // Medium search: current default
@@ -46,10 +46,10 @@ fn calculate_flush_threshold(depth: u8) -> u32 {
 }
 
 /// Local node counter - simplified for minimal overhead
-/// Uses u32 for efficient operations on 32-bit architectures
+/// Uses u64 to avoid overflow in long-running searches
 struct LocalNodeCounter {
     /// Non-atomic local counter (only accessed by owning thread)
-    count: u32,
+    count: u64,
     /// Current search depth for dynamic threshold calculation
     current_depth: u8,
 }
@@ -71,14 +71,11 @@ impl LocalNodeCounter {
     /// Add nodes and flush if threshold reached
     #[inline(always)]
     fn add(&mut self, nodes: u64, shared_state: &SharedSearchState) {
-        #[cfg(debug_assertions)]
-        debug_assert!(nodes <= u32::MAX as u64, "nodes count {} exceeds u32::MAX", nodes);
-
-        // Saturating add to prevent overflow on u32
-        self.count = self.count.saturating_add(nodes as u32);
+        // Saturating add to prevent overflow
+        self.count = self.count.saturating_add(nodes);
         let threshold = calculate_flush_threshold(self.current_depth);
         if self.count >= threshold {
-            shared_state.add_nodes(self.count as u64);
+            shared_state.add_nodes(self.count);
             self.count = 0;
         }
     }
@@ -86,7 +83,7 @@ impl LocalNodeCounter {
     /// Force flush all pending nodes
     fn flush(&mut self, shared_state: &SharedSearchState) {
         if self.count > 0 {
-            shared_state.add_nodes(self.count as u64);
+            shared_state.add_nodes(self.count);
             self.count = 0;
         }
     }
