@@ -1,6 +1,6 @@
 //! Simple test to verify ABDADA flag functionality
 
-use engine_core::search::{tt::NodeType, TranspositionTable};
+use engine_core::search::{NodeType, TranspositionTable};
 
 fn main() {
     println!("ABDADA Flag Test");

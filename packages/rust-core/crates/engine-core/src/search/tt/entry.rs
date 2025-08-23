@@ -1,19 +1,10 @@
 //! Transposition table entry types and bit layout
 
 use super::constants::*;
+use crate::search::NodeType;
 use crate::shogi::Move;
 
-/// Type of node in the search tree
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum NodeType {
-    /// Exact score (PV node)
-    Exact = 0,
-    /// Lower bound (fail-high/cut node)
-    LowerBound = 1,
-    /// Upper bound (fail-low/all node)
-    UpperBound = 2,
-}
+// Use crate::search::NodeType as the canonical definition
 
 /// Parameters for creating a TT entry
 #[derive(Clone, Copy)]

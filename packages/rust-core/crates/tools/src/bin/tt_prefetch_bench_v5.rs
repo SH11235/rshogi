@@ -3,7 +3,7 @@
 use clap::{Arg, Command};
 use engine_core::{
     movegen::MoveGen,
-    search::tt::{NodeType, TranspositionTable},
+    search::{tt::TranspositionTable, NodeType},
     shogi::{MoveList, Position},
 };
 use std::time::{Duration, Instant};

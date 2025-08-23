@@ -6,7 +6,7 @@
 use clap::{Arg, Command};
 use engine_core::{
     movegen::MoveGen,
-    search::tt::{DetailedTTMetrics, NodeType, TranspositionTable},
+    search::{tt::DetailedTTMetrics, NodeType, TranspositionTable},
     shogi::{MoveList, Position},
 };
 use std::sync::{
