@@ -290,7 +290,14 @@ where
 
         // Use centralized PV trimming function
         // This ensures all PVs are validated consistently
+        let original_len = pv.len();
         pv = super::pv::trim_legal_pv(pos.clone(), &pv);
+
+        // Record trimming statistics
+        crate::search::SearchStats::bump(&mut searcher.stats.pv_trim_checks, 1);
+        if pv.len() < original_len {
+            crate::search::SearchStats::bump(&mut searcher.stats.pv_trim_cuts, 1);
+        }
 
         // Full validation only in debug builds
         #[cfg(debug_assertions)]
