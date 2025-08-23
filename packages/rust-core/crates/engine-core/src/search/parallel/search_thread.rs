@@ -347,6 +347,9 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                     aspiration_hits: None,
                     re_searches: None,
                     duplication_percentage: None,
+                    check_extensions: None,
+                    king_extensions: None,
+                    qs_check_drops: None,
                 },
                 best_move: Some(root_move),
                 node_type: crate::search::NodeType::Exact, // Depth 1 evaluation is exact
