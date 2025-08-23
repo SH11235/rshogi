@@ -303,10 +303,10 @@ where
         let gives_check = pos.is_in_check();
 
         // Debug assertion to verify the optimization correctness
-        // Temporarily disabled due to edge cases in check detection
+        // Testing check detection differences
         #[cfg(debug_assertions)]
         #[allow(clippy::overly_complex_bool_expr)]
-        if false && depth >= 3 && moves_searched < 4 {
+        if true && depth >= 3 && moves_searched < 4 {
             if let Some(test_pos) = pre_pos {
                 // Old method: pre-compute gives_check on pre-move position
                 let old_gives_check = if USE_PRUNING {
