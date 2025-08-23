@@ -379,6 +379,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                     }
                                 } else {
                                     log::error!("No BestmoveEmitter available for search {search_id}");
+                                    finalize_current_search(&mut search_state, &mut current_search_is_ponder, &mut current_bestmove_emitter, &mut current_session, "SearchFinished without emitter");
                                 }
                             } else {
                                 log::debug!("Ponder search finished, not sending bestmove (USI protocol)");
@@ -488,6 +489,21 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
     log::debug!("Shutdown complete");
     Ok(())
+}
+
+#[inline]
+fn finalize_current_search(
+    search_state: &mut SearchState,
+    current_search_is_ponder: &mut bool,
+    current_bestmove_emitter: &mut Option<BestmoveEmitter>,
+    current_session: &mut Option<SearchSession>,
+    where_: &str,
+) {
+    log::debug!("Finalize current search ({})", where_);
+    *search_state = SearchState::Idle;
+    *current_search_is_ponder = false;
+    *current_bestmove_emitter = None;
+    *current_session = None;
 }
 
 #[cfg(test)]

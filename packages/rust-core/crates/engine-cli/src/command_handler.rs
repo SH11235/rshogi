@@ -89,6 +89,17 @@ pub struct CommandContext<'a> {
     pub allow_null_move: bool,
 }
 
+impl<'a> CommandContext<'a> {
+    #[inline]
+    fn finalize_search(&mut self, where_: &str) {
+        log::debug!("Finalize search {} ({})", *self.current_search_id, where_);
+        *self.search_state = SearchState::Idle;
+        *self.current_search_is_ponder = false;
+        *self.current_bestmove_emitter = None;
+        *self.current_session = None;
+    }
+}
+
 pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
     match command {
         UsiCommand::Usi => {
@@ -195,12 +206,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             log::debug!("Reset state after gameover: prev_search_id={}", *ctx.current_search_id);
 
             // Clear all search-related state for clean baseline
-            *ctx.current_session = None;
-            *ctx.current_search_is_ponder = false;
+            ctx.finalize_search("GameOver");
             // Reset to 0 so any late worker messages (old search_id) will be ignored
             *ctx.current_search_id = 0;
-            // Explicitly set to Idle (defensive, wait_for_search_completion should have done this)
-            *ctx.search_state = SearchState::Idle;
 
             // Notify engine of game result
             let mut engine = lock_or_recover_adapter(ctx.engine);
@@ -400,15 +408,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         );
 
                         emitter.emit(best_move, ponder, meta)?;
-                        *ctx.search_state = SearchState::Idle;
-                        *ctx.current_search_is_ponder = false;
-                        *ctx.current_bestmove_emitter = None;
+                        ctx.finalize_search("SessionOnStop");
                         return Ok(());
                     } else {
                         log::error!("BestmoveEmitter not available for current search; sending bestmove directly");
                         send_response(UsiResponse::BestMove { best_move, ponder })?;
-                        *ctx.search_state = SearchState::Idle;
-                        *ctx.current_search_is_ponder = false;
+                        ctx.finalize_search("DirectSend");
                         return Ok(());
                     }
                 }
@@ -487,22 +492,19 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 0, // BestmoveEmitter に補完させる
                                 depth,
                                 score_str,
-                                0,            // nodes は未知なので 0 のままでOK
+                                0, // nodes は未知なので 0 のままでOK
                                 true,
                             );
 
                             emitter.emit(move_str, None, meta)?;
-                            *ctx.search_state = SearchState::Idle;
-                            *ctx.current_search_is_ponder = false;
-                            *ctx.current_bestmove_emitter = None;
+                            ctx.finalize_search("TimeoutFallback");
                         } else {
                             log::error!("BestmoveEmitter not available for timeout fallback; sending bestmove directly");
                             send_response(UsiResponse::BestMove {
                                 best_move: move_str,
                                 ponder: None,
                             })?;
-                            *ctx.search_state = SearchState::Idle;
-                            *ctx.current_search_is_ponder = false;
+                            ctx.finalize_search("DirectSend");
                         }
                     }
                     Err(e) => {
@@ -521,17 +523,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             );
 
                             emitter.emit("resign".to_string(), None, meta)?;
-                            *ctx.search_state = SearchState::Idle;
-                            *ctx.current_search_is_ponder = false;
-                            *ctx.current_bestmove_emitter = None;
+                            ctx.finalize_search("ResignTimeout");
                         } else {
                             log::error!("BestmoveEmitter not available for resign; sending bestmove directly");
                             send_response(UsiResponse::BestMove {
                                 best_move: "resign".to_string(),
                                 ponder: None,
                             })?;
-                            *ctx.search_state = SearchState::Idle;
-                            *ctx.current_search_is_ponder = false;
+                            ctx.finalize_search("DirectSend");
                         }
                     }
                 }
@@ -642,9 +641,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                             );
 
                                             emitter.emit(best_move, ponder, meta)?;
-                                            *ctx.search_state = SearchState::Idle;
-                                            *ctx.current_search_is_ponder = false;
-                                            *ctx.current_bestmove_emitter = None;
+                                            ctx.finalize_search("BestmoveEmitter");
                                         } else {
                                             log::error!(
                                                 "BestmoveEmitter not available for SearchFinished; sending bestmove directly"
@@ -653,8 +650,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                 best_move,
                                                 ponder,
                                             })?;
-                                            *ctx.search_state = SearchState::Idle;
-                                            *ctx.current_search_is_ponder = false;
+                                            ctx.finalize_search("DirectSend");
                                         }
                                         break;
                                     }
@@ -717,17 +713,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     );
 
                                     emitter.emit(move_str, None, meta)?;
-                                    *ctx.search_state = SearchState::Idle;
-                                    *ctx.current_search_is_ponder = false;
-                                    *ctx.current_bestmove_emitter = None;
+                                    ctx.finalize_search("BestmoveEmitter");
                                 } else {
                                     log::error!("BestmoveEmitter not available for finish handler; sending bestmove directly");
                                     send_response(UsiResponse::BestMove {
                                         best_move: move_str,
                                         ponder: None,
                                     })?;
-                                    *ctx.search_state = SearchState::Idle;
-                                    *ctx.current_search_is_ponder = false;
+                                    ctx.finalize_search("DirectSend");
                                 }
                             }
                             Err(e) => {
@@ -755,9 +748,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     );
 
                                     emitter.emit("resign".to_string(), None, meta)?;
-                                    *ctx.search_state = SearchState::Idle;
-                                    *ctx.current_search_is_ponder = false;
-                                    *ctx.current_bestmove_emitter = None;
+                                    ctx.finalize_search("BestmoveEmitter");
                                 } else {
                                     log::error!(
                                         "BestmoveEmitter not available for resign on finish; sending bestmove directly"
@@ -766,8 +757,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                         best_move: "resign".to_string(),
                                         ponder: None,
                                     })?;
-                                    *ctx.search_state = SearchState::Idle;
-                                    *ctx.current_search_is_ponder = false;
+                                    ctx.finalize_search("DirectSend");
                                 }
                             }
                         }
