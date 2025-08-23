@@ -305,6 +305,9 @@ where
         // Make move
         let undo_info = pos.do_move(mv);
 
+        // Save child hash for PV owner validation (avoids second do/undo)
+        let child_hash_for_pv = pos.zobrist_hash;
+
         // Check if this move gives check (opponent is now in check)
         // This is more efficient than calling gives_check before do_move
         let gives_check = pos.is_in_check();
@@ -462,13 +465,9 @@ where
                         // Check if child PV is from the correct position
                         let child_ply = (ply + 1) as usize;
 
-                        // Temporarily apply move to get child position hash
-                        let undo_info = pos.do_move(mv);
-                        let child_hash = pos.zobrist_hash;
-                        pos.undo_move(mv, undo_info);
-
                         // Only use child PV if it was written by the correct position
-                        if searcher.pv_table.owner(child_ply) == Some(child_hash) {
+                        // (using the child hash we saved during do_move above)
+                        if searcher.pv_table.owner(child_ply) == Some(child_hash_for_pv) {
                             searcher.pv_table.update_from_child(ply as usize, mv, child_ply);
                         } else {
                             // Mixed PV detected - only use the head move
@@ -478,7 +477,7 @@ where
                                 eprintln!(
                                     "[PV MIX] Detected PV mix at ply {ply}: child owner mismatch"
                                 );
-                                eprintln!("  Expected child hash: {child_hash:016x}");
+                                eprintln!("  Expected child hash: {child_hash_for_pv:016x}");
                                 if let Some(actual) = searcher.pv_table.owner(child_ply) {
                                     eprintln!("  Actual child owner: {actual:016x}");
                                 } else {
