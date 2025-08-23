@@ -378,6 +378,8 @@ impl std::fmt::Debug for SearchLimits {
 
 #[cfg(test)]
 mod tests {
+    use crate::search::NodeType;
+
     use super::*;
 
     #[test]
@@ -498,9 +500,10 @@ mod tests {
         let counter_clone = counter.clone();
 
         // Create an info callback that increments the counter
-        let info_callback: InfoCallback = Arc::new(move |_depth, _score, _nodes, _time, _pv| {
-            counter_clone.fetch_add(1, Ordering::Relaxed);
-        });
+        let info_callback: InfoCallback =
+            Arc::new(move |_depth, _score, _nodes, _time, _pv, _extra| {
+                counter_clone.fetch_add(1, Ordering::Relaxed);
+            });
 
         // Create SearchLimits with the callback
         let limits1 = SearchLimits::builder().info_callback(info_callback).build();
@@ -514,10 +517,10 @@ mod tests {
 
         // Call both callbacks and verify they share the same counter
         if let Some(cb1) = &limits1.info_callback {
-            cb1(1, 0, 100, Duration::from_millis(10), &[]);
+            cb1(1, 0, 100, Duration::from_millis(10), &[], NodeType::Exact);
         }
         if let Some(cb2) = &limits2.info_callback {
-            cb2(2, 0, 200, Duration::from_millis(20), &[]);
+            cb2(2, 0, 200, Duration::from_millis(20), &[], NodeType::Exact);
         }
 
         // Both callbacks should have incremented the same counter

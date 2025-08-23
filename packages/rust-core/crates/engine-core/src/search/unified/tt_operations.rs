@@ -4,11 +4,8 @@
 //! based on the USE_TT const generic parameter.
 
 use crate::{
-    search::{
-        adaptive_prefetcher::AdaptivePrefetcher,
-        tt::{NodeType, TTEntry},
-        ShardedTranspositionTable,
-    },
+    search::NodeType,
+    search::{adaptive_prefetcher::AdaptivePrefetcher, tt::TTEntry, ShardedTranspositionTable},
     shogi::Move,
 };
 use std::sync::Arc;

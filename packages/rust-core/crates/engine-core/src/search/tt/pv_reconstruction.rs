@@ -1,8 +1,9 @@
 //! Common PV reconstruction functionality for transposition tables
 
-use super::{NodeType, TTEntry};
+use super::TTEntry;
 use crate::movegen::generator::MoveGenImpl;
 use crate::search::constants::MAX_PLY;
+use crate::search::NodeType;
 use crate::shogi::{Move, Position, UndoInfo};
 use crate::usi::move_to_usi;
 use std::collections::HashSet;

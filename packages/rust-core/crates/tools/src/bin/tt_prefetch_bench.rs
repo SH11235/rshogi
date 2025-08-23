@@ -4,7 +4,7 @@
 
 use engine_core::movegen::MoveGen;
 use engine_core::search::adaptive_prefetcher::AdaptivePrefetcher;
-use engine_core::search::tt::{NodeType, TranspositionTable};
+use engine_core::search::{tt::TranspositionTable, NodeType};
 use engine_core::shogi::MoveList;
 use engine_core::shogi::Position;
 use std::time::Instant;

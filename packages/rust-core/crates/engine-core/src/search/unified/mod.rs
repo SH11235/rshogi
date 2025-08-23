@@ -309,7 +309,14 @@ where
                     }
 
                     // Use snapshot for callback (immune to concurrent updates)
-                    callback(depth, score, self.stats.nodes, self.context.elapsed(), &pv_snapshot);
+                    callback(
+                        depth,
+                        score,
+                        self.stats.nodes,
+                        self.context.elapsed(),
+                        &pv_snapshot,
+                        final_node_type,
+                    );
                 }
 
                 // Save PV for next iteration's move ordering

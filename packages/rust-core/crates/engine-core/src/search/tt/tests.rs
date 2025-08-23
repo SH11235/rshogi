@@ -80,7 +80,7 @@ mod performance_tests {
                             200 + (i % 10) as i16,
                             100,
                             (i % 20) as u8,
-                            entry::NodeType::Exact,
+                            NodeType::Exact,
                         );
                     }
                 })

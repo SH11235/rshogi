@@ -1,11 +1,12 @@
 //! Flexible bucket implementation for transposition table
 
 use super::bucket::BucketSize;
-use super::entry::{NodeType, TTEntry};
+use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
 use super::utils::{try_update_entry_generic, UpdateResult};
 use crate::search::tt_simd::simd_enabled;
+use crate::search::NodeType;
 use crate::util::sync_compat::{AtomicU64, Ordering};
 
 /// Flexible bucket that can hold variable number of entries

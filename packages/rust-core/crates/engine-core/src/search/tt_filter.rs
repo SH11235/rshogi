@@ -3,7 +3,7 @@
 //! This module provides filtering functions to reduce TT overhead by
 //! selectively storing and prefetching entries based on search characteristics.
 
-use crate::search::tt::NodeType;
+use crate::search::NodeType;
 
 /// Simple optimization: Skip TT storage for very shallow nodes
 /// PV nodes are always stored regardless of depth
