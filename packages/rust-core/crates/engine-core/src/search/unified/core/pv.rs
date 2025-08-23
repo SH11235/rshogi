@@ -11,6 +11,8 @@ use crate::{
 const NULL_MOVE: Move = Move::NULL;
 
 /// Principal Variation table with strict length management
+///
+/// Uses epoch-based invalidation for O(1) clear operations
 pub struct PVTable {
     /// Move storage [ply][move_index]
     mv: [[Move; MAX_PLY]; MAX_PLY],
@@ -222,6 +224,10 @@ impl PVTable {
             child_ply > ply,
             "Child ply ({child_ply}) should be greater than parent ply ({ply})"
         );
+
+        // Validate child row is from current epoch
+        #[cfg(debug_assertions)]
+        debug_assert!(self.is_current(child_ply), "child row must be current epoch");
 
         // Skip null moves
         if best_move == Move::NULL {
