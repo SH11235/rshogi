@@ -405,7 +405,35 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                     }
                                 } else {
                                     log::error!("No BestmoveEmitter available for search {search_id}");
-                                    finalize_current_search(&mut search_state, &mut current_search_is_ponder, &mut current_bestmove_emitter, &mut current_session, "SearchFinished without emitter");
+                                    // 1) セッションがあれば検証して bestmove を直送
+                                    if let Some(ref session) = current_session {
+                                        let adapter = lock_or_recover_adapter(&engine);
+                                        if let Some(position) = adapter.get_position() {
+                                            match adapter.validate_and_get_bestmove(session, position) {
+                                                Ok((best_move, ponder)) => {
+                                                    send_response(UsiResponse::BestMove { best_move, ponder })?;
+                                                    finalize_current_search(&mut search_state, &mut current_search_is_ponder, &mut current_bestmove_emitter, &mut current_session, "SearchFinished without emitter (session direct)");
+                                                    // ここで return してもOK
+                                                }
+                                                Err(e) => {
+                                                    log::warn!("Session validation failed without emitter: {e}");
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 2) フォールバック（null move 許容設定に従う）
+                                    match generate_fallback_move(&engine, None, allow_null_move) {
+                                        Ok(fallback_move) => {
+                                            send_response(UsiResponse::BestMove { best_move: fallback_move, ponder: None })?;
+                                            finalize_current_search(&mut search_state, &mut current_search_is_ponder, &mut current_bestmove_emitter, &mut current_session, "SearchFinished (fallback: no emitter)");
+                                        }
+                                        Err(e) => {
+                                            log::error!("Fallback move generation failed without emitter: {e}");
+                                            send_response(UsiResponse::BestMove { best_move: "resign".to_string(), ponder: None })?;
+                                            finalize_current_search(&mut search_state, &mut current_search_is_ponder, &mut current_bestmove_emitter, &mut current_session, "SearchFinished (resign: no emitter)");
+                                        }
+                                    }
                                 }
                             } else {
                                 log::debug!("Ponder search finished, not sending bestmove (USI protocol)");
