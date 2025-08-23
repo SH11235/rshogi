@@ -35,6 +35,31 @@ impl PVTable {
     pub fn clear_len_at(&mut self, ply: usize) {
         if ply < MAX_PLY {
             self.len[ply] = 0;
+            // Setting length to 0 is sufficient for safety as readers always check len[ply]
+            // Full array clearing is only done in debug mode for visibility
+
+            #[cfg(debug_assertions)]
+            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                // Check for suspicious moves before clearing (debug only)
+                if ply <= 10 && self.len[ply] > 0 {
+                    for i in 0..self.len[ply].min(10) {
+                        let mv = self.mv[ply][i];
+                        if mv != NULL_MOVE {
+                            let mv_str = crate::usi::move_to_usi(&mv);
+                            if mv_str == "3i3h" {
+                                eprintln!(
+                                    "[PV CLEAR] Found 3i3h at ply={ply}, index={i} before clearing"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Clear all moves for debugging visibility (performance impact acceptable in debug)
+                for i in 0..MAX_PLY {
+                    self.mv[ply][i] = NULL_MOVE;
+                }
+            }
         }
     }
 
@@ -133,6 +158,44 @@ impl PVTable {
             return;
         }
 
+        // Debug logging for PV updates in problematic positions
+        #[cfg(debug_assertions)]
+        if std::env::var("SHOGI_DEBUG_PV").is_ok() && ply <= 10 {
+            eprintln!(
+                "[PV UPDATE] ply={ply}, best_move={}, child_ply={child_ply}, child_len={}",
+                crate::usi::move_to_usi(&best_move),
+                self.len[child_ply]
+            );
+            if self.len[child_ply] > 0 {
+                eprintln!(
+                    "  Child PV: {}",
+                    self.mv[child_ply][..self.len[child_ply]]
+                        .iter()
+                        .map(crate::usi::move_to_usi)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+
+            // Check for suspicious 3i3h in the resulting PV
+            let resulting_len = self.len[child_ply] + 1;
+            if resulting_len >= 8 && ply == 0 {
+                eprintln!("  Checking resulting PV at ply 0 (len={resulting_len}):");
+                for i in 0..resulting_len.min(10) {
+                    let mv = if i == 0 {
+                        best_move
+                    } else {
+                        self.mv[child_ply][i - 1]
+                    };
+                    let mv_str = crate::usi::move_to_usi(&mv);
+                    eprintln!("    PV[{}] = {}", i, mv_str);
+                    if mv_str == "3i3h" {
+                        eprintln!("    ^^^ FOUND 3i3h at index {}!", i);
+                    }
+                }
+            }
+        }
+
         // Get child PV length
         let child_len = self.len[child_ply];
         let copy_len = child_len.min(MAX_PLY - 1);
@@ -142,6 +205,18 @@ impl PVTable {
 
         // Copy child PV directly without temporary allocation
         if copy_len > 0 {
+            // Additional validation: ensure child PV doesn't contain NULL moves
+            #[cfg(debug_assertions)]
+            {
+                for i in 0..copy_len {
+                    if self.mv[child_ply][i] == Move::NULL {
+                        eprintln!("[WARNING] Child PV contains NULL move at index {i}, truncating");
+                        self.len[ply] = 1; // Only keep the best move
+                        return;
+                    }
+                }
+            }
+
             // We must use unsafe here because we're borrowing different rows of the same 2D array
             // Safe because debug_assert ensures child_ply != ply (non-overlapping)
             unsafe {
@@ -370,5 +445,37 @@ mod tests {
         // Should not update due to NULL move
         let (_, len) = pv.line(0);
         assert_eq!(len, 3); // Should remain unchanged
+    }
+
+    #[test]
+    fn test_pv_table_clear_len_safety() {
+        // Test that clearing length prevents reading stale data
+        let mut pv = PVTable::new();
+
+        // Simulate the problematic scenario from PV validation error
+        let _move_3i4h =
+            Move::normal(parse_usi_square("3i").unwrap(), parse_usi_square("4h").unwrap(), false);
+        let move_3i3h =
+            Move::normal(parse_usi_square("3i").unwrap(), parse_usi_square("3h").unwrap(), false);
+        let _move_8b5b =
+            Move::normal(parse_usi_square("8b").unwrap(), parse_usi_square("5b").unwrap(), false);
+
+        // First search path: Set PV at ply 8 with move 3i3h
+        pv.set_line(8, move_3i3h, &[]);
+        assert_eq!(pv.line(8).1, 1, "PV should have 1 move");
+
+        // Clear ply 8 length (simulating node entry)
+        pv.clear_len_at(8);
+
+        // Check that after clearing, the line reports empty
+        let (line, len) = pv.line(8);
+        assert_eq!(len, 0, "Cleared ply should report length 0");
+        assert!(line.is_empty(), "Line slice should be empty when len=0");
+
+        // Verify that get_line also returns empty (public API)
+        assert!(pv.get_line(8).is_empty(), "get_line should return empty slice");
+
+        // The key safety property: even if buffer contains old data,
+        // it won't be read because all accessors respect len[ply]
     }
 }
