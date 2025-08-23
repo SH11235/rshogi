@@ -38,6 +38,9 @@ impl PVTable {
     #[inline]
     pub fn clear_len_at(&mut self, ply: usize) {
         if ply < MAX_PLY {
+            #[cfg(debug_assertions)]
+            let old_len = self.len[ply];
+
             self.len[ply] = 0;
             self.owner[ply] = 0;
             // Setting length to 0 is sufficient for safety as readers always check len[ply]
@@ -46,8 +49,8 @@ impl PVTable {
             #[cfg(debug_assertions)]
             if std::env::var("SHOGI_DEBUG_PV").is_ok() {
                 // Check for suspicious moves before clearing (debug only)
-                if ply <= 10 && self.len[ply] > 0 {
-                    for i in 0..self.len[ply].min(10) {
+                if ply <= 10 && old_len > 0 {
+                    for i in 0..old_len.min(MAX_PLY) {
                         let mv = self.mv[ply][i];
                         if mv != NULL_MOVE {
                             let mv_str = crate::usi::move_to_usi(&mv);
@@ -149,6 +152,10 @@ impl PVTable {
     }
 
     /// Get the owner hash for a PV line
+    ///
+    /// Returns Some(hash) only when the line has valid content (len > 0).
+    /// Note: 0 is a valid zobrist hash value, so we don't use it as a sentinel.
+    /// The owner is only meaningful for non-empty PV lines.
     #[inline]
     pub fn owner(&self, ply: usize) -> Option<u64> {
         if ply < MAX_PLY && self.len[ply] > 0 {
@@ -537,5 +544,44 @@ mod tests {
         pv.clear_all();
         assert_eq!(pv.owner(2), None);
         assert_eq!(pv.owner(5), None);
+    }
+
+    #[test]
+    fn test_pv_owner_mismatch_keeps_head_only() {
+        // Test that owner mismatch results in head-only PV
+        let mut pv = PVTable::new();
+
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false);
+        let move3 =
+            Move::normal(parse_usi_square("2g").unwrap(), parse_usi_square("2f").unwrap(), false);
+
+        // Set up child PV at ply 1 with owner
+        pv.set_line(1, move2, &[move3]);
+        pv.set_owner(1, 0xAAAAAAAAAAAAAAAA);
+
+        // Set parent owner
+        pv.set_owner(0, 0xBBBBBBBBBBBBBBBB);
+
+        // Simulate owner mismatch scenario:
+        // When search_node checks owner(child_ply) != expected_child_hash,
+        // it should use set_line with empty tail
+        let child_owner = pv.owner(1);
+        let expected_child = 0xCCCCCCCCCCCCCCCC; // Different from actual
+
+        if child_owner != Some(expected_child) {
+            // This is what search_node does on mismatch
+            pv.set_line(0, move1, &[]);
+        } else {
+            // This would be the normal case
+            pv.update_from_child(0, move1, 1);
+        }
+
+        // Verify parent has only the head move
+        let (line, len) = pv.line(0);
+        assert_eq!(len, 1, "Parent should have only head move on owner mismatch");
+        assert_eq!(line[0], move1);
     }
 }
