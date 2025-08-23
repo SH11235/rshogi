@@ -9,18 +9,10 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BestmoveSource {
-    /// Normal search session result
-    Session,
     /// Emergency fallback when search fails
     EmergencyFallback,
     /// Resign due to no legal moves
     Resign,
-    /// Resign when no position is set
-    ResignNoPosition,
-    /// Emergency fallback when no session exists
-    EmergencyFallbackNoSession,
-    /// Resign when fallback generation fails
-    ResignFallbackFailed,
     /// Session result on stop command
     SessionOnStop,
     /// Resign due to timeout
@@ -49,12 +41,8 @@ impl fmt::Display for BestmoveSource {
         // This ensures proper string representation for logging and debugging.
         // The compiler will enforce this due to exhaustive matching.
         let s = match self {
-            Self::Session => "session",
             Self::EmergencyFallback => "emergency_fallback",
             Self::Resign => "resign",
-            Self::ResignNoPosition => "resign_no_position",
-            Self::EmergencyFallbackNoSession => "emergency_fallback_no_session",
-            Self::ResignFallbackFailed => "resign_fallback_failed",
             Self::SessionOnStop => "session_on_stop",
             Self::ResignTimeout => "resign_timeout",
             Self::SessionInSearchFinished => "session_in_search_finished",

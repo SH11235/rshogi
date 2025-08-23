@@ -126,9 +126,10 @@ pub fn generate_fallback_move(
 pub fn wait_for_search_completion(
     search_state: &mut SearchState,
     stop_flag: &Arc<AtomicBool>,
+    current_stop_flag: Option<&Arc<AtomicBool>>, // Per-search stop flag
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
-    engine: &Arc<Mutex<EngineAdapter>>,
+    _engine: &Arc<Mutex<EngineAdapter>>,
 ) -> Result<()> {
     if search_state.is_searching() {
         log::info!("wait_for_search_completion: stopping ongoing search, state={:?}", search_state);
@@ -136,14 +137,15 @@ pub fn wait_for_search_completion(
         *search_state = SearchState::StopRequested;
         stop_flag.store(true, Ordering::Release);
 
+        // Also set the per-search stop flag if available
+        if let Some(search_flag) = current_stop_flag {
+            search_flag.store(true, Ordering::Release);
+            log::debug!("wait_for_search_completion: set per-search stop flag to true");
+        }
+
         // Wait for worker with timeout
-        let wait_result = wait_for_worker_with_timeout(
-            worker_handle,
-            worker_rx,
-            engine,
-            search_state,
-            MIN_JOIN_TIMEOUT,
-        );
+        let wait_result =
+            wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, MIN_JOIN_TIMEOUT);
 
         let stop_duration = stop_start.elapsed();
         log::info!("wait_for_search_completion: completed in {stop_duration:?}");

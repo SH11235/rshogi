@@ -92,7 +92,7 @@ pub struct CommandContext<'a> {
 
 impl<'a> CommandContext<'a> {
     #[inline]
-    fn finalize_search(&mut self, where_: &str) {
+    pub fn finalize_search(&mut self, where_: &str) {
         log::debug!("Finalize search {} ({})", *self.current_search_id, where_);
         *self.search_state = SearchState::Idle;
         *self.current_search_is_ponder = false;
@@ -140,6 +140,7 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             wait_for_search_completion(
                 ctx.search_state,
                 ctx.stop_flag,
+                ctx.current_stop_flag.as_ref(),
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
@@ -199,6 +200,7 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             wait_for_search_completion(
                 ctx.search_state,
                 ctx.stop_flag,
+                ctx.current_stop_flag.as_ref(),
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
@@ -227,6 +229,7 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             wait_for_search_completion(
                 ctx.search_state,
                 ctx.stop_flag,
+                ctx.current_stop_flag.as_ref(),
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
@@ -257,6 +260,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     wait_for_search_completion(
         ctx.search_state,
         ctx.stop_flag,
+        ctx.current_stop_flag.as_ref(),
         ctx.worker_handle,
         ctx.worker_rx,
         ctx.engine,
@@ -280,9 +284,6 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     let search_stop_flag = Arc::new(AtomicBool::new(false));
     *ctx.current_stop_flag = Some(search_stop_flag.clone());
     log::info!("Created new per-search stop flag for search_id={}", *ctx.current_search_id);
-
-    // Ensure consistent memory ordering
-    std::sync::atomic::fence(Ordering::SeqCst);
 
     *ctx.current_session = None; // Clear any previous session to avoid reuse
 

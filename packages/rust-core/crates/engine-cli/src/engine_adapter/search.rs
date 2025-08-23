@@ -159,7 +159,10 @@ impl EngineAdapter {
             .committed_best
             .as_ref()
             .ok_or_else(|| anyhow!("No best move available"))?;
-        let best_move = best_entry.pv[0];
+
+        // Safely get the first move from PV
+        let best_move =
+            *best_entry.pv.first().ok_or_else(|| anyhow!("Empty PV in committed_best"))?;
         let score = &best_entry.score;
 
         let best_move_str = move_to_usi(&best_move);

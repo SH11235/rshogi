@@ -55,7 +55,6 @@ pub enum WorkerMessage {
         message: String,
         search_id: u64,
     },
-    EngineReturn(Engine), // Legacy - kept for compatibility but no longer used
 }
 
 /// Convert mate moves to pseudo centipawn value for ordering
@@ -189,12 +188,6 @@ pub fn search_worker(
         stop_flag.as_ref(),
         initial_stop_value
     );
-
-    // TEMPORARY FIX: Force stop_flag to false if it's true at worker start
-    if initial_stop_value && !params.ponder {
-        log::warn!("Worker: stop_flag was true at start, forcing to false for non-ponder search");
-        stop_flag.store(false, Ordering::Release);
-    }
 
     let _worker_start_time = Instant::now();
 
@@ -952,7 +945,6 @@ fn create_emergency_session(
 pub fn wait_for_worker_with_timeout(
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
-    engine: &Arc<Mutex<EngineAdapter>>,
     search_state: &mut SearchState,
     timeout: Duration,
 ) -> Result<()> {
@@ -1006,12 +998,6 @@ pub fn wait_for_worker_with_timeout(
                     Ok(WorkerMessage::SearchStarted { .. }) => {
                         // Search started during shutdown can be ignored
                         log::trace!("SearchStarted during shutdown - ignoring");
-                    }
-                    Ok(WorkerMessage::EngineReturn(returned_engine)) => {
-                        // This should not happen with the new design, but handle it just in case
-                        log::warn!("Unexpected EngineReturn during shutdown - returning to adapter");
-                        let mut adapter = lock_or_recover_adapter(engine);
-                        adapter.return_engine(returned_engine);
                     }
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");
