@@ -2,7 +2,10 @@
 //!
 //! Tracks the best move sequence found during search
 
-use crate::{search::constants::MAX_PLY, shogi::Move};
+use crate::{
+    search::constants::MAX_PLY,
+    shogi::{Move, Position},
+};
 
 /// NULL move constant for uninitialized entries
 const NULL_MOVE: Move = Move::NULL;
@@ -15,6 +18,10 @@ pub struct PVTable {
     len: [usize; MAX_PLY],
     /// Owner hash for each PV line (the zobrist hash of the position that wrote this line)
     owner: [u64; MAX_PLY],
+    /// Epoch when each row was last written
+    row_epoch: [u32; MAX_PLY],
+    /// Current epoch number (incremented at each iteration)
+    cur_epoch: u32,
 }
 
 impl PVTable {
@@ -24,14 +31,43 @@ impl PVTable {
             mv: [[NULL_MOVE; MAX_PLY]; MAX_PLY],
             len: [0; MAX_PLY],
             owner: [0; MAX_PLY],
+            row_epoch: [0; MAX_PLY],
+            cur_epoch: 1, // Start from 1 to distinguish from uninitialized (0)
         }
     }
 
-    /// Clear all PV lines (for new iteration)
+    /// Begin a new iteration - O(1) operation
+    #[inline]
+    pub fn begin_iteration(&mut self) {
+        self.cur_epoch = self.cur_epoch.wrapping_add(1);
+        // Handle epoch wraparound
+        if self.cur_epoch == 0 {
+            // Rare case: epoch wrapped around to 0
+            // Clear all row epochs to ensure they're invalid
+            self.row_epoch.fill(0);
+            self.cur_epoch = 1;
+        }
+    }
+
+    /// Clear all PV lines (for new iteration) - O(1) operation
     #[inline]
     pub fn clear_all(&mut self) {
-        self.len.fill(0);
-        self.owner.fill(0);
+        // Simply increment epoch - old data becomes invisible
+        self.begin_iteration();
+    }
+
+    /// Check if a row is from the current epoch
+    #[inline]
+    fn is_current(&self, ply: usize) -> bool {
+        ply < MAX_PLY && self.row_epoch[ply] == self.cur_epoch
+    }
+
+    /// Mark a row as written in the current epoch
+    #[inline]
+    fn mark_written(&mut self, ply: usize) {
+        if ply < MAX_PLY {
+            self.row_epoch[ply] = self.cur_epoch;
+        }
     }
 
     /// Clear PV at specific ply (on node entry)
@@ -43,6 +79,8 @@ impl PVTable {
 
             self.len[ply] = 0;
             self.owner[ply] = 0;
+            // Mark this row as updated in current epoch
+            self.mark_written(ply);
             // Setting length to 0 is sufficient for safety as readers always check len[ply]
             // Full array clearing is only done in debug mode for visibility
 
@@ -75,10 +113,11 @@ impl PVTable {
     /// Get PV line with length (no allocation)
     #[inline]
     pub fn line(&self, ply: usize) -> (&[Move], usize) {
-        if ply < MAX_PLY {
+        if self.is_current(ply) {
             let len = self.len[ply];
             (&self.mv[ply][..len], len)
         } else {
+            // Row is from a previous epoch - treat as empty
             (&[], 0)
         }
     }
@@ -106,6 +145,8 @@ impl PVTable {
             self.mv[ply][1..(1 + tail_len)].copy_from_slice(&tail[..tail_len]);
         }
         self.len[ply] = tail_len + 1;
+        // Mark this row as written in current epoch
+        self.mark_written(ply);
     }
 
     /// Get PV as Vec (only for final output)
@@ -129,6 +170,8 @@ impl PVTable {
         if !pv.is_empty() && pv.len() < MAX_PLY {
             self.mv[0][..pv.len()].copy_from_slice(pv);
             self.len[0] = pv.len();
+            // Mark root line as written
+            self.mark_written(0);
         }
     }
 
@@ -158,7 +201,7 @@ impl PVTable {
     /// The owner is only meaningful for non-empty PV lines.
     #[inline]
     pub fn owner(&self, ply: usize) -> Option<u64> {
-        if ply < MAX_PLY && self.len[ply] > 0 {
+        if ply < MAX_PLY && self.len[ply] > 0 && self.is_current(ply) {
             Some(self.owner[ply])
         } else {
             None
@@ -260,6 +303,8 @@ impl PVTable {
         }
 
         self.len[ply] = copy_len + 1;
+        // Mark this row as written in current epoch
+        self.mark_written(ply);
     }
 }
 
@@ -267,6 +312,46 @@ impl Default for PVTable {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Trim PV to contain only legal moves
+///
+/// This function validates each move in the PV and returns a new vector
+/// containing only the legal prefix. It stops at the first illegal move.
+///
+/// # Arguments
+/// * `pos` - Current position (will be cloned internally)
+/// * `pv` - Principal variation to validate
+///
+/// # Returns
+/// A vector containing only the legal moves from the start of the PV
+pub fn trim_legal_pv(pos: Position, pv: &[Move]) -> Vec<Move> {
+    // Early returns for invalid PVs
+    if pv.is_empty() || pv.len() > MAX_PLY || pv.contains(&Move::NULL) {
+        return Vec::new();
+    }
+
+    let mut clean = Vec::with_capacity(pv.len());
+    let mut temp_pos = pos;
+
+    for &mv in pv {
+        if temp_pos.is_legal_move(mv) {
+            clean.push(mv);
+            let _undo = temp_pos.do_move(mv);
+            // Don't undo - keep position updated for next move check
+        } else {
+            // First illegal move found - stop here
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[PV TRIM] Trimming PV at move {}: {}",
+                clean.len(),
+                crate::usi::move_to_usi(&mv)
+            );
+            break;
+        }
+    }
+
+    clean
 }
 
 #[cfg(test)]
@@ -322,15 +407,15 @@ mod tests {
         pv.set_line(0, move1, &[move2]);
         pv.set_line(1, move2, &[]);
 
-        assert_eq!(pv.len[0], 2);
-        assert_eq!(pv.len[1], 1);
+        assert_eq!(pv.line(0).1, 2);
+        assert_eq!(pv.line(1).1, 1);
 
         // Clear all
         pv.clear_all();
 
-        // All lengths should be zero
-        assert_eq!(pv.len[0], 0);
-        assert_eq!(pv.len[1], 0);
+        // All PVs should be empty (epoch-based invisibility)
+        assert_eq!(pv.line(0).1, 0);
+        assert_eq!(pv.line(1).1, 0);
         assert_eq!(pv.get_pv().len(), 0);
     }
 
@@ -608,5 +693,149 @@ mod tests {
             mismatches <= checks,
             "pv_owner_mismatches({mismatches}) > pv_owner_checks({checks})"
         );
+    }
+
+    #[test]
+    fn test_trim_legal_pv() {
+        use crate::shogi::Position;
+
+        // Test empty PV
+        let pos = Position::startpos();
+        let pv = trim_legal_pv(pos.clone(), &[]);
+        assert!(pv.is_empty(), "Empty PV should remain empty");
+
+        // Test PV with NULL moves
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let pv_with_null = vec![move1, Move::NULL, move1];
+        let pv = trim_legal_pv(pos.clone(), &pv_with_null);
+        assert!(pv.is_empty(), "PV with NULL moves should be cleared");
+
+        // Test legal PV
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("3c").unwrap(), parse_usi_square("3d").unwrap(), false);
+        let legal_pv = vec![move1, move2];
+        let pv = trim_legal_pv(pos.clone(), &legal_pv);
+        assert_eq!(pv.len(), 2, "Legal PV should be preserved");
+        assert_eq!(pv[0], move1);
+        assert_eq!(pv[1], move2);
+
+        // Test PV with illegal move
+        let illegal_move =
+            Move::normal(parse_usi_square("5g").unwrap(), parse_usi_square("5f").unwrap(), false);
+        let mixed_pv = vec![move1, illegal_move, move2];
+        let pv = trim_legal_pv(pos.clone(), &mixed_pv);
+        assert_eq!(pv.len(), 1, "PV should be trimmed at first illegal move");
+        assert_eq!(pv[0], move1);
+
+        // Test PV exceeding MAX_PLY
+        let mut long_pv = Vec::with_capacity(MAX_PLY + 10);
+        for _ in 0..MAX_PLY + 10 {
+            long_pv.push(move1);
+        }
+        let pv = trim_legal_pv(pos.clone(), &long_pv);
+        assert!(pv.is_empty(), "PV exceeding MAX_PLY should be cleared");
+    }
+
+    #[test]
+    fn test_epoch_mismatch_is_empty() {
+        // Test that previous epoch data is invisible
+        let mut pv = PVTable::new();
+
+        // Set up some data
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        let move2 =
+            Move::normal(parse_usi_square("6c").unwrap(), parse_usi_square("6d").unwrap(), false);
+
+        // Write to ply 0 and 1
+        pv.set_line(0, move1, &[move2]);
+        pv.set_line(1, move2, &[]);
+        pv.set_owner(0, 0x1234567890ABCDEF);
+        pv.set_owner(1, 0xFEDCBA0987654321);
+
+        // Verify data is visible
+        assert_eq!(pv.line(0).1, 2);
+        assert_eq!(pv.line(1).1, 1);
+        assert_eq!(pv.owner(0), Some(0x1234567890ABCDEF));
+        assert_eq!(pv.owner(1), Some(0xFEDCBA0987654321));
+
+        // Start new iteration
+        pv.begin_iteration();
+
+        // Old data should be invisible
+        assert_eq!(pv.line(0).1, 0, "Old epoch data should be invisible");
+        assert_eq!(pv.line(1).1, 0, "Old epoch data should be invisible");
+        assert_eq!(pv.owner(0), None, "Old epoch owner should be None");
+        assert_eq!(pv.owner(1), None, "Old epoch owner should be None");
+
+        // Write new data to ply 0 only
+        pv.set_line(0, move2, &[]);
+        pv.set_owner(0, 0xAAAAAAAAAAAAAAAA);
+
+        // New data should be visible, old data still invisible
+        assert_eq!(pv.line(0).1, 1);
+        assert_eq!(pv.owner(0), Some(0xAAAAAAAAAAAAAAAA));
+        assert_eq!(pv.line(1).1, 0, "Unwritten row should remain invisible");
+        assert_eq!(pv.owner(1), None, "Unwritten row owner should be None");
+    }
+
+    #[test]
+    fn test_clear_all_is_o1() {
+        // Test that clear_all doesn't write to arrays
+        let mut pv = PVTable::new();
+
+        // Fill with data
+        for ply in 0..10 {
+            let move1 = Move::normal(
+                parse_usi_square("7g").unwrap(),
+                parse_usi_square("7f").unwrap(),
+                false,
+            );
+            pv.set_line(ply, move1, &[]);
+        }
+
+        // Get the current epoch
+        let epoch_before = pv.cur_epoch;
+
+        // Clear all - should just increment epoch
+        pv.clear_all();
+
+        // Verify epoch was incremented
+        assert_eq!(pv.cur_epoch, epoch_before + 1);
+
+        // All data should be invisible
+        for ply in 0..10 {
+            assert_eq!(pv.line(ply).1, 0);
+        }
+    }
+
+    #[test]
+    fn test_epoch_wraparound() {
+        // Test epoch wraparound handling
+        let mut pv = PVTable::new();
+
+        // Set epoch near wraparound
+        pv.cur_epoch = u32::MAX - 1;
+
+        // Write some data
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        pv.set_line(0, move1, &[]);
+
+        // Trigger wraparound
+        pv.begin_iteration(); // MAX
+        pv.begin_iteration(); // Wraps to 0, then resets to 1
+
+        assert_eq!(pv.cur_epoch, 1, "Epoch should reset to 1 after wraparound");
+
+        // Old data should be invisible
+        assert_eq!(pv.line(0).1, 0);
+
+        // New data should work normally
+        pv.set_line(0, move1, &[]);
+        assert_eq!(pv.line(0).1, 1);
     }
 }

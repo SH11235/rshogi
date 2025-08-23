@@ -202,6 +202,8 @@ impl EngineAdapter {
             stop_info: result.stop_info,
             pv_owner_mismatches: result.stats.pv_owner_mismatches,
             pv_owner_checks: result.stats.pv_owner_checks,
+            pv_trim_cuts: result.stats.pv_trim_cuts,
+            pv_trim_checks: result.stats.pv_trim_checks,
         })
     }
 

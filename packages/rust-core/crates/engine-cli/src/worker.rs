@@ -616,6 +616,22 @@ pub fn search_worker(
                 }
             }
 
+            // Send PV trimming statistics if available
+            if let (Some(cuts), Some(checks)) =
+                (extended_result.pv_trim_cuts, extended_result.pv_trim_checks)
+            {
+                if checks > 0 {
+                    let trim_rate = (cuts as f64 / checks as f64) * 100.0;
+                    let pv_trim_info = SearchInfo {
+                        string: Some(format!(
+                            "PV trimming: {cuts}/{checks} trimmed ({trim_rate:.1}%)"
+                        )),
+                        ..Default::default()
+                    };
+                    let _ = tx.send(WorkerMessage::Info(pv_trim_info));
+                }
+            }
+
             // Clean up ponder state if needed
             {
                 let mut adapter = lock_or_recover_adapter(&engine_adapter);
