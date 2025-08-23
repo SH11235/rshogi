@@ -288,8 +288,7 @@ impl SearchStack {
         self.move_count = 0;
         self.excluded_move = None;
         self.quiet_moves.clear();
-        self.consecutive_checks = 0;
-        // Note: We keep killers, static_eval, threat_move, counter_move as they may be useful
+        // Note: We keep killers, static_eval, threat_move, counter_move, consecutive_checks as they may be useful
     }
 
     /// Check if ply is within valid range for SearchStack access

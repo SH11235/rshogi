@@ -285,25 +285,12 @@ where
             continue;
         }
 
-        // Calculate gives_check for both extensions and LMR decisions
-        // Use lightweight pre-filter to minimize expensive gives_check calls
-        let gives_check = if USE_PRUNING {
-            // First try lightweight filter (from/to/attack pattern)
-            if crate::search::unified::pruning::likely_could_give_check(pos, mv) {
-                pos.gives_check(mv)
-            } else if mv.is_drop() {
-                // Drops are harder to filter, so check accurately for early moves at sufficient depth
-                depth >= 3 && moves_searched < 8 && pos.gives_check(mv)
-            } else {
-                false
-            }
-        } else {
-            // Pruning disabled: be conservative
-            depth >= 3 && moves_searched < 8 && pos.gives_check(mv)
-        };
-
         // Make move
         let undo_info = pos.do_move(mv);
+
+        // Check if this move gives check (opponent is now in check)
+        // This is more efficient than calling gives_check before do_move
+        let gives_check = pos.is_in_check();
 
         // Simple optimization: selective prefetch
         if USE_TT
@@ -708,5 +695,29 @@ mod tests {
         // Should have searched some nodes (quiescence search)
         assert!(searcher.stats.nodes > 0);
         assert!(searcher.stats.qnodes > 0);
+    }
+
+    #[test]
+    fn test_consecutive_check_extension_limit() {
+        // Test that consecutive_checks is preserved across clear_for_new_node
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+
+        // Set consecutive_checks value
+        searcher.search_stack[3].consecutive_checks = 2;
+
+        // Call clear_for_new_node
+        searcher.search_stack[3].clear_for_new_node();
+
+        // Verify consecutive_checks is preserved (not reset to 0)
+        assert_eq!(
+            searcher.search_stack[3].consecutive_checks, 2,
+            "consecutive_checks should be preserved across clear_for_new_node"
+        );
+
+        // Also test that other fields are cleared
+        assert_eq!(searcher.search_stack[3].current_move, None);
+        assert_eq!(searcher.search_stack[3].move_count, 0);
+        assert_eq!(searcher.search_stack[3].excluded_move, None);
+        assert!(searcher.search_stack[3].quiet_moves.is_empty());
     }
 }
