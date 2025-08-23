@@ -19,8 +19,8 @@ pub mod utils;
 #[cfg(test)]
 mod tests;
 
-use crate::shogi::Move;
-use crate::util;
+use crate::{search::SEARCH_INF, shogi::Move};
+use crate::{util, Position};
 use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
 use flexible_bucket::FlexibleTTBucket;
@@ -638,7 +638,7 @@ impl TranspositionTable {
         debug_assert!(params.key != 0, "Attempting to store entry with zero hash");
         debug_assert!(params.depth <= 127, "Depth value out of reasonable range: {}", params.depth);
         debug_assert!(
-            params.score.abs() <= 30000,
+            params.score.abs() <= SEARCH_INF as i16,
             "Score value out of reasonable range: {}",
             params.score
         );
@@ -741,11 +741,7 @@ impl TranspositionTable {
     ///
     /// # Returns
     /// * Vector of moves forming the PV (empty if no PV found)
-    pub fn reconstruct_pv_from_tt(
-        &self,
-        pos: &mut crate::shogi::Position,
-        max_depth: u8,
-    ) -> Vec<Move> {
+    pub fn reconstruct_pv_from_tt(&self, pos: &mut Position, max_depth: u8) -> Vec<Move> {
         reconstruct_pv_generic(self, pos, max_depth)
     }
 
