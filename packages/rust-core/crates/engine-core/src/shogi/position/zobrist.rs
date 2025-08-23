@@ -213,6 +213,12 @@ impl ZobristHashing for Position {
         let color_idx = color as usize;
         let piece_idx = piece_type.hand_index().expect("King cannot be dropped");
         let old_count = self.hands[color_idx][piece_idx];
+        // old_count==0 の場合 hand_hash は 0 を返してしまうため、debug_assert で検出する
+        debug_assert!(old_count > 0, "Dropping {:?} for {:?} but hand is empty", piece_type, color);
+        if old_count == 0 {
+            // リリースでも安全側に無変更で返す
+            return hash;
+        }
         let new_count = old_count - 1;
 
         // Remove old hand hash
