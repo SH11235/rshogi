@@ -319,13 +319,13 @@ mod tests {
     }
 
     #[test]
-   fn test_set_start_time_does_not_reset_sent() {
-       let mut emitter = BestmoveEmitter::new(123);
-       // 疑似的に送信済みにする
-       assert!(!emitter.sent.swap(true, Ordering::AcqRel));
-       // ここで start_time を更新しても…
-       emitter.set_start_time(std::time::Instant::now());
-       // 送信済み状態は維持される
-       assert!(emitter.is_sent());
-   }
+    fn test_set_start_time_does_not_reset_sent() {
+        let mut emitter = BestmoveEmitter::new(123);
+        // 疑似的に送信済みにする
+        assert!(!emitter.sent.swap(true, Ordering::AcqRel));
+        // ここで start_time を更新しても…
+        emitter.set_start_time(std::time::Instant::now());
+        // 送信済み状態は維持される
+        assert!(emitter.is_sent());
+    }
 }
