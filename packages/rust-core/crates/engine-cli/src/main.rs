@@ -224,9 +224,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                     emitter.emit(best_move, ponder, meta)?;
 
                                                     // Update state
-                                                    search_state = SearchState::Idle;
-                                                                                                        current_search_is_ponder = false;
-                                                    current_bestmove_emitter = None;
+                                                    finalize_current_search(
+                                                        &mut search_state,
+                                                        &mut current_search_is_ponder,
+                                                        &mut current_bestmove_emitter,
+                                                        &mut current_session,
+                                                        "SearchFinished with session bestmove"
+                                                    );
                                             }
                                                 Err(e) => {
                                                     log::warn!("Session validation failed on finish: {e}");
@@ -258,9 +262,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                                             log::info!("Fallback move ready: {fallback_move}");
                                                             emitter.emit(fallback_move, None, meta)?;
-                                                            search_state = SearchState::Idle;
-                                                                                                                        current_search_is_ponder = false;
-                                                            current_bestmove_emitter = None;
+                                                            finalize_current_search(
+                                                                &mut search_state,
+                                                                &mut current_search_is_ponder,
+                                                                &mut current_bestmove_emitter,
+                                                                &mut current_session,
+                                                                "SearchFinished (fallback)"
+                                                            );
                                                         }
                                                         Err(e) => {
                                                             log::error!("Fallback move generation failed: {e}");
@@ -285,8 +293,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                             };
 
                                                             emitter.emit("resign".to_string(), None, meta)?;
-                                                            search_state = SearchState::Idle;
-                                                                                                                        current_search_is_ponder = false;
+                                                            finalize_current_search(
+                                                                &mut search_state,
+                                                                &mut current_search_is_ponder,
+                                                                &mut current_bestmove_emitter,
+                                                                &mut current_session,
+                                                                "SearchFinished (resign)"
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -314,9 +327,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                             };
 
                                             emitter.emit("resign".to_string(), None, meta)?;
-                                            search_state = SearchState::Idle;
-                                                                                        current_search_is_ponder = false;
-                                            current_bestmove_emitter = None;
+                                            finalize_current_search(
+                                                &mut search_state,
+                                                &mut current_search_is_ponder,
+                                                &mut current_bestmove_emitter,
+                                                &mut current_session,
+                                                "SearchFinished (resign: no position)"
+                                            );
                                         }
                                     } else {
                                         log::warn!("No session available on search finish");
@@ -345,9 +362,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                                                 log::info!("Emergency fallback move: {fallback_move}");
                                                 emitter.emit(fallback_move, None, meta)?;
-                                                search_state = SearchState::Idle;
-                                                                                                current_search_is_ponder = false;
-                                                current_bestmove_emitter = None;
+                                                finalize_current_search(
+                                                    &mut search_state,
+                                                    &mut current_search_is_ponder,
+                                                    &mut current_bestmove_emitter,
+                                                    &mut current_session,
+                                                    "SearchFinished (fallback: no session)"
+                                                );
                                             }
                                             Err(e) => {
                                                 log::error!("Emergency fallback move failed: {e}");
@@ -372,8 +393,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                 };
 
                                                 emitter.emit("resign".to_string(), None, meta)?;
-                                                search_state = SearchState::Idle;
-                                                                                                current_search_is_ponder = false;
+                                                finalize_current_search(
+                                                    &mut search_state,
+                                                    &mut current_search_is_ponder,
+                                                    &mut current_bestmove_emitter,
+                                                    &mut current_session,
+                                                    "SearchFinished (resign: no session)"
+                                                );
                                             }
                                         }
                                     }
@@ -398,7 +424,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         if search_id == current_search_id && search_state != SearchState::Idle {
                             log::debug!("Worker thread finished (from_guard: {from_guard}, search_id: {search_id}, transitioning from {search_state:?} to Idle)");
                             // Transition from Searching/StopRequested/FallbackSent to Idle
-                            search_state = SearchState::Idle;
+                            finalize_current_search(
+                                &mut search_state,
+                                &mut current_search_is_ponder,
+                                &mut current_bestmove_emitter,
+                                &mut current_session,
+                                "Worker Finished message",
+                            );
                         } else {
                             log::trace!("Ignoring duplicate or late Finished message (from_guard: {from_guard}, search_id: {search_id}, current_search_id: {current_search_id}, search_state: {search_state:?})");
                             continue;
