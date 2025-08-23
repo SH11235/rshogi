@@ -45,10 +45,11 @@ pub struct SearchStats {
 }
 
 impl SearchStats {
-    /// Helper function to increment an optional counter
+    /// Helper function to increment an optional counter with overflow protection
     #[inline]
     pub fn bump(opt: &mut Option<u64>, by: u64) {
-        *opt = Some(opt.unwrap_or(0) + by);
+        let cur = opt.unwrap_or(0);
+        *opt = Some(cur.saturating_add(by));
     }
 }
 

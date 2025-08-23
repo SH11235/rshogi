@@ -9,8 +9,9 @@ use crate::{
         constants::{MAX_PLY, SEARCH_INF},
         unified::UnifiedSearcher,
     },
-    shogi::Position,
+    shogi::{Move, Position},
 };
+use smallvec::SmallVec;
 use std::sync::atomic::Ordering;
 
 // Import victim_score from move_ordering module
@@ -429,13 +430,13 @@ where
         let ksq_opt = pos.board.king_square(them);
 
         if let Some(ksq) = ksq_opt {
-            // Extract checking drops
-            let mut check_drops: Vec<crate::shogi::Move> = all_moves
+            // Extract checking drops (use SmallVec to avoid heap allocation for small lists)
+            let mut check_drops: SmallVec<[Move; 16]> = all_moves
                 .iter()
                 .copied()
                 .filter(|&mv| mv.is_drop())
-                // Proximity filter: only drops near the king (cost reduction)
-                // Exception: sliders (Rook, Bishop, Lance) can check from distance
+                // Proximity and alignment filter to reduce gives_check calls
+                // Exception: sliders (Rook, Bishop, Lance) have special alignment checks
                 .filter(|&mv| {
                     use crate::shogi::PieceType;
                     let to = mv.to();
@@ -444,8 +445,9 @@ where
 
                     // drop_piece_type() returns PieceType directly for drop moves
                     match mv.drop_piece_type() {
-                        PieceType::Rook | PieceType::Bishop => true, // Always consider sliders
-                        PieceType::Lance => dy <= CHECK_DROP_NEAR_KING_DIST + 1, // Slightly relaxed for Lance
+                        PieceType::Rook => dx == 0 || dy == 0, // Must be aligned horizontally or vertically
+                        PieceType::Bishop => dx == dy,         // Must be diagonally aligned
+                        PieceType::Lance => dx == 0 && dy <= CHECK_DROP_NEAR_KING_DIST + 1, // Vertically aligned with distance limit
                         _ => dx + dy <= CHECK_DROP_NEAR_KING_DIST, // Near king only for others
                     }
                 })
