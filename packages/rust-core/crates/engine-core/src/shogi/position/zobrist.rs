@@ -13,7 +13,12 @@ use crate::{
 
 use super::Position;
 
-/// Maximum number of pieces that can be held in hand (18 pieces max)
+/// Maximum count per piece type that a player can hold in hand.
+///
+/// This is the upper bound for the “count” axis of the hand Zobrist table
+/// for any piece type (King excluded). We choose 18 because, in theory,
+/// one side can hold all pawns at once (there are 18 pawns in total).
+/// Other theoretical maxima per side: Lance/Knight/Silver/Gold = 4, Bishop/Rook = 2, King = 0.
 const MAX_HAND_COUNT: usize = 18;
 
 /// Zobrist hash tables
