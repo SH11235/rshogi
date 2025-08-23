@@ -265,7 +265,10 @@ where
                 self.aspiration_window.update_score(score, best_node_type);
 
                 // Try to reconstruct PV from TT if we have TT enabled
-                if USE_TT {
+                // This is disabled by default due to reliability issues with hash collisions
+                const ENABLE_TT_PV_RECONSTRUCTION: bool = false;
+
+                if USE_TT && ENABLE_TT_PV_RECONSTRUCTION {
                     if let Some(ref tt) = self.tt {
                         // Clone position to avoid modifying the original
                         let mut temp_pos = pos.clone();
@@ -284,7 +287,28 @@ where
 
                             // Validate that TT PV starts with the same best move
                             if tt_pv[0] == self.stats.pv[0] {
-                                self.stats.pv = tt_pv;
+                                // Additional validation: check that TT PV is legal
+                                let mut validation_pos = pos.clone();
+                                let mut valid = true;
+
+                                for (i, &mv) in tt_pv.iter().enumerate() {
+                                    if !validation_pos.is_legal_move(mv) {
+                                        log::warn!(
+                                            "TT PV contains illegal move at ply {}: {}",
+                                            i,
+                                            crate::usi::move_to_usi(&mv)
+                                        );
+                                        valid = false;
+                                        break;
+                                    }
+                                    let _ = validation_pos.do_move(mv);
+                                }
+
+                                if valid {
+                                    self.stats.pv = tt_pv;
+                                } else {
+                                    log::warn!("TT PV validation failed, keeping triangular PV");
+                                }
                             } else {
                                 log::warn!(
                                     "TT PV starts with different move: {} vs {}",
