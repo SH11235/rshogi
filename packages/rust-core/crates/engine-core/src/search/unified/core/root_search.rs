@@ -259,6 +259,30 @@ where
         if pv.contains(&Move::NULL) || pv.len() > crate::search::constants::MAX_PLY {
             pv.clear(); // Discard corrupted PV
         } else {
+            // Lightweight trimming in release builds - ensure all moves are legal
+            // This prevents showing broken PVs to users
+            let mut temp_pos = pos.clone();
+            let mut clean_pv = Vec::with_capacity(pv.len());
+
+            for &mv in &pv {
+                if temp_pos.is_legal_move(mv) {
+                    clean_pv.push(mv);
+                    let _undo = temp_pos.do_move(mv);
+                    // Don't undo - keep position updated for next move check
+                } else {
+                    // First illegal move found - stop here
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "[PV TRIM] Trimming PV at move {}: {}",
+                        clean_pv.len(),
+                        crate::usi::move_to_usi(&mv)
+                    );
+                    break;
+                }
+            }
+
+            pv = clean_pv;
+
             // Full validation only in debug builds
             #[cfg(debug_assertions)]
             {

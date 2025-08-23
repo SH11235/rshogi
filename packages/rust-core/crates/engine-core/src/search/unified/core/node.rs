@@ -456,7 +456,36 @@ where
                     };
 
                     if move_valid {
-                        searcher.pv_table.update_from_child(ply as usize, mv, (ply + 1) as usize);
+                        // Set the owner hash for the current ply
+                        searcher.pv_table.set_owner(ply as usize, pos.zobrist_hash);
+
+                        // Check if child PV is from the correct position
+                        let child_ply = (ply + 1) as usize;
+
+                        // Temporarily apply move to get child position hash
+                        let undo_info = pos.do_move(mv);
+                        let child_hash = pos.zobrist_hash;
+                        pos.undo_move(mv, undo_info);
+
+                        // Only use child PV if it was written by the correct position
+                        if searcher.pv_table.owner(child_ply) == Some(child_hash) {
+                            searcher.pv_table.update_from_child(ply as usize, mv, child_ply);
+                        } else {
+                            // Mixed PV detected - only use the head move
+                            searcher.pv_table.set_line(ply as usize, mv, &[]);
+                            #[cfg(debug_assertions)]
+                            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                                eprintln!(
+                                    "[PV MIX] Detected PV mix at ply {ply}: child owner mismatch"
+                                );
+                                eprintln!("  Expected child hash: {child_hash:016x}");
+                                if let Some(actual) = searcher.pv_table.owner(child_ply) {
+                                    eprintln!("  Actual child owner: {actual:016x}");
+                                } else {
+                                    eprintln!("  Actual child owner: None");
+                                }
+                            }
+                        }
                     } else {
                         #[cfg(debug_assertions)]
                         if std::env::var("SHOGI_DEBUG_PV").is_ok() {

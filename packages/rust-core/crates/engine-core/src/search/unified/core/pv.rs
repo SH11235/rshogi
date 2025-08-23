@@ -13,6 +13,8 @@ pub struct PVTable {
     mv: [[Move; MAX_PLY]; MAX_PLY],
     /// Length of PV at each ply
     len: [usize; MAX_PLY],
+    /// Owner hash for each PV line (the zobrist hash of the position that wrote this line)
+    owner: [u64; MAX_PLY],
 }
 
 impl PVTable {
@@ -21,6 +23,7 @@ impl PVTable {
         Self {
             mv: [[NULL_MOVE; MAX_PLY]; MAX_PLY],
             len: [0; MAX_PLY],
+            owner: [0; MAX_PLY],
         }
     }
 
@@ -28,6 +31,7 @@ impl PVTable {
     #[inline]
     pub fn clear_all(&mut self) {
         self.len.fill(0);
+        self.owner.fill(0);
     }
 
     /// Clear PV at specific ply (on node entry)
@@ -35,6 +39,7 @@ impl PVTable {
     pub fn clear_len_at(&mut self, ply: usize) {
         if ply < MAX_PLY {
             self.len[ply] = 0;
+            self.owner[ply] = 0;
             // Setting length to 0 is sufficient for safety as readers always check len[ply]
             // Full array clearing is only done in debug mode for visibility
 
@@ -46,9 +51,10 @@ impl PVTable {
                         let mv = self.mv[ply][i];
                         if mv != NULL_MOVE {
                             let mv_str = crate::usi::move_to_usi(&mv);
-                            if mv_str == "3i3h" {
+                            if mv_str == "3i3h" || mv_str == "4b5b" {
                                 eprintln!(
-                                    "[PV CLEAR] Found 3i3h at ply={ply}, index={i} before clearing"
+                                    "[PV CLEAR] Found {} at ply={ply}, index={i} before clearing",
+                                    mv_str
                                 );
                             }
                         }
@@ -132,6 +138,24 @@ impl PVTable {
     /// Get the main PV (from root) (backward compatibility)
     pub fn get_pv(&self) -> &[Move] {
         self.get_line(0)
+    }
+
+    /// Set the owner hash for a PV line
+    #[inline]
+    pub fn set_owner(&mut self, ply: usize, hash: u64) {
+        if ply < MAX_PLY {
+            self.owner[ply] = hash;
+        }
+    }
+
+    /// Get the owner hash for a PV line
+    #[inline]
+    pub fn owner(&self, ply: usize) -> Option<u64> {
+        if ply < MAX_PLY && self.len[ply] > 0 {
+            Some(self.owner[ply])
+        } else {
+            None
+        }
     }
 
     /// Update PV by copying from child ply without allocation
@@ -477,5 +501,41 @@ mod tests {
 
         // The key safety property: even if buffer contains old data,
         // it won't be read because all accessors respect len[ply]
+    }
+
+    #[test]
+    fn test_pv_owner_hash() {
+        // Test owner hash functionality
+        let mut pv = PVTable::new();
+
+        // Initially, no owner
+        assert_eq!(pv.owner(0), None);
+        assert_eq!(pv.owner(5), None);
+
+        // Set a PV line and owner
+        let move1 =
+            Move::normal(parse_usi_square("7g").unwrap(), parse_usi_square("7f").unwrap(), false);
+        pv.set_line(0, move1, &[]);
+        pv.set_owner(0, 0x123456789ABCDEF0);
+
+        // Owner should be retrievable
+        assert_eq!(pv.owner(0), Some(0x123456789ABCDEF0));
+
+        // Clear should reset owner
+        pv.clear_len_at(0);
+        assert_eq!(pv.owner(0), None);
+
+        // Test clear_all
+        pv.set_line(2, move1, &[]);
+        pv.set_owner(2, 0xFEDCBA9876543210);
+        pv.set_line(5, move1, &[]);
+        pv.set_owner(5, 0x1111111111111111);
+
+        assert_eq!(pv.owner(2), Some(0xFEDCBA9876543210));
+        assert_eq!(pv.owner(5), Some(0x1111111111111111));
+
+        pv.clear_all();
+        assert_eq!(pv.owner(2), None);
+        assert_eq!(pv.owner(5), None);
     }
 }
