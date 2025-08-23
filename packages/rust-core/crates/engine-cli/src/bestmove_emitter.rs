@@ -50,6 +50,15 @@ impl BestmoveEmitter {
         }
     }
 
+    /// Create a new bestmove emitter with a specific start time
+    pub fn with_start_time(search_id: u64, start_time: Instant) -> Self {
+        Self {
+            sent: AtomicBool::new(false),
+            search_id,
+            start_time,
+        }
+    }
+
     /// Emit bestmove with unified logging
     pub fn emit(
         &self,

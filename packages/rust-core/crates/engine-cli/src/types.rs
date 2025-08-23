@@ -44,7 +44,10 @@ pub enum BestmoveSource {
 
 impl fmt::Display for BestmoveSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // NOTE: When adding new variants to BestmoveSource, update this match expression
+        // IMPORTANT: When adding new variants to the BestmoveSource enum above,
+        // you MUST also add a corresponding match arm here in the Display implementation.
+        // This ensures proper string representation for logging and debugging.
+        // The compiler will enforce this due to exhaustive matching.
         let s = match self {
             Self::Session => "session",
             Self::EmergencyFallback => "emergency_fallback",

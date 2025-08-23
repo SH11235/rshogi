@@ -76,6 +76,25 @@ impl SearchSession {
     ) {
         self.current_iteration_best = Some(CommittedBest {
             depth,
+            seldepth: None, // Will be updated separately when available
+            score: Score::from_raw(score),
+            pv: pv.into_iter().collect(),
+            node_type,
+        });
+    }
+
+    /// Update current iteration best with seldepth
+    pub fn update_current_best_with_seldepth(
+        &mut self,
+        depth: u8,
+        seldepth: Option<u8>,
+        score: i32,
+        pv: Vec<Move>,
+        node_type: NodeType,
+    ) {
+        self.current_iteration_best = Some(CommittedBest {
+            depth,
+            seldepth,
             score: Score::from_raw(score),
             pv: pv.into_iter().collect(),
             node_type,
@@ -88,6 +107,9 @@ impl SearchSession {
 pub struct CommittedBest {
     /// Search depth
     pub depth: u8,
+
+    /// Selective depth
+    pub seldepth: Option<u8>,
 
     /// Evaluation score (preserves cp/mate)
     pub score: Score,

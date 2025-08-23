@@ -19,6 +19,12 @@ use std::time::{Duration, Instant};
 pub enum WorkerMessage {
     Info(SearchInfo),
 
+    /// Search has started
+    SearchStarted {
+        search_id: u64,
+        start_time: Instant,
+    },
+
     /// Iteration completed with committed results
     IterationComplete {
         session: Box<SearchSession>,
@@ -178,6 +184,13 @@ pub fn search_worker(
     search_id: u64,
 ) {
     log::debug!("Search worker thread started with params: {params:?}");
+
+    // Send SearchStarted message with current time
+    let start_time = Instant::now();
+    let _ = tx.send(WorkerMessage::SearchStarted {
+        search_id,
+        start_time,
+    });
 
     // Set up info callback with partial result tracking
     let tx_info = tx.clone();
@@ -580,8 +593,9 @@ pub fn search_worker(
             // Use actual search result data with original Move objects
             // This preserves the piece type information that would be lost if we
             // converted to USI strings and back
-            session.update_current_best(
+            session.update_current_best_with_seldepth(
                 extended_result.depth,
+                extended_result.seldepth,
                 extended_result.score,
                 extended_result.pv, // Original Move objects with piece types preserved
                 extended_result.node_type,
@@ -875,7 +889,13 @@ fn create_emergency_session(
     let depth = 1;
     let score = if is_resign { -30000 } else { 0 }; // Large negative score for resign
 
-    session.update_current_best(depth, score, moves, engine_core::search::NodeType::Exact);
+    session.update_current_best_with_seldepth(
+        depth,
+        None,
+        score,
+        moves,
+        engine_core::search::NodeType::Exact,
+    );
     session.commit_iteration();
 
     session
@@ -944,6 +964,10 @@ pub fn wait_for_worker_with_timeout(
                     Ok(WorkerMessage::SearchFinished { .. }) => {
                         // Search finished during shutdown can be ignored
                         log::trace!("SearchFinished during shutdown - ignoring");
+                    }
+                    Ok(WorkerMessage::SearchStarted { .. }) => {
+                        // Search started during shutdown can be ignored
+                        log::trace!("SearchStarted during shutdown - ignoring");
                     }
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");

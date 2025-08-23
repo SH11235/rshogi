@@ -197,6 +197,7 @@ impl EngineAdapter {
             best_move: move_to_usi(&best_move),
             ponder_move,
             depth: result.stats.depth,
+            seldepth: result.stats.seldepth,
             score: result.score,
             pv,
             node_type: result.node_type,

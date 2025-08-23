@@ -254,6 +254,7 @@ fn test_session_bestmove_validation() {
     // Set up committed best
     let committed = CommittedBest {
         depth: 5,
+        seldepth: None,
         score: Score::Cp(100),
         pv: SmallVec::from_vec(vec![best_move]),
         node_type: NodeType::Exact,
@@ -378,6 +379,7 @@ fn test_ponder_behavior() {
     // Set up a committed best with ponder move
     let committed = CommittedBest {
         depth: 10,
+        seldepth: Some(12),
         score: Score::Cp(50),
         pv: SmallVec::from_vec(vec![best_move, ponder_move]),
         node_type: NodeType::Exact,
