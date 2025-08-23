@@ -200,6 +200,8 @@ impl EngineAdapter {
             score: result.score,
             pv,
             stop_info: result.stop_info,
+            pv_owner_mismatches: result.stats.pv_owner_mismatches,
+            pv_owner_checks: result.stats.pv_owner_checks,
         })
     }
 

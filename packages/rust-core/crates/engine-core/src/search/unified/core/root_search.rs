@@ -192,8 +192,12 @@ where
             }
 
             // Only extend with child PV if it was written by the correct position
-            crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_checks, 1);
-            if searcher.pv_table.owner(1) == Some(child_hash) {
+            let child_owner = searcher.pv_table.owner(1);
+            if child_owner.is_some() {
+                // Only count as a check if there was actually a child PV to verify
+                crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_checks, 1);
+            }
+            if child_owner == Some(child_hash) {
                 // In release builds, trust the child PV without validation
                 // This avoids expensive cloning and move validation in hot path
                 #[cfg(not(debug_assertions))]
@@ -242,7 +246,10 @@ where
             } else {
                 // Owner mismatch - child PV is from a different position
                 // Only keep the head move (current best move)
-                crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_mismatches, 1);
+                if child_owner.is_some() {
+                    // Only count as a mismatch if there was a child PV (not empty)
+                    crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_mismatches, 1);
+                }
                 #[cfg(debug_assertions)]
                 if std::env::var("SHOGI_DEBUG_PV").is_ok() {
                     eprintln!(
