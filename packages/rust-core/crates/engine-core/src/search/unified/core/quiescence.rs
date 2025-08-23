@@ -451,6 +451,13 @@ where
                 if searcher.context.should_stop() {
                     return alpha;
                 }
+
+                // Increment qs_check_drops counter
+                if let Some(ref mut counter) = searcher.stats.qs_check_drops {
+                    *counter += 1;
+                } else {
+                    searcher.stats.qs_check_drops = Some(1);
+                }
                 // Budget (qnodes) strict enforcement
                 if let Some(limit) = qlimit {
                     let exceeded = if let Some(ref counter) = qnodes_counter {

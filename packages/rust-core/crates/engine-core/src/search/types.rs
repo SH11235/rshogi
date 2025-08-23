@@ -36,6 +36,12 @@ pub struct SearchStats {
     pub re_searches: Option<u32>,
     /// Duplication percentage for parallel search (0-100)
     pub duplication_percentage: Option<f64>,
+    /// Number of check extensions applied
+    pub check_extensions: Option<u64>,
+    /// Number of king move extensions applied
+    pub king_extensions: Option<u64>,
+    /// Number of checking drops searched in quiescence search
+    pub qs_check_drops: Option<u64>,
 }
 
 /// Search result
