@@ -220,6 +220,7 @@ impl ZobristHashing for Position {
         // old_count==0 の場合 hand_hash は 0 を返してしまうため、debug_assert で検出する
         debug_assert!(old_count > 0, "Dropping {:?} for {:?} but hand is empty", piece_type, color);
         if old_count == 0 {
+            log::warn!("Dropping {:?} for {:?} but hand is empty", piece_type, color);
             // リリースでも安全側に無変更で返す
             return hash;
         }
