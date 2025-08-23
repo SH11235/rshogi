@@ -517,10 +517,10 @@ mod tests {
 
         // Call both callbacks and verify they share the same counter
         if let Some(cb1) = &limits1.info_callback {
-            cb1(1, 0, 100, Duration::from_millis(10), &[]);
+            cb1(1, 0, 100, Duration::from_millis(10), &[], NodeType::Exact);
         }
         if let Some(cb2) = &limits2.info_callback {
-            cb2(2, 0, 200, Duration::from_millis(20), &[]);
+            cb2(2, 0, 200, Duration::from_millis(20), &[], NodeType::Exact);
         }
 
         // Both callbacks should have incremented the same counter
