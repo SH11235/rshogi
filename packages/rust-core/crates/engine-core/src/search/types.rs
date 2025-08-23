@@ -46,6 +46,10 @@ pub struct SearchStats {
     pub pv_owner_mismatches: Option<u64>,
     /// Number of PV owner mismatch checks performed
     pub pv_owner_checks: Option<u64>,
+    /// Number of PV trimming checks performed
+    pub pv_trim_checks: Option<u64>,
+    /// Number of times PV was actually trimmed
+    pub pv_trim_cuts: Option<u64>,
 }
 
 impl SearchStats {
