@@ -39,7 +39,7 @@ fn test_termination_reason_variants() {
 
     for reason in reasons {
         let stop_info = StopInfo {
-            reason: reason.clone(),
+            reason,
             elapsed_ms: 100,
             nodes: 1000,
             depth_reached: 5,

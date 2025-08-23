@@ -112,7 +112,7 @@ fn test_stop_reason_scenarios() {
 
     for scenario in scenarios {
         let stop_info = StopInfo {
-            reason: scenario.reason.clone(),
+            reason: scenario.reason,
             elapsed_ms: 1000,
             nodes: 10000,
             depth_reached: 10,

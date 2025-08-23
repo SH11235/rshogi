@@ -3,33 +3,12 @@
 //! This module provides SearchSession to encapsulate all search-related data
 //! within a single worker thread, preventing cross-thread contamination.
 
+use crate::utils::to_usi_score;
 use engine_core::shogi::Move;
 use smallvec::SmallVec;
 
-/// Score representation that preserves cp/mate distinction
-#[derive(Clone, Debug)]
-pub enum Score {
-    /// Centipawn score
-    Cp(i32),
-    /// Mate in N moves (positive = winning, negative = losing)
-    Mate(i32),
-}
-
-impl Score {
-    /// Convert from raw engine score
-    pub fn from_raw(score: i32) -> Self {
-        use engine_core::search::constants::{MATE_SCORE, MAX_PLY};
-
-        if score.abs() >= MATE_SCORE - MAX_PLY as i32 {
-            // It's a mate score - calculate mate distance
-            let mate_in_half = MATE_SCORE - score.abs();
-            let mate_in = ((mate_in_half + 1) / 2).max(1);
-            Score::Mate(if score > 0 { mate_in } else { -mate_in })
-        } else {
-            Score::Cp(score)
-        }
-    }
-}
+// Re-export Score from usi::output for backward compatibility
+pub use crate::usi::output::Score;
 
 /// Search session data encapsulated per worker thread
 #[derive(Clone)]
@@ -70,7 +49,7 @@ impl SearchSession {
         self.current_iteration_best = Some(CommittedBest {
             depth,
             seldepth: None, // Will be updated separately when available
-            score: Score::from_raw(score),
+            score: to_usi_score(score),
             pv: pv.into_iter().collect(),
         });
     }
@@ -86,7 +65,7 @@ impl SearchSession {
         self.current_iteration_best = Some(CommittedBest {
             depth,
             seldepth,
-            score: Score::from_raw(score),
+            score: to_usi_score(score),
             pv: pv.into_iter().collect(),
         });
     }
