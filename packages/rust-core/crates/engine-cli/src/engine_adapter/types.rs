@@ -17,6 +17,8 @@ pub struct ExtendedSearchResult {
     pub stop_info: Option<StopInfo>,
     pub pv_owner_mismatches: Option<u64>,
     pub pv_owner_checks: Option<u64>,
+    pub pv_trim_cuts: Option<u64>,
+    pub pv_trim_checks: Option<u64>,
 }
 
 /// State management for pondering
