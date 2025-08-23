@@ -285,17 +285,21 @@ where
             continue;
         }
 
-        // Calculate gives_check before making the move to avoid double move execution
-        // Use lightweight pre-filter first, then accurate check if needed
-        // Only calculate when LMR reduction might be applied
-        let gives_check = if USE_PRUNING && depth >= 3 && moves_searched >= 4 {
+        // Calculate gives_check for both extensions and LMR decisions
+        // Use lightweight pre-filter to minimize expensive gives_check calls
+        let gives_check = if USE_PRUNING {
+            // First try lightweight filter (from/to/attack pattern)
             if crate::search::unified::pruning::likely_could_give_check(pos, mv) {
                 pos.gives_check(mv)
+            } else if mv.is_drop() {
+                // Drops are harder to filter, so check accurately for early moves at sufficient depth
+                depth >= 3 && moves_searched < 8 && pos.gives_check(mv)
             } else {
                 false
             }
         } else {
-            false
+            // Pruning disabled: be conservative
+            depth >= 3 && moves_searched < 8 && pos.gives_check(mv)
         };
 
         // Make move
@@ -317,12 +321,15 @@ where
             let next_depth = depth.saturating_sub(1);
             score = -super::alpha_beta(searcher, pos, next_depth, -beta, -alpha, ply + 1);
         } else {
-            // Special handling for king moves - extend search to see consequences
-            let extension = if is_king_move && depth >= 3 {
-                1 // Extend search by 1 ply for king moves
-            } else {
-                0
-            };
+            // Extension: (1) checking moves (including drops) (2) king moves
+            let mut extension = 0;
+            if depth >= 3 {
+                if gives_check {
+                    extension = 1; // Check extension
+                } else if is_king_move {
+                    extension = 1; // Existing king extension
+                }
+            }
 
             // Late move reduction using advanced pruning module
             let reduction = if USE_PRUNING
@@ -333,8 +340,9 @@ where
                     gives_check,
                     mv,
                 )
-                && !is_king_move
-            // Don't reduce king moves
+                && !is_king_move // Don't reduce king moves
+                && !gives_check
+            // Don't reduce check extension nodes
             {
                 crate::search::unified::pruning::lmr_reduction(depth, moves_searched)
             } else {

@@ -16,6 +16,11 @@ use std::sync::atomic::Ordering;
 // Import victim_score from move_ordering module
 use super::move_ordering::victim_score;
 
+// Conservative initial values for checking drops in quiescence search
+const MAX_QS_CHECK_DROPS: usize = 4; // Maximum number of checking drops to search in QS
+const CHECK_DROP_MARGIN: i32 = 80; // Small margin to prune clearly losing drops
+const CHECK_DROP_NEAR_KING_DIST: u8 = 2; // Manhattan distance limit for drops near king
+
 /// Quiescence search to resolve tactical exchanges and avoid horizon effects
 ///
 /// This function searches capture moves (and check evasions when in check) to ensure
@@ -402,5 +407,116 @@ where
         }
     }
 
+    // === Add: checking drops (limited) ===
+    // First, skip generation if stand pat is too far below alpha
+    if stand_pat + CHECK_DROP_MARGIN >= alpha {
+        // all_moves already generated above (generate_all). Extract checking drops.
+        let them = pos.side_to_move.opposite();
+        let ksq_opt = pos.board.king_square(them);
+
+        if let Some(ksq) = ksq_opt {
+            // Extract checking drops
+            let mut check_drops: Vec<crate::shogi::Move> = all_moves
+                .iter()
+                .copied()
+                .filter(|&mv| mv.is_drop())
+                // Proximity filter: only drops near the king (cost reduction)
+                .filter(|&mv| {
+                    let to = mv.to();
+                    let dx = (ksq.file() as i32 - to.file() as i32).unsigned_abs() as u8;
+                    let dy = (ksq.rank() as i32 - to.rank() as i32).unsigned_abs() as u8;
+                    dx + dy <= CHECK_DROP_NEAR_KING_DIST
+                })
+                // Final check: actually gives check (accurate)
+                .filter(|&mv| pos.gives_check(mv))
+                .collect();
+
+            // Ordering: proximity and piece hints
+            check_drops.sort_by_key(|&mv| -score_check_drop_for_ordering(pos, mv));
+
+            // Limit number of drops
+            if check_drops.len() > MAX_QS_CHECK_DROPS {
+                check_drops.truncate(MAX_QS_CHECK_DROPS);
+            }
+
+            // Search checking drops
+            for &mv in check_drops.iter() {
+                if searcher.context.should_stop() {
+                    return alpha;
+                }
+                // Budget (qnodes) strict enforcement
+                if let Some(limit) = qlimit {
+                    let exceeded = if let Some(ref counter) = qnodes_counter {
+                        counter.load(Ordering::Acquire) >= limit
+                    } else {
+                        searcher.stats.qnodes >= limit
+                    };
+                    if exceeded {
+                        return alpha;
+                    }
+                }
+
+                // Drops have zero capture value, so use a small margin for delta-style pruning
+                if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN < alpha {
+                    continue;
+                }
+
+                if !pos.is_pseudo_legal(mv) {
+                    continue;
+                }
+
+                let undo = pos.do_move(mv);
+                let score = -quiescence_search(
+                    searcher,
+                    pos,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    qply.saturating_add(1),
+                );
+                pos.undo_move(mv, undo);
+
+                if searcher.context.should_stop() {
+                    return alpha;
+                }
+                if score >= beta {
+                    return beta;
+                }
+                if score > alpha {
+                    alpha = score;
+                }
+            }
+        }
+    }
+
     alpha
+}
+
+/// Score checking drops for move ordering in quiescence search
+/// Prioritizes drops closer to the king and more valuable pieces
+#[inline]
+fn score_check_drop_for_ordering(pos: &Position, mv: crate::shogi::Move) -> i32 {
+    use crate::shogi::PieceType;
+    let them = pos.side_to_move.opposite();
+    let ksq = match pos.board.king_square(them) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let to = mv.to();
+    let dx = (ksq.file() as i32 - to.file() as i32).abs();
+    let dy = (ksq.rank() as i32 - to.rank() as i32).abs();
+    let prox = 10 - (dx + dy); // Closer is better
+    let pt = mv.drop_piece_type();
+    // Slightly favor attacking pieces (not too much to avoid instability)
+    let atk_hint = match pt {
+        PieceType::Pawn => 5,
+        PieceType::Lance => 8,
+        PieceType::Knight => 9,
+        PieceType::Silver => 10,
+        PieceType::Gold => 9,
+        PieceType::Bishop => 11,
+        PieceType::Rook => 12,
+        PieceType::King => 0,
+    };
+    prox * 2 + atk_hint
 }
