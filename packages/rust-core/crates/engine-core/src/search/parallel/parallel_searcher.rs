@@ -302,6 +302,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         total_nodes,
                         elapsed,
                         &pv_to_send,
+                        best_result.node_type,
                     );
                 }
                 *last_heartbeat = Instant::now();
@@ -864,7 +865,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                 if !pv_to_send.is_empty() {
                     debug!("Calling info callback for iteration {iteration} (depth {main_depth})");
-                    callback(main_depth, result.score, total_nodes, elapsed, &pv_to_send);
+                    callback(
+                        main_depth,
+                        result.score,
+                        total_nodes,
+                        elapsed,
+                        &pv_to_send,
+                        result.node_type,
+                    );
                 }
             } else {
                 debug!("No info callback available for iteration {iteration}");

@@ -17,7 +17,8 @@
 //! the requested size due to internal bucket alignment in TranspositionTable.
 
 use super::tt::pv_reconstruction::{reconstruct_pv_generic, TTProbe};
-use super::tt::{NodeType, TTEntry, TTEntryParams, TranspositionTable};
+use super::tt::{TTEntry, TTEntryParams, TranspositionTable};
+use crate::search::NodeType;
 use crate::shogi::{Move, Position};
 use std::sync::Arc;
 

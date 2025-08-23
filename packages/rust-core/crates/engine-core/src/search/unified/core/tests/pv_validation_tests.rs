@@ -1,9 +1,9 @@
 //! Tests for PV (Principal Variation) validation
 
 use crate::evaluation::evaluate::MaterialEvaluator;
-use crate::search::tt::NodeType;
 use crate::search::unified::core::{pv_validation, PVTable};
 use crate::search::unified::{TTOperations, UnifiedSearcher};
+use crate::search::NodeType;
 use crate::search::ShardedTranspositionTable;
 use crate::shogi::{Move, Square};
 use crate::usi::{parse_usi_move, parse_usi_square};

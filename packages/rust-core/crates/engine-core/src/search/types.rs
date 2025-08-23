@@ -5,11 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Info callback type for search progress reporting
-pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move]) + Send + Sync>;
-
-/// Extended info callback type that includes NodeType information
-pub type ExtendedInfoCallback =
-    Arc<dyn Fn(u8, i32, u64, Duration, &[Move], NodeType) + Send + Sync>;
+pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move], NodeType) + Send + Sync>;
 
 /// Search statistics
 #[derive(Clone, Debug, Default)]
@@ -136,13 +132,14 @@ impl SearchResult {
 
 /// Node type in alpha-beta search
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum NodeType {
     /// Exact score (PV node)
-    Exact,
+    Exact = 0,
     /// Upper bound (All node, fail low)
-    UpperBound,
-    /// Lower bound (Cut node, fail high)  
-    LowerBound,
+    UpperBound = 2,
+    /// Lower bound (Cut node, fail high)
+    LowerBound = 1,
 }
 
 /// Reason for search termination

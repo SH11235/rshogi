@@ -9,7 +9,7 @@
 use engine_core::{
     evaluation::evaluate::{Evaluator, MaterialEvaluator},
     movegen::MoveGen,
-    search::tt::{NodeType, TranspositionTable},
+    search::{NodeType, TranspositionTable},
     shogi::moves::{Move, MoveList},
     usi::parse_sfen,
     Position,

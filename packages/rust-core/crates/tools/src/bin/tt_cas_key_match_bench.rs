@@ -3,7 +3,7 @@
 //! This benchmark specifically tests the scenario where multiple threads
 //! try to write the same position, which is common in parallel search.
 
-use engine_core::search::tt::{NodeType, TranspositionTable};
+use engine_core::search::{tt::TranspositionTable, NodeType};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
