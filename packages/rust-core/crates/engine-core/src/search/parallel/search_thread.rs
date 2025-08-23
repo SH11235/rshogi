@@ -71,6 +71,9 @@ impl LocalNodeCounter {
     /// Add nodes and flush if threshold reached
     #[inline(always)]
     fn add(&mut self, nodes: u64, shared_state: &SharedSearchState) {
+        #[cfg(debug_assertions)]
+        debug_assert!(nodes <= u32::MAX as u64, "nodes count {} exceeds u32::MAX", nodes);
+
         // Saturating add to prevent overflow on u32
         self.count = self.count.saturating_add(nodes as u32);
         let threshold = calculate_flush_threshold(self.current_depth);
@@ -353,7 +356,7 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                 },
                 best_move: Some(root_move),
                 node_type: crate::search::NodeType::Exact, // Depth 1 evaluation is exact
-                stop_info: None,                           // TODO: Will be populated in Phase 2
+                stop_info: Some(crate::search::types::StopInfo::default()), // Consistent with other cases
             }
         };
 
