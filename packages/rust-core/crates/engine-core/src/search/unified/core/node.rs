@@ -468,23 +468,33 @@ where
 
                         // Only use child PV if it was written by the correct position
                         // (using the child hash we saved during do_move above)
-                        crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_checks, 1);
-                        if searcher.pv_table.owner(child_ply) == Some(child_hash_for_pv) {
+                        let child_owner = searcher.pv_table.owner(child_ply);
+                        if child_owner.is_some() {
+                            // Only count as a check if there was actually a child PV to verify
+                            crate::search::SearchStats::bump(
+                                &mut searcher.stats.pv_owner_checks,
+                                1,
+                            );
+                        }
+                        if child_owner == Some(child_hash_for_pv) {
                             searcher.pv_table.update_from_child(ply as usize, mv, child_ply);
                         } else {
                             // Mixed PV detected - only use the head move
                             searcher.pv_table.set_line(ply as usize, mv, &[]);
-                            crate::search::SearchStats::bump(
-                                &mut searcher.stats.pv_owner_mismatches,
-                                1,
-                            );
+                            if child_owner.is_some() {
+                                // Only count as a mismatch if there was a child PV (not empty)
+                                crate::search::SearchStats::bump(
+                                    &mut searcher.stats.pv_owner_mismatches,
+                                    1,
+                                );
+                            }
                             #[cfg(debug_assertions)]
                             if std::env::var("SHOGI_DEBUG_PV").is_ok() {
                                 eprintln!(
                                     "[PV MIX] Detected PV mix at ply {ply}: child owner mismatch"
                                 );
                                 eprintln!("  Expected child hash: {child_hash_for_pv:016x}");
-                                if let Some(actual) = searcher.pv_table.owner(child_ply) {
+                                if let Some(actual) = child_owner {
                                     eprintln!("  Actual child owner: {actual:016x}");
                                 } else {
                                     eprintln!("  Actual child owner: None");

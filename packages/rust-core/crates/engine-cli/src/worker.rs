@@ -599,6 +599,23 @@ pub fn search_worker(
                 extended_result.pv, // Original Move objects with piece types preserved
             );
             session.commit_iteration();
+
+            // Send PV owner statistics if available
+            if let (Some(mismatches), Some(checks)) =
+                (extended_result.pv_owner_mismatches, extended_result.pv_owner_checks)
+            {
+                if checks > 0 {
+                    let mismatch_rate = (mismatches as f64 / checks as f64) * 100.0;
+                    let pv_owner_info = SearchInfo {
+                        string: Some(format!(
+                            "PV owner mismatches: {mismatches}/{checks} ({mismatch_rate:.1}%)"
+                        )),
+                        ..Default::default()
+                    };
+                    let _ = tx.send(WorkerMessage::Info(pv_owner_info));
+                }
+            }
+
             // Clean up ponder state if needed
             {
                 let mut adapter = lock_or_recover_adapter(&engine_adapter);

@@ -272,7 +272,7 @@ impl Default for PVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{shogi::Move, usi::parse_usi_square};
+    use crate::{search::unified::core::node::search_node, shogi::Move, usi::parse_usi_square};
 
     #[test]
     fn test_pv_table() {
@@ -583,5 +583,30 @@ mod tests {
         let (line, len) = pv.line(0);
         assert_eq!(len, 1, "Parent should have only head move on owner mismatch");
         assert_eq!(line[0], move1);
+    }
+
+    #[test]
+    fn test_pv_owner_stats_counts() {
+        use crate::{
+            evaluation::evaluate::MaterialEvaluator,
+            search::{unified::UnifiedSearcher, SearchLimits},
+            shogi::Position,
+        };
+        let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+        searcher.context.set_limits(SearchLimits::builder().depth(3).build());
+        // 明示初期化（なくてもbumpがSome化するが、期待値比較のため）
+        searcher.stats.pv_owner_checks = Some(0);
+        searcher.stats.pv_owner_mismatches = Some(0);
+
+        let mut pos = Position::startpos();
+        let _ = search_node(&mut searcher, &mut pos, 2, -1000, 1000, 0);
+
+        // どちらも Some であることと、関係が破綻していないことを緩く確認（回帰検知用）
+        let checks = searcher.stats.pv_owner_checks.expect("pv_owner_checks is None");
+        let mismatches = searcher.stats.pv_owner_mismatches.expect("pv_owner_mismatches is None");
+        assert!(
+            mismatches <= checks,
+            "pv_owner_mismatches({mismatches}) > pv_owner_checks({checks})"
+        );
     }
 }
