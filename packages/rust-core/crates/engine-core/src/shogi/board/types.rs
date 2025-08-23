@@ -538,6 +538,13 @@ mod tests {
     }
 
     #[test]
+    fn test_hand_index_matches_hand_order() {
+        for (idx, &pt) in HAND_ORDER.iter().enumerate() {
+            assert_eq!(pt.hand_index(), Some(idx));
+        }
+    }
+
+    #[test]
     fn test_square_bounds_checking() {
         // Test valid squares
         let sq = Square::new(0, 0);

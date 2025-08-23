@@ -7,7 +7,7 @@ use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::{
-    shogi::board::{BOARD_SQUARES, MAX_PIECE_INDEX},
+    shogi::board::{BOARD_SQUARES, HAND_ORDER, MAX_PIECE_INDEX},
     Color, Piece, PieceType, Square,
 };
 
@@ -145,7 +145,7 @@ impl ZobristHashing for Position {
         for color in [Color::Black, Color::White] {
             let color_idx = color as usize;
             // Skip King (index 0), iterate through other piece types using HAND_ORDER
-            for (piece_idx, &piece_type) in crate::shogi::board::HAND_ORDER.iter().enumerate() {
+            for (piece_idx, &piece_type) in HAND_ORDER.iter().enumerate() {
                 let count = self.hands[color_idx][piece_idx];
                 if count > 0 {
                     hash ^= ZOBRIST.hand_hash(color, piece_type, count);
@@ -175,18 +175,22 @@ impl ZobristHashing for Position {
             hash ^= ZOBRIST.piece_square_hash(captured_piece, to);
 
             // Update hand hash (piece goes to hand)
+            // IMPORTANT: Promoted pieces revert to their base type when captured
+            // e.g., ProRook → Rook, ProPawn → Pawn
             let color_idx = moving.color as usize;
+            // Since promoted pieces cannot exist in hand, we use the base piece type
+            let captured_base_type = captured_piece.piece_type;
             let piece_idx =
-                captured_piece.piece_type.hand_index().expect("King is never captured to hand");
+                captured_base_type.hand_index().expect("King is never captured to hand");
             let old_count = self.hands[color_idx][piece_idx];
             let new_count = old_count + 1;
 
             // Remove old hand hash
             if old_count > 0 {
-                hash ^= ZOBRIST.hand_hash(moving.color, captured_piece.piece_type, old_count);
+                hash ^= ZOBRIST.hand_hash(moving.color, captured_base_type, old_count);
             }
             // Add new hand hash
-            hash ^= ZOBRIST.hand_hash(moving.color, captured_piece.piece_type, new_count);
+            hash ^= ZOBRIST.hand_hash(moving.color, captured_base_type, new_count);
         }
 
         // Add moving piece to destination
@@ -253,16 +257,19 @@ impl ZobristHashing for Position {
 /// Helper methods for Position to use in do_move
 impl Position {
     /// Get zobrist hash for piece on square
+    #[inline]
     pub fn piece_square_zobrist(&self, piece: Piece, sq: Square) -> u64 {
         ZOBRIST.piece_square_hash(piece, sq)
     }
 
     /// Get zobrist hash for hand piece
+    #[inline]
     pub fn hand_zobrist(&self, color: Color, piece_type: PieceType, count: u8) -> u64 {
         ZOBRIST.hand_hash(color, piece_type, count)
     }
 
     /// Get zobrist hash for side to move
+    #[inline]
     pub fn side_to_move_zobrist(&self) -> u64 {
         ZOBRIST.side_hash(self.side_to_move)
     }
@@ -712,5 +719,104 @@ mod tests {
                 "Bucket {bucket} has poor distribution: {count} values (expected ~{expected_per_bucket})"
             );
         }
+    }
+
+    #[test]
+    fn test_promoted_piece_capture_hash() {
+        // Test that capturing promoted pieces correctly updates the hash
+        // Promoted pieces should revert to base type when added to hand
+        let mut pos = Position::empty();
+
+        // Place kings
+        let black_king = Piece::new(PieceType::King, Color::Black);
+        let white_king = Piece::new(PieceType::King, Color::White);
+        pos.board.put_piece(parse_usi_square("5i").unwrap(), black_king);
+        pos.board.put_piece(parse_usi_square("5a").unwrap(), white_king);
+
+        // Place a promoted pawn (tokin) that will be captured
+        let promoted_pawn = Piece::promoted(PieceType::Pawn, Color::White);
+        let capture_sq = parse_usi_square("5e").unwrap();
+        pos.board.put_piece(capture_sq, promoted_pawn);
+
+        // Place black silver that will capture the tokin
+        let black_silver = Piece::new(PieceType::Silver, Color::Black);
+        let from_sq = parse_usi_square("4f").unwrap();
+        pos.board.put_piece(from_sq, black_silver);
+
+        // Calculate initial hash
+        pos.hash = pos.compute_hash();
+        pos.zobrist_hash = pos.hash;
+        let initial_hash = pos.zobrist_hash;
+
+        // Simulate the capture move
+        let mut pos_after = pos.clone();
+        pos_after.board.remove_piece(from_sq);
+        pos_after.board.remove_piece(capture_sq);
+        pos_after.board.put_piece(capture_sq, black_silver);
+
+        // IMPORTANT: Promoted piece becomes unpromoted when captured
+        pos_after.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+        pos_after.side_to_move = Color::White;
+
+        // Calculate hash from scratch
+        pos_after.hash = pos_after.compute_hash();
+        pos_after.zobrist_hash = pos_after.hash;
+        let hash_from_scratch = pos_after.zobrist_hash;
+
+        // Calculate incremental hash
+        let hash_incremental = pos.update_hash_move(
+            initial_hash,
+            from_sq,
+            capture_sq,
+            black_silver,
+            Some(promoted_pawn),
+        );
+
+        assert_eq!(
+            hash_from_scratch, hash_incremental,
+            "Hash mismatch when capturing promoted piece"
+        );
+
+        // Test with promoted rook
+        let mut pos2 = Position::empty();
+        pos2.board.put_piece(parse_usi_square("5i").unwrap(), black_king);
+        pos2.board.put_piece(parse_usi_square("5a").unwrap(), white_king);
+
+        let promoted_rook = Piece::promoted(PieceType::Rook, Color::White);
+        let capture_sq2 = parse_usi_square("3c").unwrap();
+        pos2.board.put_piece(capture_sq2, promoted_rook);
+
+        let black_gold = Piece::new(PieceType::Gold, Color::Black);
+        let from_sq2 = parse_usi_square("4d").unwrap();
+        pos2.board.put_piece(from_sq2, black_gold);
+
+        pos2.hash = pos2.compute_hash();
+        pos2.zobrist_hash = pos2.hash;
+        let initial_hash2 = pos2.zobrist_hash;
+
+        // Simulate capture
+        let mut pos2_after = pos2.clone();
+        pos2_after.board.remove_piece(from_sq2);
+        pos2_after.board.remove_piece(capture_sq2);
+        pos2_after.board.put_piece(capture_sq2, black_gold);
+        pos2_after.hands[Color::Black as usize][PieceType::Rook.hand_index().unwrap()] = 1;
+        pos2_after.side_to_move = Color::White;
+
+        pos2_after.hash = pos2_after.compute_hash();
+        pos2_after.zobrist_hash = pos2_after.hash;
+        let hash2_from_scratch = pos2_after.zobrist_hash;
+
+        let hash2_incremental = pos2.update_hash_move(
+            initial_hash2,
+            from_sq2,
+            capture_sq2,
+            black_gold,
+            Some(promoted_rook),
+        );
+
+        assert_eq!(
+            hash2_from_scratch, hash2_incremental,
+            "Hash mismatch when capturing promoted rook"
+        );
     }
 }
