@@ -575,7 +575,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     session_id: _,
                     root_hash: _,
                     search_id,
-                    stop_info: _,
+                    stop_info,
                 }) => {
                     // Handle SearchFinished in stop command context
                     if search_id == *ctx.current_search_id {
@@ -616,15 +616,29 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                 .as_ref()
                                                 .and_then(|b| b.seldepth);
 
+                                            // Use stop_info values if available, otherwise use defaults
+                                            let (elapsed_ms, nodes, reason, hard_timeout) =
+                                                if let Some(ref info) = stop_info {
+                                                    (
+                                                        info.elapsed_ms,
+                                                        info.nodes,
+                                                        info.reason,
+                                                        info.hard_timeout,
+                                                    )
+                                                } else {
+                                                    // stop_info is None: use 0 to let emitter complement
+                                                    (0, 0, TerminationReason::UserStop, false)
+                                                };
+
                                             let meta = create_bestmove_meta_with_seldepth(
                                                 BestmoveSource::SessionInSearchFinished,
-                                                TerminationReason::UserStop,
-                                                elapsed.as_millis() as u64,
+                                                reason,
+                                                elapsed_ms,
                                                 depth,
                                                 seldepth,
                                                 score_str,
-                                                0, // TODO: Get actual node count
-                                                false,
+                                                nodes,
+                                                hard_timeout,
                                             );
 
                                             emitter.emit(best_move, ponder, meta)?;
