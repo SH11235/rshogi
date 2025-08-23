@@ -306,6 +306,7 @@ where
         let undo_info = pos.do_move(mv);
 
         // Save child hash for PV owner validation (avoids second do/undo)
+        // This is the Zobrist hash of the child position after making the move
         let child_hash_for_pv = pos.zobrist_hash;
 
         // Check if this move gives check (opponent is now in check)
@@ -460,18 +461,23 @@ where
 
                     if move_valid {
                         // Set the owner hash for the current ply
-                        searcher.pv_table.set_owner(ply as usize, pos.zobrist_hash);
+                        searcher.pv_table.set_owner(ply as usize, hash);
 
                         // Check if child PV is from the correct position
                         let child_ply = (ply + 1) as usize;
 
                         // Only use child PV if it was written by the correct position
                         // (using the child hash we saved during do_move above)
+                        crate::search::SearchStats::bump(&mut searcher.stats.pv_owner_checks, 1);
                         if searcher.pv_table.owner(child_ply) == Some(child_hash_for_pv) {
                             searcher.pv_table.update_from_child(ply as usize, mv, child_ply);
                         } else {
                             // Mixed PV detected - only use the head move
                             searcher.pv_table.set_line(ply as usize, mv, &[]);
+                            crate::search::SearchStats::bump(
+                                &mut searcher.stats.pv_owner_mismatches,
+                                1,
+                            );
                             #[cfg(debug_assertions)]
                             if std::env::var("SHOGI_DEBUG_PV").is_ok() {
                                 eprintln!(
