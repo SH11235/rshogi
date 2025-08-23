@@ -144,3 +144,84 @@ fn test_quiescence_check_no_relative_limit() {
     // Score should not be mate (we have legal moves)
     assert!(score > -30000, "Should not return mate score when evasions exist");
 }
+
+#[test]
+fn test_quiescence_long_distance_checking_drops() {
+    // Test that long distance checking drops (rook/bishop) are considered in quiescence search
+    use crate::movegen::MoveGen;
+    use crate::shogi::{Color, MoveList, PieceType};
+
+    // Create a position where we can drop rook/bishop at distance to give check
+    // Enemy king at 5e (55), we have rook and bishop in hand
+    // Clear files/diagonals for long distance drops
+    let pos = Position::from_sfen("4k4/9/9/9/9/9/9/9/4K4 b RB 1").unwrap();
+
+    // Get enemy king position
+    let enemy_king_sq = pos.board.king_square(Color::White).unwrap();
+
+    // Manually test the checking drop logic used in quiescence search
+    let mut move_gen = MoveGen::new();
+    let mut all_moves = MoveList::new();
+    move_gen.generate_all(&pos, &mut all_moves);
+
+    // Filter drops that would give check (similar to quiescence search logic)
+    let checking_drops: Vec<_> = all_moves
+        .iter()
+        .copied()
+        .filter(|&mv| mv.is_drop())
+        .filter(|&mv| {
+            // Apply the alignment filter from quiescence search
+            let to = mv.to();
+            let dx = enemy_king_sq.file().abs_diff(to.file());
+            let dy = enemy_king_sq.rank().abs_diff(to.rank());
+
+            match mv.drop_piece_type() {
+                PieceType::Rook => dx == 0 || dy == 0,
+                PieceType::Bishop => dx == dy,
+                _ => false, // Only testing rook/bishop
+            }
+        })
+        .filter(|&mv| pos.gives_check(mv))
+        .collect();
+
+    // Should find long distance checking drops
+    let has_distant_rook_drop = checking_drops.iter().any(|&mv| {
+        mv.drop_piece_type() == PieceType::Rook && {
+            let to = mv.to();
+            let dx = enemy_king_sq.file().abs_diff(to.file());
+            let dy = enemy_king_sq.rank().abs_diff(to.rank());
+            dx > 2 || dy > 2 // Distance > 2 (outside near king range)
+        }
+    });
+
+    let has_distant_bishop_drop = checking_drops.iter().any(|&mv| {
+        mv.drop_piece_type() == PieceType::Bishop && {
+            let to = mv.to();
+            let dx = enemy_king_sq.file().abs_diff(to.file());
+            let dy = enemy_king_sq.rank().abs_diff(to.rank());
+            dx > 2 && dx == dy // Diagonal distance > 2
+        }
+    });
+
+    assert!(has_distant_rook_drop, "Should find long distance rook checking drops");
+    assert!(has_distant_bishop_drop, "Should find long distance bishop checking drops");
+
+    // Verify that our filtering doesn't exclude all drops
+    assert!(!checking_drops.is_empty(), "Should find at least some checking drops");
+
+    // Count near vs far drops to ensure both are captured
+    let far_drops = checking_drops
+        .iter()
+        .filter(|&&mv| {
+            let to = mv.to();
+            let dx = enemy_king_sq.file().abs_diff(to.file());
+            let dy = enemy_king_sq.rank().abs_diff(to.rank());
+            match mv.drop_piece_type() {
+                PieceType::Rook | PieceType::Bishop => dx > 2 || dy > 2,
+                _ => false,
+            }
+        })
+        .count();
+
+    assert!(far_drops > 0, "Should have at least one far drop among checking drops");
+}

@@ -36,6 +36,21 @@ pub struct SearchStats {
     pub re_searches: Option<u32>,
     /// Duplication percentage for parallel search (0-100)
     pub duplication_percentage: Option<f64>,
+    /// Number of check extensions applied
+    pub check_extensions: Option<u64>,
+    /// Number of king move extensions applied
+    pub king_extensions: Option<u64>,
+    /// Number of checking drops searched in quiescence search
+    pub qs_check_drops: Option<u64>,
+}
+
+impl SearchStats {
+    /// Helper function to increment an optional counter with overflow protection
+    #[inline]
+    pub fn bump(opt: &mut Option<u64>, by: u64) {
+        let cur = opt.unwrap_or(0);
+        *opt = Some(cur.saturating_add(by));
+    }
 }
 
 /// Search result
@@ -246,6 +261,8 @@ pub struct SearchStack {
     pub counter_move: Option<Move>,
     /// Quiet moves tried at this node (for history updates)
     pub quiet_moves: Vec<Move>,
+    /// Consecutive check extensions count
+    pub consecutive_checks: u8,
 }
 
 impl SearchStack {
@@ -286,7 +303,7 @@ impl SearchStack {
         self.move_count = 0;
         self.excluded_move = None;
         self.quiet_moves.clear();
-        // Note: We keep killers, static_eval, threat_move, counter_move as they may be useful
+        // Note: We keep killers, static_eval, threat_move, counter_move, consecutive_checks as they may be useful
     }
 
     /// Check if ply is within valid range for SearchStack access
