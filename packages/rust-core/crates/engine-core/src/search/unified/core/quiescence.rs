@@ -242,6 +242,13 @@ where
             // Make move
             let undo_info = pos.do_move(mv);
 
+            // Check if still in check after the move
+            let still_in_check = pos.is_in_check();
+            if still_in_check {
+                pos.undo_move(mv, undo_info);
+                continue; // Not a valid evasion
+            }
+
             // Recursive search (increment both ply and qply)
             let score =
                 -quiescence_search(searcher, pos, -beta, -alpha, ply + 1, qply.saturating_add(1));
@@ -423,8 +430,8 @@ where
                 // Proximity filter: only drops near the king (cost reduction)
                 .filter(|&mv| {
                     let to = mv.to();
-                    let dx = (ksq.file() as i32 - to.file() as i32).unsigned_abs() as u8;
-                    let dy = (ksq.rank() as i32 - to.rank() as i32).unsigned_abs() as u8;
+                    let dx = ksq.file().abs_diff(to.file());
+                    let dy = ksq.rank().abs_diff(to.rank());
                     dx + dy <= CHECK_DROP_NEAR_KING_DIST
                 })
                 // Final check: actually gives check (accurate)
@@ -456,10 +463,7 @@ where
                     }
                 }
 
-                // Drops have zero capture value, so use a small margin for delta-style pruning
-                if USE_PRUNING && stand_pat + CHECK_DROP_MARGIN < alpha {
-                    continue;
-                }
+                // Drops have zero capture value, already checked margin at outer level
 
                 if !pos.is_pseudo_legal(mv) {
                     continue;

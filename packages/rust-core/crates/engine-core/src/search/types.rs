@@ -246,6 +246,8 @@ pub struct SearchStack {
     pub counter_move: Option<Move>,
     /// Quiet moves tried at this node (for history updates)
     pub quiet_moves: Vec<Move>,
+    /// Consecutive check extensions count
+    pub consecutive_checks: u8,
 }
 
 impl SearchStack {
@@ -286,6 +288,7 @@ impl SearchStack {
         self.move_count = 0;
         self.excluded_move = None;
         self.quiet_moves.clear();
+        self.consecutive_checks = 0;
         // Note: We keep killers, static_eval, threat_move, counter_move as they may be useful
     }
 

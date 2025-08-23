@@ -315,22 +315,37 @@ where
 
         let mut score;
 
+        // Extension: (1) checking moves (including drops) (2) king moves
+        let mut extension = 0;
+        if depth >= 3 {
+            let allow_check_ext = moves_searched < 4 // Early moves only
+                && crate::search::types::SearchStack::is_valid_ply(ply)
+                && searcher.search_stack[ply as usize].consecutive_checks < 2; // Cap at 2
+
+            if gives_check && allow_check_ext {
+                extension = 1; // Check extension
+            } else if is_king_move {
+                extension = 1; // Existing king extension
+            }
+        }
+
+        // Update consecutive checks count for next ply
+        if crate::search::types::SearchStack::is_valid_ply(ply + 1) {
+            let current_consecutive_checks = searcher.search_stack[ply as usize].consecutive_checks;
+            let next = &mut searcher.search_stack[(ply + 1) as usize];
+            next.consecutive_checks = if gives_check && extension > 0 {
+                current_consecutive_checks + 1
+            } else {
+                0
+            };
+        }
+
         // Principal variation search
         if moves_searched == 0 {
             // Full window search for first move (saturating for safety)
-            let next_depth = depth.saturating_sub(1);
+            let next_depth = depth.saturating_add(extension).saturating_sub(1);
             score = -super::alpha_beta(searcher, pos, next_depth, -beta, -alpha, ply + 1);
         } else {
-            // Extension: (1) checking moves (including drops) (2) king moves
-            let mut extension = 0;
-            if depth >= 3 {
-                if gives_check {
-                    extension = 1; // Check extension
-                } else if is_king_move {
-                    extension = 1; // Existing king extension
-                }
-            }
-
             // Late move reduction using advanced pruning module
             let reduction = if USE_PRUNING
                 && crate::search::unified::pruning::can_do_lmr(
