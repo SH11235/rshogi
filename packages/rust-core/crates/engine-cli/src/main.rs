@@ -146,16 +146,22 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
             recv(worker_rx) -> msg => {
                 match msg {
                     Ok(msg) => {
-                        handle_worker_message(
-                            msg,
-                            &engine,
-                            &mut search_state,
-                            current_search_id,
-                            current_search_is_ponder,
-                            &mut current_session,
-                            &mut current_bestmove_emitter,
+                        let mut ctx = CommandContext {
+                            engine: &engine,
+                            stop_flag: &stop_flag,
+                            worker_tx: &worker_tx,
+                            worker_rx: &worker_rx,
+                            worker_handle: &mut worker_handle,
+                            search_state: &mut search_state,
+                            search_id_counter: &mut search_id_counter,
+                            current_search_id: &mut current_search_id,
+                            current_search_is_ponder: &mut current_search_is_ponder,
+                            current_session: &mut current_session,
+                            current_bestmove_emitter: &mut current_bestmove_emitter,
+                            current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
-                        )?;
+                        };
+                        handle_worker_message(msg, &mut ctx)?;
                     }
                     Err(_) => {
                         log::debug!("Worker channel closed");
@@ -178,7 +184,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
         worker::wait_for_worker_with_timeout(
             &mut worker_handle,
             &worker_rx,
-            &engine,
             &mut search_state,
             helpers::MIN_JOIN_TIMEOUT,
         )?;
@@ -201,20 +206,11 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 }
 
 /// Handle worker messages during normal operation
-fn handle_worker_message(
-    msg: WorkerMessage,
-    engine: &Arc<Mutex<EngineAdapter>>,
-    search_state: &mut SearchState,
-    current_search_id: u64,
-    current_search_is_ponder: bool,
-    current_session: &mut Option<SearchSession>,
-    current_bestmove_emitter: &mut Option<BestmoveEmitter>,
-    allow_null_move: bool,
-) -> Result<()> {
+fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result<()> {
     match msg {
         WorkerMessage::Info(info) => {
             // Forward info messages during active search
-            if search_state.is_searching() {
+            if ctx.search_state.is_searching() {
                 send_response(UsiResponse::Info(info))?;
             } else {
                 log::trace!("Suppressed Info message - not in searching state");
@@ -226,29 +222,35 @@ fn handle_worker_message(
             start_time,
         } => {
             // Update BestmoveEmitter with accurate start time if it's for current search
-            if search_id == current_search_id {
-                if let Some(ref mut emitter) = current_bestmove_emitter {
+            if search_id == *ctx.current_search_id {
+                if let Some(ref mut emitter) = ctx.current_bestmove_emitter {
                     emitter.set_start_time(start_time);
                     log::debug!(
                         "Updated BestmoveEmitter with worker start time for search {search_id}"
                     );
                 }
             } else {
-                log::trace!("Ignoring SearchStarted from old search: {search_id} (current: {current_search_id})");
+                log::trace!(
+                    "Ignoring SearchStarted from old search: {search_id} (current: {})",
+                    *ctx.current_search_id
+                );
             }
         }
 
         WorkerMessage::IterationComplete { session, search_id } => {
             // Update current session if it's for current search
-            if search_id == current_search_id {
+            if search_id == *ctx.current_search_id {
                 log::debug!(
                     "Iteration complete for search {}, depth: {:?}",
                     search_id,
                     session.committed_best.as_ref().map(|b| b.depth)
                 );
-                *current_session = Some(*session);
+                *ctx.current_session = Some(*session);
             } else {
-                log::trace!("Ignoring iteration from old search: {search_id} (current: {current_search_id})");
+                log::trace!(
+                    "Ignoring iteration from old search: {search_id} (current: {})",
+                    *ctx.current_search_id
+                );
             }
         }
 
@@ -259,16 +261,16 @@ fn handle_worker_message(
             stop_info,
         } => {
             // Handle search completion for current search
-            if search_id == current_search_id && search_state.can_accept_bestmove() {
+            if search_id == *ctx.current_search_id && ctx.search_state.can_accept_bestmove() {
                 log::info!("Search {search_id} finished (session_id: {session_id}, root_hash: {root_hash:016x})");
 
                 // Send bestmove immediately if not ponder
-                if !current_search_is_ponder {
-                    if let Some(ref emitter) = current_bestmove_emitter {
+                if !*ctx.current_search_is_ponder {
+                    if let Some(ref emitter) = ctx.current_bestmove_emitter {
                         // Try to use session-based bestmove
-                        if let Some(ref session) = current_session {
+                        if let Some(ref session) = ctx.current_session {
                             log::debug!("Using session for bestmove generation");
-                            let adapter = lock_or_recover_adapter(engine);
+                            let adapter = lock_or_recover_adapter(ctx.engine);
                             if let Some(position) = adapter.get_position() {
                                 match adapter.validate_and_get_bestmove(session, position) {
                                     Ok((best_move, ponder)) => {
@@ -322,13 +324,7 @@ fn handle_worker_message(
                                         };
 
                                         emitter.emit(best_move, ponder, meta)?;
-                                        finalize_current_search(
-                                            search_state,
-                                            &mut false,
-                                            current_bestmove_emitter,
-                                            current_session,
-                                            "SearchFinished with bestmove",
-                                        );
+                                        ctx.finalize_search("SearchFinished with bestmove");
                                         return Ok(());
                                     }
                                     Err(e) => {
@@ -341,7 +337,7 @@ fn handle_worker_message(
                         }
 
                         // Fallback if session validation failed
-                        match generate_fallback_move(engine, None, allow_null_move) {
+                        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
                             Ok(fallback_move) => {
                                 let meta = BestmoveMeta {
                                     from: BestmoveSource::EmergencyFallback,
@@ -387,39 +383,27 @@ fn handle_worker_message(
                             }
                         }
 
-                        finalize_current_search(
-                            search_state,
-                            &mut false,
-                            current_bestmove_emitter,
-                            current_session,
-                            "SearchFinished with fallback",
-                        );
+                        ctx.finalize_search("SearchFinished with fallback");
                     } else {
                         // No emitter available - send bestmove directly
                         log::error!("No BestmoveEmitter available for search {search_id}");
 
                         // Try session first
-                        if let Some(ref session) = current_session {
-                            let adapter = lock_or_recover_adapter(engine);
+                        if let Some(ref session) = ctx.current_session {
+                            let adapter = lock_or_recover_adapter(ctx.engine);
                             if let Some(position) = adapter.get_position() {
                                 if let Ok((best_move, ponder)) =
                                     adapter.validate_and_get_bestmove(session, position)
                                 {
                                     send_response(UsiResponse::BestMove { best_move, ponder })?;
-                                    finalize_current_search(
-                                        search_state,
-                                        &mut false,
-                                        current_bestmove_emitter,
-                                        current_session,
-                                        "SearchFinished direct send",
-                                    );
+                                    ctx.finalize_search("SearchFinished direct send");
                                     return Ok(());
                                 }
                             }
                         }
 
                         // Fallback
-                        match generate_fallback_move(engine, None, allow_null_move) {
+                        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
                             Ok(fallback_move) => {
                                 send_response(UsiResponse::BestMove {
                                     best_move: fallback_move,
@@ -435,13 +419,7 @@ fn handle_worker_message(
                             }
                         }
 
-                        finalize_current_search(
-                            search_state,
-                            &mut false,
-                            current_bestmove_emitter,
-                            current_session,
-                            "SearchFinished direct fallback",
-                        );
+                        ctx.finalize_search("SearchFinished direct fallback");
                     }
                 } else {
                     log::debug!("Ponder search finished, not sending bestmove");
@@ -457,7 +435,7 @@ fn handle_worker_message(
         } => {
             // Partial results are primarily used in stop command processing
             // but we can log them for debugging
-            if search_id == current_search_id {
+            if search_id == *ctx.current_search_id {
                 log::trace!("PartialResult: move={current_best}, depth={depth}, score={score}");
             }
         }
@@ -467,7 +445,7 @@ fn handle_worker_message(
             search_id,
         } => {
             // Handle worker thread completion
-            if search_id == current_search_id && *search_state != SearchState::Idle {
+            if search_id == *ctx.current_search_id && *ctx.search_state != SearchState::Idle {
                 log::debug!(
                     "Worker thread finished (from_guard: {from_guard}, search_id: {search_id})"
                 );
@@ -475,40 +453,20 @@ fn handle_worker_message(
                 // This is just cleanup notification
             } else {
                 log::trace!(
-                    "Ignoring Finished from old search: {search_id} (current: {current_search_id})"
+                    "Ignoring Finished from old search: {search_id} (current: {})",
+                    *ctx.current_search_id
                 );
             }
         }
 
         WorkerMessage::Error { message, search_id } => {
-            if search_id == current_search_id {
+            if search_id == *ctx.current_search_id {
                 send_info_string(format!("Error: {message}"))?;
             }
-        }
-
-        WorkerMessage::EngineReturn(returned_engine) => {
-            log::debug!("Engine returned from worker");
-            let mut adapter = lock_or_recover_adapter(engine);
-            adapter.return_engine(returned_engine);
         }
     }
 
     Ok(())
-}
-
-#[inline]
-fn finalize_current_search(
-    search_state: &mut SearchState,
-    current_search_is_ponder: &mut bool,
-    current_bestmove_emitter: &mut Option<BestmoveEmitter>,
-    current_session: &mut Option<SearchSession>,
-    where_: &str,
-) {
-    log::debug!("Finalize current search ({})", where_);
-    *search_state = SearchState::Idle;
-    *current_search_is_ponder = false;
-    *current_bestmove_emitter = None;
-    *current_session = None;
 }
 
 #[cfg(test)]

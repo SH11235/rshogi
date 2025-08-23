@@ -25,13 +25,13 @@ fn test_bestmove_meta_construction() {
     };
 
     let meta = BestmoveMeta {
-        from: BestmoveSource::Session,
+        from: BestmoveSource::SessionOnStop,
         stop_info,
         stats,
     };
 
     // Verify fields
-    assert_eq!(meta.from, BestmoveSource::Session);
+    assert_eq!(meta.from, BestmoveSource::SessionOnStop);
     assert_eq!(meta.stop_info.reason, TerminationReason::TimeLimit);
     assert_eq!(meta.stats.depth, 18);
     assert_eq!(meta.stats.score, "cp 125");
@@ -40,14 +40,7 @@ fn test_bestmove_meta_construction() {
 #[test]
 fn test_bestmove_from_sources() {
     // Test different bestmove sources
-    let sources = vec![
-        BestmoveSource::Session,
-        BestmoveSource::EmergencyFallback,
-        BestmoveSource::Resign,
-        BestmoveSource::ResignNoPosition,
-        BestmoveSource::EmergencyFallbackNoSession,
-        BestmoveSource::ResignFallbackFailed,
-    ];
+    let sources = vec![BestmoveSource::EmergencyFallback, BestmoveSource::Resign];
 
     for source in sources {
         let stop_info = StopInfo {
