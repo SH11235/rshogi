@@ -170,6 +170,23 @@ where
             // Get PV from recursive search
             let child_pv = searcher.pv_table.get_line(1);
 
+            // Debug logging for PV construction at root
+            #[cfg(debug_assertions)]
+            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                eprintln!(
+                    "[ROOT PV] depth={depth}, move_idx={move_idx}, best_move={}, score={score}",
+                    crate::usi::move_to_usi(&mv)
+                );
+                if !child_pv.is_empty() {
+                    eprintln!(
+                        "  Child PV (ply=1): {}",
+                        child_pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" ")
+                    );
+                } else {
+                    eprintln!("  Child PV (ply=1): <empty>");
+                }
+            }
+
             // In release builds, trust the child PV without validation
             // This avoids expensive cloning and move validation in hot path
             #[cfg(not(debug_assertions))]
@@ -221,6 +238,23 @@ where
 
     // Validate PV before returning
     if !pv.is_empty() {
+        // Debug logging for final PV construction
+        #[cfg(debug_assertions)]
+        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+            eprintln!(
+                "[ROOT FINAL PV] depth={depth}, score={best_score}, pv_len={}, pv={}",
+                pv.len(),
+                pv.iter().map(crate::usi::move_to_usi).collect::<Vec<_>>().join(" ")
+            );
+
+            // Check for suspicious moves in PV
+            if pv.len() >= 8 {
+                if let Some(&mv) = pv.get(7) {
+                    eprintln!("  PV[7] (8th move) = {}", crate::usi::move_to_usi(&mv));
+                }
+            }
+        }
+
         // Minimal O(1) sanity check even in release builds
         if pv.contains(&Move::NULL) || pv.len() > crate::search::constants::MAX_PLY {
             pv.clear(); // Discard corrupted PV

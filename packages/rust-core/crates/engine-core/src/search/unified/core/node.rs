@@ -136,22 +136,29 @@ where
         if depth > 2 {
             if let Some(ref tt) = searcher.tt {
                 if tt.has_exact_cut(hash) {
-                    // Early return with the stored score if available
+                    // Early return with the stored score if available and reliable
                     if let Some(entry) = tt_entry {
-                        // Only trust the early cutoff if the entry has sufficient depth and matches key
+                        // Only trust the early cutoff if:
+                        // 1. Entry matches hash
+                        // 2. Entry has sufficient depth
+                        // 3. Entry is a lower bound (cut node) and score >= beta
                         if entry.matches(hash) && entry.depth() >= depth.saturating_sub(1) {
-                            // Adjust mate scores from TT (stored relative to root) to current ply
                             let adjusted_score = crate::search::common::adjust_mate_score_from_tt(
                                 entry.score() as i32,
                                 ply as u8,
                             );
-                            return adjusted_score;
+                            // For lower bound entries, we can only use them if score >= beta
+                            if entry.node_type() == NodeType::LowerBound && adjusted_score >= beta {
+                                return adjusted_score;
+                            }
+                            // For exact entries, we can always use them
+                            if entry.node_type() == NodeType::Exact {
+                                return adjusted_score;
+                            }
                         }
                     }
-                    // Even without a good score, stop searching this node
-                    // to avoid duplication with sibling threads
-                    // Return alpha to keep a safe fail-low bound under negamax
-                    return alpha;
+                    // If we don't have sufficient evidence, continue normal search
+                    // This prevents propagating incorrect bounds
                 }
             }
         }
@@ -306,7 +313,7 @@ where
         // Testing check detection differences
         #[cfg(debug_assertions)]
         #[allow(clippy::overly_complex_bool_expr)]
-        if true && depth >= 3 && moves_searched < 4 {
+        if depth >= 3 && moves_searched < 4 {
             if let Some(test_pos) = pre_pos {
                 // Old method: pre-compute gives_check on pre-move position
                 let old_gives_check = if USE_PRUNING {
@@ -437,7 +444,29 @@ where
                 // Validate that the move is still pseudo-legal before adding to PV
                 // This prevents TT pollution from causing invalid PVs
                 if pos.is_pseudo_legal(mv) {
-                    searcher.pv_table.update_from_child(ply as usize, mv, (ply + 1) as usize);
+                    // Additional check: ensure the move's source square is not empty
+                    let move_valid = if !mv.is_drop() {
+                        if let Some(from) = mv.from() {
+                            pos.piece_at(from).is_some()
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    };
+
+                    if move_valid {
+                        searcher.pv_table.update_from_child(ply as usize, mv, (ply + 1) as usize);
+                    } else {
+                        #[cfg(debug_assertions)]
+                        if std::env::var("SHOGI_DEBUG_PV").is_ok() {
+                            eprintln!(
+                                "[ERROR] Move passed pseudo_legal but source square is empty!"
+                            );
+                            eprintln!("  Ply: {ply}, Move: {}", crate::usi::move_to_usi(&mv));
+                            eprintln!("  Position: {}", crate::usi::position_to_sfen(pos));
+                        }
+                    }
                 } else {
                     #[cfg(debug_assertions)]
                     if std::env::var("SHOGI_DEBUG_PV").is_ok() {

@@ -70,6 +70,18 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
             break;
         }
 
+        // Skip shallow depth entries for PV reconstruction reliability
+        // Shallow entries are more likely to be from different positions due to hash collisions
+        const MIN_DEPTH_FOR_PV_TRUST: u8 = 4;
+        if entry.depth() < MIN_DEPTH_FOR_PV_TRUST && !pv.is_empty() {
+            log::trace!(
+                "PV reconstruction: Stopping at shallow entry (depth: {}) at ply {}",
+                entry.depth(),
+                pv.len()
+            );
+            break;
+        }
+
         // Get the best move
         let best_move = match entry.get_move() {
             Some(mv) => mv,
