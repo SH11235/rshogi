@@ -1,5 +1,8 @@
 user_book1.db
 user_book_100T.db
+# Opening book large files (prevent re-introduction)
+converted_openings/opening_book_*.binz
+converted_openings/opening_book_*.bin.gz
 converted_openings/opening_book_full.bin
 
 target/
