@@ -484,10 +484,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             let meta = create_bestmove_meta(
                                 from,
                                 TerminationReason::TimeLimit,
-                                elapsed.as_millis() as u64,
+                                0, // BestmoveEmitter に補完させる
                                 depth,
                                 score_str,
-                                0, // TODO: Get actual node count
+                                0,            // nodes は未知なので 0 のままでOK
                                 true,
                             );
 
@@ -513,7 +513,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             let meta = create_bestmove_meta(
                                 BestmoveSource::ResignTimeout,
                                 TerminationReason::Error,
-                                elapsed.as_millis() as u64,
+                                0, // BestmoveEmitter に補完させる
                                 0,
                                 None,
                                 0,
@@ -709,7 +709,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     let meta = create_bestmove_meta(
                                         from,
                                         TerminationReason::UserStop,
-                                        elapsed.as_millis() as u64,
+                                        0, // BestmoveEmitter に補完させる
                                         depth,
                                         score_str,
                                         0, // TODO: Get actual node count
@@ -747,7 +747,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     let meta = create_bestmove_meta(
                                         BestmoveSource::ResignOnFinish,
                                         TerminationReason::Error,
-                                        elapsed.as_millis() as u64,
+                                        0, // BestmoveEmitter に補完させる
                                         0,
                                         None,
                                         0,
