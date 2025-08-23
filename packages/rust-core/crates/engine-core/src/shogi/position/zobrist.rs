@@ -341,4 +341,370 @@ mod tests {
         let expected = hash ^ ZOBRIST.side_to_move ^ ZOBRIST.side_to_move;
         assert_eq!(hash3, expected); // Should be back to original
     }
+
+    #[test]
+    fn test_side_to_move_difference() {
+        // Test that the same position with different side to move has different hash
+        let mut pos_black = Position::empty();
+        let mut pos_white = Position::empty();
+
+        // Set up identical board positions
+        let piece = Piece::new(PieceType::King, Color::Black);
+        let sq = parse_usi_square("5i").unwrap();
+        pos_black.board.put_piece(sq, piece);
+        pos_white.board.put_piece(sq, piece);
+
+        let piece2 = Piece::new(PieceType::King, Color::White);
+        let sq2 = parse_usi_square("5a").unwrap();
+        pos_black.board.put_piece(sq2, piece2);
+        pos_white.board.put_piece(sq2, piece2);
+
+        // Set different side to move
+        pos_black.side_to_move = Color::Black;
+        pos_white.side_to_move = Color::White;
+
+        // Calculate hashes
+        pos_black.hash = pos_black.compute_hash();
+        pos_black.zobrist_hash = pos_black.hash;
+        pos_white.hash = pos_white.compute_hash();
+        pos_white.zobrist_hash = pos_white.hash;
+
+        let hash_black = pos_black.zobrist_hash;
+        let hash_white = pos_white.zobrist_hash;
+
+        // Hashes should differ by exactly the side_to_move value
+        assert_ne!(hash_black, hash_white);
+        assert_eq!(hash_black ^ hash_white, ZOBRIST.side_to_move);
+    }
+
+    #[test]
+    fn test_hand_pieces_difference() {
+        // Test that the same board position with different hand pieces has different hash
+        let mut pos1 = Position::empty();
+        let mut pos2 = Position::empty();
+
+        // Set up identical board positions with kings
+        let king_black = Piece::new(PieceType::King, Color::Black);
+        let king_white = Piece::new(PieceType::King, Color::White);
+        pos1.board.put_piece(parse_usi_square("5i").unwrap(), king_black);
+        pos1.board.put_piece(parse_usi_square("5a").unwrap(), king_white);
+        pos2.board.put_piece(parse_usi_square("5i").unwrap(), king_black);
+        pos2.board.put_piece(parse_usi_square("5a").unwrap(), king_white);
+
+        // Add different hand pieces
+        pos1.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+        pos2.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 2;
+
+        // Calculate hashes
+        pos1.hash = pos1.compute_hash();
+        pos1.zobrist_hash = pos1.hash;
+        pos2.hash = pos2.compute_hash();
+        pos2.zobrist_hash = pos2.hash;
+
+        let hash1 = pos1.zobrist_hash;
+        let hash2 = pos2.zobrist_hash;
+
+        // Hashes should be different
+        assert_ne!(hash1, hash2);
+
+        // Test with different piece types in hand
+        let mut pos3 = Position::empty();
+        pos3.board.put_piece(parse_usi_square("5i").unwrap(), king_black);
+        pos3.board.put_piece(parse_usi_square("5a").unwrap(), king_white);
+        pos3.hands[Color::Black as usize][PieceType::Rook.hand_index().unwrap()] = 1;
+
+        pos3.hash = pos3.compute_hash();
+        pos3.zobrist_hash = pos3.hash;
+
+        let hash3 = pos3.zobrist_hash;
+        assert_ne!(hash1, hash3);
+        assert_ne!(hash2, hash3);
+    }
+
+    #[test]
+    fn test_incremental_updates() {
+        // Test that incremental hash updates match full recalculation
+        let pos = Position::startpos();
+        let initial_hash = pos.zobrist_hash();
+
+        // Make a move
+        let from = parse_usi_square("7g").unwrap();
+        let to = parse_usi_square("7f").unwrap();
+        let moving_piece = pos.piece_at(from).unwrap();
+
+        // Simulate move
+        let mut pos_after = pos.clone();
+        pos_after.board.remove_piece(from);
+        pos_after.board.put_piece(to, moving_piece);
+        pos_after.side_to_move = match pos_after.side_to_move {
+            Color::Black => Color::White,
+            Color::White => Color::Black,
+        };
+
+        // Calculate hash from scratch
+        pos_after.hash = pos_after.compute_hash();
+        pos_after.zobrist_hash = pos_after.hash;
+        let hash_from_scratch = pos_after.zobrist_hash;
+
+        // Calculate incremental hash
+        let hash_incremental = pos.update_hash_move(initial_hash, from, to, moving_piece, None);
+
+        // They should match
+        assert_eq!(hash_from_scratch, hash_incremental);
+
+        // Test with capture
+        let mut pos_capture = Position::empty();
+        let black_pawn = Piece::new(PieceType::Pawn, Color::Black);
+        let white_pawn = Piece::new(PieceType::Pawn, Color::White);
+        let black_king = Piece::new(PieceType::King, Color::Black);
+        let white_king = Piece::new(PieceType::King, Color::White);
+
+        pos_capture.board.put_piece(parse_usi_square("5i").unwrap(), black_king);
+        pos_capture.board.put_piece(parse_usi_square("5a").unwrap(), white_king);
+        pos_capture.board.put_piece(parse_usi_square("5e").unwrap(), black_pawn);
+        pos_capture.board.put_piece(parse_usi_square("5d").unwrap(), white_pawn);
+
+        pos_capture.hash = pos_capture.compute_hash();
+        pos_capture.zobrist_hash = pos_capture.hash;
+        let initial_capture_hash = pos_capture.zobrist_hash;
+
+        // Capture white pawn with black pawn
+        let mut pos_after_capture = pos_capture.clone();
+        pos_after_capture.board.remove_piece(parse_usi_square("5e").unwrap());
+        pos_after_capture.board.remove_piece(parse_usi_square("5d").unwrap());
+        pos_after_capture.board.put_piece(parse_usi_square("5d").unwrap(), black_pawn);
+        pos_after_capture.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
+        pos_after_capture.side_to_move = Color::White;
+
+        pos_after_capture.hash = pos_after_capture.compute_hash();
+        pos_after_capture.zobrist_hash = pos_after_capture.hash;
+        let hash_capture_scratch = pos_after_capture.zobrist_hash;
+        let hash_capture_incremental = pos_capture.update_hash_move(
+            initial_capture_hash,
+            parse_usi_square("5e").unwrap(),
+            parse_usi_square("5d").unwrap(),
+            black_pawn,
+            Some(white_pawn),
+        );
+
+        assert_eq!(hash_capture_scratch, hash_capture_incremental);
+    }
+
+    #[test]
+    fn test_symmetric_positions() {
+        // Test that symmetric positions have different hashes
+        let mut pos1 = Position::empty();
+        let mut pos2 = Position::empty();
+
+        // Create horizontally symmetric positions
+        // Position 1: Rook on 1a
+        pos1.board
+            .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+        pos1.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos1.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        // Position 2: Rook on 9a (symmetric)
+        pos2.board
+            .put_piece(parse_usi_square("9a").unwrap(), Piece::new(PieceType::Rook, Color::White));
+        pos2.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos2.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        pos1.hash = pos1.compute_hash();
+        pos1.zobrist_hash = pos1.hash;
+        pos2.hash = pos2.compute_hash();
+        pos2.zobrist_hash = pos2.hash;
+
+        let hash1 = pos1.zobrist_hash;
+        let hash2 = pos2.zobrist_hash;
+
+        // Symmetric positions should have different hashes
+        assert_ne!(hash1, hash2);
+
+        // Test with multiple pieces
+        let mut pos3 = Position::empty();
+        let mut pos4 = Position::empty();
+
+        // Add kings
+        pos3.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos3.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+        pos4.board
+            .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
+        pos4.board
+            .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
+
+        // Add pawns in symmetric positions
+        pos3.board
+            .put_piece(parse_usi_square("3e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+        pos4.board
+            .put_piece(parse_usi_square("7e").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
+
+        pos3.hash = pos3.compute_hash();
+        pos3.zobrist_hash = pos3.hash;
+        pos4.hash = pos4.compute_hash();
+        pos4.zobrist_hash = pos4.hash;
+
+        let hash3 = pos3.zobrist_hash;
+        let hash4 = pos4.zobrist_hash;
+
+        assert_ne!(hash3, hash4);
+    }
+
+    #[test]
+    fn test_hash_distribution() {
+        use std::collections::HashMap;
+
+        // Test statistical properties of hash values
+        let mut bit_counts = vec![0u32; 64];
+        let mut hash_values = Vec::new();
+
+        // Generate many different positions
+        for i in 0..1000 {
+            let mut pos = Position::empty();
+
+            // Add kings (required) - vary their positions too
+            let black_king_file = ((i * 7) % 9) as u8;
+            let black_king_rank = 'g' as u8 + (i % 3) as u8;
+            let black_king_file_char = (b'9' - black_king_file) as char;
+            let black_king_rank_char = black_king_rank as char;
+            if let Ok(sq) =
+                parse_usi_square(&format!("{black_king_file_char}{black_king_rank_char}"))
+            {
+                pos.board.put_piece(sq, Piece::new(PieceType::King, Color::Black));
+            } else {
+                // Fallback position
+                pos.board.put_piece(
+                    parse_usi_square("5i").unwrap(),
+                    Piece::new(PieceType::King, Color::Black),
+                );
+            }
+
+            let white_king_file = ((i * 3) % 9) as u8;
+            let white_king_rank = 'a' as u8 + (i % 3) as u8;
+            let white_king_file_char = (b'9' - white_king_file) as char;
+            let white_king_rank_char = white_king_rank as char;
+            if let Ok(sq) =
+                parse_usi_square(&format!("{white_king_file_char}{white_king_rank_char}"))
+            {
+                pos.board.put_piece(sq, Piece::new(PieceType::King, Color::White));
+            } else {
+                // Fallback position
+                pos.board.put_piece(
+                    parse_usi_square("5a").unwrap(),
+                    Piece::new(PieceType::King, Color::White),
+                );
+            }
+
+            // Add various pieces to create diversity
+            let piece_types = [
+                PieceType::Pawn,
+                PieceType::Lance,
+                PieceType::Knight,
+                PieceType::Silver,
+                PieceType::Gold,
+                PieceType::Bishop,
+                PieceType::Rook,
+            ];
+
+            // Add pieces based on different patterns
+            for j in 0..5 {
+                let idx = (i * 7 + j * 13) % 81;
+                let file = idx % 9;
+                let rank = idx / 9;
+
+                let file_char = (b'9' - file as u8) as char;
+                let rank_char = (b'a' + rank as u8) as char;
+                if let Ok(sq) = parse_usi_square(&format!("{file_char}{rank_char}")) {
+                    // Check if square is not occupied by king
+                    if pos.piece_at(sq).is_none() {
+                        let piece_type = piece_types[(i + j) % piece_types.len()];
+                        let color = if (i + j) % 2 == 0 {
+                            Color::Black
+                        } else {
+                            Color::White
+                        };
+                        pos.board.put_piece(sq, Piece::new(piece_type, color));
+                    }
+                }
+            }
+
+            // Vary hand pieces with more diversity
+            let hand_piece_types = [
+                PieceType::Pawn,
+                PieceType::Lance,
+                PieceType::Knight,
+                PieceType::Silver,
+                PieceType::Gold,
+                PieceType::Bishop,
+                PieceType::Rook,
+            ];
+
+            for (idx, &piece_type) in hand_piece_types.iter().enumerate() {
+                if let Some(hand_idx) = piece_type.hand_index() {
+                    pos.hands[Color::Black as usize][hand_idx] = ((i + idx * 7) % 5) as u8;
+                    pos.hands[Color::White as usize][hand_idx] = ((i + idx * 11) % 4) as u8;
+                }
+            }
+
+            // Vary side to move
+            pos.side_to_move = if i % 2 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            // Vary ply for additional diversity
+            pos.ply = (i % 200) as u16;
+
+            pos.hash = pos.compute_hash();
+            pos.zobrist_hash = pos.hash;
+            let hash = pos.zobrist_hash;
+            hash_values.push(hash);
+
+            // Count bits
+            for bit in 0..64 {
+                if (hash >> bit) & 1 == 1 {
+                    bit_counts[bit] += 1;
+                }
+            }
+        }
+
+        // Check bit distribution (should be close to 50%)
+        for (bit, count) in bit_counts.iter().enumerate() {
+            let ratio = *count as f64 / 1000.0;
+            assert!(
+                (0.35..=0.65).contains(&ratio), // Slightly relaxed bounds
+                "Bit {bit} has poor distribution: {:.2}%",
+                ratio * 100.0
+            );
+        }
+
+        // Check for collisions
+        let unique_count = hash_values.iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(unique_count, hash_values.len(), "Hash collisions detected!");
+
+        // Check hash value distribution across buckets
+        let mut buckets = HashMap::new();
+        let bucket_size = u64::MAX / 16;
+
+        for &hash in &hash_values {
+            let bucket = hash / bucket_size;
+            *buckets.entry(bucket).or_insert(0) += 1;
+        }
+
+        // Each bucket should have roughly 1000/16 ≈ 62 values
+        let expected_per_bucket = 1000.0 / 16.0;
+        for (bucket, count) in buckets {
+            let ratio = count as f64 / expected_per_bucket;
+            assert!(
+                (0.3..=1.7).contains(&ratio),  // Slightly relaxed bounds
+                "Bucket {bucket} has poor distribution: {count} values (expected ~{expected_per_bucket})"
+            );
+        }
+    }
 }
