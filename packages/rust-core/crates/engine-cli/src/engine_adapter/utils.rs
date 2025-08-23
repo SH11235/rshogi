@@ -15,9 +15,8 @@ use crate::engine_adapter::{EngineAdapter, EngineError, ExtendedSearchResult};
 use crate::usi::{output::SearchInfo, GameResult};
 use crate::utils::to_usi_score;
 
-// Type alias for engine callback
-type EngineInfoCallback =
-    Arc<dyn Fn(u8, i32, u64, std::time::Duration, &[engine_core::shogi::Move]) + Send + Sync>;
+// Use engine-core's canonical callback type
+use engine_core::search::{InfoCallback, NodeType};
 
 impl EngineAdapter {
     /// Handle game over notification
@@ -200,7 +199,6 @@ impl EngineAdapter {
             seldepth: result.stats.seldepth,
             score: result.score,
             pv,
-            node_type: result.node_type,
             stop_info: result.stop_info,
         })
     }
@@ -231,9 +229,7 @@ impl EngineAdapter {
     }
 
     /// Create info callback wrapper for engine search
-    fn create_info_callback(
-        info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
-    ) -> EngineInfoCallback {
+    fn create_info_callback(info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>) -> InfoCallback {
         let info_callback_arc = Arc::new(info_callback);
 
         Arc::new(
@@ -241,7 +237,8 @@ impl EngineAdapter {
                   score: i32,
                   nodes: u64,
                   elapsed: std::time::Duration,
-                  pv: &[engine_core::shogi::Move]| {
+                  pv: &[engine_core::shogi::Move],
+                  node_type: NodeType| {
                 let pv_str: Vec<String> = pv.iter().map(engine_core::usi::move_to_usi).collect();
                 let score_enum = to_usi_score(score);
 
@@ -251,6 +248,8 @@ impl EngineAdapter {
                     nodes: Some(nodes),
                     pv: pv_str,
                     score: Some(score_enum),
+                    // Map node type into USI score bound for output
+                    score_bound: Some(node_type.into()),
                     ..Default::default()
                 };
                 (*info_callback_arc)(info);

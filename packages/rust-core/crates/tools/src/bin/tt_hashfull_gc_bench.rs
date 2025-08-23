@@ -1,6 +1,9 @@
 //! Comprehensive benchmark for Transposition Table with Hashfull Control and GC
 
-use engine_core::search::tt::{NodeType, TTEntryParams, TranspositionTable};
+use engine_core::search::{
+    tt::{TTEntryParams, TranspositionTable},
+    NodeType,
+};
 use engine_core::shogi::Position;
 use rand::{RngCore, SeedableRng};
 use std::time::Instant;

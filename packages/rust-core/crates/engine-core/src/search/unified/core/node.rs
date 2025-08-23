@@ -4,8 +4,8 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         constants::SEARCH_INF,
-        tt::NodeType,
         unified::{tt_operations::TTOperations, UnifiedSearcher},
+        NodeType,
     },
     shogi::{PieceType, Position, TriedMoves},
 };

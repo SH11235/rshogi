@@ -1,9 +1,7 @@
 //! Trait for transposition tables to allow using both regular and sharded implementations
 
-use super::tt::{
-    entry::{NodeType, TTEntry, TTEntryParams},
-    TranspositionTable,
-};
+use super::tt::{entry::TTEntry, entry::TTEntryParams, TranspositionTable};
+use crate::search::NodeType;
 use crate::shogi::Move;
 
 /// Common interface for transposition tables

@@ -257,7 +257,6 @@ fn test_session_bestmove_validation() {
         seldepth: None,
         score: Score::Cp(100),
         pv: SmallVec::from_vec(vec![best_move]),
-        node_type: NodeType::Exact,
     };
     session.committed_best = Some(committed);
 
@@ -382,7 +381,6 @@ fn test_ponder_behavior() {
         seldepth: Some(12),
         score: Score::Cp(50),
         pv: SmallVec::from_vec(vec![best_move, ponder_move]),
-        node_type: NodeType::Exact,
     };
     session.committed_best = Some(committed);
 

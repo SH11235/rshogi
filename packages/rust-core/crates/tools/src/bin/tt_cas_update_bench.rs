@@ -4,7 +4,7 @@
 //! the same TT entries with increasing depths, maximizing CAS operations
 //! in the update path.
 
-use engine_core::search::tt::{NodeType, TranspositionTable};
+use engine_core::search::{tt::TranspositionTable, NodeType};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

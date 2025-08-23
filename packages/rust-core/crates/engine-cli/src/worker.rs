@@ -551,7 +551,6 @@ pub fn search_worker(
                             info.depth.unwrap_or(0) as u8,
                             raw_score,
                             pv_moves,
-                            engine_core::search::NodeType::Exact,
                         );
                         session_guard.commit_iteration();
 
@@ -598,7 +597,6 @@ pub fn search_worker(
                 extended_result.seldepth,
                 extended_result.score,
                 extended_result.pv, // Original Move objects with piece types preserved
-                extended_result.node_type,
             );
             session.commit_iteration();
             // Clean up ponder state if needed
@@ -889,13 +887,7 @@ fn create_emergency_session(
     let depth = 1;
     let score = if is_resign { -30000 } else { 0 }; // Large negative score for resign
 
-    session.update_current_best_with_seldepth(
-        depth,
-        None,
-        score,
-        moves,
-        engine_core::search::NodeType::Exact,
-    );
+    session.update_current_best_with_seldepth(depth, None, score, moves);
     session.commit_iteration();
 
     session

@@ -177,7 +177,7 @@ fn bench_tt_performance(c: &mut Criterion) {
                 // Pre-fill TT
                 for i in 0..1000 {
                     let test_hash = hash.wrapping_add(i);
-                    tt.store(test_hash, None, 100, 0, 5, engine_core::search::tt::NodeType::Exact);
+                    tt.store(test_hash, None, 100, 0, 5, engine_core::search::NodeType::Exact);
                 }
 
                 b.iter(|| {
@@ -201,7 +201,7 @@ fn bench_tt_performance(c: &mut Criterion) {
                 // Pre-fill TT
                 for i in 0..1000 {
                     let test_hash = hash.wrapping_add(i);
-                    tt.store(test_hash, None, 100, 0, 5, engine_core::search::tt::NodeType::Exact);
+                    tt.store(test_hash, None, 100, 0, 5, engine_core::search::NodeType::Exact);
                 }
 
                 b.iter(|| {

@@ -34,9 +34,10 @@ use utils::*;
 // No need to import entry module since it's already defined
 
 // Re-export main types for backward compatibility
+use crate::search::NodeType;
 pub use bucket::BucketSize;
 pub use constants::{AGE_MASK, GENERATION_CYCLE};
-pub use entry::{NodeType, TTEntry, TTEntryParams};
+pub use entry::{TTEntry, TTEntryParams};
 #[cfg(feature = "tt_metrics")]
 pub use metrics::DetailedTTMetrics;
 

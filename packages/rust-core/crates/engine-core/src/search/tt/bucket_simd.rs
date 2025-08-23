@@ -1,7 +1,8 @@
 //! SIMD-optimized bucket operations for transposition table
 
 use super::constants::BUCKET_SIZE;
-use super::entry::{NodeType, TTEntry};
+use super::entry::TTEntry;
+use crate::search::NodeType;
 use crate::util::sync_compat::{AtomicU64, Ordering};
 
 /// SIMD-optimized probe implementation for TTBucket

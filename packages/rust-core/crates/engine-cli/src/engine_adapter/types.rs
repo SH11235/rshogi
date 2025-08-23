@@ -3,7 +3,7 @@
 //! This module contains common types used throughout the engine adapter,
 //! including search results, ponder state, and callback function types.
 
-use engine_core::search::types::{NodeType, StopInfo};
+use engine_core::search::types::StopInfo;
 use engine_core::shogi::Move;
 
 /// Extended search result containing all necessary information
@@ -14,7 +14,6 @@ pub struct ExtendedSearchResult {
     pub seldepth: Option<u8>,
     pub score: i32,
     pub pv: Vec<Move>,
-    pub node_type: NodeType,
     pub stop_info: Option<StopInfo>,
 }
 

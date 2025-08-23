@@ -1,7 +1,7 @@
 //! Benchmark for TTBucket SIMD optimizations
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use engine_core::search::tt::NodeType;
+use engine_core::search::NodeType;
 use engine_core::search::TranspositionTable;
 use rand::Rng;
 use std::hint::black_box;

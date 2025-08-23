@@ -145,10 +145,10 @@ where
                     );
                     match tt_entry.node_type() {
                         // EXACT entries contain the true score for this position
-                        crate::search::tt::NodeType::Exact => return adjusted_score,
+                        crate::search::NodeType::Exact => return adjusted_score,
                         // LOWERBOUND means the true score is >= tt_score
                         // We can use it for cutoff if it's >= beta
-                        crate::search::tt::NodeType::LowerBound => {
+                        crate::search::NodeType::LowerBound => {
                             if adjusted_score >= beta {
                                 return adjusted_score;
                             }
@@ -157,7 +157,7 @@ where
                         }
                         // UPPERBOUND means the true score is <= tt_score
                         // We can use it for cutoff if it's <= alpha
-                        crate::search::tt::NodeType::UpperBound => {
+                        crate::search::NodeType::UpperBound => {
                             if adjusted_score <= alpha {
                                 return adjusted_score;
                             }
