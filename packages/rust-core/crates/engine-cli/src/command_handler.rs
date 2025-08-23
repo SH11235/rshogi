@@ -767,7 +767,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     // Update BestmoveEmitter with accurate start time if it's for current search
                     if search_id == *ctx.current_search_id {
                         if let Some(ref mut emitter) = ctx.current_bestmove_emitter {
-                            *emitter = BestmoveEmitter::with_start_time(search_id, start_time);
+                            emitter.set_start_time(start_time);
                             log::debug!("Updated BestmoveEmitter with worker start time in stop handler for search {search_id}");
                         }
                     } else {

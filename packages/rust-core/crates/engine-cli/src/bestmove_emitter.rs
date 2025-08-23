@@ -50,15 +50,6 @@ impl BestmoveEmitter {
         }
     }
 
-    /// Create a new bestmove emitter with a specific start time
-    pub fn with_start_time(search_id: u64, start_time: Instant) -> Self {
-        Self {
-            sent: AtomicBool::new(false),
-            search_id,
-            start_time,
-        }
-    }
-
     /// Emit bestmove with unified logging
     pub fn emit(
         &self,
@@ -167,6 +158,11 @@ impl BestmoveEmitter {
                 Err(anyhow::anyhow!("Failed to send bestmove: {}", e))
             }
         }
+    }
+
+    /// Set start time
+    pub fn set_start_time(&mut self, start_time: Instant) {
+        self.start_time = start_time;
     }
 
     /// Check if bestmove has been sent

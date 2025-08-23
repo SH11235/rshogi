@@ -148,7 +148,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         // Update BestmoveEmitter with accurate start time
                         if search_id == current_search_id {
                             if let Some(ref mut emitter) = current_bestmove_emitter {
-                                *emitter = BestmoveEmitter::with_start_time(search_id, start_time);
+                                emitter.set_start_time(start_time);
                                 log::debug!("Updated BestmoveEmitter with worker start time for search {search_id}");
                             }
                         } else {
