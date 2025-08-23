@@ -11,6 +11,7 @@ pub struct ExtendedSearchResult {
     pub best_move: String,
     pub ponder_move: Option<String>,
     pub depth: u8,
+    pub seldepth: Option<u8>,
     pub score: i32,
     pub pv: Vec<Move>,
     pub node_type: NodeType,

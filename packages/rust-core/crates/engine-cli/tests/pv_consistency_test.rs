@@ -18,6 +18,7 @@ fn test_extended_search_result_pv_consistency() {
         best_move: "7g7f".to_string(),
         ponder_move: Some("3c3d".to_string()),
         depth: 10,
+        seldepth: Some(15),
         score: 100,
         pv: pv.clone(),
         node_type: NodeType::Exact,

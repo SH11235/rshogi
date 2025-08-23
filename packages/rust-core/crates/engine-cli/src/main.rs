@@ -144,6 +144,17 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                     Ok(WorkerMessage::Info(info)) => {
                         send_response(UsiResponse::Info(info))?;
                     }
+                    Ok(WorkerMessage::SearchStarted { search_id, start_time }) => {
+                        // Update BestmoveEmitter with accurate start time
+                        if search_id == current_search_id {
+                            if let Some(ref mut emitter) = current_bestmove_emitter {
+                                *emitter = BestmoveEmitter::with_start_time(search_id, start_time);
+                                log::debug!("Updated BestmoveEmitter with worker start time for search {search_id}");
+                            }
+                        } else {
+                            log::trace!("Ignoring SearchStarted from old search: {search_id} (current: {current_search_id})");
+                        }
+                    }
                     Ok(WorkerMessage::IterationComplete { session, search_id }) => {
                         // Update session if it's for current search
                         if search_id == current_search_id {
@@ -193,13 +204,16 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                                         hard_timeout: false,
                                                     });
 
+                                                    // Get seldepth from session
+                                                    let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
+
                                                     // Emit bestmove with metadata
                                                     let meta = BestmoveMeta {
                                                         from: BestmoveSource::Session,
                                                         stop_info: final_stop_info,
                                                         stats: BestmoveStats {
                                                             depth,
-                                                            seldepth: None, // TODO: Get from session if available
+                                                            seldepth,
                                                             score: score_str,
                                                             nodes,
                                                             nps,

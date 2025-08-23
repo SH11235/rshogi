@@ -26,6 +26,30 @@ fn create_bestmove_meta(
     nodes: u64,
     hard_timeout: bool,
 ) -> BestmoveMeta {
+    create_bestmove_meta_with_seldepth(
+        from,
+        reason,
+        elapsed_ms,
+        depth,
+        None,
+        score,
+        nodes,
+        hard_timeout,
+    )
+}
+
+/// Helper to construct BestmoveMeta with seldepth
+#[allow(clippy::too_many_arguments)]
+fn create_bestmove_meta_with_seldepth(
+    from: BestmoveSource,
+    reason: TerminationReason,
+    elapsed_ms: u64,
+    depth: u8,
+    seldepth: Option<u8>,
+    score: Option<String>,
+    nodes: u64,
+    hard_timeout: bool,
+) -> BestmoveMeta {
     BestmoveMeta {
         from,
         stop_info: StopInfo {
@@ -37,7 +61,7 @@ fn create_bestmove_meta(
         },
         stats: BestmoveStats {
             depth,
-            seldepth: None,
+            seldepth,
             score: score.unwrap_or_else(|| "unknown".to_string()),
             nodes,
             nps: if elapsed_ms > 0 {
@@ -362,11 +386,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             crate::search_session::Score::Mate(mate) => format!("mate {mate}"),
                         });
 
-                        let meta = create_bestmove_meta(
+                        let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
+
+                        let meta = create_bestmove_meta_with_seldepth(
                             BestmoveSource::SessionOnStop,
                             TerminationReason::UserStop,
                             0, // TODO: Get actual elapsed time
                             depth,
+                            seldepth,
                             score_str,
                             0, // TODO: Get actual node count
                             false,
@@ -584,11 +611,17 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                     }
                                                 });
 
-                                            let meta = create_bestmove_meta(
+                                            let seldepth = session
+                                                .committed_best
+                                                .as_ref()
+                                                .and_then(|b| b.seldepth);
+
+                                            let meta = create_bestmove_meta_with_seldepth(
                                                 BestmoveSource::SessionInSearchFinished,
                                                 TerminationReason::UserStop,
                                                 elapsed.as_millis() as u64,
                                                 depth,
+                                                seldepth,
                                                 score_str,
                                                 0, // TODO: Get actual node count
                                                 false,
@@ -725,6 +758,20 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             }
                         }
                         break;
+                    }
+                }
+                Ok(WorkerMessage::SearchStarted {
+                    search_id,
+                    start_time,
+                }) => {
+                    // Update BestmoveEmitter with accurate start time if it's for current search
+                    if search_id == *ctx.current_search_id {
+                        if let Some(ref mut emitter) = ctx.current_bestmove_emitter {
+                            *emitter = BestmoveEmitter::with_start_time(search_id, start_time);
+                            log::debug!("Updated BestmoveEmitter with worker start time in stop handler for search {search_id}");
+                        }
+                    } else {
+                        log::trace!("Ignoring SearchStarted from old search in stop handler: {search_id} (current: {})", *ctx.current_search_id);
                     }
                 }
                 _ => {
