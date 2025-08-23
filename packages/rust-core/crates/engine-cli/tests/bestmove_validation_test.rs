@@ -2,13 +2,17 @@
 
 // Import EngineAdapter from the parent crate's internal modules
 // Since we're in the tests directory, we need to use the full path
-use engine_cli::engine_adapter::EngineAdapter;
+use engine_cli::{
+    engine_adapter::EngineAdapter,
+    search_session::{CommittedBest, Score, SearchSession},
+};
+use engine_core::usi::parse_usi_move;
+use smallvec::SmallVec;
 
 // Additional imports for new tests
 mod to_usi_score_tests {
-    use engine_cli::usi::output::Score;
-    use engine_cli::utils::to_usi_score;
-    use engine_core::search::constants::{MATE_SCORE, MAX_PLY};
+    use engine_cli::{usi::output::Score, utils::to_usi_score};
+    use engine_core::search::{MATE_SCORE, MAX_PLY};
 
     #[test]
     fn test_to_usi_score_mate_edges() {
@@ -234,9 +238,6 @@ fn test_partial_result_validation() {
 #[test]
 fn test_session_bestmove_validation() {
     // Test that session-based bestmove validation works correctly
-    use engine_cli::search_session::{CommittedBest, Score, SearchSession};
-    use engine_core::usi::parse_usi_move;
-    use smallvec::SmallVec;
 
     let mut adapter = EngineAdapter::new();
     adapter.initialize().unwrap();
@@ -306,7 +307,6 @@ fn test_legal_move_drop_disambiguation() {
 #[test]
 fn test_position_mismatch_detection() {
     // Test that position mismatches are detected
-    use engine_cli::search_session::SearchSession;
 
     let mut adapter = EngineAdapter::new();
     adapter.initialize().unwrap();
@@ -352,9 +352,6 @@ fn test_fallback_move_strategies() {
 fn test_ponder_behavior() {
     // Test that ponder searches don't send bestmove immediately
     // This is more of an integration test but we can test the validation part
-    use engine_cli::search_session::{CommittedBest, Score, SearchSession};
-    use engine_core::usi::parse_usi_move;
-    use smallvec::SmallVec;
 
     let mut adapter = EngineAdapter::new();
     adapter.initialize().unwrap();
