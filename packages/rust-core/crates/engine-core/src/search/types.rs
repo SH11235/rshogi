@@ -44,6 +44,14 @@ pub struct SearchStats {
     pub qs_check_drops: Option<u64>,
 }
 
+impl SearchStats {
+    /// Helper function to increment an optional counter
+    #[inline]
+    pub fn bump(opt: &mut Option<u64>, by: u64) {
+        *opt = Some(opt.unwrap_or(0) + by);
+    }
+}
+
 /// Search result
 #[derive(Clone, Debug)]
 pub struct SearchResult {

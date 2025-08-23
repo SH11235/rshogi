@@ -46,6 +46,13 @@ const CHECK_DROP_NEAR_KING_DIST: u8 = 2; // Manhattan distance limit for drops n
 /// adjusted using `adjust_mate_score_for_tt` when storing and
 /// `adjust_mate_score_from_tt` when retrieving, similar to the implementation
 /// in `alpha_beta` and `search_node` functions.
+///
+/// # Token Return Policy
+/// For qnodes budget tracking, tokens are only returned at function entry when
+/// the budget is exceeded. Tokens are NOT returned during the search loops to
+/// provide more accurate statistics about nodes actually searched. This policy
+/// ensures that the node count reflects actual work performed rather than
+/// prematurely aborted attempts.
 pub fn quiescence_search<E, const USE_TT: bool, const USE_PRUNING: bool>(
     searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
     pos: &mut Position,
@@ -428,11 +435,19 @@ where
                 .copied()
                 .filter(|&mv| mv.is_drop())
                 // Proximity filter: only drops near the king (cost reduction)
+                // Exception: sliders (Rook, Bishop, Lance) can check from distance
                 .filter(|&mv| {
+                    use crate::shogi::PieceType;
                     let to = mv.to();
                     let dx = ksq.file().abs_diff(to.file());
                     let dy = ksq.rank().abs_diff(to.rank());
-                    dx + dy <= CHECK_DROP_NEAR_KING_DIST
+
+                    // drop_piece_type() returns PieceType directly for drop moves
+                    match mv.drop_piece_type() {
+                        PieceType::Rook | PieceType::Bishop => true, // Always consider sliders
+                        PieceType::Lance => dy <= CHECK_DROP_NEAR_KING_DIST + 1, // Slightly relaxed for Lance
+                        _ => dx + dy <= CHECK_DROP_NEAR_KING_DIST, // Near king only for others
+                    }
                 })
                 // Final check: actually gives check (accurate)
                 .filter(|&mv| pos.gives_check(mv))
@@ -453,11 +468,7 @@ where
                 }
 
                 // Increment qs_check_drops counter
-                if let Some(ref mut counter) = searcher.stats.qs_check_drops {
-                    *counter += 1;
-                } else {
-                    searcher.stats.qs_check_drops = Some(1);
-                }
+                crate::search::SearchStats::bump(&mut searcher.stats.qs_check_drops, 1);
                 // Budget (qnodes) strict enforcement
                 if let Some(limit) = qlimit {
                     let exceeded = if let Some(ref counter) = qnodes_counter {
@@ -516,7 +527,7 @@ fn score_check_drop_for_ordering(pos: &Position, mv: crate::shogi::Move) -> i32 
     let to = mv.to();
     let dx = (ksq.file() as i32 - to.file() as i32).abs();
     let dy = (ksq.rank() as i32 - to.rank() as i32).abs();
-    let prox = 10 - (dx + dy); // Closer is better
+    let prox = (10 - (dx + dy)).max(0); // Closer is better, clamped to 0
     let pt = mv.drop_piece_type();
     // Slightly favor attacking pieces (not too much to avoid instability)
     let atk_hint = match pt {
