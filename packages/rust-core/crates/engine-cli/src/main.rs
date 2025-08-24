@@ -435,13 +435,18 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     }
                 } else {
                     log::debug!("Ponder search finished, not sending bestmove");
+                    // Finalize ponder search to ensure proper cleanup
+                    // (normally ponder ends via stop/ponderhit, but handle natural termination)
+                    ctx.finalize_search("PonderFinished");
                 }
             } else if search_id == *ctx.current_search_id
                 && *ctx.search_state == SearchState::StopRequested
             {
                 // SearchFinished arrived after stop command already handled bestmove
+                // State transition timeline: Searching → StopRequested (stop handler sends bestmove) → Idle
+                // This SearchFinished message arrives during StopRequested state, after bestmove was already sent
                 log::debug!("SearchFinished for search {} ignored (state=StopRequested, bestmove already sent by stop handler)", search_id);
-                // Still finalize to clean up state
+                // Still finalize to clean up state and transition to Idle
                 ctx.finalize_search("SearchFinished after stop");
             }
         }

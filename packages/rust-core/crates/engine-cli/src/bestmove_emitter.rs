@@ -107,6 +107,12 @@ impl BestmoveEmitter {
                     meta.stats.nps
                 );
 
+                // Debug-only observability info
+                #[cfg(debug_assertions)]
+                {
+                    let _ = send_info_string(format!("Emitter: sent={}", self.search_id));
+                }
+
                 // Send unified tab-separated key=value log (single line for machine readability)
                 // Note: The score field contains spaces (e.g., "cp 150", "mate 7") following USI protocol format.
                 // External parsers should use tab as the delimiter, not spaces.

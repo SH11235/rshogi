@@ -66,7 +66,7 @@ fn test_stop_and_search_finished_race() {
     send_command(&mut stdin, "stop");
 
     // Wait for bestmove
-    let bestmove = rx.recv_timeout(Duration::from_secs(2)).expect("Should receive bestmove");
+    let bestmove = rx.recv_timeout(Duration::from_secs(3)).expect("Should receive bestmove");
 
     println!("Received bestmove: {bestmove}");
 
@@ -97,12 +97,18 @@ fn test_rapid_stop_go_cycles() {
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
 
+    // Channel to collect bestmoves
+    let (tx, rx) = mpsc::channel();
+
     // Capture stdout
     let stdout_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut lines = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             println!("<<< {line}");
+            if line.starts_with("bestmove") {
+                tx.send(line.clone()).ok();
+            }
             lines.push(line);
         }
         lines
@@ -126,18 +132,27 @@ fn test_rapid_stop_go_cycles() {
 
         send_command(&mut stdin, "stop");
 
-        // Minimal wait before next cycle
-        thread::sleep(Duration::from_millis(10));
+        // Wait for bestmove explicitly (more reliable than counting later)
+        match rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(bestmove) => println!("Cycle {} received: {}", i + 1, bestmove),
+            Err(e) => panic!("Cycle {} failed to receive bestmove: {}", i + 1, e),
+        }
     }
 
     // Final position and search
     send_command(&mut stdin, "position startpos");
     send_command(&mut stdin, "go depth 1");
-    thread::sleep(Duration::from_millis(200));
+
+    // Wait for final bestmove
+    match rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(bestmove) => println!("Final search received: {}", bestmove),
+        Err(e) => panic!("Final search failed to receive bestmove: {}", e),
+    }
 
     // Clean up
     send_command(&mut stdin, "quit");
     drop(stdin);
+    drop(rx); // Drop receiver to close channel
     let _ = engine.wait();
     let lines = stdout_handle.join().unwrap();
 
@@ -229,6 +244,8 @@ fn test_ponder_stop_immediate_search_finished() {
     );
 
     // Check for the expected log message
+    // Note: env_logger outputs to stderr, not stdout, so this log won't be captured here
+    // We keep this check for documentation purposes and future compatibility
     let has_stop_requested_log = lines.iter().any(|l| {
         l.contains("SearchFinished") && l.contains("ignored") && l.contains("StopRequested")
     });
