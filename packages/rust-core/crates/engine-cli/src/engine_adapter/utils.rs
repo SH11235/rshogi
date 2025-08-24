@@ -111,14 +111,8 @@ impl EngineAdapter {
         if let Some(ref info_cb) = limits.info_callback {
             info!("Sending initial depth 1 info as heartbeat");
             // Send immediate depth 1 with 0 nodes to indicate search is starting
-            let _initial_info = SearchInfo {
-                depth: Some(1),
-                time: Some(1),
-                nodes: Some(0),
-                string: Some("search starting".to_string()),
-                ..Default::default()
-            };
-            // Call the info callback through the Arc
+            // We use the engine callback directly (not SearchInfo) for performance
+            // pv=[] and NodeType::Exact are used as placeholders for the initial heartbeat
             let engine_callback = Arc::clone(info_cb);
             engine_callback(1, 0, 0, std::time::Duration::from_millis(1), &[], NodeType::Exact);
         }
