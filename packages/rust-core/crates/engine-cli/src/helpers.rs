@@ -55,7 +55,12 @@ pub fn generate_fallback_move(
                 Some(move_str)
             }
             Err(e) => {
-                log::warn!("Quick search failed: {e}");
+                // Log specific reason for failure
+                if e.to_string().contains("Engine not available") {
+                    log::info!("Quick search skipped: engine not available (likely held by timed-out worker)");
+                } else {
+                    log::warn!("Quick search failed: {e}");
+                }
                 None
             }
         }
@@ -159,13 +164,13 @@ pub fn wait_for_search_completion(
         }
 
         // Always reset stop flag after completion
-        stop_flag.store(false, Ordering::SeqCst);
+        stop_flag.store(false, Ordering::Release);
         log::debug!("wait_for_search_completion: reset stop_flag to false after stopping search");
     } else {
         log::debug!("wait_for_search_completion: no search in progress");
         // Ensure stop flag is false even if no search was running
-        let was_true = stop_flag.load(Ordering::SeqCst);
-        stop_flag.store(false, Ordering::SeqCst);
+        let was_true = stop_flag.load(Ordering::Acquire);
+        stop_flag.store(false, Ordering::Release);
         if was_true {
             log::warn!("wait_for_search_completion: stop_flag was true even though no search was running, reset to false");
         }

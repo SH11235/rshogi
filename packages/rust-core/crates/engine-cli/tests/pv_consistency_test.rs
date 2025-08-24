@@ -21,6 +21,10 @@ fn test_extended_search_result_pv_consistency() {
         score: 100,
         pv: pv.clone(),
         stop_info: None,
+        pv_owner_mismatches: None,
+        pv_owner_checks: None,
+        pv_trim_cuts: None,
+        pv_trim_checks: None,
     };
 
     // Verify consistency

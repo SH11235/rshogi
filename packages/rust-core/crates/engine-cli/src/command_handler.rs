@@ -146,6 +146,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 ctx.engine,
             )?;
 
+            // Clear per-search stop flag after search completion
+            *ctx.current_stop_flag = None;
+
             let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.set_position(startpos, sfen.as_deref(), &moves) {
                 Ok(()) => {
@@ -235,6 +238,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 ctx.engine,
             )?;
 
+            // Clear per-search stop flag after search completion
+            *ctx.current_stop_flag = None;
+
             // Reset engine state for new game
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.new_game();
@@ -270,11 +276,25 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     // Check engine availability before proceeding
     {
-        let adapter = lock_or_recover_adapter(ctx.engine);
+        let mut adapter = lock_or_recover_adapter(ctx.engine);
         let engine_available = adapter.is_engine_available();
         log::info!("Engine availability after wait: {engine_available}");
         if !engine_available {
             log::error!("Engine is not available after wait_for_search_completion");
+            // Force reset state to recover engine if it's stuck in another thread
+            log::warn!("Attempting to force reset engine state for recovery");
+            adapter.force_reset_state();
+
+            // Check again after reset
+            let engine_available_after_reset = adapter.is_engine_available();
+            if !engine_available_after_reset {
+                log::error!(
+                    "Engine still not available after force reset - falling back to emergency move"
+                );
+                // Continue anyway - fallback mechanisms will handle this
+            } else {
+                log::info!("Engine recovered after force reset");
+            }
         }
     }
 
@@ -403,7 +423,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         // Signal stop to worker thread using per-search flag
         *ctx.search_state = SearchState::StopRequested;
         if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::SeqCst);
+            stop_flag.store(true, Ordering::Release);
         }
 
         // Keep state as StopRequested and ponder flag as true
@@ -417,15 +437,15 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     if ctx.search_state.is_searching() {
         *ctx.search_state = SearchState::StopRequested;
         if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::SeqCst);
+            stop_flag.store(true, Ordering::Release);
             log::info!(
                 "Per-search stop flag set to true for search_id={}, search_state = StopRequested",
                 *ctx.current_search_id
             );
 
             // Debug: Verify stop flag was actually set
-            let stop_value = stop_flag.load(Ordering::SeqCst);
-            log::debug!("Stop flag verification: {stop_value}");
+            let stop_value = stop_flag.load(Ordering::Acquire);
+            log::debug!("Stop flag verification (Acquire read): {stop_value}");
         } else {
             log::warn!("No current stop flag available for search_id={}", *ctx.current_search_id);
         }
