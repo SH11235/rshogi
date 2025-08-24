@@ -114,6 +114,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         if matches!(cmd, UsiCommand::Quit) {
                             // Handle quit
                             stop_flag.store(true, Ordering::Release);
+                            // Also set per-search stop flag if available
+                            if let Some(ref search_stop_flag) = current_stop_flag {
+                                search_stop_flag.store(true, Ordering::Release);
+                            }
                             break;
                         }
 
