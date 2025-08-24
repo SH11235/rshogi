@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 
 /// Messages from worker thread to main thread
 pub enum WorkerMessage {
-    Info(SearchInfo),
+    Info {
+        info: SearchInfo,
+        search_id: u64,
+    },
 
     /// Search has started
     SearchStarted {
@@ -207,7 +210,10 @@ pub fn search_worker(
     let last_partial_depth = Arc::new(Mutex::new(0u8));
     let info_callback = move |info: SearchInfo| {
         // Always send the info message
-        let _ = tx_info.send(WorkerMessage::Info(info.clone()));
+        let _ = tx_info.send(WorkerMessage::Info {
+            info: info.clone(),
+            search_id,
+        });
 
         // Send partial result at certain depth intervals
         if let (Some(depth), Some(score), Some(pv)) =
@@ -629,7 +635,10 @@ pub fn search_worker(
                         )),
                         ..Default::default()
                     };
-                    let _ = tx.send(WorkerMessage::Info(pv_owner_info));
+                    let _ = tx.send(WorkerMessage::Info {
+                        info: pv_owner_info,
+                        search_id,
+                    });
                 }
             }
 
@@ -645,7 +654,10 @@ pub fn search_worker(
                         )),
                         ..Default::default()
                     };
-                    let _ = tx.send(WorkerMessage::Info(pv_trim_info));
+                    let _ = tx.send(WorkerMessage::Info {
+                        info: pv_trim_info,
+                        search_id,
+                    });
                 }
             }
 
@@ -976,9 +988,9 @@ pub fn wait_for_worker_with_timeout(
                             log::trace!("Ignoring duplicate Finished message #{finished_count} (from_guard: {from_guard})");
                         }
                     }
-                    Ok(WorkerMessage::Info(info)) => {
+                    Ok(WorkerMessage::Info { info, search_id }) => {
                         // Info messages during shutdown can be ignored
-                        log::trace!("Received info during shutdown: {info:?}");
+                        log::trace!("Received info during shutdown (search_id={}): {info:?}", search_id);
                     }
                     // WorkerMessage::BestMove has been completely removed.
                     // All bestmove emissions now go through the session-based approach
