@@ -16,21 +16,6 @@ use std::time::{Duration, Instant};
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
 use engine_core::search::types::{StopInfo, TerminationReason};
 
-/// Get message kind and search_id for logging
-fn message_kind_and_id(msg: &WorkerMessage) -> (&'static str, Option<u64>) {
-    match msg {
-        WorkerMessage::Info { search_id, .. } => ("Info", Some(*search_id)),
-        WorkerMessage::SearchStarted { search_id, .. } => ("SearchStarted", Some(*search_id)),
-        WorkerMessage::IterationComplete { search_id, .. } => {
-            ("IterationComplete", Some(*search_id))
-        }
-        WorkerMessage::PartialResult { search_id, .. } => ("PartialResult", Some(*search_id)),
-        WorkerMessage::SearchFinished { search_id, .. } => ("SearchFinished", Some(*search_id)),
-        WorkerMessage::Finished { search_id, .. } => ("Finished", Some(*search_id)),
-        WorkerMessage::Error { search_id, .. } => ("Error", Some(*search_id)),
-    }
-}
-
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
     pub engine: &'a Arc<Mutex<EngineAdapter>>,
@@ -107,9 +92,6 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 ctx.worker_rx,
                 ctx.engine,
             )?;
-
-            // Clear per-search stop flag after search completion
-            *ctx.current_stop_flag = None;
 
             // Clean up any remaining search state
             ctx.finalize_search("Position");
@@ -202,9 +184,6 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 ctx.worker_rx,
                 ctx.engine,
             )?;
-
-            // Clear per-search stop flag after search completion
-            *ctx.current_stop_flag = None;
 
             // Clean up any remaining search state
             ctx.finalize_search("UsiNewGame");
@@ -368,97 +347,6 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         ..Default::default()
     }))?;
     log::debug!("Sent initial info depth 1 heartbeat to GUI");
-
-    // Try to immediately consume SearchStarted message if available
-    // This ensures BestmoveEmitter gets accurate start time in normal flow
-    let mut stash = Vec::new();
-    let mut found_search_started = false;
-
-    // Drain messages until we find SearchStarted or run out
-    while let Ok(msg) = ctx.worker_rx.try_recv() {
-        match msg {
-            WorkerMessage::SearchStarted {
-                search_id: msg_search_id,
-                start_time,
-            } if msg_search_id == search_id => {
-                if let Some(ref mut emitter) = ctx.current_bestmove_emitter {
-                    emitter.set_start_time(start_time);
-                    log::debug!("Consumed SearchStarted and updated BestmoveEmitter start time");
-                }
-                found_search_started = true;
-                break;
-            }
-            WorkerMessage::Info { info: _, search_id } => {
-                // Info messages are harmless to discard during this phase
-                log::trace!(
-                    "Discarded Info message (search_id={}) while looking for SearchStarted",
-                    search_id
-                );
-            }
-            // Critical messages must be preserved with priority
-            msg @ (WorkerMessage::Error { .. }
-            | WorkerMessage::Finished { .. }
-            | WorkerMessage::SearchFinished { .. }) => {
-                let (kind, sid) = message_kind_and_id(&msg);
-                log::info!(
-                    "Found critical {} message (search_id={:?}) during drain - preserving with priority",
-                    kind,
-                    sid
-                );
-                // Insert at the beginning to ensure it's re-queued first
-                stash.insert(0, msg);
-                break;
-            }
-            other => {
-                // Other messages must be preserved
-                stash.push(other);
-                // Break to limit re-queuing to 1 message.
-                // Note: This message will be re-queued at the end of the channel,
-                // potentially reordering it relative to messages sent by the worker thread.
-                break;
-            }
-        }
-    }
-
-    // Re-queue non-Info messages that we collected
-    // Using try_send to avoid potential blocking if channel becomes bounded in the future
-    // Note: Currently using unbounded channel so Full error won't occur in practice,
-    // but keeping the error handling for future bounded channel migration
-    for msg in stash {
-        match ctx.worker_tx.try_send(msg) {
-            Ok(_) => {}
-            Err(e) => {
-                // Capture error type before consuming it
-                let (error_type, is_disconnected) = match &e {
-                    crossbeam_channel::TrySendError::Full(_) => ("channel full", false),
-                    crossbeam_channel::TrySendError::Disconnected(_) => {
-                        ("channel disconnected", true)
-                    }
-                };
-                let msg = e.into_inner();
-                let (kind, sid) = message_kind_and_id(&msg);
-
-                if is_disconnected {
-                    log::error!(
-                        "Dropping {} (search_id={:?}) after SearchStarted drain - {error_type}",
-                        kind,
-                        sid
-                    );
-                } else {
-                    log::warn!(
-                        "Dropping {} (search_id={:?}) after SearchStarted drain - {error_type}",
-                        kind,
-                        sid
-                    );
-                }
-                // Messages are discarded on failure to prevent blocking
-            }
-        }
-    }
-
-    if !found_search_started {
-        log::trace!("SearchStarted not immediately available, will be processed later");
-    }
 
     // Don't block - return immediately
     Ok(())

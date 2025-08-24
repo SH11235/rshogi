@@ -90,7 +90,7 @@ pub fn assert_valid_bestmove(bestmove: &str) {
     let move_str = parts[1];
     assert!(
         move_str != "0000" || move_str == "resign",
-        "Unexpected null move or resign: {bestmove}"
+        "Invalid move in bestmove (null move detected): {bestmove}"
     );
 }
 
