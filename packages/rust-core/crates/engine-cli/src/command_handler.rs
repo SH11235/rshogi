@@ -441,6 +441,20 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                     search_id
                 );
             }
+            // Critical messages must be preserved with priority
+            msg @ (WorkerMessage::Error { .. }
+            | WorkerMessage::Finished { .. }
+            | WorkerMessage::SearchFinished { .. }) => {
+                let (kind, sid) = message_kind_and_id(&msg);
+                log::info!(
+                    "Found critical {} message (search_id={:?}) during drain - preserving with priority",
+                    kind,
+                    sid
+                );
+                // Insert at the beginning to ensure it's re-queued first
+                stash.insert(0, msg);
+                break;
+            }
             other => {
                 // Other messages must be preserved
                 stash.push(other);
@@ -454,17 +468,35 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     // Re-queue non-Info messages that we collected
     // Using try_send to avoid potential blocking if channel becomes bounded in the future
+    // Note: Currently using unbounded channel so Full error won't occur in practice,
+    // but keeping the error handling for future bounded channel migration
     for msg in stash {
         match ctx.worker_tx.try_send(msg) {
             Ok(_) => {}
             Err(e) => {
+                // Capture error type before consuming it
+                let (error_type, is_disconnected) = match &e {
+                    crossbeam_channel::TrySendError::Full(_) => ("channel full", false),
+                    crossbeam_channel::TrySendError::Disconnected(_) => {
+                        ("channel disconnected", true)
+                    }
+                };
                 let msg = e.into_inner();
                 let (kind, sid) = message_kind_and_id(&msg);
-                log::warn!(
-                    "Dropping {} (search_id={:?}) after SearchStarted drain - channel error",
-                    kind,
-                    sid
-                );
+
+                if is_disconnected {
+                    log::error!(
+                        "Dropping {} (search_id={:?}) after SearchStarted drain - {error_type}",
+                        kind,
+                        sid
+                    );
+                } else {
+                    log::warn!(
+                        "Dropping {} (search_id={:?}) after SearchStarted drain - {error_type}",
+                        kind,
+                        sid
+                    );
+                }
                 // Messages are discarded on failure to prevent blocking
             }
         }
@@ -553,16 +585,33 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                         let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
 
-                        let meta = create_bestmove_meta_with_seldepth(
-                            BestmoveSource::SessionOnStop,
-                            TerminationReason::UserStop,
-                            0, // TODO: Get actual elapsed time
-                            depth,
-                            seldepth,
-                            score_str,
-                            0, // TODO: Get actual node count
-                            false,
-                        );
+                        // TODO: Get actual elapsed time and node count
+                        let si = StopInfo {
+                            reason: TerminationReason::UserStop,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: depth,
+                            hard_timeout: false,
+                        };
+
+                        let nodes = si.nodes;
+                        let elapsed_ms = si.elapsed_ms;
+
+                        let meta = BestmoveMeta {
+                            from: BestmoveSource::SessionOnStop,
+                            stop_info: si,
+                            stats: BestmoveStats {
+                                depth,
+                                seldepth,
+                                score: score_str.unwrap_or_else(|| "unknown".to_string()),
+                                nodes,
+                                nps: if elapsed_ms > 0 {
+                                    nodes.saturating_mul(1000) / elapsed_ms
+                                } else {
+                                    0
+                                },
+                            },
+                        };
 
                         emitter.emit(best_move, ponder, meta)?;
                         ctx.finalize_search("SessionOnStop");
