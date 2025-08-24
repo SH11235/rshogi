@@ -97,7 +97,7 @@ fn test_stop_response_time() {
     send_command(stdin, "stop");
 
     // Wait for bestmove
-    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(2000));
+    let result = read_until_pattern(&mut reader, "bestmove ", Duration::from_millis(2000));
     let elapsed = start.elapsed();
 
     if let Err(e) = &result {
@@ -189,7 +189,7 @@ fn test_stop_during_deep_search() {
     send_command(stdin, "stop");
 
     // Should get bestmove quickly
-    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(1500));
+    let result = read_until_pattern(&mut reader, "bestmove ", Duration::from_millis(1500));
     let elapsed = start.elapsed();
 
     if let Err(e) = &result {
@@ -226,7 +226,7 @@ fn test_multiple_stop_commands() {
         let start = Instant::now();
         send_command(stdin, "stop");
 
-        let result = read_until_pattern(&mut reader, "bestmove", Duration::from_millis(1500));
+        let result = read_until_pattern(&mut reader, "bestmove ", Duration::from_millis(1500));
         let elapsed = start.elapsed();
 
         if let Err(e) = &result {
@@ -299,7 +299,7 @@ fn test_ponder_sequence() {
 
     // Now the search should have time limits and will complete on its own
     // Wait for bestmove (should come relatively quickly after ponderhit)
-    let result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(30));
+    let result = read_until_pattern(&mut reader, "bestmove ", Duration::from_secs(30));
 
     match result {
         Ok(lines) => {
@@ -312,14 +312,14 @@ fn test_ponder_sequence() {
             let has_info = lines.iter().any(|line| line.starts_with("info"));
             assert!(has_info, "Expected info output during search");
 
-            let has_bestmove = lines.iter().any(|line| line.starts_with("bestmove"));
+            let has_bestmove = lines.iter().any(|line| line.starts_with("bestmove "));
             assert!(has_bestmove, "Expected bestmove after ponderhit");
         }
         Err(e) => {
             // If no bestmove, try stopping manually
             eprintln!("No bestmove received after ponderhit, trying stop command. Error: {e}");
             send_command(stdin, "stop");
-            let stop_result = read_until_pattern(&mut reader, "bestmove", Duration::from_secs(5));
+            let stop_result = read_until_pattern(&mut reader, "bestmove ", Duration::from_secs(5));
 
             if let Ok(stop_lines) = &stop_result {
                 eprintln!("Received lines after stop:");
