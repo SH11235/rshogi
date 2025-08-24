@@ -30,7 +30,13 @@ pub fn generate_fallback_move(
     if let Some((best_move, depth, score)) = partial_result {
         // Validate the partial result move before using it
         let adapter = lock_or_recover_adapter(engine);
-        if adapter.is_legal_move(&best_move) {
+
+        // First check if it's a well-formed USI move string
+        if engine_core::usi::parse_usi_move(&best_move).is_err() {
+            log::warn!(
+                "Partial result move {best_move} has invalid USI format, proceeding to Stage 2"
+            );
+        } else if adapter.is_legal_move(&best_move) {
             log::info!(
                 "Using validated partial result: move={best_move}, depth={depth}, score={score}"
             );
@@ -55,7 +61,12 @@ pub fn generate_fallback_move(
                 Some(move_str)
             }
             Err(e) => {
-                log::warn!("Quick search failed: {e}");
+                // Log specific reason for failure
+                if e.to_string().contains("Engine not available") {
+                    log::info!("Quick search skipped: engine not available (likely held by timed-out worker)");
+                } else {
+                    log::warn!("Quick search failed: {e}");
+                }
                 None
             }
         }
@@ -126,9 +137,10 @@ pub fn generate_fallback_move(
 pub fn wait_for_search_completion(
     search_state: &mut SearchState,
     stop_flag: &Arc<AtomicBool>,
+    current_stop_flag: Option<&Arc<AtomicBool>>, // Per-search stop flag
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
-    engine: &Arc<Mutex<EngineAdapter>>,
+    _engine: &Arc<Mutex<EngineAdapter>>,
 ) -> Result<()> {
     if search_state.is_searching() {
         log::info!("wait_for_search_completion: stopping ongoing search, state={:?}", search_state);
@@ -136,14 +148,15 @@ pub fn wait_for_search_completion(
         *search_state = SearchState::StopRequested;
         stop_flag.store(true, Ordering::Release);
 
+        // Also set the per-search stop flag if available
+        if let Some(search_flag) = current_stop_flag {
+            search_flag.store(true, Ordering::Release);
+            log::debug!("wait_for_search_completion: set per-search stop flag to true");
+        }
+
         // Wait for worker with timeout
-        let wait_result = wait_for_worker_with_timeout(
-            worker_handle,
-            worker_rx,
-            engine,
-            search_state,
-            MIN_JOIN_TIMEOUT,
-        );
+        let wait_result =
+            wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, MIN_JOIN_TIMEOUT);
 
         let stop_duration = stop_start.elapsed();
         log::info!("wait_for_search_completion: completed in {stop_duration:?}");
@@ -157,16 +170,76 @@ pub fn wait_for_search_completion(
         }
 
         // Always reset stop flag after completion
-        stop_flag.store(false, Ordering::SeqCst);
+        stop_flag.store(false, Ordering::Release);
         log::debug!("wait_for_search_completion: reset stop_flag to false after stopping search");
     } else {
         log::debug!("wait_for_search_completion: no search in progress");
         // Ensure stop flag is false even if no search was running
-        let was_true = stop_flag.load(Ordering::SeqCst);
-        stop_flag.store(false, Ordering::SeqCst);
+        let was_true = stop_flag.load(Ordering::Acquire);
+        stop_flag.store(false, Ordering::Release);
         if was_true {
             log::warn!("wait_for_search_completion: stop_flag was true even though no search was running, reset to false");
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_adapter::EngineAdapter;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_fallback_move_invalid_usi_format() {
+        // Create a test engine adapter
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+
+        // Set up a valid position
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Test with invalid USI format in partial result
+        let partial_result = Some(("invalid-move-format".to_string(), 5, 100));
+
+        // Generate fallback move - should skip Stage 1 and use Stage 2 or 3
+        let result = generate_fallback_move(&engine, partial_result, false);
+
+        // Should not fail, but return a valid move from Stage 2 or 3
+        assert!(result.is_ok());
+        let move_str = result.unwrap();
+
+        // The move should not be the invalid format we provided
+        assert_ne!(move_str, "invalid-move-format");
+
+        // It should be either a valid move or "resign"
+        assert!(move_str == "resign" || engine_core::usi::parse_usi_move(&move_str).is_ok());
+    }
+
+    #[test]
+    fn test_fallback_move_illegal_but_valid_format() {
+        // Create a test engine adapter
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+
+        // Set up initial position
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Test with a well-formed but illegal move (e.g., moving opponent's piece)
+        let partial_result = Some(("1a1b".to_string(), 5, 100)); // Valid format but illegal move
+
+        // Generate fallback move
+        let result = generate_fallback_move(&engine, partial_result, false);
+
+        // Should not fail
+        assert!(result.is_ok());
+        let move_str = result.unwrap();
+
+        // Should not return the illegal move
+        assert_ne!(move_str, "1a1b");
+    }
 }

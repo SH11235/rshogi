@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 
 /// Messages from worker thread to main thread
 pub enum WorkerMessage {
-    Info(SearchInfo),
+    Info {
+        info: SearchInfo,
+        search_id: u64,
+    },
 
     /// Search has started
     SearchStarted {
@@ -55,7 +58,6 @@ pub enum WorkerMessage {
         message: String,
         search_id: u64,
     },
-    EngineReturn(Engine), // Legacy - kept for compatibility but no longer used
 }
 
 /// Convert mate moves to pseudo centipawn value for ordering
@@ -190,15 +192,11 @@ pub fn search_worker(
         initial_stop_value
     );
 
-    // TEMPORARY FIX: Force stop_flag to false if it's true at worker start
-    if initial_stop_value && !params.ponder {
-        log::warn!("Worker: stop_flag was true at start, forcing to false for non-ponder search");
-        stop_flag.store(false, Ordering::Release);
-    }
-
     let _worker_start_time = Instant::now();
 
     // Send SearchStarted message with current time
+    // Note: This is sent before take_engine() to ensure GUI sees activity ASAP.
+    // If take_engine fails, subsequent Error and SearchFinished messages will clean up.
     let start_time = Instant::now();
     let _ = tx.send(WorkerMessage::SearchStarted {
         search_id,
@@ -212,7 +210,10 @@ pub fn search_worker(
     let last_partial_depth = Arc::new(Mutex::new(0u8));
     let info_callback = move |info: SearchInfo| {
         // Always send the info message
-        let _ = tx_info.send(WorkerMessage::Info(info.clone()));
+        let _ = tx_info.send(WorkerMessage::Info {
+            info: info.clone(),
+            search_id,
+        });
 
         // Send partial result at certain depth intervals
         if let (Some(depth), Some(score), Some(pv)) =
@@ -634,7 +635,10 @@ pub fn search_worker(
                         )),
                         ..Default::default()
                     };
-                    let _ = tx.send(WorkerMessage::Info(pv_owner_info));
+                    let _ = tx.send(WorkerMessage::Info {
+                        info: pv_owner_info,
+                        search_id,
+                    });
                 }
             }
 
@@ -650,7 +654,10 @@ pub fn search_worker(
                         )),
                         ..Default::default()
                     };
-                    let _ = tx.send(WorkerMessage::Info(pv_trim_info));
+                    let _ = tx.send(WorkerMessage::Info {
+                        info: pv_trim_info,
+                        search_id,
+                    });
                 }
             }
 
@@ -952,13 +959,12 @@ fn create_emergency_session(
 pub fn wait_for_worker_with_timeout(
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
-    engine: &Arc<Mutex<EngineAdapter>>,
     search_state: &mut SearchState,
     timeout: Duration,
 ) -> Result<()> {
+    use crate::helpers::MIN_JOIN_TIMEOUT;
     use crossbeam_channel::select;
     const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
-    const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
     let wait_start = Instant::now();
     log::info!("wait_for_worker_with_timeout: started with timeout={timeout:?}");
@@ -982,9 +988,9 @@ pub fn wait_for_worker_with_timeout(
                             log::trace!("Ignoring duplicate Finished message #{finished_count} (from_guard: {from_guard})");
                         }
                     }
-                    Ok(WorkerMessage::Info(info)) => {
+                    Ok(WorkerMessage::Info { info, search_id }) => {
                         // Info messages during shutdown can be ignored
-                        log::trace!("Received info during shutdown: {info:?}");
+                        log::trace!("Received info during shutdown (search_id={}): {info:?}", search_id);
                     }
                     // WorkerMessage::BestMove has been completely removed.
                     // All bestmove emissions now go through the session-based approach
@@ -1006,12 +1012,6 @@ pub fn wait_for_worker_with_timeout(
                     Ok(WorkerMessage::SearchStarted { .. }) => {
                         // Search started during shutdown can be ignored
                         log::trace!("SearchStarted during shutdown - ignoring");
-                    }
-                    Ok(WorkerMessage::EngineReturn(returned_engine)) => {
-                        // This should not happen with the new design, but handle it just in case
-                        log::warn!("Unexpected EngineReturn during shutdown - returning to adapter");
-                        let mut adapter = lock_or_recover_adapter(engine);
-                        adapter.return_engine(returned_engine);
                     }
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");
