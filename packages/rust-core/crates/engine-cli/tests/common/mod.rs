@@ -97,6 +97,7 @@ pub fn assert_valid_bestmove(bestmove: &str) {
 /// Spawn the engine process with stderr piped for log analysis
 pub fn spawn_engine_with_stderr() -> (Child, ChildStderr) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_engine-cli"))
+        .env("RUST_LOG", "info")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped()) // Pipe stderr to capture logs

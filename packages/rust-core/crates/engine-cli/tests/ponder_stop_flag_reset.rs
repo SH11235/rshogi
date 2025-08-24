@@ -1,6 +1,11 @@
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+//! Regression tests for ponder stop flag reset behavior
+
+mod common;
+
+use common::*;
+use regex::Regex;
+use std::io::{BufRead, BufReader};
+use std::thread;
 
 #[test]
 fn test_ponder_natural_completion_then_new_search() {
@@ -8,71 +13,57 @@ fn test_ponder_natural_completion_then_new_search() {
     // a new search can be started successfully with a fresh stop flag.
     // The test checks for incrementing search IDs to confirm proper cleanup.
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_engine-cli"))
-        .env("RUST_LOG", "info")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn engine");
-
-    let mut stdin = child.stdin.take().expect("Failed to get stdin");
-    let stdout = child.stdout.take().expect("Failed to get stdout");
-    let stderr = child.stderr.take().expect("Failed to get stderr");
-
-    // Collect all output in background threads
-    let stdout_handle = std::thread::spawn(move || {
+    let (mut child, stderr) = spawn_engine_with_stderr();
+    let stdin = child.stdin.as_mut().expect("Failed to get stdin");
+    let stdout = child.stdout.as_mut().expect("Failed to get stdout");
+    let _stdout_drain = thread::spawn(move || {
         let reader = BufReader::new(stdout);
-        reader.lines().collect::<Result<Vec<_>, _>>().unwrap_or_default()
+        for _ in reader.lines().map_while(Result::ok) {
+            // stdout は本テストで使わないので捨てる
+        }
     });
+    let mut reader = BufReader::new(stdout);
 
-    let stderr_handle = std::thread::spawn(move || {
+    // Initialize engine with proper handshake
+    initialize_engine(stdin, &mut reader);
+
+    // Collect stderr in background thread
+    let stderr_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         reader.lines().collect::<Result<Vec<_>, _>>().unwrap_or_default()
     });
 
-    // Send commands
-    writeln!(stdin, "usi").unwrap();
-    writeln!(stdin, "isready").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    send_command(stdin, "position startpos");
+    send_command(stdin, "go ponder depth 1"); // Short ponder that completes naturally
+    thread::sleep(T_SEARCH); // Wait for natural completion
 
-    writeln!(stdin, "position startpos").unwrap();
-    writeln!(stdin, "go ponder depth 1").unwrap(); // Short ponder that completes naturally
-    std::thread::sleep(Duration::from_millis(500)); // Wait for natural completion
+    send_command(stdin, "go depth 1"); // New search after ponder
+    thread::sleep(T_SHORT);
 
-    writeln!(stdin, "go depth 1").unwrap(); // New search after ponder
-    std::thread::sleep(Duration::from_millis(100));
-
-    writeln!(stdin, "quit").unwrap();
-    stdin.flush().unwrap();
-    drop(stdin);
+    send_command(stdin, "quit");
 
     // Wait for completion
     let _ = child.wait();
 
     // Analyze logs
     let stderr_lines = stderr_handle.join().expect("Failed to join stderr thread");
-    let _stdout_lines = stdout_handle.join().expect("Failed to join stdout thread");
 
     let mut ponder_search_id = 0u64;
     let mut new_search_id = 0u64;
 
-    for line in &stderr_lines {
-        // Extract ponder search ID
-        if line.contains("Starting new search with ID:") && line.contains("ponder: true") {
-            if let Some(id_str) = line.split("ID: ").nth(1) {
-                if let Some(id_part) = id_str.split(',').next() {
-                    ponder_search_id = id_part.parse().unwrap_or(0);
-                }
-            }
-        }
+    // Use regex for robust log parsing
+    let search_re =
+        Regex::new(r"Starting new search with ID:\s*(\d+),\s*ponder:\s*(true|false)").unwrap();
 
-        // Extract new search ID
-        if line.contains("Starting new search with ID:") && line.contains("ponder: false") {
-            if let Some(id_str) = line.split("ID: ").nth(1) {
-                if let Some(id_part) = id_str.split(',').next() {
-                    new_search_id = id_part.parse().unwrap_or(0);
-                }
+    for line in &stderr_lines {
+        if let Some(captures) = search_re.captures(line) {
+            let id: u64 = captures[1].parse().unwrap_or(0);
+            let is_ponder = &captures[2] == "true";
+
+            if is_ponder {
+                ponder_search_id = id;
+            } else {
+                new_search_id = id;
             }
         }
     }
@@ -85,6 +76,11 @@ fn test_ponder_natural_completion_then_new_search() {
         new_search_id,
         ponder_search_id
     );
+    let crit_re = Regex::new(r"CRITICAL:\s*stop_flag is true at search start").unwrap();
+    assert!(
+        !stderr_lines.iter().any(|l| crit_re.is_match(l)),
+        "Regression: stop_flag was true at new search start (see stderr)"
+    );
 }
 
 #[test]
@@ -94,80 +90,68 @@ fn test_ponder_stop_then_new_search() {
     // The test confirms proper cleanup by checking for the "Stop during ponder" log message
     // and incrementing search IDs.
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_engine-cli"))
-        .env("RUST_LOG", "info")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn engine");
+    let (mut child, stderr) = spawn_engine_with_stderr();
+    let stdin = child.stdin.as_mut().expect("Failed to get stdin");
+    let stdout = child.stdout.as_mut().expect("Failed to get stdout");
+    let mut reader = BufReader::new(stdout);
 
-    let mut stdin = child.stdin.take().expect("Failed to get stdin");
-    let stdout = child.stdout.take().expect("Failed to get stdout");
-    let stderr = child.stderr.take().expect("Failed to get stderr");
+    // Initialize engine with proper handshake
+    initialize_engine(stdin, &mut reader);
 
-    // Collect all output in background threads
-    let stdout_handle = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        reader.lines().collect::<Result<Vec<_>, _>>().unwrap_or_default()
-    });
-
-    let stderr_handle = std::thread::spawn(move || {
+    // Collect stderr in background thread
+    let stderr_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         reader.lines().collect::<Result<Vec<_>, _>>().unwrap_or_default()
     });
 
-    // Send commands
-    writeln!(stdin, "usi").unwrap();
-    writeln!(stdin, "isready").unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    send_command(stdin, "position startpos");
+    send_command(stdin, "go ponder depth 10"); // Long ponder that we'll stop
+    thread::sleep(T_SHORT); // Let it start
 
-    writeln!(stdin, "position startpos").unwrap();
-    writeln!(stdin, "go ponder depth 10").unwrap(); // Long ponder that we'll stop
-    std::thread::sleep(Duration::from_millis(100)); // Let it start
+    send_command(stdin, "stop"); // Stop the ponder
+    thread::sleep(T_SEARCH); // Wait for stop to process
 
-    writeln!(stdin, "stop").unwrap(); // Stop the ponder
-    std::thread::sleep(Duration::from_millis(200)); // Wait for stop to process
+    // Wait for bestmove after stop (USI spec compliance check)
+    let bestmove = wait_for_bestmove(&mut reader)
+        .expect("Should receive bestmove after stop during ponder per USI spec");
+    assert_valid_bestmove(&bestmove);
 
-    writeln!(stdin, "go depth 1").unwrap(); // New search after stop
-    std::thread::sleep(Duration::from_millis(100));
+    send_command(stdin, "go depth 1"); // New search after stop
+    thread::sleep(T_SHORT);
 
-    writeln!(stdin, "quit").unwrap();
-    stdin.flush().unwrap();
-    drop(stdin);
+    send_command(stdin, "quit");
 
     // Wait for completion
     let _ = child.wait();
 
     // Analyze logs
     let stderr_lines = stderr_handle.join().expect("Failed to join stderr thread");
-    let _stdout_lines = stdout_handle.join().expect("Failed to join stdout thread");
 
     let mut found_stop_during_ponder = false;
     let mut ponder_search_id = 0u64;
     let mut new_search_id = 0u64;
 
+    // Use regex for robust log parsing
+    let search_re =
+        Regex::new(r"Starting new search with ID:\s*(\d+),\s*ponder:\s*(true|false)").unwrap();
+    let stop_ponder_re = Regex::new(r"Stop during ponder.*search_id:\s*(\d+)").unwrap();
+
     for line in &stderr_lines {
         // Check for stop during ponder
-        if line.contains("Stop during ponder") && line.contains("will send bestmove per USI spec") {
+        if let Some(captures) = stop_ponder_re.captures(line) {
             found_stop_during_ponder = true;
-            // Extract search ID from the log
-            if let Some(id_str) = line.split("search_id: ").nth(1) {
-                if let Some(id_part) = id_str.split(')').next() {
-                    ponder_search_id = id_part.parse().unwrap_or(0);
-                }
-            }
+            ponder_search_id = captures[1].parse().unwrap_or(0);
         }
 
-        // Extract new search ID (only after finding stop during ponder)
-        if found_stop_during_ponder
-            && line.contains("Starting new search with ID:")
-            && line.contains("ponder: false")
-        {
-            if let Some(id_str) = line.split("ID: ").nth(1) {
-                if let Some(id_part) = id_str.split(',').next() {
-                    new_search_id = id_part.parse().unwrap_or(0);
-                }
+        // Extract search IDs
+        if let Some(captures) = search_re.captures(line) {
+            let id: u64 = captures[1].parse().unwrap_or(0);
+            let is_ponder = &captures[2] == "true";
+
+            if is_ponder && ponder_search_id == 0 {
+                ponder_search_id = id;
+            } else if !is_ponder && found_stop_during_ponder {
+                new_search_id = id;
             }
         }
     }
@@ -180,5 +164,10 @@ fn test_ponder_stop_then_new_search() {
         "New search ID ({}) should be greater than ponder search ID ({}), indicating proper cleanup",
         new_search_id,
         ponder_search_id
+    );
+    let crit_re = Regex::new(r"CRITICAL:\s*stop_flag is true at search start").unwrap();
+    assert!(
+        !stderr_lines.iter().any(|l| crit_re.is_match(l)),
+        "Regression: stop_flag was true at new search start (see stderr)"
     );
 }
