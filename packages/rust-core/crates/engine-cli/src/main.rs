@@ -208,12 +208,17 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 /// Handle worker messages during normal operation
 fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result<()> {
     match msg {
-        WorkerMessage::Info(info) => {
-            // Forward info messages during active search
-            if ctx.search_state.is_searching() {
+        WorkerMessage::Info { info, search_id } => {
+            // Forward info messages only from current search
+            if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
                 send_response(UsiResponse::Info(info))?;
             } else {
-                log::trace!("Suppressed Info message - not in searching state");
+                log::trace!(
+                    "Suppressed Info message - search_id: {} (current: {}), state: {:?}",
+                    search_id,
+                    *ctx.current_search_id,
+                    *ctx.search_state
+                );
             }
         }
 

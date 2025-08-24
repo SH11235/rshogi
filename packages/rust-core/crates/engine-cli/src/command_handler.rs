@@ -16,6 +16,21 @@ use std::time::{Duration, Instant};
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
 use engine_core::search::types::{StopInfo, TerminationReason};
 
+/// Get message kind and search_id for logging
+fn message_kind_and_id(msg: &WorkerMessage) -> (&'static str, Option<u64>) {
+    match msg {
+        WorkerMessage::Info { search_id, .. } => ("Info", Some(*search_id)),
+        WorkerMessage::SearchStarted { search_id, .. } => ("SearchStarted", Some(*search_id)),
+        WorkerMessage::IterationComplete { search_id, .. } => {
+            ("IterationComplete", Some(*search_id))
+        }
+        WorkerMessage::PartialResult { search_id, .. } => ("PartialResult", Some(*search_id)),
+        WorkerMessage::SearchFinished { search_id, .. } => ("SearchFinished", Some(*search_id)),
+        WorkerMessage::Finished { search_id, .. } => ("Finished", Some(*search_id)),
+        WorkerMessage::Error { search_id, .. } => ("Error", Some(*search_id)),
+    }
+}
+
 /// Helper to construct BestmoveMeta with common defaults
 fn create_bestmove_meta(
     from: BestmoveSource,
@@ -419,14 +434,20 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 found_search_started = true;
                 break;
             }
-            WorkerMessage::Info(_) => {
+            WorkerMessage::Info { info: _, search_id } => {
                 // Info messages are harmless to discard during this phase
-                log::trace!("Discarded Info message while looking for SearchStarted");
+                log::trace!(
+                    "Discarded Info message (search_id={}) while looking for SearchStarted",
+                    search_id
+                );
             }
             other => {
                 // Other messages must be preserved
                 stash.push(other);
-                break; // Don't consume too many messages
+                // Break to limit re-queuing to 1 message.
+                // Note: This message will be re-queued at the end of the channel,
+                // potentially reordering it relative to messages sent by the worker thread.
+                break;
             }
         }
     }
@@ -434,9 +455,18 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     // Re-queue non-Info messages that we collected
     // Using try_send to avoid potential blocking if channel becomes bounded in the future
     for msg in stash {
-        if let Err(e) = ctx.worker_tx.try_send(msg) {
-            log::warn!("Failed to re-queue message after SearchStarted drain: {e}");
-            // Messages are discarded on failure to prevent blocking
+        match ctx.worker_tx.try_send(msg) {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.into_inner();
+                let (kind, sid) = message_kind_and_id(&msg);
+                log::warn!(
+                    "Dropping {} (search_id={:?}) after SearchStarted drain - channel error",
+                    kind,
+                    sid
+                );
+                // Messages are discarded on failure to prevent blocking
+            }
         }
     }
 
@@ -668,16 +698,19 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             match ctx.worker_rx.try_recv() {
                 // WorkerMessage::BestMove has been completely removed.
                 // All bestmove emissions now go through the session-based approach
-                Ok(WorkerMessage::Info(info)) => {
+                Ok(WorkerMessage::Info { info, search_id }) => {
                     // Forward info messages during active search (including StopRequested state)
-                    // TODO: Add search_id to Info messages to filter out stale messages from previous searches
-                    // This would prevent old search info from appearing during new searches
+                    // Only forward messages from current search to prevent old search info from appearing
                     // Note: is_searching() returns true for both Searching and StopRequested states,
                     // allowing GUIs to receive final info messages during stop processing
-                    if ctx.search_state.is_searching() {
+                    if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
                         let _ = send_response(UsiResponse::Info(info));
                     } else {
-                        log::trace!("Suppressed Info message - not in searching state");
+                        log::trace!(
+                            "Suppressed Info message - old search_id: {} (current: {})",
+                            search_id,
+                            *ctx.current_search_id
+                        );
                     }
                 }
                 Ok(WorkerMessage::PartialResult {
