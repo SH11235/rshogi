@@ -143,7 +143,7 @@ fn test_quit_clean_exit() {
 
     // Wait for process to exit
     let start = Instant::now();
-    let timeout = Duration::from_secs(2);
+    let timeout = Duration::from_secs(6); // Extended to account for MIN_JOIN_TIMEOUT (5s)
 
     loop {
         match engine.try_wait() {
