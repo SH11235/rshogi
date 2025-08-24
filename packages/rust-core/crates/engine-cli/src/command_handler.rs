@@ -432,9 +432,11 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     }
 
     // Re-queue non-Info messages that we collected
+    // Using try_send to avoid potential blocking if channel becomes bounded in the future
     for msg in stash {
-        if let Err(e) = ctx.worker_tx.send(msg) {
+        if let Err(e) = ctx.worker_tx.try_send(msg) {
             log::warn!("Failed to re-queue message after SearchStarted drain: {e}");
+            // Messages are discarded on failure to prevent blocking
         }
     }
 
