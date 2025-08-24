@@ -30,7 +30,13 @@ pub fn generate_fallback_move(
     if let Some((best_move, depth, score)) = partial_result {
         // Validate the partial result move before using it
         let adapter = lock_or_recover_adapter(engine);
-        if adapter.is_legal_move(&best_move) {
+
+        // First check if it's a well-formed USI move string
+        if engine_core::usi::parse_usi_move(&best_move).is_err() {
+            log::warn!(
+                "Partial result move {best_move} has invalid USI format, proceeding to Stage 2"
+            );
+        } else if adapter.is_legal_move(&best_move) {
             log::info!(
                 "Using validated partial result: move={best_move}, depth={depth}, score={score}"
             );
@@ -176,4 +182,64 @@ pub fn wait_for_search_completion(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_adapter::EngineAdapter;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_fallback_move_invalid_usi_format() {
+        // Create a test engine adapter
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+
+        // Set up a valid position
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Test with invalid USI format in partial result
+        let partial_result = Some(("invalid-move-format".to_string(), 5, 100));
+
+        // Generate fallback move - should skip Stage 1 and use Stage 2 or 3
+        let result = generate_fallback_move(&engine, partial_result, false);
+
+        // Should not fail, but return a valid move from Stage 2 or 3
+        assert!(result.is_ok());
+        let move_str = result.unwrap();
+
+        // The move should not be the invalid format we provided
+        assert_ne!(move_str, "invalid-move-format");
+
+        // It should be either a valid move or "resign"
+        assert!(move_str == "resign" || engine_core::usi::parse_usi_move(&move_str).is_ok());
+    }
+
+    #[test]
+    fn test_fallback_move_illegal_but_valid_format() {
+        // Create a test engine adapter
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+
+        // Set up initial position
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Test with a well-formed but illegal move (e.g., moving opponent's piece)
+        let partial_result = Some(("1a1b".to_string(), 5, 100)); // Valid format but illegal move
+
+        // Generate fallback move
+        let result = generate_fallback_move(&engine, partial_result, false);
+
+        // Should not fail
+        assert!(result.is_ok());
+        let move_str = result.unwrap();
+
+        // Should not return the illegal move
+        assert_ne!(move_str, "1a1b");
+    }
 }

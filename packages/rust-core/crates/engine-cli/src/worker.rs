@@ -950,9 +950,9 @@ pub fn wait_for_worker_with_timeout(
     search_state: &mut SearchState,
     timeout: Duration,
 ) -> Result<()> {
+    use crate::helpers::MIN_JOIN_TIMEOUT;
     use crossbeam_channel::select;
     const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
-    const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
     let wait_start = Instant::now();
     log::info!("wait_for_worker_with_timeout: started with timeout={timeout:?}");
