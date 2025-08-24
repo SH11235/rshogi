@@ -55,7 +55,7 @@ pub enum WorkerMessage {
         message: String,
         search_id: u64,
     },
-    EngineReturn(Engine), // Return the engine after search
+    EngineReturn(Engine), // Legacy - kept for compatibility but no longer used
 }
 
 /// Convert mate moves to pseudo centipawn value for ordering
@@ -95,14 +95,21 @@ fn mate_moves_to_pseudo_cp(mate: i32) -> Option<i32> {
 /// Guard to ensure engine is returned on drop (for panic safety)
 pub struct EngineReturnGuard {
     engine: Option<Engine>,
+    adapter: Arc<Mutex<EngineAdapter>>,
     tx: Sender<WorkerMessage>,
     search_id: u64,
 }
 
 impl EngineReturnGuard {
-    pub fn new(engine: Engine, tx: Sender<WorkerMessage>, search_id: u64) -> Self {
+    pub fn new(
+        engine: Engine,
+        adapter: Arc<Mutex<EngineAdapter>>,
+        tx: Sender<WorkerMessage>,
+        search_id: u64,
+    ) -> Self {
         Self {
             engine: Some(engine),
+            adapter,
             tx,
             search_id,
         }
@@ -126,30 +133,21 @@ impl std::ops::DerefMut for EngineReturnGuard {
 impl Drop for EngineReturnGuard {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.take() {
-            log::debug!("EngineReturnGuard: returning engine");
+            log::debug!("EngineReturnGuard: returning engine directly to adapter");
 
-            // Try to return engine through channel
-            match self.tx.try_send(WorkerMessage::EngineReturn(engine)) {
-                Ok(()) => {
-                    log::debug!("Engine returned successfully through channel");
-                }
-                Err(crossbeam_channel::TrySendError::Full(_)) => {
-                    // Channel is full - this shouldn't happen with unbounded channel
-                    log::error!("Channel full, cannot return engine");
-                    // Engine will be dropped here, which is safe
-                }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                    // Channel is disconnected - main thread has exited
-                    log::warn!("Channel disconnected, cannot return engine");
-                    // Engine will be dropped here, which is safe
-                }
-            }
+            // Return engine directly to adapter
+            let mut adapter = lock_or_recover_adapter(&self.adapter);
+            adapter.return_engine(engine);
+            log::debug!("Engine returned successfully to adapter");
 
-            // Always try to send Finished message to signal completion (from guard)
-            let _ = self.tx.try_send(WorkerMessage::Finished {
+            // Send finished notification
+            if let Err(e) = self.tx.send(WorkerMessage::Finished {
                 from_guard: true,
                 search_id: self.search_id,
-            });
+            }) {
+                log::warn!("Failed to send Finished message from guard: {e}");
+                // This is OK - channel might be closed during shutdown
+            }
         }
     }
 }
@@ -184,6 +182,21 @@ pub fn search_worker(
     search_id: u64,
 ) {
     log::debug!("Search worker thread started with params: {params:?}");
+    let initial_stop_value = stop_flag.load(Ordering::Acquire);
+    log::info!(
+        "Worker: search_id={search_id}, ponder={}, stop_flag_ptr={:p}, stop_flag_value={}",
+        params.ponder,
+        stop_flag.as_ref(),
+        initial_stop_value
+    );
+
+    // TEMPORARY FIX: Force stop_flag to false if it's true at worker start
+    if initial_stop_value && !params.ponder {
+        log::warn!("Worker: stop_flag was true at start, forcing to false for non-ponder search");
+        stop_flag.store(false, Ordering::Release);
+    }
+
+    let _worker_start_time = Instant::now();
 
     // Send SearchStarted message with current time
     let start_time = Instant::now();
@@ -191,6 +204,7 @@ pub fn search_worker(
         search_id,
         start_time,
     });
+    log::info!("Worker: SearchStarted message sent");
 
     // Set up info callback with partial result tracking
     let tx_info = tx.clone();
@@ -242,12 +256,17 @@ pub fn search_worker(
     // Take engine out and prepare search
     let was_ponder = params.ponder;
     log::debug!("Attempting to take engine from adapter");
+    let engine_take_start = Instant::now();
     let (engine, position, limits, ponder_hit_flag) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::debug!("Adapter lock acquired, calling take_engine");
+        let engine_available = adapter.is_engine_available();
+        log::info!("Worker: engine available before take: {engine_available}");
         match adapter.take_engine() {
             Ok(engine) => {
                 log::debug!("Engine taken successfully, preparing search");
+                let take_duration = engine_take_start.elapsed();
+                log::info!("Worker: engine taken successfully after {take_duration:?}");
                 match adapter.prepare_search(&params, stop_flag.clone()) {
                     Ok((pos, lim, flag)) => {
                         log::debug!("Search prepared successfully");
@@ -566,17 +585,20 @@ pub fn search_worker(
     };
 
     // Wrap engine in guard for panic safety
-    let mut engine_guard = EngineReturnGuard::new(engine, tx.clone(), search_id);
+    let mut engine_guard =
+        EngineReturnGuard::new(engine, engine_adapter.clone(), tx.clone(), search_id);
 
     // Execute search without holding the lock
     log::info!("Calling execute_search_static");
+    let search_start = Instant::now();
     let result = EngineAdapter::execute_search_static(
         &mut engine_guard,
         position.clone(),
         limits,
         Box::new(enhanced_info_callback),
     );
-    log::info!("execute_search_static returned: {:?}", result.is_ok());
+    let search_duration = search_start.elapsed();
+    log::info!("execute_search_static returned after {search_duration:?}: {:?}", result.is_ok());
 
     // Handle result
     match result {
@@ -938,12 +960,14 @@ pub fn wait_for_worker_with_timeout(
     const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
     const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+    let wait_start = Instant::now();
+    log::info!("wait_for_worker_with_timeout: started with timeout={timeout:?}");
+
     let deadline = Instant::now() + timeout.max(MIN_JOIN_TIMEOUT);
     let mut finished = false;
-    let mut engine_returned = false;
     let mut finished_count = 0u32;
 
-    // Wait for Finished message AND EngineReturn message or timeout
+    // Wait for Finished message or timeout
     loop {
         select! {
             recv(worker_rx) -> msg => {
@@ -953,20 +977,9 @@ pub fn wait_for_worker_with_timeout(
                         if !finished {
                             log::debug!("Worker thread finished cleanly (from_guard: {from_guard})");
                             finished = true;
-                            if engine_returned {
-                                break;
-                            }
+                            break;
                         } else {
                             log::trace!("Ignoring duplicate Finished message #{finished_count} (from_guard: {from_guard})");
-                        }
-                    }
-                    Ok(WorkerMessage::EngineReturn(returned_engine)) => {
-                        log::debug!("Engine returned from worker");
-                        let mut adapter = lock_or_recover_adapter(engine);
-                        adapter.return_engine(returned_engine);
-                        engine_returned = true;
-                        if finished {
-                            break;
                         }
                     }
                     Ok(WorkerMessage::Info(info)) => {
@@ -994,6 +1007,12 @@ pub fn wait_for_worker_with_timeout(
                         // Search started during shutdown can be ignored
                         log::trace!("SearchStarted during shutdown - ignoring");
                     }
+                    Ok(WorkerMessage::EngineReturn(returned_engine)) => {
+                        // This should not happen with the new design, but handle it just in case
+                        log::warn!("Unexpected EngineReturn during shutdown - returning to adapter");
+                        let mut adapter = lock_or_recover_adapter(engine);
+                        adapter.return_engine(returned_engine);
+                    }
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");
                         break;
@@ -1013,27 +1032,51 @@ pub fn wait_for_worker_with_timeout(
     // If we received Finished, join() should complete immediately
     if finished {
         if let Some(handle) = worker_handle.take() {
-            match handle.join() {
-                Ok(()) => log::debug!("Worker thread joined successfully"),
-                Err(_) => log::error!("Worker thread panicked"),
+            let join_start = Instant::now();
+
+            // Try to join with a short timeout
+            const MAX_JOIN_WAIT: Duration = Duration::from_millis(100);
+
+            // Use a channel to signal join completion
+            let (tx, rx) = crossbeam_channel::bounded(1);
+
+            // Spawn a thread to perform the join
+            std::thread::spawn(move || match handle.join() {
+                Ok(()) => {
+                    let _ = tx.send(Ok(()));
+                }
+                Err(_) => {
+                    let _ = tx.send(Err(()));
+                }
+            });
+
+            // Wait for join to complete with timeout
+            match rx.recv_timeout(MAX_JOIN_WAIT) {
+                Ok(Ok(())) => {
+                    let join_duration = join_start.elapsed();
+                    log::debug!("Worker thread joined successfully in {join_duration:?}");
+                }
+                Ok(Err(())) => {
+                    log::error!("Worker thread panicked");
+                }
+                Err(_) => {
+                    log::warn!("Worker thread join timeout after {MAX_JOIN_WAIT:?}, continuing without join");
+                    // The join thread will clean up eventually
+                }
             }
         }
     }
 
+    let total_wait_duration = wait_start.elapsed();
+    log::info!(
+        "wait_for_worker_with_timeout: completed in {total_wait_duration:?}, finished={finished}"
+    );
+
     *search_state = SearchState::Idle;
 
     // Drain any remaining messages in worker_rx
-    while let Ok(msg) = worker_rx.try_recv() {
-        match msg {
-            WorkerMessage::EngineReturn(returned_engine) => {
-                log::debug!("Engine returned during drain");
-                let mut adapter = lock_or_recover_adapter(engine);
-                adapter.return_engine(returned_engine);
-            }
-            _ => {
-                log::trace!("Drained message: {:?}", std::any::type_name_of_val(&msg));
-            }
-        }
+    while worker_rx.try_recv().is_ok() {
+        // Just drain - messages during shutdown can be ignored
     }
 
     Ok(())

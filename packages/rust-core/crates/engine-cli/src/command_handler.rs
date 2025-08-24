@@ -76,7 +76,7 @@ fn create_bestmove_meta_with_seldepth(
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
     pub engine: &'a Arc<Mutex<EngineAdapter>>,
-    pub stop_flag: &'a Arc<AtomicBool>,
+    pub stop_flag: &'a Arc<AtomicBool>, // Global stop flag (for shutdown)
     pub worker_tx: &'a Sender<WorkerMessage>,
     pub worker_rx: &'a Receiver<WorkerMessage>,
     pub worker_handle: &'a mut Option<JoinHandle<()>>,
@@ -86,6 +86,7 @@ pub struct CommandContext<'a> {
     pub current_search_is_ponder: &'a mut bool,
     pub current_session: &'a mut Option<SearchSession>,
     pub current_bestmove_emitter: &'a mut Option<BestmoveEmitter>,
+    pub current_stop_flag: &'a mut Option<Arc<AtomicBool>>, // Per-search stop flag
     pub allow_null_move: bool,
 }
 
@@ -97,6 +98,7 @@ impl<'a> CommandContext<'a> {
         *self.current_search_is_ponder = false;
         *self.current_bestmove_emitter = None;
         *self.current_session = None;
+        *self.current_stop_flag = None; // Clear per-search stop flag
     }
 }
 
@@ -213,7 +215,10 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             // Notify engine of game result
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.game_over(result);
-            log::debug!("Game over processed, worker cleaned up, state reset to Idle");
+
+            // Reset stop flag for next game
+            ctx.stop_flag.store(false, Ordering::Release);
+            log::debug!("Game over processed, worker cleaned up, state reset to Idle, stop_flag reset to false");
         }
 
         UsiCommand::UsiNewGame => {
@@ -244,8 +249,11 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
 
 fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     log::info!("Received go command with params: {params:?}");
+    let go_received_time = Instant::now();
+    send_info_string(format!("NewSearchStart: go received at {go_received_time:?}"))?;
 
     // Stop any ongoing search and ensure engine is available
+    let wait_start = Instant::now();
     wait_for_search_completion(
         ctx.search_state,
         ctx.stop_flag,
@@ -253,11 +261,29 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         ctx.worker_rx,
         ctx.engine,
     )?;
+    let wait_duration = wait_start.elapsed();
+    log::info!("Wait for search completion took: {wait_duration:?}");
+
+    // Check engine availability before proceeding
+    {
+        let adapter = lock_or_recover_adapter(ctx.engine);
+        let engine_available = adapter.is_engine_available();
+        log::info!("Engine availability after wait: {engine_available}");
+        if !engine_available {
+            log::error!("Engine is not available after wait_for_search_completion");
+        }
+    }
 
     // No delay needed - state transitions are atomic
 
-    // Reset stop flag
-    ctx.stop_flag.store(false, Ordering::Release);
+    // Create new per-search stop flag
+    let search_stop_flag = Arc::new(AtomicBool::new(false));
+    *ctx.current_stop_flag = Some(search_stop_flag.clone());
+    log::info!("Created new per-search stop flag for search_id={}", *ctx.current_search_id);
+
+    // Ensure consistent memory ordering
+    std::sync::atomic::fence(Ordering::SeqCst);
+
     *ctx.current_session = None; // Clear any previous session to avoid reuse
 
     // Verify we can start a new search (defensive check)
@@ -304,8 +330,13 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     // Clone necessary data for worker thread
     let engine_clone = Arc::clone(ctx.engine);
-    let stop_clone = Arc::clone(ctx.stop_flag);
+    let stop_clone = search_stop_flag.clone();
     let tx_clone = ctx.worker_tx.clone();
+    log::info!("Using per-search stop flag for search_id={search_id}");
+
+    // Log before spawning worker
+    log::info!("About to spawn worker thread for search_id={search_id}");
+    send_info_string(format!("NewSearchStart: spawning worker, search_id={search_id}"))?;
 
     // Spawn worker thread for search with panic safety
     let handle = thread::spawn(move || {
@@ -332,6 +363,16 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     *ctx.search_state = SearchState::Searching;
     log::info!("Worker thread handle stored, search_state = Searching");
 
+    // Send immediate info depth 1 to confirm search started (ensures GUI sees activity)
+    send_response(UsiResponse::Info(crate::usi::output::SearchInfo {
+        depth: Some(1),
+        time: Some(1),
+        nodes: Some(0),
+        string: Some("search starting".to_string()),
+        ..Default::default()
+    }))?;
+    log::debug!("Sent initial info depth 1 heartbeat to GUI");
+
     // Don't block - return immediately
     Ok(())
 }
@@ -339,10 +380,15 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     log::info!("Received stop command, search_state = {:?}", *ctx.search_state);
     log::debug!("Stop command received, entering stop handler");
+    send_info_string(format!(
+        "StopRequested: search_id={}, state={:?}",
+        *ctx.current_search_id, *ctx.search_state
+    ))?;
 
     // Early return if not searching
     if !ctx.search_state.is_searching() {
         log::debug!("Stop while idle -> ignore");
+        send_info_string("StopAck: ignored (not searching)")?;
         return Ok(());
     }
 
@@ -353,9 +399,11 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             *ctx.current_search_id
         );
 
-        // Signal stop to worker thread
+        // Signal stop to worker thread using per-search flag
         *ctx.search_state = SearchState::StopRequested;
-        ctx.stop_flag.store(true, Ordering::Release);
+        if let Some(ref stop_flag) = *ctx.current_stop_flag {
+            stop_flag.store(true, Ordering::SeqCst);
+        }
 
         // Keep state as StopRequested and ponder flag as true
         // They will be cleaned up when the worker is properly joined
@@ -367,12 +415,20 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     // Signal stop to worker thread for normal searches
     if ctx.search_state.is_searching() {
         *ctx.search_state = SearchState::StopRequested;
-        ctx.stop_flag.store(true, Ordering::Release);
-        log::info!("Stop flag set to true, search_state = StopRequested");
+        if let Some(ref stop_flag) = *ctx.current_stop_flag {
+            stop_flag.store(true, Ordering::SeqCst);
+            log::info!(
+                "Per-search stop flag set to true for search_id={}, search_state = StopRequested",
+                *ctx.current_search_id
+            );
 
-        // Debug: Verify stop flag was actually set
-        let stop_value = ctx.stop_flag.load(Ordering::Acquire);
-        log::debug!("Stop flag verification: {stop_value}");
+            // Debug: Verify stop flag was actually set
+            let stop_value = stop_flag.load(Ordering::SeqCst);
+            log::debug!("Stop flag verification: {stop_value}");
+        } else {
+            log::warn!("No current stop flag available for search_id={}", *ctx.current_search_id);
+        }
+        send_info_string(format!("StopAck: stop_flag set, search_id={}", *ctx.current_search_id))?;
 
         // First try to use committed best from session immediately
         if let Some(ref session) = *ctx.current_session {
@@ -429,13 +485,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         // Use adaptive timeouts based on byoyomi safety settings
         let stage1_timeout = if is_byoyomi {
             // Use half of safety margin for stage 1, clamped to reasonable range
-            Duration::from_millis((safety_ms / 2).clamp(200, 800))
+            Duration::from_millis((safety_ms / 2).clamp(400, 1000))
         } else {
             Duration::from_millis(100) // Normal mode: quick wait
         };
         let total_timeout = if is_byoyomi {
             // Use full safety margin for total timeout, clamped to reasonable range
-            Duration::from_millis(safety_ms.clamp(600, 1500))
+            Duration::from_millis(safety_ms.clamp(800, 2000))
         } else {
             Duration::from_millis(150) // Normal mode: quick fallback
         };
