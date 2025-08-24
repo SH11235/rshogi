@@ -192,6 +192,8 @@ pub fn search_worker(
     let _worker_start_time = Instant::now();
 
     // Send SearchStarted message with current time
+    // Note: This is sent before take_engine() to ensure GUI sees activity ASAP.
+    // If take_engine fails, subsequent Error and SearchFinished messages will clean up.
     let start_time = Instant::now();
     let _ = tx.send(WorkerMessage::SearchStarted {
         search_id,

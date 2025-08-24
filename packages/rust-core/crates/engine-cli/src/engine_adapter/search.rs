@@ -356,6 +356,33 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_pv_validation() {
+        use crate::search_session::{CommittedBest, Score, SearchSession};
+        use smallvec::SmallVec;
+
+        let adapter = make_test_adapter();
+        let position = engine_core::shogi::Position::startpos();
+
+        // Create session with empty PV
+        let session = SearchSession {
+            id: 1,
+            root_hash: position.hash,
+            committed_best: Some(CommittedBest {
+                pv: SmallVec::new(), // Empty PV
+                score: Score::Cp(100),
+                depth: 5,
+                seldepth: Some(10),
+            }),
+            current_iteration_best: None,
+        };
+
+        // Validation should fail with proper error
+        let result = adapter.validate_and_get_bestmove(&session, &position);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Empty PV"));
+    }
+
+    #[test]
     fn test_byoyomi_overhead_application() {
         let mut adapter = make_test_adapter();
         adapter.set_position(true, None, &[]).unwrap();
