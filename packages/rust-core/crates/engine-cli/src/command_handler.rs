@@ -16,63 +16,6 @@ use std::time::{Duration, Instant};
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
 use engine_core::search::types::{StopInfo, TerminationReason};
 
-/// Helper to construct BestmoveMeta with common defaults
-fn create_bestmove_meta(
-    from: BestmoveSource,
-    reason: TerminationReason,
-    elapsed_ms: u64,
-    depth: u8,
-    score: Option<String>,
-    nodes: u64,
-    hard_timeout: bool,
-) -> BestmoveMeta {
-    create_bestmove_meta_with_seldepth(
-        from,
-        reason,
-        elapsed_ms,
-        depth,
-        None,
-        score,
-        nodes,
-        hard_timeout,
-    )
-}
-
-/// Helper to construct BestmoveMeta with seldepth
-#[allow(clippy::too_many_arguments)]
-fn create_bestmove_meta_with_seldepth(
-    from: BestmoveSource,
-    reason: TerminationReason,
-    elapsed_ms: u64,
-    depth: u8,
-    seldepth: Option<u8>,
-    score: Option<String>,
-    nodes: u64,
-    hard_timeout: bool,
-) -> BestmoveMeta {
-    BestmoveMeta {
-        from,
-        stop_info: StopInfo {
-            reason,
-            elapsed_ms,
-            nodes,
-            depth_reached: depth,
-            hard_timeout,
-        },
-        stats: BestmoveStats {
-            depth,
-            seldepth,
-            score: score.unwrap_or_else(|| "unknown".to_string()),
-            nodes,
-            nps: if elapsed_ms > 0 {
-                nodes.saturating_mul(1000) / elapsed_ms
-            } else {
-                0
-            },
-        },
-    }
-}
-
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
     pub engine: &'a Arc<Mutex<EngineAdapter>>,
@@ -92,13 +35,17 @@ pub struct CommandContext<'a> {
 
 impl<'a> CommandContext<'a> {
     #[inline]
-    fn finalize_search(&mut self, where_: &str) {
+    pub fn finalize_search(&mut self, where_: &str) {
         log::debug!("Finalize search {} ({})", *self.current_search_id, where_);
         *self.search_state = SearchState::Idle;
         *self.current_search_is_ponder = false;
         *self.current_bestmove_emitter = None;
         *self.current_session = None;
-        *self.current_stop_flag = None; // Clear per-search stop flag
+
+        // Reset stop flag to false before dropping to ensure clean state
+        if let Some(flag) = self.current_stop_flag.take() {
+            flag.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -140,10 +87,14 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             wait_for_search_completion(
                 ctx.search_state,
                 ctx.stop_flag,
+                ctx.current_stop_flag.as_ref(),
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
             )?;
+
+            // Clean up any remaining search state
+            ctx.finalize_search("Position");
 
             let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.set_position(startpos, sfen.as_deref(), &moves) {
@@ -199,6 +150,7 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             wait_for_search_completion(
                 ctx.search_state,
                 ctx.stop_flag,
+                ctx.current_stop_flag.as_ref(),
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
@@ -227,10 +179,14 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             wait_for_search_completion(
                 ctx.search_state,
                 ctx.stop_flag,
+                ctx.current_stop_flag.as_ref(),
                 ctx.worker_handle,
                 ctx.worker_rx,
                 ctx.engine,
             )?;
+
+            // Clean up any remaining search state
+            ctx.finalize_search("UsiNewGame");
 
             // Reset engine state for new game
             let mut engine = lock_or_recover_adapter(ctx.engine);
@@ -257,6 +213,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     wait_for_search_completion(
         ctx.search_state,
         ctx.stop_flag,
+        ctx.current_stop_flag.as_ref(),
         ctx.worker_handle,
         ctx.worker_rx,
         ctx.engine,
@@ -266,23 +223,29 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     // Check engine availability before proceeding
     {
-        let adapter = lock_or_recover_adapter(ctx.engine);
+        let mut adapter = lock_or_recover_adapter(ctx.engine);
         let engine_available = adapter.is_engine_available();
         log::info!("Engine availability after wait: {engine_available}");
         if !engine_available {
             log::error!("Engine is not available after wait_for_search_completion");
+            // Force reset state to recover engine if it's stuck in another thread
+            log::warn!("Attempting to force reset engine state for recovery");
+            adapter.force_reset_state();
+
+            // Check again after reset
+            let engine_available_after_reset = adapter.is_engine_available();
+            if !engine_available_after_reset {
+                log::error!(
+                    "Engine still not available after force reset - falling back to emergency move"
+                );
+                // Continue anyway - fallback mechanisms will handle this
+            } else {
+                log::info!("Engine recovered after force reset (note: position was cleared)");
+            }
         }
     }
 
     // No delay needed - state transitions are atomic
-
-    // Create new per-search stop flag
-    let search_stop_flag = Arc::new(AtomicBool::new(false));
-    *ctx.current_stop_flag = Some(search_stop_flag.clone());
-    log::info!("Created new per-search stop flag for search_id={}", *ctx.current_search_id);
-
-    // Ensure consistent memory ordering
-    std::sync::atomic::fence(Ordering::SeqCst);
 
     *ctx.current_session = None; // Clear any previous session to avoid reuse
 
@@ -315,6 +278,18 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             return Ok(());
         }
     }
+
+    // Clean up old stop flag before creating new one
+    if let Some(old_flag) = ctx.current_stop_flag.take() {
+        // Reset to false before dropping to ensure clean state
+        old_flag.store(false, Ordering::Release);
+        log::debug!("Cleaned up old stop flag before creating new one");
+    }
+
+    // Create new per-search stop flag (after all validation passes)
+    let search_stop_flag = Arc::new(AtomicBool::new(false));
+    *ctx.current_stop_flag = Some(search_stop_flag.clone());
+    log::info!("Created new per-search stop flag for upcoming search");
 
     // Increment search ID for new search
     *ctx.search_id_counter += 1;
@@ -392,39 +367,38 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         return Ok(());
     }
 
-    // Early return for ponder searches - no bestmove should be sent
+    // Handle ponder searches - according to USI spec, stop command should return bestmove
     if *ctx.current_search_is_ponder {
         log::info!(
-            "Stop during ponder (search_id: {}) - not sending bestmove",
+            "Stop during ponder (search_id: {}) - will send bestmove per USI spec",
             *ctx.current_search_id
         );
 
         // Signal stop to worker thread using per-search flag
         *ctx.search_state = SearchState::StopRequested;
         if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::SeqCst);
+            stop_flag.store(true, Ordering::Release);
         }
 
-        // Keep state as StopRequested and ponder flag as true
-        // They will be cleaned up when the worker is properly joined
-        log::debug!("Ponder stop: keeping StopRequested state for proper cleanup");
+        // Mark that we're no longer in ponder mode since stop was received
+        *ctx.current_search_is_ponder = false;
 
-        return Ok(());
+        // Continue to send bestmove below
     }
 
     // Signal stop to worker thread for normal searches
     if ctx.search_state.is_searching() {
         *ctx.search_state = SearchState::StopRequested;
         if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::SeqCst);
+            stop_flag.store(true, Ordering::Release);
             log::info!(
                 "Per-search stop flag set to true for search_id={}, search_state = StopRequested",
                 *ctx.current_search_id
             );
 
             // Debug: Verify stop flag was actually set
-            let stop_value = stop_flag.load(Ordering::SeqCst);
-            log::debug!("Stop flag verification: {stop_value}");
+            let stop_value = stop_flag.load(Ordering::Acquire);
+            log::debug!("Stop flag verification (Acquire read): {stop_value}");
         } else {
             log::warn!("No current stop flag available for search_id={}", *ctx.current_search_id);
         }
@@ -452,16 +426,33 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                         let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
 
-                        let meta = create_bestmove_meta_with_seldepth(
-                            BestmoveSource::SessionOnStop,
-                            TerminationReason::UserStop,
-                            0, // TODO: Get actual elapsed time
-                            depth,
-                            seldepth,
-                            score_str,
-                            0, // TODO: Get actual node count
-                            false,
-                        );
+                        // TODO: Get actual elapsed time and node count
+                        let si = StopInfo {
+                            reason: TerminationReason::UserStop,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: depth,
+                            hard_timeout: false,
+                        };
+
+                        let nodes = si.nodes;
+                        let elapsed_ms = si.elapsed_ms;
+
+                        let meta = BestmoveMeta {
+                            from: BestmoveSource::SessionOnStop,
+                            stop_info: si,
+                            stats: BestmoveStats {
+                                depth,
+                                seldepth,
+                                score: score_str.unwrap_or_else(|| "unknown".to_string()),
+                                nodes,
+                                nps: if elapsed_ms > 0 {
+                                    nodes.saturating_mul(1000) / elapsed_ms
+                                } else {
+                                    0
+                                },
+                            },
+                        };
 
                         emitter.emit(best_move, ponder, meta)?;
                         ctx.finalize_search("SessionOnStop");
@@ -542,15 +533,32 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 (BestmoveSource::EmergencyFallbackTimeout, 0, None)
                             };
 
-                            let meta = create_bestmove_meta(
+                            let si = StopInfo {
+                                reason: TerminationReason::TimeLimit,
+                                elapsed_ms: 0, // BestmoveEmitter に補完させる
+                                nodes: 0,      // nodes は未知なので 0 のままでOK
+                                depth_reached: depth,
+                                hard_timeout: true,
+                            };
+
+                            let nodes = si.nodes;
+                            let elapsed_ms = si.elapsed_ms;
+
+                            let meta = BestmoveMeta {
                                 from,
-                                TerminationReason::TimeLimit,
-                                0, // BestmoveEmitter に補完させる
-                                depth,
-                                score_str,
-                                0, // nodes は未知なので 0 のままでOK
-                                true,
-                            );
+                                stop_info: si,
+                                stats: BestmoveStats {
+                                    depth,
+                                    seldepth: None,
+                                    score: score_str.unwrap_or_else(|| "unknown".to_string()),
+                                    nodes,
+                                    nps: if elapsed_ms > 0 {
+                                        nodes.saturating_mul(1000) / elapsed_ms
+                                    } else {
+                                        0
+                                    },
+                                },
+                            };
 
                             emitter.emit(move_str, None, meta)?;
                             ctx.finalize_search("TimeoutFallback");
@@ -568,15 +576,32 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                         // Use BestmoveEmitter for centralized emission
                         if let Some(ref emitter) = ctx.current_bestmove_emitter {
-                            let meta = create_bestmove_meta(
-                                BestmoveSource::ResignTimeout,
-                                TerminationReason::Error,
-                                0, // BestmoveEmitter に補完させる
-                                0,
-                                None,
-                                0,
-                                true,
-                            );
+                            let si = StopInfo {
+                                reason: TerminationReason::Error,
+                                elapsed_ms: 0, // BestmoveEmitter に補完させる
+                                nodes: 0,
+                                depth_reached: 0,
+                                hard_timeout: true,
+                            };
+
+                            let nodes = si.nodes;
+                            let elapsed_ms = si.elapsed_ms;
+
+                            let meta = BestmoveMeta {
+                                from: BestmoveSource::ResignTimeout,
+                                stop_info: si,
+                                stats: BestmoveStats {
+                                    depth: 0,
+                                    seldepth: None,
+                                    score: "unknown".to_string(),
+                                    nodes,
+                                    nps: if elapsed_ms > 0 {
+                                        nodes.saturating_mul(1000) / elapsed_ms
+                                    } else {
+                                        0
+                                    },
+                                },
+                            };
 
                             emitter.emit("resign".to_string(), None, meta)?;
                             ctx.finalize_search("ResignTimeout");
@@ -597,16 +622,19 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             match ctx.worker_rx.try_recv() {
                 // WorkerMessage::BestMove has been completely removed.
                 // All bestmove emissions now go through the session-based approach
-                Ok(WorkerMessage::Info(info)) => {
+                Ok(WorkerMessage::Info { info, search_id }) => {
                     // Forward info messages during active search (including StopRequested state)
-                    // TODO: Add search_id to Info messages to filter out stale messages from previous searches
-                    // This would prevent old search info from appearing during new searches
+                    // Only forward messages from current search to prevent old search info from appearing
                     // Note: is_searching() returns true for both Searching and StopRequested states,
                     // allowing GUIs to receive final info messages during stop processing
-                    if ctx.search_state.is_searching() {
+                    if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
                         let _ = send_response(UsiResponse::Info(info));
                     } else {
-                        log::trace!("Suppressed Info message - not in searching state");
+                        log::trace!(
+                            "Suppressed Info message - old search_id: {} (current: {})",
+                            search_id,
+                            *ctx.current_search_id
+                        );
                     }
                 }
                 Ok(WorkerMessage::PartialResult {
@@ -672,29 +700,38 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                 .and_then(|b| b.seldepth);
 
                                             // Use stop_info values if available, otherwise use defaults
-                                            let (elapsed_ms, nodes, reason, hard_timeout) =
-                                                if let Some(ref info) = stop_info {
-                                                    (
-                                                        info.elapsed_ms,
-                                                        info.nodes,
-                                                        info.reason,
-                                                        info.hard_timeout,
-                                                    )
-                                                } else {
-                                                    // stop_info is None: use 0 to let emitter complement
-                                                    (0, 0, TerminationReason::UserStop, false)
-                                                };
+                                            let si = if let Some(info) = stop_info {
+                                                info
+                                            } else {
+                                                // stop_info is None: use defaults to let emitter complement
+                                                StopInfo {
+                                                    reason: TerminationReason::UserStop,
+                                                    elapsed_ms: 0,
+                                                    nodes: 0,
+                                                    depth_reached: depth,
+                                                    hard_timeout: false,
+                                                }
+                                            };
 
-                                            let meta = create_bestmove_meta_with_seldepth(
-                                                BestmoveSource::SessionInSearchFinished,
-                                                reason,
-                                                elapsed_ms,
-                                                depth,
-                                                seldepth,
-                                                score_str,
-                                                nodes,
-                                                hard_timeout,
-                                            );
+                                            let nodes = si.nodes;
+                                            let elapsed_ms = si.elapsed_ms;
+
+                                            let meta = BestmoveMeta {
+                                                from: BestmoveSource::SessionInSearchFinished,
+                                                stop_info: si,
+                                                stats: BestmoveStats {
+                                                    depth,
+                                                    seldepth,
+                                                    score: score_str
+                                                        .unwrap_or_else(|| "unknown".to_string()),
+                                                    nodes,
+                                                    nps: if elapsed_ms > 0 {
+                                                        nodes.saturating_mul(1000) / elapsed_ms
+                                                    } else {
+                                                        0
+                                                    },
+                                                },
+                                            };
 
                                             emitter.emit(best_move, ponder, meta)?;
                                             ctx.finalize_search("BestmoveEmitter");
@@ -758,15 +795,33 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                             (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
                                         };
 
-                                    let meta = create_bestmove_meta(
+                                    let si = StopInfo {
+                                        reason: TerminationReason::UserStop,
+                                        elapsed_ms: 0, // BestmoveEmitter に補完させる
+                                        nodes: 0,      // TODO: Get actual node count
+                                        depth_reached: depth,
+                                        hard_timeout: false,
+                                    };
+
+                                    let nodes = si.nodes;
+                                    let elapsed_ms = si.elapsed_ms;
+
+                                    let meta = BestmoveMeta {
                                         from,
-                                        TerminationReason::UserStop,
-                                        0, // BestmoveEmitter に補完させる
-                                        depth,
-                                        score_str,
-                                        0, // TODO: Get actual node count
-                                        false,
-                                    );
+                                        stop_info: si,
+                                        stats: BestmoveStats {
+                                            depth,
+                                            seldepth: None,
+                                            score: score_str
+                                                .unwrap_or_else(|| "unknown".to_string()),
+                                            nodes,
+                                            nps: if elapsed_ms > 0 {
+                                                nodes.saturating_mul(1000) / elapsed_ms
+                                            } else {
+                                                0
+                                            },
+                                        },
+                                    };
 
                                     emitter.emit(move_str, None, meta)?;
                                     ctx.finalize_search("BestmoveEmitter");
@@ -793,15 +848,32 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 );
 
                                 if let Some(ref emitter) = ctx.current_bestmove_emitter {
-                                    let meta = create_bestmove_meta(
-                                        BestmoveSource::ResignOnFinish,
-                                        TerminationReason::Error,
-                                        0, // BestmoveEmitter に補完させる
-                                        0,
-                                        None,
-                                        0,
-                                        false,
-                                    );
+                                    let si = StopInfo {
+                                        reason: TerminationReason::Error,
+                                        elapsed_ms: 0, // BestmoveEmitter に補完させる
+                                        nodes: 0,
+                                        depth_reached: 0,
+                                        hard_timeout: false,
+                                    };
+
+                                    let nodes = si.nodes;
+                                    let elapsed_ms = si.elapsed_ms;
+
+                                    let meta = BestmoveMeta {
+                                        from: BestmoveSource::ResignOnFinish,
+                                        stop_info: si,
+                                        stats: BestmoveStats {
+                                            depth: 0,
+                                            seldepth: None,
+                                            score: "unknown".to_string(),
+                                            nodes,
+                                            nps: if elapsed_ms > 0 {
+                                                nodes.saturating_mul(1000) / elapsed_ms
+                                            } else {
+                                                0
+                                            },
+                                        },
+                                    };
 
                                     emitter.emit("resign".to_string(), None, meta)?;
                                     ctx.finalize_search("BestmoveEmitter");

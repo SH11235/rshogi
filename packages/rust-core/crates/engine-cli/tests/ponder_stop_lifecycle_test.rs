@@ -64,6 +64,13 @@ fn test_ponder_stop_then_immediate_go() {
     println!("\n--- Stopping ponder ---");
     send_command(&mut stdin, "stop");
 
+    // Wait for bestmove from ponder stop
+    let ponder_bestmove = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("Should receive bestmove from ponder stop");
+
+    println!("Received bestmove from ponder stop: {ponder_bestmove}");
+
     // Very short wait - not enough for full cleanup
     thread::sleep(Duration::from_millis(50));
 
@@ -95,9 +102,12 @@ fn test_ponder_stop_then_immediate_go() {
     let _ = engine.wait();
     let lines = stdout_handle.join().unwrap();
 
-    // Verify we got exactly 2 bestmoves (no ghost messages from ponder)
+    // Verify we got exactly 3 bestmoves (1 from ponder stop + 2 from normal searches)
     let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove")).count();
-    assert_eq!(bestmove_count, 2, "Should have exactly 2 bestmoves, got {bestmove_count}");
+    assert_eq!(
+        bestmove_count, 3,
+        "Should have exactly 3 bestmoves (1 ponder stop + 2 searches), got {bestmove_count}"
+    );
 
     println!("\n✓ Test passed: ponder stop followed by immediate go works correctly");
 }
@@ -136,9 +146,9 @@ fn test_ponder_stop_delayed_message_handling() {
     // Set position
     send_command(&mut stdin, "position startpos");
 
-    // Start ponder search with infinite time
+    // Start ponder search
     println!("\n--- Starting ponder search ---");
-    send_command(&mut stdin, "go ponder infinite");
+    send_command(&mut stdin, "go ponder");
 
     // Let it search for a bit to build up some depth
     thread::sleep(Duration::from_millis(500));
@@ -150,16 +160,16 @@ fn test_ponder_stop_delayed_message_handling() {
     // Wait a bit to see if any bestmove arrives
     thread::sleep(Duration::from_millis(500));
 
-    // Check that no bestmove was sent
+    // Check that bestmove was sent (per USI spec, stop during ponder sends bestmove)
     let mut bestmove_found = false;
     while let Ok(msg) = rx.try_recv() {
         if msg.starts_with("bestmove") {
             bestmove_found = true;
-            println!("ERROR: Unexpected bestmove: {msg}");
+            println!("Got expected bestmove from ponder stop: {msg}");
         }
     }
 
-    assert!(!bestmove_found, "No bestmove should be sent when stopping ponder");
+    assert!(bestmove_found, "Bestmove should be sent when stopping ponder (USI spec)");
 
     // Now do a normal search to ensure engine still works
     println!("\n--- Starting normal search ---");
@@ -184,7 +194,14 @@ fn test_ponder_stop_delayed_message_handling() {
     send_command(&mut stdin, "quit");
     drop(stdin);
     let _ = engine.wait();
-    let _ = stdout_handle.join();
+    let lines = stdout_handle.join().unwrap();
+
+    // Verify we got exactly 2 bestmoves (1 from ponder stop + 1 from normal search)
+    let total_bestmoves = lines.iter().filter(|l| l.starts_with("bestmove")).count();
+    assert_eq!(
+        total_bestmoves, 2,
+        "Should have exactly 2 bestmoves (ponder stop + normal search), got {total_bestmoves}"
+    );
 
     println!("\n✓ Test passed: delayed messages handled correctly");
 }
@@ -240,11 +257,11 @@ fn test_multiple_ponder_stop_cycles() {
     let _ = engine.wait();
     let lines = stdout_handle.join().unwrap();
 
-    // Count bestmoves - should only have 1 from the final search
+    // Count bestmoves - should have 3 from ponder stops + 1 from final search = 4 total
     let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove")).count();
     assert_eq!(
-        bestmove_count, 1,
-        "Should have exactly 1 bestmove from final search, got {bestmove_count}"
+        bestmove_count, 4,
+        "Should have exactly 4 bestmoves (3 ponder stops + 1 final search), got {bestmove_count}"
     );
 
     println!("\n✓ Test passed: multiple ponder/stop cycles handled correctly");
@@ -302,10 +319,11 @@ fn test_ponder_stop_then_gameover() {
     // Wait a bit to ensure no bestmove is sent
     thread::sleep(Duration::from_millis(300));
 
-    // Verify no bestmove was sent
-    if let Ok(msg) = rx.try_recv() {
-        panic!("Unexpected bestmove after ponder stop: {msg}");
-    }
+    // Verify bestmove was sent from ponder stop
+    let ponder_bestmove = rx
+        .recv_timeout(Duration::from_millis(500))
+        .expect("Should receive bestmove from ponder stop");
+    println!("Got expected bestmove from ponder stop: {ponder_bestmove}");
 
     // Now start a new game and search to verify engine is still functional
     println!("\n--- Starting new game ---");
@@ -326,11 +344,11 @@ fn test_ponder_stop_then_gameover() {
     let _ = engine.wait();
     let lines = stdout_handle.join().unwrap();
 
-    // Count bestmoves - should only have 1 from the new game
+    // Count bestmoves - should have 1 from ponder stop + 1 from new game = 2 total
     let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove")).count();
     assert_eq!(
-        bestmove_count, 1,
-        "Should have exactly 1 bestmove from new game, got {bestmove_count}"
+        bestmove_count, 2,
+        "Should have exactly 2 bestmoves (1 ponder stop + 1 new game), got {bestmove_count}"
     );
 
     println!("\n✓ Test passed: ponder stop followed by gameover handled correctly");
@@ -388,11 +406,11 @@ fn test_ponder_stop_ponderhit_race() {
     let _ = engine.wait();
     let lines = stdout_handle.join().unwrap();
 
-    // Verify we got exactly 1 bestmove from the final search
+    // Verify we got exactly 2 bestmoves (1 from ponder stop + 1 from final search)
     let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove")).count();
     assert_eq!(
-        bestmove_count, 1,
-        "Should have exactly 1 bestmove from final search, got {bestmove_count}"
+        bestmove_count, 2,
+        "Should have exactly 2 bestmoves (1 ponder stop + 1 final search), got {bestmove_count}"
     );
 
     // Check logs for ponderhit being ignored

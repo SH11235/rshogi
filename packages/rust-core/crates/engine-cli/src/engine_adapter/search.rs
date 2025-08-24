@@ -159,7 +159,10 @@ impl EngineAdapter {
             .committed_best
             .as_ref()
             .ok_or_else(|| anyhow!("No best move available"))?;
-        let best_move = best_entry.pv[0];
+
+        // Safely get the first move from PV
+        let best_move =
+            *best_entry.pv.first().ok_or_else(|| anyhow!("Empty PV in committed_best"))?;
         let score = &best_entry.score;
 
         let best_move_str = move_to_usi(&best_move);
@@ -350,6 +353,33 @@ mod tests {
             !adapter.last_search_is_byoyomi(),
             "Ponder with inner Fischer should not be detected as byoyomi"
         );
+    }
+
+    #[test]
+    fn test_empty_pv_validation() {
+        use crate::search_session::{CommittedBest, Score, SearchSession};
+        use smallvec::SmallVec;
+
+        let adapter = make_test_adapter();
+        let position = engine_core::shogi::Position::startpos();
+
+        // Create session with empty PV
+        let session = SearchSession {
+            id: 1,
+            root_hash: position.hash,
+            committed_best: Some(CommittedBest {
+                pv: SmallVec::new(), // Empty PV
+                score: Score::Cp(100),
+                depth: 5,
+                seldepth: Some(10),
+            }),
+            current_iteration_best: None,
+        };
+
+        // Validation should fail with proper error
+        let result = adapter.validate_and_get_bestmove(&session, &position);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Empty PV"));
     }
 
     #[test]

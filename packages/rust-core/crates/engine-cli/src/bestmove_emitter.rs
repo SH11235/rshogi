@@ -81,6 +81,13 @@ impl BestmoveEmitter {
             meta.stats.nps = meta.stats.nodes.saturating_mul(1000) / meta.stop_info.elapsed_ms;
         }
 
+        // Log null move usage for debugging
+        if best_move == "0000" {
+            let _ = send_info_string(
+                "using null move (0000) - position may be invalid or no legal moves",
+            );
+        }
+
         // Send USI bestmove response
         let result = send_response(UsiResponse::BestMove {
             best_move: best_move.clone(),
@@ -99,6 +106,15 @@ impl BestmoveEmitter {
                     meta.stats.depth,
                     meta.stats.nps
                 );
+
+                // Debug-only observability info
+                #[cfg(debug_assertions)]
+                {
+                    let _ = send_info_string(format!(
+                        "Emitter: sent={} from={}",
+                        self.search_id, meta.from
+                    ));
+                }
 
                 // Send unified tab-separated key=value log (single line for machine readability)
                 // Note: The score field contains spaces (e.g., "cp 150", "mate 7") following USI protocol format.
