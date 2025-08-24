@@ -97,14 +97,14 @@ impl EngineAdapter {
         // Debug: Check if stop_flag is present and its value
         if let Some(ref stop_flag) = limits.stop_flag {
             let stop_value = stop_flag.load(std::sync::atomic::Ordering::Acquire);
-            info!("SearchLimits has stop_flag, initial value: {} (should be false)", stop_value);
+            info!("stop_flag_attached: true, stop_flag_initial_value: {}", stop_value);
             if stop_value {
                 error!(
                     "CRITICAL: stop_flag is true at search start! Search will immediately stop."
                 );
             }
         } else {
-            info!("WARNING: SearchLimits does not have stop_flag!");
+            info!("stop_flag_attached: false");
         }
 
         // Send initial depth 1 info to confirm search started

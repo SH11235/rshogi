@@ -270,7 +270,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             stop_info,
         } => {
             // Handle search completion for current search
-            if search_id == *ctx.current_search_id && ctx.search_state.can_accept_bestmove() {
+            // Only process if we're still in Searching state (not StopRequested)
+            if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Searching {
                 log::info!("Search {search_id} finished (session_id: {session_id}, root_hash: {root_hash:016x})");
 
                 // Send bestmove immediately if not ponder
@@ -435,6 +436,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 } else {
                     log::debug!("Ponder search finished, not sending bestmove");
                 }
+            } else if search_id == *ctx.current_search_id
+                && *ctx.search_state == SearchState::StopRequested
+            {
+                // SearchFinished arrived after stop command already handled bestmove
+                log::debug!("SearchFinished for search {} ignored (state=StopRequested, bestmove already sent by stop handler)", search_id);
+                // Still finalize to clean up state
+                ctx.finalize_search("SearchFinished after stop");
             }
         }
 
