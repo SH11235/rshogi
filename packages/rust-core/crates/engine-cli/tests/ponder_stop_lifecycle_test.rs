@@ -146,9 +146,9 @@ fn test_ponder_stop_delayed_message_handling() {
     // Set position
     send_command(&mut stdin, "position startpos");
 
-    // Start ponder search with infinite time
+    // Start ponder search
     println!("\n--- Starting ponder search ---");
-    send_command(&mut stdin, "go ponder infinite");
+    send_command(&mut stdin, "go ponder");
 
     // Let it search for a bit to build up some depth
     thread::sleep(Duration::from_millis(500));

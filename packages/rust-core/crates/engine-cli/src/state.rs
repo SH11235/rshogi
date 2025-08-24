@@ -19,9 +19,4 @@ impl SearchState {
     pub fn can_start_search(&self) -> bool {
         matches!(self, SearchState::Idle)
     }
-
-    /// Check if we should accept a bestmove
-    pub fn can_accept_bestmove(&self) -> bool {
-        matches!(self, SearchState::Searching | SearchState::StopRequested)
-    }
 }
