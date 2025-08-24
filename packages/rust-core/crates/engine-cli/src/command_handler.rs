@@ -56,7 +56,11 @@ impl<'a> CommandContext<'a> {
         *self.current_search_is_ponder = false;
         *self.current_bestmove_emitter = None;
         *self.current_session = None;
-        *self.current_stop_flag = None; // Clear per-search stop flag
+
+        // Reset stop flag to false before dropping to ensure clean state
+        if let Some(flag) = self.current_stop_flag.take() {
+            flag.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -294,6 +298,13 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             })?;
             return Ok(());
         }
+    }
+
+    // Clean up old stop flag before creating new one
+    if let Some(old_flag) = ctx.current_stop_flag.take() {
+        // Reset to false before dropping to ensure clean state
+        old_flag.store(false, Ordering::Release);
+        log::debug!("Cleaned up old stop flag before creating new one");
     }
 
     // Create new per-search stop flag (after all validation passes)

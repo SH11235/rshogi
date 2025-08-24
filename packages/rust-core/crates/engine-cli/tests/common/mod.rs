@@ -1,9 +1,7 @@
 //! Common test utilities for engine-cli tests
 
-#![allow(dead_code)] // These utilities may be used by various test files
-
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 // Timeout constants for CI stability
@@ -94,4 +92,16 @@ pub fn assert_valid_bestmove(bestmove: &str) {
         move_str != "0000" || move_str == "resign",
         "Unexpected null move or resign: {bestmove}"
     );
+}
+
+/// Spawn the engine process with stderr piped for log analysis
+pub fn spawn_engine_with_stderr() -> (Child, ChildStderr) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_engine-cli"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped()) // Pipe stderr to capture logs
+        .spawn()
+        .expect("Failed to spawn engine");
+    let stderr = child.stderr.take().expect("Failed to get stderr");
+    (child, stderr)
 }
