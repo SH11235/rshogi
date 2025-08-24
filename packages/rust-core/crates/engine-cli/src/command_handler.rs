@@ -149,6 +149,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             // Clear per-search stop flag after search completion
             *ctx.current_stop_flag = None;
 
+            // Clean up any remaining search state
+            ctx.finalize_search("Position");
+
             let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.set_position(startpos, sfen.as_deref(), &moves) {
                 Ok(()) => {
@@ -241,6 +244,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             // Clear per-search stop flag after search completion
             *ctx.current_stop_flag = None;
 
+            // Clean up any remaining search state
+            ctx.finalize_search("UsiNewGame");
+
             // Reset engine state for new game
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.new_game();
@@ -293,17 +299,12 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 );
                 // Continue anyway - fallback mechanisms will handle this
             } else {
-                log::info!("Engine recovered after force reset");
+                log::info!("Engine recovered after force reset (note: position was cleared)");
             }
         }
     }
 
     // No delay needed - state transitions are atomic
-
-    // Create new per-search stop flag
-    let search_stop_flag = Arc::new(AtomicBool::new(false));
-    *ctx.current_stop_flag = Some(search_stop_flag.clone());
-    log::info!("Created new per-search stop flag for search_id={}", *ctx.current_search_id);
 
     *ctx.current_session = None; // Clear any previous session to avoid reuse
 
@@ -336,6 +337,11 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             return Ok(());
         }
     }
+
+    // Create new per-search stop flag (after all validation passes)
+    let search_stop_flag = Arc::new(AtomicBool::new(false));
+    *ctx.current_stop_flag = Some(search_stop_flag.clone());
+    log::info!("Created new per-search stop flag for upcoming search");
 
     // Increment search ID for new search
     *ctx.search_id_counter += 1;
@@ -393,6 +399,48 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         ..Default::default()
     }))?;
     log::debug!("Sent initial info depth 1 heartbeat to GUI");
+
+    // Try to immediately consume SearchStarted message if available
+    // This ensures BestmoveEmitter gets accurate start time in normal flow
+    let mut stash = Vec::new();
+    let mut found_search_started = false;
+
+    // Drain messages until we find SearchStarted or run out
+    while let Ok(msg) = ctx.worker_rx.try_recv() {
+        match msg {
+            WorkerMessage::SearchStarted {
+                search_id: msg_search_id,
+                start_time,
+            } if msg_search_id == search_id => {
+                if let Some(ref mut emitter) = ctx.current_bestmove_emitter {
+                    emitter.set_start_time(start_time);
+                    log::debug!("Consumed SearchStarted and updated BestmoveEmitter start time");
+                }
+                found_search_started = true;
+                break;
+            }
+            WorkerMessage::Info(_) => {
+                // Info messages are harmless to discard during this phase
+                log::trace!("Discarded Info message while looking for SearchStarted");
+            }
+            other => {
+                // Other messages must be preserved
+                stash.push(other);
+                break; // Don't consume too many messages
+            }
+        }
+    }
+
+    // Re-queue non-Info messages that we collected
+    for msg in stash {
+        if let Err(e) = ctx.worker_tx.send(msg) {
+            log::warn!("Failed to re-queue message after SearchStarted drain: {e}");
+        }
+    }
+
+    if !found_search_started {
+        log::trace!("SearchStarted not immediately available, will be processed later");
+    }
 
     // Don't block - return immediately
     Ok(())
