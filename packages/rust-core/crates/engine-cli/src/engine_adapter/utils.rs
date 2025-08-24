@@ -107,16 +107,6 @@ impl EngineAdapter {
             info!("stop_flag_attached: false");
         }
 
-        // Send initial depth 1 info to confirm search started
-        if let Some(ref info_cb) = limits.info_callback {
-            info!("Sending initial depth 1 info as heartbeat");
-            // Send immediate depth 1 with 0 nodes to indicate search is starting
-            // We use the engine callback directly (not SearchInfo) for performance
-            // pv=[] and NodeType::Exact are used as placeholders for the initial heartbeat
-            let engine_callback = Arc::clone(info_cb);
-            engine_callback(1, 0, 0, std::time::Duration::from_millis(1), &[], NodeType::Exact);
-        }
-
         // Execute search
         info!("Calling engine.search with limits: {limits:?}");
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
