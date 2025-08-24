@@ -468,10 +468,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         return Ok(());
     }
 
-    // Early return for ponder searches - no bestmove should be sent
+    // Handle ponder searches - according to USI spec, stop command should return bestmove
     if *ctx.current_search_is_ponder {
         log::info!(
-            "Stop during ponder (search_id: {}) - not sending bestmove",
+            "Stop during ponder (search_id: {}) - will send bestmove per USI spec",
             *ctx.current_search_id
         );
 
@@ -481,11 +481,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             stop_flag.store(true, Ordering::Release);
         }
 
-        // Keep state as StopRequested and ponder flag as true
-        // They will be cleaned up when the worker is properly joined
-        log::debug!("Ponder stop: keeping StopRequested state for proper cleanup");
+        // Mark that we're no longer in ponder mode since stop was received
+        *ctx.current_search_is_ponder = false;
 
-        return Ok(());
+        // Continue to send bestmove below
     }
 
     // Signal stop to worker thread for normal searches
