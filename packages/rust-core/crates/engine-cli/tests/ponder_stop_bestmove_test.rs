@@ -1,4 +1,4 @@
-//! Test to verify that stop during ponder does not emit bestmove
+//! Test to verify that stop during ponder emits bestmove
 //! as per USI protocol specification
 
 use std::io::{BufRead, BufReader, Write};
@@ -23,7 +23,7 @@ fn send_command(stdin: &mut std::process::ChildStdin, cmd: &str) {
 }
 
 #[test]
-fn test_ponder_stop_no_bestmove() {
+fn test_ponder_stop_sends_bestmove() {
     let mut engine = spawn_engine();
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
@@ -78,14 +78,14 @@ fn test_ponder_stop_no_bestmove() {
     let _ = engine.wait();
     let lines = stdout_handle.join().unwrap();
 
-    // Verify no bestmove was sent
-    assert!(!bestmove_received, "Bestmove should NOT be sent when stopping ponder");
+    // Verify bestmove was sent
+    assert!(bestmove_received, "Bestmove should be sent when stopping ponder per USI spec");
 
     // Double-check in collected lines
     let has_bestmove = lines.iter().any(|l| l.starts_with("bestmove"));
-    assert!(!has_bestmove, "No bestmove line should exist in output when stopping ponder");
+    assert!(has_bestmove, "Bestmove line should exist in output when stopping ponder");
 
-    println!("\n✓ Test passed: stop during ponder does not emit bestmove");
+    println!("\n✓ Test passed: stop during ponder emits bestmove as per USI spec");
 }
 
 #[test]
