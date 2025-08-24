@@ -110,7 +110,10 @@ impl BestmoveEmitter {
                 // Debug-only observability info
                 #[cfg(debug_assertions)]
                 {
-                    let _ = send_info_string(format!("Emitter: sent={}", self.search_id));
+                    let _ = send_info_string(format!(
+                        "Emitter: sent={} from={}",
+                        self.search_id, meta.from
+                    ));
                 }
 
                 // Send unified tab-separated key=value log (single line for machine readability)

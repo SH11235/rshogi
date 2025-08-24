@@ -1,25 +1,11 @@
 //! Test to ensure bestmove is sent exactly once even in race conditions
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+mod common;
+
+use common::*;
+use std::io::{BufRead, BufReader};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
-
-fn spawn_engine() -> std::process::Child {
-    Command::new(env!("CARGO_BIN_EXE_engine-cli"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("Failed to spawn engine")
-}
-
-fn send_command(stdin: &mut std::process::ChildStdin, cmd: &str) {
-    println!(">>> {cmd}");
-    writeln!(stdin, "{cmd}").expect("Failed to write command");
-    stdin.flush().expect("Failed to flush stdin");
-}
 
 #[test]
 fn test_stop_and_search_finished_race() {
@@ -36,7 +22,7 @@ fn test_stop_and_search_finished_race() {
         let mut lines = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             println!("<<< {line}");
-            if line.starts_with("bestmove") {
+            if line.starts_with("bestmove ") {
                 tx.send(line.clone()).ok();
             }
             lines.push(line);
@@ -45,11 +31,12 @@ fn test_stop_and_search_finished_race() {
     });
 
     // Initialize engine
+    // We can't use initialize_engine here because stdout is already moved
+    // So we do manual initialization with timing
     send_command(&mut stdin, "usi");
-    thread::sleep(Duration::from_millis(100));
-
+    thread::sleep(T_SHORT);
     send_command(&mut stdin, "isready");
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(T_SEARCH);
 
     // Set position
     send_command(&mut stdin, "position startpos");
@@ -59,19 +46,20 @@ fn test_stop_and_search_finished_race() {
     send_command(&mut stdin, "go infinite");
 
     // Give it time to search deeply
-    thread::sleep(Duration::from_millis(300));
+    thread::sleep(T_SEARCH);
 
     // Send stop command which will trigger bestmove
     println!("\n--- Sending stop command ---");
     send_command(&mut stdin, "stop");
 
     // Wait for bestmove
-    let bestmove = rx.recv_timeout(Duration::from_secs(3)).expect("Should receive bestmove");
+    let bestmove = rx.recv_timeout(T_BESTMOVE).expect("Should receive bestmove");
 
     println!("Received bestmove: {bestmove}");
+    assert_valid_bestmove(&bestmove);
 
     // Wait a bit more to see if any duplicate bestmove arrives
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(T_SEARCH);
 
     // Check that no additional bestmove was sent
     if let Ok(duplicate) = rx.try_recv() {
@@ -85,7 +73,7 @@ fn test_stop_and_search_finished_race() {
     let lines = stdout_handle.join().unwrap();
 
     // Count bestmoves - should be exactly 1
-    let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove")).count();
+    let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove ")).count();
     assert_eq!(bestmove_count, 1, "Should have exactly 1 bestmove, got {bestmove_count}");
 
     println!("\n✓ Test passed: bestmove sent exactly once despite potential race");
@@ -106,7 +94,7 @@ fn test_rapid_stop_go_cycles() {
         let mut lines = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             println!("<<< {line}");
-            if line.starts_with("bestmove") {
+            if line.starts_with("bestmove ") {
                 tx.send(line.clone()).ok();
             }
             lines.push(line);
@@ -115,10 +103,12 @@ fn test_rapid_stop_go_cycles() {
     });
 
     // Initialize
-    send_command(&mut stdin, "usi");
-    thread::sleep(Duration::from_millis(100));
-    send_command(&mut stdin, "isready");
-    thread::sleep(Duration::from_millis(500));
+    {
+        send_command(&mut stdin, "usi");
+        thread::sleep(T_SHORT);
+        send_command(&mut stdin, "isready");
+        thread::sleep(T_SEARCH);
+    }
 
     // Run rapid stop/go cycles to stress test race conditions
     for i in 0..5 {
@@ -128,13 +118,16 @@ fn test_rapid_stop_go_cycles() {
         send_command(&mut stdin, "go infinite");
 
         // Very short search time
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(T_SHORT);
 
         send_command(&mut stdin, "stop");
 
         // Wait for bestmove explicitly (more reliable than counting later)
-        match rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(bestmove) => println!("Cycle {} received: {}", i + 1, bestmove),
+        match rx.recv_timeout(T_BESTMOVE) {
+            Ok(bestmove) => {
+                println!("Cycle {} received: {}", i + 1, bestmove);
+                assert_valid_bestmove(&bestmove);
+            }
             Err(e) => panic!("Cycle {} failed to receive bestmove: {}", i + 1, e),
         }
     }
@@ -144,8 +137,11 @@ fn test_rapid_stop_go_cycles() {
     send_command(&mut stdin, "go depth 1");
 
     // Wait for final bestmove
-    match rx.recv_timeout(Duration::from_secs(3)) {
-        Ok(bestmove) => println!("Final search received: {}", bestmove),
+    match rx.recv_timeout(T_BESTMOVE) {
+        Ok(bestmove) => {
+            println!("Final search received: {}", bestmove);
+            assert_valid_bestmove(&bestmove);
+        }
         Err(e) => panic!("Final search failed to receive bestmove: {}", e),
     }
 
@@ -157,7 +153,7 @@ fn test_rapid_stop_go_cycles() {
     let lines = stdout_handle.join().unwrap();
 
     // Count bestmoves - should be 6 (5 stop cycles + 1 final)
-    let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove")).count();
+    let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove ")).count();
     assert_eq!(
         bestmove_count, 6,
         "Should have exactly 6 bestmoves (5 stops + 1 final), got {bestmove_count}"
@@ -186,7 +182,7 @@ fn test_ponder_stop_immediate_search_finished() {
         let mut lines = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             println!("<<< {line}");
-            if line.starts_with("bestmove") {
+            if line.starts_with("bestmove ") {
                 tx.send(line.clone()).ok();
             }
             lines.push(line);
@@ -195,11 +191,12 @@ fn test_ponder_stop_immediate_search_finished() {
     });
 
     // Initialize engine
-    send_command(&mut stdin, "usi");
-    thread::sleep(Duration::from_millis(100));
-
-    send_command(&mut stdin, "isready");
-    thread::sleep(Duration::from_millis(500));
+    {
+        send_command(&mut stdin, "usi");
+        thread::sleep(T_SHORT);
+        send_command(&mut stdin, "isready");
+        thread::sleep(T_SEARCH);
+    }
 
     // Set position
     send_command(&mut stdin, "position startpos");
@@ -209,21 +206,20 @@ fn test_ponder_stop_immediate_search_finished() {
     send_command(&mut stdin, "go ponder");
 
     // Give it time to search
-    thread::sleep(Duration::from_millis(300));
+    thread::sleep(T_SEARCH);
 
     // Send stop command (should send bestmove)
     println!("\n--- Sending stop during ponder ---");
     send_command(&mut stdin, "stop");
 
     // Wait for bestmove from stop
-    let bestmove = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("Should receive bestmove from stop");
+    let bestmove = rx.recv_timeout(T_BESTMOVE).expect("Should receive bestmove from stop");
 
     println!("Received bestmove from stop: {bestmove}");
+    assert_valid_bestmove(&bestmove);
 
     // Wait to ensure SearchFinished doesn't send another bestmove
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(T_SEARCH);
 
     // Check that no additional bestmove was sent
     if let Ok(duplicate) = rx.try_recv() {
@@ -237,7 +233,7 @@ fn test_ponder_stop_immediate_search_finished() {
     let lines = stdout_handle.join().unwrap();
 
     // Count bestmoves - should be exactly 1
-    let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove")).count();
+    let bestmove_count = lines.iter().filter(|l| l.starts_with("bestmove ")).count();
     assert_eq!(
         bestmove_count, 1,
         "Should have exactly 1 bestmove from ponder stop, got {bestmove_count}"
