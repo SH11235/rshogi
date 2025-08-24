@@ -29,6 +29,11 @@ impl EngineAdapter {
         self.engine.take().ok_or_else(|| anyhow!("Engine not available"))
     }
 
+    /// Check if the engine is currently available
+    pub fn is_engine_available(&self) -> bool {
+        self.engine.is_some()
+    }
+
     /// Return the engine after searching
     pub fn return_engine(&mut self, mut engine: Engine) {
         // Apply any pending configuration changes
@@ -94,6 +99,10 @@ impl EngineAdapter {
             self.overhead_ms as u32
         };
 
+        // Check stop flag before applying go params
+        let stop_value_before = stop_flag.load(std::sync::atomic::Ordering::Acquire);
+        log::info!("prepare_search: stop_flag value before apply_go_params = {stop_value_before}");
+
         // Apply go parameters to get search limits
         let limits = crate::engine_adapter::time_control::apply_go_params(
             params,
@@ -105,6 +114,10 @@ impl EngineAdapter {
             self.pv_stability_base,
             self.pv_stability_slope,
         )?;
+
+        // Check stop flag after applying go params
+        let stop_value_after = stop_flag.load(std::sync::atomic::Ordering::Acquire);
+        log::info!("prepare_search: stop_flag value after apply_go_params = {stop_value_after}");
 
         // Detect if this is actually byoyomi time control by looking at the real TimeControl
         self.last_search_is_byoyomi = match &limits.time_control {

@@ -94,14 +94,33 @@ impl EngineAdapter {
             ..limits
         };
 
-        // Debug: Check if stop_flag is present
+        // Debug: Check if stop_flag is present and its value
         if let Some(ref stop_flag) = limits.stop_flag {
-            info!(
-                "SearchLimits has stop_flag, initial value: {}",
-                stop_flag.load(std::sync::atomic::Ordering::Acquire)
-            );
+            let stop_value = stop_flag.load(std::sync::atomic::Ordering::Acquire);
+            info!("SearchLimits has stop_flag, initial value: {} (should be false)", stop_value);
+            if stop_value {
+                error!(
+                    "CRITICAL: stop_flag is true at search start! Search will immediately stop."
+                );
+            }
         } else {
             info!("WARNING: SearchLimits does not have stop_flag!");
+        }
+
+        // Send initial depth 1 info to confirm search started
+        if let Some(ref info_cb) = limits.info_callback {
+            info!("Sending initial depth 1 info as heartbeat");
+            // Send immediate depth 1 with 0 nodes to indicate search is starting
+            let _initial_info = SearchInfo {
+                depth: Some(1),
+                time: Some(1),
+                nodes: Some(0),
+                string: Some("search starting".to_string()),
+                ..Default::default()
+            };
+            // Call the info callback through the Arc
+            let engine_callback = Arc::clone(info_cb);
+            engine_callback(1, 0, 0, std::time::Duration::from_millis(1), &[], NodeType::Exact);
         }
 
         // Execute search

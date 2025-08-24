@@ -131,15 +131,42 @@ pub fn wait_for_search_completion(
     engine: &Arc<Mutex<EngineAdapter>>,
 ) -> Result<()> {
     if search_state.is_searching() {
+        log::info!("wait_for_search_completion: stopping ongoing search, state={:?}", search_state);
+        let stop_start = std::time::Instant::now();
         *search_state = SearchState::StopRequested;
         stop_flag.store(true, Ordering::Release);
-        wait_for_worker_with_timeout(
+
+        // Wait for worker with timeout
+        let wait_result = wait_for_worker_with_timeout(
             worker_handle,
             worker_rx,
             engine,
             search_state,
             MIN_JOIN_TIMEOUT,
-        )?;
+        );
+
+        let stop_duration = stop_start.elapsed();
+        log::info!("wait_for_search_completion: completed in {stop_duration:?}");
+
+        // Even if wait failed, ensure we're in a clean state
+        if let Err(e) = wait_result {
+            log::error!("wait_for_worker_with_timeout failed: {e}, forcing clean state");
+            *search_state = SearchState::Idle;
+            // Drain any remaining messages
+            while worker_rx.try_recv().is_ok() {}
+        }
+
+        // Always reset stop flag after completion
+        stop_flag.store(false, Ordering::SeqCst);
+        log::debug!("wait_for_search_completion: reset stop_flag to false after stopping search");
+    } else {
+        log::debug!("wait_for_search_completion: no search in progress");
+        // Ensure stop flag is false even if no search was running
+        let was_true = stop_flag.load(Ordering::SeqCst);
+        stop_flag.store(false, Ordering::SeqCst);
+        if was_true {
+            log::warn!("wait_for_search_completion: stop_flag was true even though no search was running, reset to false");
+        }
     }
     Ok(())
 }
