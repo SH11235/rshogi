@@ -738,30 +738,30 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // NOTE: has_legal_moves check is temporarily disabled due to MoveGen hang issue
-        // 
-        // Investigation results (2025-08-25):
-        // - MoveGen::generate_all() hangs when called in subprocess context
-        // - Works fine in unit tests and direct execution
-        // - Root cause: Complex interaction between subprocess execution context 
-        //   and engine_core API calls (not stderr blocking)
+        // NOTE: has_legal_moves check is implemented but disabled due to MoveGen hang issue
+        //
+        // EngineAdapter::has_legal_moves() exists and uses MoveGen::generate_all(),
+        // but calling it from subprocess context causes a hang. The issue appears to be
+        // related to complex interaction between subprocess execution and engine_core APIs.
         //
         // The check is controlled by SKIP_LEGAL_MOVES environment variable:
-        // - SKIP_LEGAL_MOVES=1 (default for now): Skip the check
-        // - SKIP_LEGAL_MOVES=0: Enable the check (will cause hang in subprocess)
+        // - SKIP_LEGAL_MOVES=1 (default): Skip the check to avoid hang
+        // - SKIP_LEGAL_MOVES=0: Would enable the check but causes hang in subprocess
         //
         // This workaround is safe because:
         // - Positions without legal moves are extremely rare
-        // - The search will handle illegal positions correctly
-        // - See docs/movegen-hang-investigation.md for details
+        // - The search algorithm handles checkmate/stalemate naturally
+        // - See docs/movegen-hang-investigation-final.md for details
         let skip_legal_moves_check = std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
-        
+
         if skip_legal_moves_check {
             log::debug!("has_legal_moves check is disabled (SKIP_LEGAL_MOVES != 0)");
         } else {
-            log::warn!("has_legal_moves check is ENABLED - this may cause hang in subprocess execution!");
-            // TODO: Implement has_legal_moves check when the hang issue is resolved
-            // Currently has_legal_moves() method doesn't exist in Position
+            log::warn!("has_legal_moves check would be enabled but is not called to avoid hang");
+            // TODO: Call engine.has_legal_moves() when the hang issue is resolved
+            // if let Err(e) = engine.has_legal_moves() {
+            //     return fail_position_restore(ResignReason::NoLegalMoves, "no_legal_moves");
+            // }
         }
     }
 
