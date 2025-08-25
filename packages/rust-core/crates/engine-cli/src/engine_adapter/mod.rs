@@ -117,4 +117,16 @@ impl EngineAdapter {
     pub fn byoyomi_safety_ms(&self) -> u64 {
         self.byoyomi_safety_ms
     }
+
+    /// Set byoyomi safety ms for testing
+    #[cfg(test)]
+    pub fn set_byoyomi_safety_ms_for_test(&mut self, ms: u64) {
+        self.byoyomi_safety_ms = ms;
+    }
+
+    /// Set last search is byoyomi for testing
+    #[cfg(test)]
+    pub fn set_last_search_is_byoyomi(&mut self, is_byoyomi: bool) {
+        self.last_search_is_byoyomi = is_byoyomi;
+    }
 }

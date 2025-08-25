@@ -56,12 +56,12 @@ impl EngineAdapter {
         if let (Some(start_hash), Some(start_side)) =
             (self.search_start_position_hash, self.search_start_side_to_move)
         {
-            if start_hash != position.hash || start_side != position.side_to_move {
+            if start_hash != position.zobrist_hash() || start_side != position.side_to_move {
                 log::warn!(
-                    "Position inconsistency detected during validation! Search start: hash={:016x}, side={:?} -> Current: hash={:016x}, side={:?}",
+                    "Position inconsistency detected during validation! Search start: hash={:#016x}, side={:?} -> Current: hash={:#016x}, side={:?}",
                     start_hash,
                     start_side,
-                    position.hash,
+                    position.zobrist_hash(),
                     position.side_to_move
                 );
             }
@@ -94,7 +94,7 @@ impl EngineAdapter {
         // Log detailed information for debugging
         log::warn!("Move '{usi_move}' is not legal in current position");
         log::warn!("Current position SFEN: {}", usi::position_to_sfen(position));
-        log::warn!("Position hash: {:016x}, ply: {}", position.hash, position.ply);
+        log::warn!("Position hash: {:#016x}, ply: {}", position.zobrist_hash(), position.ply);
         log::warn!("Side to move: {:?}", position.side_to_move);
         log::warn!("Legal moves count: {}", legal_moves.len());
 
