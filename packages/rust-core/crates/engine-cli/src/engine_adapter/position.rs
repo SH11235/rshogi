@@ -126,4 +126,10 @@ impl EngineAdapter {
         self.clear_ponder_state();
         info!("New game started - position and ponder state cleared");
     }
+
+    /// Clear position (for testing position recovery)
+    #[cfg(test)]
+    pub fn clear_position(&mut self) {
+        self.position = None;
+    }
 }
