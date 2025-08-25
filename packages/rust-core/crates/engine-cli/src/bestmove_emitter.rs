@@ -38,6 +38,9 @@ pub struct BestmoveEmitter {
     search_id: u64,
     /// Search start time for elapsed calculation
     start_time: Instant,
+    /// Test-only flag to force emit() to return an error
+    #[cfg(test)]
+    force_error: bool,
 }
 
 impl BestmoveEmitter {
@@ -47,6 +50,19 @@ impl BestmoveEmitter {
             sent: AtomicBool::new(false),
             search_id,
             start_time: Instant::now(),
+            #[cfg(test)]
+            force_error: false,
+        }
+    }
+
+    /// Create a new bestmove emitter that will force an error on emit()
+    #[cfg(test)]
+    pub fn new_with_error(search_id: u64) -> Self {
+        Self {
+            sent: AtomicBool::new(false),
+            search_id,
+            start_time: Instant::now(),
+            force_error: true,
         }
     }
 
@@ -57,6 +73,12 @@ impl BestmoveEmitter {
         ponder: Option<String>,
         mut meta: BestmoveMeta,
     ) -> anyhow::Result<()> {
+        // Test-only: force error if requested
+        #[cfg(test)]
+        if self.force_error {
+            return Err(anyhow::anyhow!("Test error: forced emit failure"));
+        }
+
         // Ensure exactly-once emission
         if self.sent.swap(true, Ordering::AcqRel) {
             log::debug!(
