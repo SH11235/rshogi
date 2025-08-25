@@ -222,6 +222,17 @@ impl EngineAdapter {
         Ok(!legal_moves.is_empty())
     }
 
+    /// Check if the current position has any legal moves (optimized version)
+    /// Returns true as soon as the first legal move is found
+    #[allow(dead_code)] // Temporarily unused due to subprocess hang issue
+    pub fn has_any_legal_move(&self) -> Result<bool> {
+        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
+
+        // Use optimized early-exit version
+        let mut movegen = MoveGen::new();
+        Ok(movegen.has_any_legal_move(&position))
+    }
+
     /// Check if the current position is in check
     #[allow(dead_code)] // Temporarily unused due to subprocess hang issue
     pub fn is_in_check(&self) -> Result<bool> {

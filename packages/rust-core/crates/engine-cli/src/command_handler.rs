@@ -748,18 +748,29 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         // - SKIP_LEGAL_MOVES=1 (default): Skip the check to avoid hang
         // - SKIP_LEGAL_MOVES=0: Would enable the check but causes hang in subprocess
         //
+        // Additionally, USE_ANY_LEGAL environment variable controls which method to use:
+        // - USE_ANY_LEGAL=1: Use optimized has_any_legal_move() with early exit
+        // - USE_ANY_LEGAL=0 (default): Use standard has_legal_moves() with generate_all
+        //
         // This workaround is safe because:
         // - Positions without legal moves are extremely rare
         // - The search algorithm handles checkmate/stalemate naturally
         // - See docs/movegen-hang-investigation-final.md for details
         let skip_legal_moves_check = std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
+        let use_any_legal = std::env::var("USE_ANY_LEGAL").as_deref() == Ok("1");
 
         if skip_legal_moves_check {
             log::debug!("has_legal_moves check is disabled (SKIP_LEGAL_MOVES != 0)");
+        } else if use_any_legal {
+            log::warn!("has_any_legal_move check would be enabled but is not called to avoid hang");
+            // TODO: Call engine.has_any_legal_move() when the hang issue is resolved
+            // if !engine.has_any_legal_move()? {
+            //     return fail_position_restore(ResignReason::NoLegalMoves, "no_legal_moves");
+            // }
         } else {
             log::warn!("has_legal_moves check would be enabled but is not called to avoid hang");
             // TODO: Call engine.has_legal_moves() when the hang issue is resolved
-            // if let Err(e) = engine.has_legal_moves() {
+            // if !engine.has_legal_moves()? {
             //     return fail_position_restore(ResignReason::NoLegalMoves, "no_legal_moves");
             // }
         }

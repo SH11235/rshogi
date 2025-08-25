@@ -118,6 +118,80 @@ impl<'a> MoveGenImpl<'a> {
 
         std::mem::take(&mut self.moves)
     }
+
+    /// Check if there is any legal move from the current position
+    /// Returns true as soon as the first legal move is found (early exit optimization)
+    pub fn has_any_legal_move(&mut self) -> bool {
+        let us = self.pos.side_to_move;
+        let them = us.opposite();
+
+        // If in double check, only king moves are legal
+        if self.checkers.count_ones() > 1 {
+            // Check king moves only
+            self.generate_king_moves();
+            return !self.moves.is_empty();
+        }
+
+        // Check king moves first (always needed)
+        self.generate_king_moves();
+        if !self.moves.is_empty() {
+            return true;
+        }
+
+        // Check moves for other piece types
+        for &piece_type_enum in &ALL_PIECE_TYPES {
+            if piece_type_enum == PieceType::King {
+                continue; // Already checked
+            }
+            let piece_type = piece_type_enum as usize;
+            let mut pieces = self.pos.board.piece_bb[us as usize][piece_type];
+
+            while let Some(from) = pieces.pop_lsb() {
+                // Check if the piece is promoted
+                let piece = self.pos.board.piece_on(from);
+                let promoted = piece.map(|p| p.promoted).unwrap_or(false);
+
+                // Clear moves before generating (since we check after each piece)
+                self.moves.clear();
+
+                match piece_type_enum {
+                    PieceType::Rook => self.generate_sliding_moves(from, piece_type_enum, promoted),
+                    PieceType::Bishop => {
+                        self.generate_sliding_moves(from, piece_type_enum, promoted)
+                    }
+                    PieceType::Gold => self.generate_gold_moves(from, promoted),
+                    PieceType::Silver => self.generate_silver_moves(from, promoted),
+                    PieceType::Knight => self.generate_knight_moves(from, promoted),
+                    PieceType::Lance => self.generate_lance_moves(from, promoted),
+                    PieceType::Pawn => self.generate_pawn_moves(from, promoted),
+                    _ => unreachable!("King moves already checked"),
+                }
+
+                // Filter out any moves that would capture the enemy king
+                let enemy_king_bb =
+                    self.pos.board.piece_bb[them as usize][PieceType::King as usize];
+                if let Some(enemy_king_sq) = enemy_king_bb.lsb() {
+                    self.moves.as_mut_vec().retain(|m| m.to() != enemy_king_sq);
+                }
+
+                if !self.moves.is_empty() {
+                    return true;
+                }
+            }
+        }
+
+        // Check drop moves
+        self.moves.clear();
+        self.generate_drop_moves();
+
+        // Filter out any drop moves that would capture the enemy king (should not happen)
+        let enemy_king_bb = self.pos.board.piece_bb[them as usize][PieceType::King as usize];
+        if let Some(enemy_king_sq) = enemy_king_bb.lsb() {
+            self.moves.as_mut_vec().retain(|m| m.to() != enemy_king_sq);
+        }
+
+        !self.moves.is_empty()
+    }
 }
 
 // Forward declarations for methods implemented in other modules
