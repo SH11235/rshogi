@@ -51,18 +51,14 @@ pub fn build_meta(
             | BestmoveSource::EmergencyFallbackTimeout
             | BestmoveSource::PartialResultTimeout => TerminationReason::TimeLimit,
             // Normal completion cases -> Completed
-            BestmoveSource::EmergencyFallbackOnFinish
+            BestmoveSource::EmergencyFallback
+            | BestmoveSource::EmergencyFallbackOnFinish
             | BestmoveSource::PartialResultOnFinish
             | BestmoveSource::SessionInSearchFinished => TerminationReason::Completed,
             // User stop cases -> UserStop
             BestmoveSource::SessionOnStop => TerminationReason::UserStop,
             // Error cases -> Error
             BestmoveSource::Resign | BestmoveSource::ResignOnFinish => TerminationReason::Error,
-            // Fallback cases (should use specific mapping above)
-            BestmoveSource::EmergencyFallback => {
-                log::warn!("Unmapped BestmoveSource: {:?}, defaulting to UserStop", from);
-                TerminationReason::UserStop
-            }
             // Test variant
             #[cfg(test)]
             BestmoveSource::Test => TerminationReason::UserStop,
@@ -99,6 +95,36 @@ pub fn build_meta(
 }
 
 impl<'a> CommandContext<'a> {
+    /// Try to emit bestmove from session
+    /// Returns Ok(true) if bestmove was successfully emitted
+    fn emit_best_from_session(
+        &mut self,
+        session: &SearchSession,
+        from: BestmoveSource,
+        stop_info: Option<StopInfo>,
+        finalize_label: &str,
+    ) -> Result<bool> {
+        let adapter = lock_or_recover_adapter(self.engine);
+        if let Some(position) = adapter.get_position() {
+            if let Ok((best_move, ponder)) = adapter.validate_and_get_bestmove(session, position) {
+                // Extract common score formatting and metadata
+                let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
+                let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
+                let score_str = session.committed_best.as_ref().map(|b| match &b.score {
+                    crate::search_session::Score::Cp(cp) => format!("cp {cp}"),
+                    crate::search_session::Score::Mate(mate) => format!("mate {mate}"),
+                });
+
+                log::debug!("Validated bestmove from session: depth={depth}");
+
+                let meta = build_meta(from, depth, seldepth, score_str, stop_info);
+                self.emit_and_finalize(best_move, ponder, meta, finalize_label)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     #[inline]
     pub fn finalize_search(&mut self, where_: &str) {
         log::debug!("Finalize search {} ({})", *self.current_search_id, where_);
@@ -113,7 +139,10 @@ impl<'a> CommandContext<'a> {
     }
 
     /// Emit bestmove and always finalize search, even on error
-    /// This ensures finalize_search is called even if emit fails
+    ///
+    /// This ensures finalize_search is called even if emit fails.
+    /// Following USI best practices, this method always succeeds (returns Ok)
+    /// and makes best effort to send bestmove even if primary emission fails.
     pub fn emit_and_finalize(
         &mut self,
         best_move: String,
@@ -133,7 +162,10 @@ impl<'a> CommandContext<'a> {
                     // Always finalize search even on error
                     self.finalize_search(finalize_label);
                     // Try direct send as fallback
-                    send_response(UsiResponse::BestMove { best_move, ponder })?;
+                    if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
+                        log::error!("Failed to send bestmove even with direct fallback: {e}");
+                        // Continue without propagating error - USI requires best effort
+                    }
                     Ok(())
                 }
             }
@@ -141,7 +173,10 @@ impl<'a> CommandContext<'a> {
             log::warn!("BestmoveEmitter not available; sending bestmove directly");
             // Always finalize before sending
             self.finalize_search(finalize_label);
-            send_response(UsiResponse::BestMove { best_move, ponder })?;
+            if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
+                log::error!("Failed to send bestmove directly: {e}");
+                // Continue without propagating error - USI requires best effort
+            }
             Ok(())
         }
     }
@@ -308,9 +343,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.game_over(result);
 
-            // Reset stop flag for next game
-            ctx.stop_flag.store(false, Ordering::Release);
-            log::debug!("Game over processed, worker cleaned up, state reset to Idle, stop_flag reset to false");
+            // Note: stop_flag is already reset to false by wait_for_search_completion
+            log::debug!("Game over processed, worker cleaned up, state reset to Idle");
         }
 
         UsiCommand::UsiNewGame => {
@@ -350,7 +384,7 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
 fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     log::debug!("Received go command with params: {params:?}");
     let go_received_time = Instant::now();
-    send_info_string(format!("NewSearchStart: go received at {go_received_time:?}"))?;
+    log::debug!("NewSearchStart: go received at {go_received_time:?}");
 
     // Stop any ongoing search and ensure engine is available
     let wait_start = Instant::now();
@@ -545,7 +579,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     // Log before spawning worker
     log::debug!("About to spawn worker thread for search_id={search_id}");
-    send_info_string(format!("NewSearchStart: spawning worker, search_id={search_id}"))?;
+    log::debug!("NewSearchStart: spawning worker, search_id={search_id}");
 
     // Spawn worker thread for search with panic safety
     let handle = thread::spawn(move || {
@@ -589,15 +623,16 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     log::debug!("Received stop command, search_state = {:?}", *ctx.search_state);
     log::debug!("Stop command received, entering stop handler");
-    send_info_string(format!(
+    log::debug!(
         "StopRequested: search_id={}, state={:?}",
-        *ctx.current_search_id, *ctx.search_state
-    ))?;
+        *ctx.current_search_id,
+        *ctx.search_state
+    );
 
     // Early return if not searching
     if !ctx.search_state.is_searching() {
         log::debug!("Stop while idle -> ignore");
-        send_info_string("StopAck: ignored (not searching)")?;
+        log::debug!("StopAck: ignored (not searching)");
         return Ok(());
     }
 
@@ -636,46 +671,17 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         } else {
             log::warn!("No current stop flag available for search_id={}", *ctx.current_search_id);
         }
-        send_info_string(format!("StopAck: stop_flag set, search_id={}", *ctx.current_search_id))?;
+        log::debug!("StopAck: stop_flag set, search_id={}", *ctx.current_search_id);
 
         // First try to use committed best from session immediately
-        if let Some(ref session) = *ctx.current_session {
-            let adapter = lock_or_recover_adapter(ctx.engine);
-            if let Some(position) = adapter.get_position() {
-                if let Ok((best_move, ponder)) =
-                    adapter.validate_and_get_bestmove(session, position)
-                {
-                    // Log bestmove validation (source info now handled by BestmoveEmitter)
-                    let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-                    log::debug!("Validated bestmove from session on stop: depth={depth}");
-
-                    log::debug!("Sending committed bestmove from session on stop: {best_move}");
-
-                    // Use BestmoveEmitter for centralized emission
-                    if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                        let score_str = session.committed_best.as_ref().map(|b| match &b.score {
-                            crate::search_session::Score::Cp(cp) => format!("cp {cp}"),
-                            crate::search_session::Score::Mate(mate) => format!("mate {mate}"),
-                        });
-
-                        let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
-
-                        let meta = build_meta(
-                            BestmoveSource::SessionOnStop,
-                            depth,
-                            seldepth,
-                            score_str,
-                            None, // Let build_meta create default StopInfo
-                        );
-
-                        return ctx.emit_and_finalize(best_move, ponder, meta, "SessionOnStop");
-                    } else {
-                        log::warn!("BestmoveEmitter not available for current search; sending bestmove directly");
-                        send_response(UsiResponse::BestMove { best_move, ponder })?;
-                        ctx.finalize_search("DirectSend");
-                        return Ok(());
-                    }
-                }
+        if let Some(session) = ctx.current_session.clone() {
+            if ctx.emit_best_from_session(
+                &session,
+                BestmoveSource::SessionOnStop,
+                None, // Let build_meta create default StopInfo
+                "SessionOnStop",
+            )? {
+                return Ok(());
             }
         }
 
@@ -685,18 +691,33 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             (adapter.last_search_is_byoyomi(), adapter.byoyomi_safety_ms())
         };
 
+        // Get safety factor from environment variable (default: 0.5 for stage1, 1.0 for total)
+        let stage1_factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.5);
+        let total_factor = std::env::var("BYOYOMI_TOTAL_FACTOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(1.0);
+
         // Use adaptive timeouts based on byoyomi safety settings
         #[cfg(test)]
         let stage1_timeout = if is_byoyomi {
             // Test mode: minimal clamp for faster tests
-            Duration::from_millis((safety_ms / 2).max(1))
+            Duration::from_millis(((safety_ms as f64 * stage1_factor) as u64).max(1))
         } else {
             Duration::from_millis(10) // Test mode: very quick wait
         };
         #[cfg(not(test))]
         let stage1_timeout = if is_byoyomi {
-            // Use half of safety margin for stage 1, clamped to reasonable range
-            Duration::from_millis((safety_ms / 2).clamp(400, 1000))
+            // Use configured fraction of safety margin for stage 1
+            // For very short byoyomi (< 800ms safety), allow shorter minimums
+            let min_stage1 = if safety_ms < 800 { 200 } else { 400 };
+            let max_stage1 = if safety_ms < 800 { 600 } else { 1000 };
+            Duration::from_millis(
+                ((safety_ms as f64 * stage1_factor) as u64).clamp(min_stage1, max_stage1),
+            )
         } else {
             Duration::from_millis(100) // Normal mode: quick wait
         };
@@ -704,14 +725,19 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         #[cfg(test)]
         let total_timeout = if is_byoyomi {
             // Test mode: minimal clamp for faster tests
-            Duration::from_millis(safety_ms.max(1))
+            Duration::from_millis(((safety_ms as f64 * total_factor) as u64).max(1))
         } else {
             Duration::from_millis(15) // Test mode: very quick fallback
         };
         #[cfg(not(test))]
         let total_timeout = if is_byoyomi {
-            // Use full safety margin for total timeout, clamped to reasonable range
-            Duration::from_millis(safety_ms.clamp(800, 2000))
+            // Use configured fraction of safety margin for total timeout
+            // For very short byoyomi (< 1600ms safety), allow shorter minimums
+            let min_total = if safety_ms < 1600 { 400 } else { 800 };
+            let max_total = if safety_ms < 1600 { 1200 } else { 2000 };
+            Duration::from_millis(
+                ((safety_ms as f64 * total_factor) as u64).clamp(min_total, max_total),
+            )
         } else {
             Duration::from_millis(150) // Normal mode: quick fallback
         };
@@ -822,8 +848,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 break;
             }
 
-            // Check for bestmove message
-            match ctx.worker_rx.try_recv() {
+            // Calculate remaining time for adaptive polling
+            let remaining = total_timeout.saturating_sub(elapsed);
+            let poll_timeout = std::cmp::min(remaining, Duration::from_millis(3));
+
+            // Check for bestmove message with timeout
+            match ctx.worker_rx.recv_timeout(poll_timeout) {
                 // WorkerMessage::BestMove has been completely removed.
                 // All bestmove emissions now go through the session-based approach
                 Ok(WorkerMessage::Info { info, search_id }) => {
@@ -868,78 +898,19 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     if search_id == *ctx.current_search_id {
                         log::debug!("SearchFinished received in stop handler, sending bestmove");
                         // Try to use session-based bestmove
-                        if let Some(ref session) = *ctx.current_session {
-                            let adapter = lock_or_recover_adapter(ctx.engine);
-                            if let Some(position) = adapter.get_position() {
-                                match adapter.validate_and_get_bestmove(session, position) {
-                                    Ok((best_move, ponder)) => {
-                                        // Log bestmove validation (source info now handled by BestmoveEmitter)
-                                        let depth = session
-                                            .committed_best
-                                            .as_ref()
-                                            .map(|b| b.depth)
-                                            .unwrap_or(0);
-                                        log::debug!("Validated bestmove from session in stop handler: depth={depth}");
-
-                                        log::debug!(
-                                            "Sending bestmove from stop handler: {best_move}"
-                                        );
-
-                                        if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                                            let score_str =
-                                                session.committed_best.as_ref().map(|b| {
-                                                    match &b.score {
-                                                        crate::search_session::Score::Cp(cp) => {
-                                                            format!("cp {cp}")
-                                                        }
-                                                        crate::search_session::Score::Mate(
-                                                            mate,
-                                                        ) => format!("mate {mate}"),
-                                                    }
-                                                });
-
-                                            let seldepth = session
-                                                .committed_best
-                                                .as_ref()
-                                                .and_then(|b| b.seldepth);
-
-                                            let meta = build_meta(
-                                                BestmoveSource::SessionInSearchFinished,
-                                                depth,
-                                                seldepth,
-                                                score_str,
-                                                stop_info, // Pass the provided stop_info if any
-                                            );
-
-                                            ctx.emit_and_finalize(
-                                                best_move,
-                                                ponder,
-                                                meta,
-                                                "BestmoveEmitter",
-                                            )?;
-                                        } else {
-                                            log::error!(
-                                                "BestmoveEmitter not available for SearchFinished; sending bestmove directly"
-                                            );
-                                            send_response(UsiResponse::BestMove {
-                                                best_move,
-                                                ponder,
-                                            })?;
-                                            ctx.finalize_search("DirectSend");
-                                        }
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        let position_info = adapter
-                                            .get_position()
-                                            .map(position_to_sfen)
-                                            .unwrap_or_else(|| "<no position>".to_string());
-                                        log::warn!(
-                                            "Session validation failed in stop handler for position {}: {e}", position_info
-                                        );
-                                        // Continue to wait for BestMove or use fallback
-                                    }
-                                }
+                        if let Some(session) = ctx.current_session.clone() {
+                            if ctx.emit_best_from_session(
+                                &session,
+                                BestmoveSource::SessionInSearchFinished,
+                                stop_info, // Pass the provided stop_info if any
+                                "BestmoveEmitter",
+                            )? {
+                                break;
+                            } else {
+                                // Continue to wait for BestMove or use fallback
+                                log::debug!(
+                                    "Session validation failed in stop handler, continuing to wait"
+                                );
                             }
                         }
                     }
@@ -1054,8 +1025,18 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         log::trace!("Ignoring SearchStarted from old search in stop handler: {search_id} (current: {})", *ctx.current_search_id);
                     }
                 }
-                _ => {
-                    thread::sleep(Duration::from_millis(10));
+                Ok(WorkerMessage::Error { message, search_id }) => {
+                    if search_id == *ctx.current_search_id {
+                        log::error!("Worker error in stop handler: {message}");
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    // Timeout is expected - just continue to next iteration
+                }
+                Err(e) => {
+                    // Channel disconnected
+                    log::error!("Worker channel error in stop handler: {e:?}");
+                    break;
                 }
             }
         }
@@ -1741,16 +1722,14 @@ mod tests {
 
     #[test]
     fn test_stop_handler_partial_result_timeout() {
-        use crate::bestmove_emitter::LAST_EMIT_SOURCE;
+        use crate::bestmove_emitter::{clear_last_source_for, last_source_for};
         use std::thread;
         use std::time::Duration;
 
-        // Clear last emit source
-        {
-            if let Ok(mut last) = LAST_EMIT_SOURCE.lock() {
-                *last = None;
-            }
-        }
+        let search_id = 200;
+
+        // Clear last emit source for this search_id
+        clear_last_source_for(search_id);
 
         let (
             engine,
@@ -1836,32 +1815,58 @@ mod tests {
         assert!(ctx.current_bestmove_emitter.is_none());
 
         // Verify the correct BestmoveSource was used
-        {
-            if let Ok(last) = LAST_EMIT_SOURCE.lock() {
-                assert_eq!(
-                    *last,
-                    Some(BestmoveSource::PartialResultTimeout),
-                    "Should have used PartialResultTimeout source"
-                );
-            }
-        }
+        assert_eq!(
+            last_source_for(search_id),
+            Some(BestmoveSource::PartialResultTimeout),
+            "Should have used PartialResultTimeout source"
+        );
 
         // Clean up worker thread
         let _ = worker_thread.join();
     }
 
     #[test]
+    fn test_build_meta_mapping() {
+        use engine_core::search::types::TerminationReason;
+
+        // Test all BestmoveSource to TerminationReason mappings
+        let test_cases = vec![
+            // Timeout cases -> TimeLimit
+            (BestmoveSource::ResignTimeout, TerminationReason::TimeLimit),
+            (BestmoveSource::EmergencyFallbackTimeout, TerminationReason::TimeLimit),
+            (BestmoveSource::PartialResultTimeout, TerminationReason::TimeLimit),
+            // Normal completion cases -> Completed
+            (BestmoveSource::EmergencyFallback, TerminationReason::Completed),
+            (BestmoveSource::EmergencyFallbackOnFinish, TerminationReason::Completed),
+            (BestmoveSource::PartialResultOnFinish, TerminationReason::Completed),
+            (BestmoveSource::SessionInSearchFinished, TerminationReason::Completed),
+            // User stop cases -> UserStop
+            (BestmoveSource::SessionOnStop, TerminationReason::UserStop),
+            // Error cases -> Error
+            (BestmoveSource::Resign, TerminationReason::Error),
+            (BestmoveSource::ResignOnFinish, TerminationReason::Error),
+        ];
+
+        for (source, expected_reason) in test_cases {
+            let meta = build_meta(source, 10, None, None, None);
+            assert_eq!(
+                meta.stop_info.reason, expected_reason,
+                "BestmoveSource::{:?} should map to TerminationReason::{:?}",
+                source, expected_reason
+            );
+        }
+    }
+
+    #[test]
     fn test_stop_handler_emergency_fallback_timeout() {
-        use crate::bestmove_emitter::LAST_EMIT_SOURCE;
+        use crate::bestmove_emitter::{clear_last_source_for, last_source_for};
         use std::thread;
         use std::time::Duration;
 
-        // Clear last emit source
-        {
-            if let Ok(mut last) = LAST_EMIT_SOURCE.lock() {
-                *last = None;
-            }
-        }
+        let search_id = 300;
+
+        // Clear last emit source for this search_id
+        clear_last_source_for(search_id);
 
         let (
             engine,
@@ -1939,17 +1944,153 @@ mod tests {
         assert!(ctx.current_bestmove_emitter.is_none());
 
         // Verify the correct BestmoveSource was used
-        {
-            if let Ok(last) = LAST_EMIT_SOURCE.lock() {
-                assert_eq!(
-                    *last,
-                    Some(BestmoveSource::EmergencyFallbackTimeout),
-                    "Should have used EmergencyFallbackTimeout source"
-                );
-            }
-        }
+        assert_eq!(
+            last_source_for(search_id),
+            Some(BestmoveSource::EmergencyFallbackTimeout),
+            "Should have used EmergencyFallbackTimeout source"
+        );
 
         // Clean up worker thread
         let _ = worker_thread.join();
+    }
+
+    #[test]
+    fn test_worker_error_handling() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set up search state
+        *ctx.search_state = SearchState::Searching;
+        *ctx.current_search_id = 400;
+        *ctx.current_search_is_ponder = false;
+        *ctx.current_stop_flag = Some(Arc::new(AtomicBool::new(false)));
+        *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(400));
+
+        // Test error from current search
+        let error_msg = WorkerMessage::Error {
+            message: "Test error".to_string(),
+            search_id: 400,
+        };
+
+        // Send error message
+        ctx.worker_tx.send(error_msg).unwrap();
+
+        // Also test error from old search (should be ignored)
+        let old_error_msg = WorkerMessage::Error {
+            message: "Old error".to_string(),
+            search_id: 300,
+        };
+        ctx.worker_tx.send(old_error_msg).unwrap();
+
+        // Send SearchFinished to terminate
+        ctx.worker_tx
+            .send(WorkerMessage::SearchFinished {
+                session_id: 1,
+                root_hash: 0,
+                search_id: 400,
+                stop_info: None,
+            })
+            .unwrap();
+
+        // Call stop handler which should process the error message
+        let result = handle_stop_command(&mut ctx);
+        assert!(result.is_ok(), "Stop command should handle error messages");
+
+        // Verify search was finalized
+        assert_eq!(*ctx.search_state, SearchState::Idle);
+    }
+
+    #[test]
+    fn test_recv_timeout_boundary() {
+        use std::time::{Duration, Instant};
+
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        // Set up engine adapter with very short timeout (1ms)
+        {
+            let mut adapter = lock_or_recover_adapter(&engine);
+            adapter.set_byoyomi_safety_ms_for_test(1);
+            adapter.set_last_search_is_byoyomi(true);
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set up search state
+        *ctx.search_state = SearchState::Searching;
+        *ctx.current_search_id = 500;
+        *ctx.current_search_is_ponder = false;
+        *ctx.current_stop_flag = Some(Arc::new(AtomicBool::new(false)));
+        *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(500));
+
+        // Don't send any messages - let it timeout
+        let start = Instant::now();
+        let result = handle_stop_command(&mut ctx);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "Stop command should handle timeout gracefully");
+        assert!(elapsed < Duration::from_millis(10), "Should timeout quickly with 1ms safety");
+
+        // Verify search was finalized
+        assert_eq!(*ctx.search_state, SearchState::Idle);
     }
 }

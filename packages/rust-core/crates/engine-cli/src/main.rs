@@ -43,7 +43,10 @@ struct Args {
     debug: bool,
 
     /// Use null move (0000) instead of resign for fallback
-    /// Note: null move is not defined in USI spec but handled by most GUIs
+    ///
+    /// Note: null move (0000) is not defined in USI specification but is widely
+    /// supported by most shogi GUIs as a graceful way to handle edge cases.
+    /// When disabled (default), the engine will send "resign" as per USI spec.
     #[arg(long)]
     allow_null_move: bool,
 }
@@ -417,6 +420,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 log::debug!("SearchFinished for search {} ignored (state=StopRequested, bestmove already sent by stop handler)", search_id);
                 // Still finalize to clean up state and transition to Idle
                 ctx.finalize_search("SearchFinished after stop");
+            } else if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Idle
+            {
+                // SearchFinished arrived after bestmove was already sent (typically from stop timeout)
+                log::debug!(
+                    "SearchFinished for search {} ignored (state=Idle, bestmove already sent)",
+                    search_id
+                );
             }
         }
 
@@ -625,6 +635,58 @@ mod tests {
         // Each search should have received messages
         for (i, &count) in finished_per_search.iter().enumerate() {
             assert!(count > 0, "Search {i} should have Finished messages");
+        }
+    }
+
+    #[test]
+    fn test_delayed_search_finished_idle_state() {
+        // Test that SearchFinished arriving after Idle state is properly logged
+        let (worker_tx, worker_rx) = unbounded();
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let mut worker_handle: Option<JoinHandle<()>> = None;
+        let mut search_state = SearchState::Idle; // Already in Idle
+        let mut search_id_counter = 3u64;
+        let mut current_search_id = 3u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter = None;
+        let mut current_stop_flag = None;
+        let mut last_position_cmd = None;
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &worker_tx,
+            worker_rx: &worker_rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Send SearchFinished for current search while already Idle
+        let msg = WorkerMessage::SearchFinished {
+            session_id: 1,
+            root_hash: 0,
+            search_id: 3,
+            stop_info: None,
+        };
+
+        // Process the message - should be ignored with debug log
+        match handle_worker_message(msg, &mut ctx) {
+            Ok(_) => {
+                // Should succeed but not do anything
+                assert_eq!(*ctx.search_state, SearchState::Idle);
+            }
+            Err(e) => panic!("handle_worker_message failed: {e}"),
         }
     }
 
