@@ -13,12 +13,11 @@ mod utils;
 mod worker;
 
 use anyhow::Result;
-use bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
+use bestmove_emitter::BestmoveEmitter;
 use clap::Parser;
-use command_handler::{handle_command, CommandContext};
+use command_handler::{build_meta, handle_command, CommandContext};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
-use engine_core::search::types::{StopInfo, TerminationReason};
 use helpers::generate_fallback_move;
 use search_session::SearchSession;
 use state::SearchState;
@@ -279,7 +278,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                 // Send bestmove immediately if not ponder
                 if !*ctx.current_search_is_ponder {
-                    if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                    if let Some(ref _emitter) = ctx.current_bestmove_emitter {
                         // Try to use session-based bestmove
                         if let Some(ref session) = ctx.current_session {
                             log::debug!("Using session for bestmove generation");
@@ -306,37 +305,20 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                                             }
                                         });
 
-                                        let si = stop_info.unwrap_or(StopInfo {
-                                            reason: TerminationReason::Completed,
-                                            elapsed_ms: 0,
-                                            nodes: 0,
-                                            depth_reached: depth,
-                                            hard_timeout: false,
-                                        });
+                                        let meta = build_meta(
+                                            BestmoveSource::SessionInSearchFinished,
+                                            depth,
+                                            seldepth,
+                                            score_str,
+                                            stop_info,
+                                        );
 
-                                        let nodes = si.nodes;
-                                        let elapsed_ms = si.elapsed_ms;
-
-                                        let meta = BestmoveMeta {
-                                            from: BestmoveSource::SessionInSearchFinished,
-                                            stop_info: si,
-                                            stats: BestmoveStats {
-                                                depth,
-                                                seldepth,
-                                                score: score_str
-                                                    .unwrap_or_else(|| "unknown".to_string()),
-                                                nodes,
-                                                nps: if elapsed_ms > 0 {
-                                                    nodes.saturating_mul(1000) / elapsed_ms
-                                                } else {
-                                                    0
-                                                },
-                                            },
-                                        };
-
-                                        emitter.emit(best_move, ponder, meta)?;
-                                        ctx.finalize_search("SearchFinished with bestmove");
-                                        return Ok(());
+                                        return ctx.emit_and_finalize(
+                                            best_move,
+                                            ponder,
+                                            meta,
+                                            "SearchFinished with bestmove",
+                                        );
                                     }
                                     Err(e) => {
                                         log::warn!(
@@ -350,55 +332,39 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         // Fallback if session validation failed
                         match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
                             Ok(fallback_move) => {
-                                let si = stop_info.unwrap_or(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
-                                });
+                                let meta = build_meta(
+                                    BestmoveSource::EmergencyFallback,
+                                    0,         // depth
+                                    None,      // seldepth
+                                    None,      // score
+                                    stop_info, // Pass the provided stop_info
+                                );
 
-                                let meta = BestmoveMeta {
-                                    from: BestmoveSource::EmergencyFallback,
-                                    stop_info: si,
-                                    stats: BestmoveStats {
-                                        depth: 0,
-                                        seldepth: None,
-                                        score: "unknown".to_string(),
-                                        nodes: 0,
-                                        nps: 0,
-                                    },
-                                };
-
-                                emitter.emit(fallback_move, None, meta)?;
+                                ctx.emit_and_finalize(
+                                    fallback_move,
+                                    None,
+                                    meta,
+                                    "SearchFinished with fallback",
+                                )?;
                             }
                             Err(e) => {
                                 log::error!("Fallback move generation failed: {e}");
-                                let si = stop_info.unwrap_or(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
-                                });
+                                let meta = build_meta(
+                                    BestmoveSource::Resign,
+                                    0,         // depth
+                                    None,      // seldepth
+                                    None,      // score
+                                    stop_info, // Pass the provided stop_info
+                                );
 
-                                let meta = BestmoveMeta {
-                                    from: BestmoveSource::Resign,
-                                    stop_info: si,
-                                    stats: BestmoveStats {
-                                        depth: 0,
-                                        seldepth: None,
-                                        score: "unknown".to_string(),
-                                        nodes: 0,
-                                        nps: 0,
-                                    },
-                                };
-
-                                emitter.emit("resign".to_string(), None, meta)?;
+                                ctx.emit_and_finalize(
+                                    "resign".to_string(),
+                                    None,
+                                    meta,
+                                    "SearchFinished with fallback",
+                                )?;
                             }
                         }
-
-                        ctx.finalize_search("SearchFinished with fallback");
                     } else {
                         // No emitter available - send bestmove directly
                         log::error!("No BestmoveEmitter available for search {search_id}");

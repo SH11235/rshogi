@@ -18,6 +18,9 @@ pub enum EngineError {
     /// Operation timed out
     Timeout,
 
+    /// Position was corrupted during search
+    PositionCorrupted,
+
     /// Other errors
     Other(anyhow::Error),
 }
@@ -28,6 +31,7 @@ impl fmt::Display for EngineError {
             EngineError::NoLegalMoves => write!(f, "No legal moves available"),
             EngineError::EngineNotAvailable(msg) => write!(f, "Engine not available: {msg}"),
             EngineError::Timeout => write!(f, "Operation timed out"),
+            EngineError::PositionCorrupted => write!(f, "Position was corrupted during search"),
             EngineError::Other(e) => write!(f, "Other error: {e}"),
         }
     }

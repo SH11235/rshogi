@@ -153,6 +153,7 @@ impl EngineAdapter {
                 original_hash, original_side, original_ply,
                 position.zobrist_hash(), position.side_to_move, position.ply
             );
+            return Err(EngineError::PositionCorrupted);
         }
 
         // Convert to extended result

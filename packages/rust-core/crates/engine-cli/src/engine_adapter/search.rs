@@ -247,7 +247,14 @@ impl EngineAdapter {
         let slice = legal_moves.as_slice();
 
         // Common opening moves that are generally good
-        let common_opening_moves = ["7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h"];
+        // For black (sente): pawn advances, king safety moves
+        // For white (gote): similar defensive/developing moves
+        let common_opening_moves = [
+            // Black (sente) common moves
+            "7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h",
+            // White (gote) common moves
+            "3c3d", "7c7d", "6a7b", "5a6b", "2b7b", "8c8d",
+        ];
 
         let best_move = slice
             .iter()
@@ -525,8 +532,11 @@ mod tests {
         adapter.set_position(true, None, &[]).unwrap();
         let emergency_move = adapter.generate_emergency_move().unwrap();
 
-        // Should be one of the common opening moves
-        let common_moves = ["7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h"];
+        // Should be one of the common opening moves (either sente or gote)
+        let common_moves = [
+            "7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h", "3c3d", "7c7d", "6a7b", "5a6b", "2b7b",
+            "8c8d",
+        ];
         assert!(
             common_moves.contains(&emergency_move.as_str()),
             "Emergency move {} should be a common opening move",
