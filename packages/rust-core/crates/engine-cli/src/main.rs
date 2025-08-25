@@ -2,10 +2,12 @@
 
 mod bestmove_emitter;
 mod command_handler;
+mod deadlock_detector;
 mod engine_adapter;
 mod flushing_logger;
 mod helpers;
 mod search_session;
+mod signal_handler;
 mod state;
 mod stdin_reader;
 mod types;
@@ -99,6 +101,13 @@ fn main() {
 fn run_engine(allow_null_move: bool) -> Result<()> {
     // Initialize all static tables to prevent circular initialization deadlocks
     engine_core::init::init_all_tables_once();
+
+    // Install signal handler for debugging (Unix only)
+    #[cfg(unix)]
+    signal_handler::unix::install_signal_handler();
+
+    // Install deadlock detector for debug builds
+    deadlock_detector::install_deadlock_detector();
 
     // Record program start time for elapsed calculations
     let program_start = Instant::now();

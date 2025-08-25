@@ -760,6 +760,26 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         let skip_legal_moves_check = std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
         let use_any_legal = std::env::var("USE_ANY_LEGAL").as_deref() == Ok("1");
 
+        // Safety guard: warn strongly if enabling the check in release builds
+        #[cfg(not(debug_assertions))]
+        if !skip_legal_moves_check && !*ctx.legal_moves_check_logged {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            log::error!(
+                "timestamp={timestamp}\tkind=unsafe_config\tconfig=SKIP_LEGAL_MOVES=0\tbuild=release\tmessage=WARNING: has_legal_moves check enabled in RELEASE build - this may cause hangs in subprocess execution!"
+            );
+            log::error!(
+                "timestamp={timestamp}\tkind=unsafe_config\trecommendation=Use SKIP_LEGAL_MOVES=1 (default) for production"
+            );
+            eprintln!(
+                "\n*** WARNING: SKIP_LEGAL_MOVES=0 in RELEASE build ***\n\
+                 This configuration may cause hangs in subprocess execution.\n\
+                 Recommended: Set SKIP_LEGAL_MOVES=1 or unset for production use.\n"
+            );
+        }
+
         if skip_legal_moves_check {
             // Only log once per session
             if !*ctx.legal_moves_check_logged {
