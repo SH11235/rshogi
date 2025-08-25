@@ -19,16 +19,21 @@ use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
 use engine_core::search::types::{StopInfo, TerminationReason};
 
 /// Create a TSV-formatted log string from key-value pairs
+/// Values are sanitized to prevent TSV format corruption
 fn log_tsv(pairs: &[(&str, &str)]) -> String {
-    pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\t")
+    pairs
+        .iter()
+        .map(|(k, v)| {
+            // Sanitize value by replacing tabs and newlines with spaces
+            let sanitized = v.replace(['\t', '\n', '\r'], " ");
+            format!("{k}={sanitized}")
+        })
+        .collect::<Vec<_>>()
+        .join("\t")
 }
 
 /// Handle position restoration failure by logging and sending resign
-fn fail_position_restore(
-    _ctx: &mut CommandContext,
-    reason: ResignReason,
-    log_reason: &str,
-) -> Result<()> {
+fn fail_position_restore(reason: ResignReason, log_reason: &str) -> Result<()> {
     send_info_string(log_tsv(&[("kind", "position_restore_fail"), ("reason", log_reason)]))?;
     send_info_string(log_tsv(&[("kind", "resign"), ("resign_reason", &reason.to_string())]))?;
     send_response(UsiResponse::BestMove {
@@ -222,101 +227,85 @@ impl<'a> CommandContext<'a> {
         fallback_reason: &str,
     ) {
         // Prepare TSV log similar to BestmoveEmitter's format
-        let search_id = *self.current_search_id;
-        let (
-            from,
-            stop_reason,
-            depth,
-            seldepth,
-            depth_reached,
-            score,
-            nodes,
-            nps,
-            elapsed_ms,
-            hard_timeout,
-        ) = if let Some(m) = meta {
-            (
-                format!("{}", m.from),
-                m.stop_info.reason.to_string(),
-                m.stats.depth,
-                m.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
-                m.stop_info.depth_reached,
-                m.stats.score.clone(),
-                m.stats.nodes,
-                m.stats.nps,
-                m.stop_info.elapsed_ms,
-                m.stop_info.hard_timeout,
-            )
-        } else {
-            // Default values when no metadata is available
-            (
-                fallback_reason.to_string(),
-                "error".to_string(),
-                0,
-                "-".to_string(),
-                0,
-                "none".to_string(),
-                0,
-                0,
-                0,
-                false,
-            )
-        };
-
+        let search_id_str = self.current_search_id.to_string();
         let ponder_str = ponder.unwrap_or("none");
 
-        let info_string = format!(
-            "kind=bestmove_direct_fallback\t\
-             search_id={}\t\
-             bestmove_from={}\t\
-             stop_reason={}\t\
-             depth={}\t\
-             seldepth={}\t\
-             depth_reached={}\t\
-             score={}\t\
-             nodes={}\t\
-             nps={}\t\
-             elapsed_ms={}\t\
-             hard_timeout={}\t\
-             bestmove={}\t\
-             ponder={}\t\
-             fallback_reason={}",
-            search_id,
-            from,
-            stop_reason,
-            depth,
-            seldepth,
-            depth_reached,
-            score,
-            nodes,
-            nps,
-            elapsed_ms,
-            hard_timeout,
-            best_move,
-            ponder_str,
-            fallback_reason
-        );
+        let info_string = if let Some(m) = meta {
+            // Format metadata values as strings for log_tsv
+            let from_str = m.from.to_string();
+            let stop_reason_str = m.stop_info.reason.to_string();
+            let depth_str = m.stats.depth.to_string();
+            let seldepth_str =
+                m.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+            let depth_reached_str = m.stop_info.depth_reached.to_string();
+            let nodes_str = m.stats.nodes.to_string();
+            let nps_str = m.stats.nps.to_string();
+            let elapsed_ms_str = m.stop_info.elapsed_ms.to_string();
+            let hard_timeout_str = m.stop_info.hard_timeout.to_string();
+
+            log_tsv(&[
+                ("kind", "bestmove_direct_fallback"),
+                ("search_id", &search_id_str),
+                ("bestmove_from", &from_str),
+                ("stop_reason", &stop_reason_str),
+                ("depth", &depth_str),
+                ("seldepth", &seldepth_str),
+                ("depth_reached", &depth_reached_str),
+                ("score", &m.stats.score),
+                ("nodes", &nodes_str),
+                ("nps", &nps_str),
+                ("elapsed_ms", &elapsed_ms_str),
+                ("hard_timeout", &hard_timeout_str),
+                ("bestmove", best_move),
+                ("ponder", ponder_str),
+                ("fallback_reason", fallback_reason),
+            ])
+        } else {
+            // Default values when no metadata is available
+            log_tsv(&[
+                ("kind", "bestmove_direct_fallback"),
+                ("search_id", &search_id_str),
+                ("bestmove_from", fallback_reason),
+                ("stop_reason", "error"),
+                ("depth", "0"),
+                ("seldepth", "-"),
+                ("depth_reached", "0"),
+                ("score", "none"),
+                ("nodes", "0"),
+                ("nps", "0"),
+                ("elapsed_ms", "0"),
+                ("hard_timeout", "false"),
+                ("bestmove", best_move),
+                ("ponder", ponder_str),
+                ("fallback_reason", fallback_reason),
+            ])
+        };
 
         if let Err(e) = send_info_string(info_string) {
-            log::warn!("Failed to send fallback TSV log: {}", e);
+            log::warn!("Failed to send fallback TSV log: {e}");
         }
     }
 }
 
 /// Parse environment variable as positive f64, logging warning and returning default if invalid
 fn parse_positive_or_default(key: &str, default: f64) -> f64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| {
-            if f <= 0.0 {
-                log::warn!("{key} must be positive, using default {default}");
-                default
-            } else {
-                f
+    match std::env::var(key) {
+        Ok(s) => match s.parse::<f64>() {
+            Ok(f) => {
+                if f <= 0.0 {
+                    log::warn!("{key} must be positive (got {f}), using default {default}");
+                    default
+                } else {
+                    f
+                }
             }
-        })
-        .unwrap_or(default)
+            Err(e) => {
+                log::warn!("Failed to parse {key}='{s}' as f64: {e}, using default {default}");
+                default
+            }
+        },
+        Err(_) => default, // Environment variable not set, use default silently
+    }
 }
 
 pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
@@ -661,13 +650,10 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                 }
                                 Err(e) => {
                                     log::error!("Failed to rebuild position: {}", e);
-                                    send_info_string(
-                                        log_tsv(&[
-                                            ("kind", "position_restore_fallback"),
-                                            ("reason", "rebuild_failed"),
-                                        ])
-                                        .to_string(),
-                                    )?;
+                                    send_info_string(log_tsv(&[
+                                        ("kind", "position_restore_fallback"),
+                                        ("reason", "rebuild_failed"),
+                                    ]))?;
                                     need_fallback = true;
                                 }
                             }
@@ -707,7 +693,6 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                                 ("actual", &format!("{:#016x}", current_hash)),
                                             ]))?;
                                             return fail_position_restore(
-                                                ctx,
                                                 ResignReason::PositionRebuildFailed {
                                                     error:
                                                         "hash verification failed after fallback",
@@ -718,7 +703,6 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                     } else {
                                         log::error!("Failed to get position after sfen_snapshot restoration");
                                         return fail_position_restore(
-                                            ctx,
                                             ResignReason::PositionRebuildFailed {
                                                 error: "no position after sfen restoration",
                                             },
@@ -729,7 +713,6 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                 Err(e) => {
                                     log::error!("Failed to set position from sfen_snapshot: {}", e);
                                     return fail_position_restore(
-                                        ctx,
                                         ResignReason::PositionRebuildFailed {
                                             error: "sfen_snapshot failed",
                                         },
@@ -742,7 +725,6 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                     _ => {
                         log::error!("Invalid stored position command: {}", pos_state.cmd_canonical);
                         return fail_position_restore(
-                            ctx,
                             ResignReason::InvalidStoredPositionCmd,
                             "invalid_cmd",
                         );
@@ -750,61 +732,63 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 }
             } else {
                 log::error!("No position set and no recovery state available");
-                return fail_position_restore(ctx, ResignReason::NoPositionSet, "no_position_set");
+                return fail_position_restore(ResignReason::NoPositionSet, "no_position_set");
             }
         }
 
         // Sanity check: verify we have legal moves
-        let engine = lock_or_recover_adapter(ctx.engine);
-        match engine.has_legal_moves() {
-            Ok(true) => {
-                log::debug!("Position sanity check passed - legal moves available");
+        {
+            let engine = lock_or_recover_adapter(ctx.engine);
+            match engine.has_legal_moves() {
+                Ok(true) => {
+                    log::debug!("Position sanity check passed - legal moves available");
+                }
+                Ok(false) => {
+                    // Check if it's checkmate or error condition
+                    let in_check = engine.is_in_check().unwrap_or(false);
+                    let reason = if in_check {
+                        ResignReason::Checkmate
+                    } else {
+                        ResignReason::NoLegalMovesButNotInCheck
+                    };
+
+                    log::error!("Position has no legal moves - in_check: {in_check}");
+                    send_info_string(log_tsv(&[
+                        ("kind", "resign"),
+                        ("resign_reason", &reason.to_string()),
+                    ]))?;
+
+                    // Get position info for debugging
+                    let position_info = engine
+                        .get_position()
+                        .map(position_to_sfen)
+                        .unwrap_or_else(|| "<no position>".to_string());
+                    log::error!("Current position SFEN: {position_info}");
+
+                    send_response(UsiResponse::BestMove {
+                        best_move: "resign".to_string(),
+                        ponder: None,
+                    })?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::error!("Failed to check legal moves: {e}");
+                    let reason = ResignReason::OtherError {
+                        error: "legal move check failed",
+                    };
+                    send_info_string(log_tsv(&[
+                        ("kind", "resign"),
+                        ("resign_reason", &reason.to_string()),
+                    ]))?;
+
+                    send_response(UsiResponse::BestMove {
+                        best_move: "resign".to_string(),
+                        ponder: None,
+                    })?;
+                    return Ok(());
+                }
             }
-            Ok(false) => {
-                // Check if it's checkmate or error condition
-                let in_check = engine.is_in_check().unwrap_or(false);
-                let reason = if in_check {
-                    ResignReason::Checkmate
-                } else {
-                    ResignReason::NoLegalMovesButNotInCheck
-                };
-
-                log::error!("Position has no legal moves - in_check: {in_check}");
-                send_info_string(log_tsv(&[
-                    ("kind", "resign"),
-                    ("resign_reason", &reason.to_string()),
-                ]))?;
-
-                // Get position info for debugging
-                let position_info = engine
-                    .get_position()
-                    .map(position_to_sfen)
-                    .unwrap_or_else(|| "<no position>".to_string());
-                log::error!("Current position SFEN: {position_info}");
-
-                send_response(UsiResponse::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder: None,
-                })?;
-                return Ok(());
-            }
-            Err(e) => {
-                log::error!("Failed to check legal moves: {e}");
-                let reason = ResignReason::OtherError {
-                    error: "legal move check failed",
-                };
-                send_info_string(log_tsv(&[
-                    ("kind", "resign"),
-                    ("resign_reason", &reason.to_string()),
-                ]))?;
-
-                send_response(UsiResponse::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder: None,
-                })?;
-                return Ok(());
-            }
-        }
+        } // Engine lock is dropped here
     }
 
     // Clean up old stop flag before creating new one
