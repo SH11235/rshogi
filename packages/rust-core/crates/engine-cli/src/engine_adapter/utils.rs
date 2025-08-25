@@ -75,9 +75,6 @@ impl EngineAdapter {
         limits: SearchLimits,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<ExtendedSearchResult, EngineError> {
-        info!("execute_search_static called");
-        info!("Search starting...");
-
         // Save original position state for verification
         let original_hash = position.zobrist_hash();
         let original_side = position.side_to_move;
