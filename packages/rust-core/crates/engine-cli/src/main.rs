@@ -24,9 +24,9 @@ use state::SearchState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stdin_reader::spawn_stdin_reader;
-use types::BestmoveSource;
+use types::{BestmoveSource, PositionState};
 use usi::{
     ensure_flush_on_exit, flush_final, send_info_string, send_response, UsiCommand, UsiResponse,
 };
@@ -80,6 +80,9 @@ fn main() {
 }
 
 fn run_engine(allow_null_move: bool) -> Result<()> {
+    // Record program start time for elapsed calculations
+    let program_start = Instant::now();
+
     // Create communication channels
     let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
     let (cmd_tx, cmd_rx) = bounded::<UsiCommand>(CHANNEL_SIZE);
@@ -102,7 +105,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_session: Option<SearchSession> = None; // Current search session
     let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
-    let mut last_position_cmd: Option<String> = None; // Last position command for recovery
+    let mut position_state: Option<PositionState> = None; // Position state for recovery
 
     // Main event loop - process USI commands and worker messages concurrently
     loop {
@@ -139,7 +142,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
-                            last_position_cmd: &mut last_position_cmd,
+                            position_state: &mut position_state,
+                            program_start,
                         };
                         handle_command(cmd, &mut ctx)?;
                     }
@@ -168,7 +172,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
-                            last_position_cmd: &mut last_position_cmd,
+                            position_state: &mut position_state,
+                            program_start,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -653,7 +658,7 @@ mod tests {
         let mut current_session: Option<SearchSession> = None;
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
-        let mut last_position_cmd = None;
+        let mut position_state = None;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -669,7 +674,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Send SearchFinished for current search while already Idle
@@ -706,7 +712,7 @@ mod tests {
         let mut current_session: Option<SearchSession> = None;
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
-        let mut last_position_cmd = None;
+        let mut position_state = None;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -722,7 +728,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Note: In a full test, we would mock send_response to capture sent Info messages
