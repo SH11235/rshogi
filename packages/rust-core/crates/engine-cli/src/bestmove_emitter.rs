@@ -109,14 +109,6 @@ impl BestmoveEmitter {
         ponder: Option<String>,
         mut meta: BestmoveMeta,
     ) -> anyhow::Result<()> {
-        // Test-only: track the BestmoveSource by search_id
-        #[cfg(test)]
-        {
-            if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
-                map.insert(self.search_id, meta.from);
-            }
-        }
-
         // Ensure exactly-once emission
         if self.sent.swap(true, Ordering::AcqRel) {
             log::debug!(
@@ -125,6 +117,15 @@ impl BestmoveEmitter {
                 best_move
             );
             return Ok(());
+        }
+
+        // Test-only: track the BestmoveSource by search_id
+        // This is done AFTER the sent flag check to ensure we only track actually sent moves
+        #[cfg(test)]
+        {
+            if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+                map.insert(self.search_id, meta.from);
+            }
         }
 
         // Test-only: force error if requested
@@ -148,7 +149,7 @@ impl BestmoveEmitter {
         }
 
         // Log null move usage for debugging
-        if best_move == "0000" {
+        if best_move.trim() == "0000" {
             let _ = send_info_string(
                 "using null move (0000) - position may be invalid or no legal moves.",
             );
