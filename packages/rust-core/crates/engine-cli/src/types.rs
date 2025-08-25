@@ -4,6 +4,7 @@
 //! including search results, ponder state, and callback types.
 
 use std::fmt;
+use std::time::Instant;
 
 /// Reason for resignation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +89,44 @@ impl fmt::Display for BestmoveSource {
             Self::Test => "test",
         };
         write!(f, "{s}")
+    }
+}
+
+/// State of a position for reliable restoration
+#[derive(Debug, Clone)]
+pub struct PositionState {
+    /// Canonical position command (e.g., "position startpos moves 7g7f")
+    pub cmd_canonical: String,
+    /// Zobrist hash of the root position (for quick validation)
+    pub root_hash: u64,
+    /// Number of moves from root position
+    pub move_len: usize,
+    /// SFEN snapshot of current position (fallback for restoration)
+    pub sfen_snapshot: String,
+    /// When this position was stored
+    pub stored_at: Instant,
+}
+
+impl PositionState {
+    /// Create a new PositionState
+    pub fn new(
+        cmd_canonical: String,
+        root_hash: u64,
+        move_len: usize,
+        sfen_snapshot: String,
+    ) -> Self {
+        Self {
+            cmd_canonical,
+            root_hash,
+            move_len,
+            sfen_snapshot,
+            stored_at: Instant::now(),
+        }
+    }
+
+    /// Get elapsed time since this position was stored
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.stored_at.elapsed()
     }
 }
 
