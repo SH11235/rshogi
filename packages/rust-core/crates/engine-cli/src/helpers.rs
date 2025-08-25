@@ -157,6 +157,7 @@ pub fn wait_for_search_completion(
         }
 
         // Wait for worker with timeout
+        log::debug!("Waiting up to {:?} for worker to finish", MIN_JOIN_TIMEOUT);
         let wait_result =
             wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, MIN_JOIN_TIMEOUT);
 
@@ -165,7 +166,15 @@ pub fn wait_for_search_completion(
 
         // Even if wait failed, ensure we're in a clean state
         if let Err(e) = wait_result {
-            log::error!("wait_for_worker_with_timeout failed: {e}, forcing clean state");
+            // Include diagnostic info about current position
+            let position_info = {
+                let adapter = lock_or_recover_adapter(_engine);
+                adapter
+                    .get_position()
+                    .map(position_to_sfen)
+                    .unwrap_or_else(|| "<no position>".to_string())
+            };
+            log::error!("wait_for_worker_with_timeout failed at position {position_info}: {e}, forcing clean state");
             *search_state = SearchState::Idle;
             // Drain any remaining messages
             while worker_rx.try_recv().is_ok() {}

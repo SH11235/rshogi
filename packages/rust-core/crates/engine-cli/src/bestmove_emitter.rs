@@ -10,11 +10,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 #[cfg(test)]
+use once_cell::sync::Lazy;
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::Mutex;
 
 #[cfg(test)]
-/// Test-only tracking of last emitted BestmoveSource
-pub static LAST_EMIT_SOURCE: Mutex<Option<BestmoveSource>> = Mutex::new(None);
+/// Test-only tracking of last emitted BestmoveSource by search_id
+static LAST_EMIT_SOURCE_BY_ID: Lazy<Mutex<HashMap<u64, BestmoveSource>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+/// Get the last BestmoveSource for a specific search_id
+pub fn last_source_for(search_id: u64) -> Option<BestmoveSource> {
+    LAST_EMIT_SOURCE_BY_ID.lock().ok()?.get(&search_id).copied()
+}
+
+#[cfg(test)]
+/// Clear the last BestmoveSource for a specific search_id
+pub fn clear_last_source_for(search_id: u64) {
+    if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+        map.remove(&search_id);
+    }
+}
 
 /// Statistics for bestmove emission
 #[derive(Debug)]
@@ -86,11 +105,11 @@ impl BestmoveEmitter {
             return Err(anyhow::anyhow!("Test error: forced emit failure"));
         }
 
-        // Test-only: track the BestmoveSource
+        // Test-only: track the BestmoveSource by search_id
         #[cfg(test)]
         {
-            if let Ok(mut last) = LAST_EMIT_SOURCE.lock() {
-                *last = Some(meta.from);
+            if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+                map.insert(self.search_id, meta.from);
             }
         }
 
