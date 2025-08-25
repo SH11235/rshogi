@@ -149,7 +149,7 @@ impl EngineAdapter {
         position: &Position,
     ) -> Result<(String, Option<String>)> {
         // Check position consistency
-        if session.root_hash != position.hash {
+        if session.root_hash != position.zobrist_hash() {
             warn!("Position hash mismatch in validate_and_get_bestmove");
             return Err(anyhow!("Position changed during search"));
         }
@@ -243,9 +243,27 @@ impl EngineAdapter {
             return Err(EngineError::NoLegalMoves);
         }
 
-        // Simple heuristic: prefer captures, then regular moves
-        // In a real implementation, this could be more sophisticated
-        let best_move = legal_moves.as_slice()[0];
+        // Simple heuristic: prefer captures, then common opening moves
+        let slice = legal_moves.as_slice();
+
+        // Common opening moves that are generally good
+        let common_opening_moves = ["7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h"];
+
+        let best_move = slice
+            .iter()
+            .copied()
+            .max_by_key(|m| {
+                let move_str = move_to_usi(m);
+                // Priority: captures > common opening moves > other moves
+                if m.is_capture_hint() {
+                    100
+                } else if common_opening_moves.contains(&move_str.as_str()) {
+                    10
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(slice[0]);
 
         Ok(move_to_usi(&best_move))
     }
@@ -387,7 +405,7 @@ mod tests {
         // Create session with empty PV
         let session = SearchSession {
             id: 1,
-            root_hash: position.hash,
+            root_hash: position.zobrist_hash(),
             committed_best: Some(CommittedBest {
                 pv: SmallVec::new(), // Empty PV
                 score: Score::Cp(100),
@@ -494,6 +512,46 @@ mod tests {
         // Both methods should work without error
         let _ = adapter.is_in_check().unwrap();
         let _ = adapter.has_legal_moves().unwrap();
+    }
+
+    #[test]
+    fn test_generate_emergency_move() {
+        let mut adapter = make_test_adapter();
+
+        // Test 1: No position set - should return error
+        assert!(adapter.generate_emergency_move().is_err());
+
+        // Test 2: Starting position - should return a common opening move
+        adapter.set_position(true, None, &[]).unwrap();
+        let emergency_move = adapter.generate_emergency_move().unwrap();
+
+        // Should be one of the common opening moves
+        let common_moves = ["7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h"];
+        assert!(
+            common_moves.contains(&emergency_move.as_str()),
+            "Emergency move {} should be a common opening move",
+            emergency_move
+        );
+
+        // Test 3: Position with captures available
+        // Set up a position where captures are possible
+        let moves = vec!["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "2b3c", "2e2d"];
+        adapter
+            .set_position(true, None, &moves.into_iter().map(String::from).collect::<Vec<_>>())
+            .unwrap();
+
+        let emergency_move = adapter.generate_emergency_move().unwrap();
+        assert!(adapter.is_legal_move(&emergency_move), "Emergency move should be legal");
+
+        // In this position, 2d2c+ (capturing pawn with promotion) should be prioritized
+        // if captures are properly prioritized
+    }
+
+    #[test]
+    #[ignore = "Checkmate position testing requires complex SFEN - covered by integration tests"]
+    fn test_generate_emergency_move_no_legal_moves() {
+        // This test would require setting up a checkmate position
+        // which is complex and better tested in integration tests
     }
 
     #[test]
