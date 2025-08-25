@@ -100,6 +100,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_session: Option<SearchSession> = None; // Current search session
     let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
+    let mut last_position_cmd: Option<String> = None; // Last position command for recovery
 
     // Main event loop - process USI commands and worker messages concurrently
     loop {
@@ -136,6 +137,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
+                            last_position_cmd: &mut last_position_cmd,
                         };
                         handle_command(cmd, &mut ctx)?;
                     }
@@ -164,6 +166,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
+                            last_position_cmd: &mut last_position_cmd,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }

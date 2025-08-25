@@ -166,9 +166,7 @@ pub fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<'_, E
             guard.force_reset_state();
 
             // Try to notify GUI about the reset
-            let _ = send_info_string(
-                "Engine state reset due to error recovery. Please send 'isready' to reinitialize.",
-            );
+            let _ = send_info_string("Engine state reset due to error recovery.");
 
             guard
         }
