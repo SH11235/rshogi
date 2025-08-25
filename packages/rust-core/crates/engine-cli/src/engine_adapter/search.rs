@@ -209,6 +209,25 @@ impl EngineAdapter {
         }
     }
 
+    /// Check if the current position has any legal moves
+    pub fn has_legal_moves(&self) -> Result<bool> {
+        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?;
+
+        // Generate legal moves
+        let mut movegen = MoveGen::new();
+        let mut legal_moves = MoveList::new();
+        movegen.generate_all(position, &mut legal_moves);
+
+        Ok(!legal_moves.is_empty())
+    }
+
+    /// Check if the current position is in check
+    pub fn is_in_check(&self) -> Result<bool> {
+        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?;
+
+        Ok(position.is_in_check())
+    }
+
     /// Generate an emergency move using simple heuristics
     pub fn generate_emergency_move(&self) -> Result<String, EngineError> {
         let position = self

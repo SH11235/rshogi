@@ -5,6 +5,39 @@
 
 use std::fmt;
 
+/// Reason for resignation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResignReason {
+    /// Position not set
+    NoPositionSet,
+    /// Position rebuild failed
+    PositionRebuildFailed { error: &'static str },
+    /// Invalid stored position command
+    InvalidStoredPositionCmd,
+    /// Checkmate (no legal moves and in check)
+    Checkmate,
+    /// No legal moves but not in check (likely error)
+    NoLegalMovesButNotInCheck,
+    /// Other error
+    OtherError { error: &'static str },
+}
+
+impl fmt::Display for ResignReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPositionSet => write!(f, "no_position_set"),
+            Self::PositionRebuildFailed { error } => {
+                write!(f, "position_rebuild_failed error={error}")
+            }
+            Self::InvalidStoredPositionCmd => write!(f, "invalid_stored_position_cmd"),
+            Self::Checkmate => write!(f, "checkmate"),
+            Self::NoLegalMovesButNotInCheck => write!(f, "no_legal_moves_but_not_in_check"),
+            Self::OtherError { error } => write!(f, "error={error}"),
+        }
+    }
+}
+
 /// Source of bestmove emission
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
