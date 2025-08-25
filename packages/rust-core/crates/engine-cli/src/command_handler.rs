@@ -2,7 +2,7 @@ use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::helpers::{generate_fallback_move, wait_for_search_completion};
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
-use crate::types::BestmoveSource;
+use crate::types::{BestmoveSource, ResignReason};
 use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
@@ -85,7 +85,7 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 "Handling position command - startpos: {startpos}, sfen: {sfen:?}, moves: {moves:?}"
             );
 
-            // Store the position command for recovery
+            // Build the position command string
             let mut position_cmd = String::from("position");
             if startpos {
                 position_cmd.push_str(" startpos");
@@ -100,8 +100,6 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                     position_cmd.push_str(mv);
                 }
             }
-            *ctx.last_position_cmd = Some(position_cmd.clone());
-            log::debug!("Stored position command: {}", position_cmd);
 
             // Wait for any ongoing search to complete before updating position
             wait_for_search_completion(
@@ -119,17 +117,21 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.set_position(startpos, sfen.as_deref(), &moves) {
                 Ok(()) => {
+                    // Store the position command only on success
+                    *ctx.last_position_cmd = Some(position_cmd.clone());
+                    log::debug!("Stored position command: {}", position_cmd);
+
                     // Get position info for logging
                     if let Some(pos) = engine.get_position() {
                         let sfen = position_to_sfen(pos);
-                        let zobrist = pos.zobrist_hash();
+                        let root_hash = pos.zobrist_hash();
                         log::info!(
-                            "Position command completed - SFEN: {}, zobrist: {:#x}, side_to_move: {:?}, move_count: {}",
-                            sfen, zobrist, pos.side_to_move, moves.len()
+                            "Position command completed - SFEN: {}, root_hash: {:#x}, side_to_move: {:?}, move_count: {}",
+                            sfen, root_hash, pos.side_to_move, moves.len()
                         );
                         send_info_string(format!(
-                            "Position set: zobrist={:#x} side={:?} moves={}",
-                            zobrist,
+                            "Position set: root_hash={:#x} side={:?} moves={}",
+                            root_hash,
                             pos.side_to_move,
                             moves.len()
                         ))?;
@@ -141,7 +143,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                     // Log error but don't crash - USI engines should be robust
                     log::error!("Failed to set position: {e}");
                     send_info_string(format!("Error: Failed to set position - {e}"))?;
-                    // Don't propagate the error - continue running
+                    // Don't update last_position_cmd on failure - keep the previous valid one
+                    log::debug!("Keeping previous position command due to error");
                 }
             }
         }
@@ -200,6 +203,10 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             // Reset to 0 so any late worker messages (old search_id) will be ignored
             *ctx.current_search_id = 0;
 
+            // Clear last position command to avoid carrying over to next game
+            *ctx.last_position_cmd = None;
+            log::debug!("Cleared last_position_cmd for new game");
+
             // Notify engine of game result
             let mut engine = lock_or_recover_adapter(ctx.engine);
             engine.game_over(result);
@@ -223,6 +230,10 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
 
             // Clean up any remaining search state
             ctx.finalize_search("UsiNewGame");
+
+            // Clear last position command for fresh start
+            *ctx.last_position_cmd = None;
+            log::debug!("Cleared last_position_cmd for new game");
 
             // Reset engine state for new game
             let mut engine = lock_or_recover_adapter(ctx.engine);
@@ -325,10 +336,10 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                         }
                         Err(e) => {
                             log::error!("Failed to rebuild position: {}", e);
-                            send_info_string(format!(
-                                "ResignReason: position_rebuild_failed error={}",
-                                e
-                            ))?;
+                            let reason = ResignReason::PositionRebuildFailed {
+                                error: "see log for details",
+                            };
+                            send_info_string(format!("ResignReason: {reason}"))?;
                             send_response(UsiResponse::BestMove {
                                 best_move: "resign".to_string(),
                                 ponder: None,
@@ -338,7 +349,8 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                     },
                     _ => {
                         log::error!("Invalid stored position command: {}", last_cmd);
-                        send_info_string("ResignReason: invalid_stored_position_cmd".to_string())?;
+                        let reason = ResignReason::InvalidStoredPositionCmd;
+                        send_info_string(format!("ResignReason: {reason}"))?;
                         send_response(UsiResponse::BestMove {
                             best_move: "resign".to_string(),
                             ponder: None,
@@ -348,7 +360,8 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 }
             } else {
                 log::error!("No position set and no recovery command available");
-                send_info_string("ResignReason: no_position_set".to_string())?;
+                let reason = ResignReason::NoPositionSet;
+                send_info_string(format!("ResignReason: {reason}"))?;
                 send_response(UsiResponse::BestMove {
                     best_move: "resign".to_string(),
                     ponder: None,
@@ -357,21 +370,42 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // Sanity check: verify we can generate at least one legal move
-        match engine.generate_emergency_move() {
-            Ok(_) => {
+        // Sanity check: verify we have legal moves
+        match engine.has_legal_moves() {
+            Ok(true) => {
                 log::debug!("Position sanity check passed - legal moves available");
             }
-            Err(e) => {
-                log::error!("Position sanity check failed: {}", e);
-                send_info_string(format!("ResignReason: no_legal_moves error={}", e))?;
+            Ok(false) => {
+                // Check if it's checkmate or error condition
+                let in_check = engine.is_in_check().unwrap_or(false);
+                let reason = if in_check {
+                    ResignReason::Checkmate
+                } else {
+                    ResignReason::NoLegalMovesButNotInCheck
+                };
+
+                log::error!("Position has no legal moves - in_check: {in_check}");
+                send_info_string(format!("ResignReason: {reason}"))?;
 
                 // Get position info for debugging
                 let position_info = engine
                     .get_position()
                     .map(position_to_sfen)
                     .unwrap_or_else(|| "<no position>".to_string());
-                log::error!("Current position SFEN: {}", position_info);
+                log::error!("Current position SFEN: {position_info}");
+
+                send_response(UsiResponse::BestMove {
+                    best_move: "resign".to_string(),
+                    ponder: None,
+                })?;
+                return Ok(());
+            }
+            Err(e) => {
+                log::error!("Failed to check legal moves: {e}");
+                let reason = ResignReason::OtherError {
+                    error: "legal move check failed",
+                };
+                send_info_string(format!("ResignReason: {reason}"))?;
 
                 send_response(UsiResponse::BestMove {
                     best_move: "resign".to_string(),
@@ -444,7 +478,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     // Send immediate info depth 1 to confirm search started (ensures GUI sees activity)
     send_response(UsiResponse::Info(crate::usi::output::SearchInfo {
         depth: Some(1),
-        time: Some(1),
+        time: Some(0),
         nodes: Some(0),
         string: Some("search starting".to_string()),
         ..Default::default()

@@ -678,6 +678,7 @@ mod tests {
         let mut current_session: Option<SearchSession> = None;
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
+        let mut last_position_cmd = None;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -693,6 +694,7 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
         };
 
         // Note: In a full test, we would mock send_response to capture sent Info messages
