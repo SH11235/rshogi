@@ -24,7 +24,7 @@ use state::SearchState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stdin_reader::spawn_stdin_reader;
 use types::{BestmoveSource, PositionState};
 use usi::{
@@ -80,6 +80,9 @@ fn main() {
 }
 
 fn run_engine(allow_null_move: bool) -> Result<()> {
+    // Record program start time for elapsed calculations
+    let program_start = Instant::now();
+
     // Create communication channels
     let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
     let (cmd_tx, cmd_rx) = bounded::<UsiCommand>(CHANNEL_SIZE);
@@ -140,6 +143,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
                             position_state: &mut position_state,
+                            program_start,
                         };
                         handle_command(cmd, &mut ctx)?;
                     }
@@ -169,6 +173,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
                             position_state: &mut position_state,
+                            program_start,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -670,6 +675,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Send SearchFinished for current search while already Idle
@@ -723,6 +729,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Note: In a full test, we would mock send_response to capture sent Info messages
