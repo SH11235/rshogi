@@ -743,7 +743,7 @@ pub fn search_worker(
                             // Create emergency session
                             let emergency_session = create_emergency_session(
                                 search_id,
-                                position.hash,
+                                position.zobrist_hash(),
                                 emergency_move,
                                 false,
                             );
@@ -776,7 +776,7 @@ pub fn search_worker(
                             // Only resign if no legal moves
                             let resign_session = create_emergency_session(
                                 search_id,
-                                position.hash,
+                                position.zobrist_hash(),
                                 "resign".to_string(),
                                 true,
                             );
@@ -838,7 +838,7 @@ pub fn search_worker(
                             // Create emergency session
                             let emergency_session = create_emergency_session(
                                 search_id,
-                                position.hash,
+                                position.zobrist_hash(),
                                 emergency_move,
                                 false,
                             );
@@ -871,7 +871,7 @@ pub fn search_worker(
                             // Only resign if no legal moves
                             let resign_session = create_emergency_session(
                                 search_id,
-                                position.hash,
+                                position.zobrist_hash(),
                                 "resign".to_string(),
                                 true,
                             );

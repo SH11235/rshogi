@@ -149,9 +149,9 @@ impl EngineAdapter {
             || position.ply != original_ply
         {
             error!(
-                "Position was modified during search! Original: hash={:016x}, side={:?}, ply={} -> Current: hash={:016x}, side={:?}, ply={}",
+                "Position was modified during search! Original: hash={:#016x}, side={:?}, ply={} -> Current: hash={:#016x}, side={:?}, ply={}",
                 original_hash, original_side, original_ply,
-                position.hash, position.side_to_move, position.ply
+                position.zobrist_hash(), position.side_to_move, position.ply
             );
         }
 

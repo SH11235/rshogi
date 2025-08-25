@@ -643,7 +643,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
             if elapsed > total_timeout {
                 // Timeout - use fallback strategy
-                log::warn!("Timeout waiting for bestmove after stop command");
+                log::warn!(
+                    "Timeout waiting for bestmove after stop command (search_id={})",
+                    *ctx.current_search_id
+                );
                 // Log timeout error
                 log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
 
@@ -1305,5 +1308,172 @@ mod tests {
 
         // Check that position command was cleared
         assert!(ctx.last_position_cmd.is_none());
+    }
+
+    #[test]
+    fn test_go_with_position_recovery() {
+        use crate::usi::GoParams;
+
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        // Set initial position
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Store a position command
+        *ctx.last_position_cmd = Some("position startpos moves 7g7f 3c3d".to_string());
+
+        // Force clear position in engine to simulate position loss
+        {
+            let mut adapter = ctx.engine.lock().unwrap();
+            adapter.force_reset_state();
+        }
+
+        // Send go command - should attempt recovery
+        let cmd = UsiCommand::Go(GoParams {
+            depth: Some(1),
+            ..Default::default()
+        });
+
+        // This should succeed (recovery happens in handle_go_command)
+        let result = handle_command(cmd, &mut ctx);
+        assert!(result.is_ok(), "Go command should succeed with position recovery");
+
+        // Position should be restored
+        {
+            let adapter = ctx.engine.lock().unwrap();
+            assert!(adapter.has_position().unwrap_or(false), "Position should be restored");
+        }
+    }
+
+    #[test]
+    fn test_go_with_invalid_position_recovery() {
+        use crate::usi::GoParams;
+
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Store an invalid position command
+        *ctx.last_position_cmd = Some("position invalid command".to_string());
+
+        // Send go command - recovery should fail
+        let cmd = UsiCommand::Go(GoParams {
+            depth: Some(1),
+            ..Default::default()
+        });
+
+        // This should still succeed (resigns gracefully)
+        let result = handle_command(cmd, &mut ctx);
+        assert!(result.is_ok(), "Go command should handle invalid recovery gracefully");
+    }
+
+    #[test]
+    fn test_stop_while_idle() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Ensure we're in idle state
+        assert_eq!(*ctx.search_state, SearchState::Idle);
+
+        // Send stop command while idle
+        let cmd = UsiCommand::Stop;
+        let result = handle_command(cmd, &mut ctx);
+
+        // Should succeed (ignored)
+        assert!(result.is_ok(), "Stop while idle should be handled gracefully");
+        assert_eq!(*ctx.search_state, SearchState::Idle, "Should remain idle");
     }
 }
