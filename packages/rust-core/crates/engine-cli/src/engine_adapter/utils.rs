@@ -81,7 +81,7 @@ impl EngineAdapter {
         info!("Search starting...");
 
         // Save original position state for verification
-        let original_hash = position.hash;
+        let original_hash = position.zobrist_hash();
         let original_side = position.side_to_move;
         let original_ply = position.ply;
 
@@ -144,7 +144,7 @@ impl EngineAdapter {
         };
 
         // Verify position wasn't modified
-        if position.hash != original_hash
+        if position.zobrist_hash() != original_hash
             || position.side_to_move != original_side
             || position.ply != original_ply
         {
