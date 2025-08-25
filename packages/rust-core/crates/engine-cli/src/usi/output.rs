@@ -449,11 +449,21 @@ pub enum StdoutError {
     CriticalMessageFailed(#[from] std::io::Error),
 }
 
+/// Check if USI output is disabled for debugging stdout blocking issues
+fn usi_disabled() -> bool {
+    std::env::var("USI_DRY_RUN").as_deref() == Ok("1")
+}
+
 /// Send USI response with error handling, returning Result for proper error propagation
 ///
 /// Use this in main thread and contexts where errors can be propagated up the call stack.
 pub fn send_response(response: UsiResponse) -> Result<(), StdoutError> {
     use std::io;
+
+    // Skip all USI output if USI_DRY_RUN is set
+    if usi_disabled() {
+        return Ok(());
+    }
 
     // Determine if this is a critical response
     let is_critical = matches!(

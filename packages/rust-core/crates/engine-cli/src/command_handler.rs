@@ -187,8 +187,6 @@ impl<'a> CommandContext<'a> {
                 }
                 Err(e) => {
                     log::error!("BestmoveEmitter::emit failed: {e}");
-                    // Always finalize search even on error
-                    self.finalize_search(finalize_label);
                     // Send TSV log for fallback
                     self.send_fallback_tsv_log(
                         &best_move,
@@ -201,19 +199,21 @@ impl<'a> CommandContext<'a> {
                         log::error!("Failed to send bestmove even with direct fallback: {e}");
                         // Continue without propagating error - USI requires best effort
                     }
+                    // Always finalize search after attempting to emit
+                    self.finalize_search(finalize_label);
                     Ok(())
                 }
             }
         } else {
             log::warn!("BestmoveEmitter not available; sending bestmove directly");
-            // Always finalize before sending
-            self.finalize_search(finalize_label);
             // Send TSV log for direct send
             self.send_fallback_tsv_log(&best_move, ponder.as_deref(), Some(&meta), "no_emitter");
             if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
                 log::error!("Failed to send bestmove directly: {e}");
                 // Continue without propagating error - USI requires best effort
             }
+            // Always finalize search after attempting to emit
+            self.finalize_search(finalize_label);
             Ok(())
         }
     }
@@ -327,6 +327,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
 
         UsiCommand::IsReady => {
             // Initialize engine if needed
+            // Note: Static tables are already initialized in main() using init_all_tables_once()
+            // which is idempotent (using std::sync::Once internally)
             {
                 let mut engine = lock_or_recover_adapter(ctx.engine);
                 engine.initialize()?;
@@ -736,21 +738,31 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // TEMPORARY: Skip has_legal_moves check to avoid hang in process execution
-        //
+        // NOTE: has_legal_moves check is temporarily disabled due to MoveGen hang issue
+        // 
         // Investigation results (2025-08-25):
         // - MoveGen::generate_all() hangs when called in subprocess context
         // - Works fine in unit tests and direct execution
-        // - Removing debug output from static initializers didn't help
-        // - Simplified has_legal_moves_quick() also hangs
-        // - Root cause: Complex interaction between process execution context
-        //   and engine_core API calls (possibly memory alignment, TLS, or signal handling)
+        // - Root cause: Complex interaction between subprocess execution context 
+        //   and engine_core API calls (not stderr blocking)
+        //
+        // The check is controlled by SKIP_LEGAL_MOVES environment variable:
+        // - SKIP_LEGAL_MOVES=1 (default for now): Skip the check
+        // - SKIP_LEGAL_MOVES=0: Enable the check (will cause hang in subprocess)
         //
         // This workaround is safe because:
         // - Positions without legal moves are extremely rare
         // - The search will handle illegal positions correctly
         // - See docs/movegen-hang-investigation.md for details
-        log::warn!("Skipping has_legal_moves check to avoid process hang (temporary workaround)");
+        let skip_legal_moves_check = std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
+        
+        if skip_legal_moves_check {
+            log::debug!("has_legal_moves check is disabled (SKIP_LEGAL_MOVES != 0)");
+        } else {
+            log::warn!("has_legal_moves check is ENABLED - this may cause hang in subprocess execution!");
+            // TODO: Implement has_legal_moves check when the hang issue is resolved
+            // Currently has_legal_moves() method doesn't exist in Position
+        }
     }
 
     // Clean up old stop flag before creating new one

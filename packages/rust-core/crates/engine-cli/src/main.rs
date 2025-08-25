@@ -3,6 +3,7 @@
 mod bestmove_emitter;
 mod command_handler;
 mod engine_adapter;
+mod flushing_logger;
 mod helpers;
 mod search_session;
 mod state;
@@ -55,15 +56,31 @@ fn main() {
     let args = Args::parse();
 
     // Initialize logging
-    if args.debug {
-        env_logger::init_from_env(
-            env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
-        );
+    use std::io::Write;
+    let log_level = if args.debug { "debug" } else { "info" };
+
+    // Use FlushingStderrWriter only when explicitly requested via environment variable
+    // This prevents unnecessary syscalls for every log write in normal operation
+    let use_flushing_stderr = std::env::var("FORCE_FLUSH_STDERR").as_deref() == Ok("1");
+    
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, log_level),
+    );
+    
+    builder
+        .format(|buf, record| {
+            writeln!(buf, "[{}] {}: {}", record.level(), record.target(), record.args())
+        })
+        .write_style(env_logger::WriteStyle::Never); // Disable color to reduce output size
+    
+    if use_flushing_stderr {
+        use flushing_logger::FlushingStderrWriter;
+        builder.target(env_logger::Target::Pipe(Box::new(FlushingStderrWriter::new())));
     } else {
-        env_logger::init_from_env(
-            env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
-        );
+        builder.target(env_logger::Target::Stderr);
     }
+    
+    builder.init();
 
     // Set up flush on exit hooks
     ensure_flush_on_exit();
