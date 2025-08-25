@@ -1637,4 +1637,252 @@ mod tests {
         // Note: In a real scenario, the fallback send_response() would send the bestmove
         // We can't easily verify that in unit tests without mocking the global writer
     }
+
+    #[test]
+    fn test_emit_and_finalize_without_emitter() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set up search state
+        *ctx.search_state = SearchState::Searching;
+        *ctx.current_search_id = 100;
+        *ctx.current_search_is_ponder = false;
+        *ctx.current_stop_flag = Some(Arc::new(AtomicBool::new(false)));
+
+        // Key: Set current_bestmove_emitter to None
+        *ctx.current_bestmove_emitter = None;
+
+        // Test emit_and_finalize
+        let meta =
+            build_meta(BestmoveSource::SessionOnStop, 8, Some(12), Some("cp 50".to_string()), None);
+
+        // Call emit_and_finalize
+        let result = ctx.emit_and_finalize(
+            "2g2f".to_string(),
+            Some("8c8d".to_string()),
+            meta,
+            "NoEmitterTest",
+        );
+
+        // Should succeed with direct send
+        assert!(result.is_ok(), "emit_and_finalize should succeed without emitter");
+
+        // Verify search was finalized
+        assert_eq!(*ctx.search_state, SearchState::Idle, "Search should be finalized");
+        assert!(ctx.current_bestmove_emitter.is_none(), "Emitter should remain None");
+        assert!(ctx.current_stop_flag.is_none(), "Stop flag should be cleared");
+        assert!(!*ctx.current_search_is_ponder, "Ponder flag should be reset");
+        assert!(ctx.current_session.is_none(), "Session should be cleared");
+
+        // Note: The direct send_response() call would send the bestmove,
+        // but we can't easily verify stdout output in unit tests
+    }
+
+    #[test]
+    fn test_stop_handler_partial_result_timeout() {
+        use std::thread;
+        use std::time::Duration;
+
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        // Set up engine adapter with very short byoyomi_safety_ms
+        {
+            let mut adapter = lock_or_recover_adapter(&engine);
+            adapter.set_byoyomi_safety_ms_for_test(10); // Very short to trigger timeout
+            adapter.set_last_search_is_byoyomi(true);
+        }
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set up search state
+        *ctx.search_state = SearchState::Searching;
+        *ctx.current_search_id = 200;
+        *ctx.current_search_is_ponder = false;
+        *ctx.current_stop_flag = Some(Arc::new(AtomicBool::new(false)));
+        *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(200));
+
+        // Spawn a thread that sends a partial result but delays bestmove
+        let tx_clone = ctx.worker_tx.clone();
+        let worker_thread = thread::spawn(move || {
+            // Send partial result immediately
+            let _ = tx_clone.send(WorkerMessage::PartialResult {
+                current_best: "7g7f".to_string(),
+                depth: 5,
+                score: 100,
+                search_id: 200,
+            });
+
+            // Sleep longer than the timeout to trigger timeout path
+            thread::sleep(Duration::from_millis(50));
+
+            // Send SearchFinished too late
+            let _ = tx_clone.send(WorkerMessage::SearchFinished {
+                session_id: 1,
+                root_hash: 0,
+                search_id: 200,
+                stop_info: None,
+            });
+        });
+
+        // Call handle_stop_command
+        let result = handle_stop_command(&mut ctx);
+
+        // Should succeed using partial result timeout path
+        assert!(result.is_ok(), "handle_stop should succeed with partial result timeout");
+
+        // Verify search was finalized
+        assert_eq!(*ctx.search_state, SearchState::Idle);
+        assert!(ctx.current_bestmove_emitter.is_none());
+
+        // Clean up worker thread
+        let _ = worker_thread.join();
+    }
+
+    #[test]
+    fn test_stop_handler_emergency_fallback_timeout() {
+        use std::thread;
+        use std::time::Duration;
+
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        // Set up engine adapter with very short byoyomi_safety_ms
+        {
+            let mut adapter = lock_or_recover_adapter(&engine);
+            adapter.set_byoyomi_safety_ms_for_test(10); // Very short to trigger timeout
+            adapter.set_last_search_is_byoyomi(true);
+            // Set a position for emergency fallback
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set up search state
+        *ctx.search_state = SearchState::Searching;
+        *ctx.current_search_id = 300;
+        *ctx.current_search_is_ponder = false;
+        *ctx.current_stop_flag = Some(Arc::new(AtomicBool::new(false)));
+        *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(300));
+
+        // Spawn a thread that delays both partial result and bestmove
+        let tx_clone = ctx.worker_tx.clone();
+        let worker_thread = thread::spawn(move || {
+            // Sleep longer than the timeout to trigger emergency fallback
+            thread::sleep(Duration::from_millis(50));
+
+            // These messages will arrive too late
+            let _ = tx_clone.send(WorkerMessage::PartialResult {
+                current_best: "7g7f".to_string(),
+                depth: 5,
+                score: 100,
+                search_id: 300,
+            });
+            let _ = tx_clone.send(WorkerMessage::SearchFinished {
+                session_id: 1,
+                root_hash: 0,
+                search_id: 300,
+                stop_info: None,
+            });
+        });
+
+        // Call handle_stop_command
+        let result = handle_stop_command(&mut ctx);
+
+        // Should succeed using emergency fallback timeout path
+        assert!(result.is_ok(), "handle_stop should succeed with emergency fallback timeout");
+
+        // Verify search was finalized
+        assert_eq!(*ctx.search_state, SearchState::Idle);
+        assert!(ctx.current_bestmove_emitter.is_none());
+
+        // Clean up worker thread
+        let _ = worker_thread.join();
+    }
 }
