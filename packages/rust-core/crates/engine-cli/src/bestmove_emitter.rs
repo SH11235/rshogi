@@ -166,7 +166,7 @@ impl BestmoveEmitter {
             Ok(()) => {
                 // Log after successful sending
                 log::info!(
-                    "Bestmove sent: {}, ponder: {:?} (search_id: {}, depth: {}, nps: {})",
+                    "[BESTMOVE] sent: {} ponder={:?} (search_id={}, depth={}, nps={}, flush=immediate)",
                     best_move,
                     ponder,
                     self.search_id,
