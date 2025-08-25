@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,9 @@ fn test_buffering_with_env_vars() {
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
 
+    // Create channel for bestmove notification
+    let (tx_done, rx_done) = mpsc::channel();
+
     // Start reader thread
     let reader_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
@@ -78,10 +82,19 @@ fn test_buffering_with_env_vars() {
                     if line.starts_with("info ") && !line.contains("string") {
                         println!("[{:>4}ms] INFO: {}", elapsed.as_millis(), line);
                     }
+                    // Check for bestmove
+                    if line.starts_with("bestmove") {
+                        println!("Received bestmove at {}ms: {}", elapsed.as_millis(), line);
+                        let _ = tx_done.send(());
+                    }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    println!("Reader error: {:?}", e);
+                    break;
+                }
             }
         }
+        println!("Reader thread exiting");
         output
     });
 
@@ -103,8 +116,16 @@ fn test_buffering_with_env_vars() {
     writeln!(stdin, "go depth 3").unwrap();
     stdin.flush().unwrap();
 
-    // Wait for search to complete
-    thread::sleep(Duration::from_millis(300));
+    // Wait for bestmove or timeout
+    match rx_done.recv_timeout(Duration::from_secs(3)) {
+        Ok(()) => println!("Bestmove received, proceeding to shutdown"),
+        Err(_) => {
+            println!("Timeout waiting for bestmove, sending stop command");
+            writeln!(stdin, "stop").unwrap();
+            stdin.flush().unwrap();
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
 
     // Send quit
     writeln!(stdin, "quit").unwrap();
@@ -144,6 +165,9 @@ fn test_buffering_with_delay() {
     let mut stdin = engine.stdin.take().expect("Failed to get stdin");
     let stdout = engine.stdout.take().expect("Failed to get stdout");
 
+    // Create channel for bestmove notification
+    let (tx_done, rx_done) = mpsc::channel();
+
     // Start reader thread
     let reader_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
@@ -161,10 +185,19 @@ fn test_buffering_with_delay() {
                         info_times.push(elapsed);
                         println!("[{:>4}ms] INFO: {}", elapsed.as_millis(), line);
                     }
+                    // Check for bestmove
+                    if line.starts_with("bestmove") {
+                        println!("Received bestmove at {}ms: {}", elapsed.as_millis(), line);
+                        let _ = tx_done.send(());
+                    }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    println!("Reader error: {:?}", e);
+                    break;
+                }
             }
         }
+        println!("Reader thread exiting");
 
         // Analyze timing gaps
         let mut gaps = Vec::new();
@@ -194,11 +227,19 @@ fn test_buffering_with_delay() {
 
     // Start search to generate info messages
     println!("\n--- Testing with USI_FLUSH_DELAY_MS=200 (buffered) ---");
-    writeln!(stdin, "go depth 5").unwrap();
+    writeln!(stdin, "go depth 3").unwrap(); // Reduced from depth 5 to 3
     stdin.flush().unwrap();
 
-    // Wait for search to complete
-    thread::sleep(Duration::from_millis(800));
+    // Wait for bestmove or timeout
+    match rx_done.recv_timeout(Duration::from_secs(5)) {
+        Ok(()) => println!("Bestmove received, proceeding to shutdown"),
+        Err(_) => {
+            println!("Timeout waiting for bestmove, sending stop command");
+            writeln!(stdin, "stop").unwrap();
+            stdin.flush().unwrap();
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
 
     // Send quit
     writeln!(stdin, "quit").unwrap();

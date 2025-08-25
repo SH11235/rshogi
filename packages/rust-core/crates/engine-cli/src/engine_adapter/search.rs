@@ -211,12 +211,12 @@ impl EngineAdapter {
 
     /// Check if the current position has any legal moves
     pub fn has_legal_moves(&self) -> Result<bool> {
-        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?;
+        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
 
         // Generate legal moves
         let mut movegen = MoveGen::new();
         let mut legal_moves = MoveList::new();
-        movegen.generate_all(position, &mut legal_moves);
+        movegen.generate_all(&position, &mut legal_moves);
 
         Ok(!legal_moves.is_empty())
     }

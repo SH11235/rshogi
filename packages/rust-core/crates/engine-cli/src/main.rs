@@ -80,6 +80,9 @@ fn main() {
 }
 
 fn run_engine(allow_null_move: bool) -> Result<()> {
+    // Initialize all static tables to prevent circular initialization deadlocks
+    engine_core::init::init_all_tables_once();
+
     // Record program start time for elapsed calculations
     let program_start = Instant::now();
 
@@ -115,6 +118,12 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 match cmd {
                     Ok(cmd) => {
                         log::debug!("USI command received: {cmd:?}");
+                        match &cmd {
+                            UsiCommand::Go(params) => log::info!("[MAIN] Go command received: depth={:?}", params.depth),
+                            UsiCommand::Stop => log::info!("[MAIN] Stop command received"),
+                            UsiCommand::Quit => log::info!("[MAIN] Quit command received"),
+                            _ => {},
+                        }
 
                         // Check if it's quit command
                         if matches!(cmd, UsiCommand::Quit) {
@@ -145,7 +154,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             position_state: &mut position_state,
                             program_start,
                         };
-                        handle_command(cmd, &mut ctx)?;
+                        match handle_command(cmd, &mut ctx) {
+                            Ok(()) => {},
+                            Err(e) => {
+                                log::error!("[MAIN] handle_command error: {}", e);
+                                return Err(e);
+                            }
+                        }
                     }
                     Err(_) => {
                         log::debug!("Command channel closed");
