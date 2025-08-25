@@ -5,6 +5,39 @@
 
 use std::fmt;
 
+/// Reason for resignation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResignReason {
+    /// Position not set
+    NoPositionSet,
+    /// Position rebuild failed
+    PositionRebuildFailed { error: &'static str },
+    /// Invalid stored position command
+    InvalidStoredPositionCmd,
+    /// Checkmate (no legal moves and in check)
+    Checkmate,
+    /// No legal moves but not in check (likely error)
+    NoLegalMovesButNotInCheck,
+    /// Other error
+    OtherError { error: &'static str },
+}
+
+impl fmt::Display for ResignReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPositionSet => write!(f, "no_position_set"),
+            Self::PositionRebuildFailed { error } => {
+                write!(f, "position_rebuild_failed error={error}")
+            }
+            Self::InvalidStoredPositionCmd => write!(f, "invalid_stored_position_cmd"),
+            Self::Checkmate => write!(f, "checkmate"),
+            Self::NoLegalMovesButNotInCheck => write!(f, "no_legal_moves_but_not_in_check"),
+            Self::OtherError { error } => write!(f, "error={error}"),
+        }
+    }
+}
+
 /// Source of bestmove emission
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -55,5 +88,62 @@ impl fmt::Display for BestmoveSource {
             Self::Test => "test",
         };
         write!(f, "{s}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resign_reason_display() {
+        // Test each variant's display format
+        assert_eq!(ResignReason::NoPositionSet.to_string(), "no_position_set");
+        assert_eq!(
+            ResignReason::PositionRebuildFailed {
+                error: "test error"
+            }
+            .to_string(),
+            "position_rebuild_failed error=test error"
+        );
+        assert_eq!(
+            ResignReason::InvalidStoredPositionCmd.to_string(),
+            "invalid_stored_position_cmd"
+        );
+        assert_eq!(ResignReason::Checkmate.to_string(), "checkmate");
+        assert_eq!(
+            ResignReason::NoLegalMovesButNotInCheck.to_string(),
+            "no_legal_moves_but_not_in_check"
+        );
+        assert_eq!(
+            ResignReason::OtherError {
+                error: "custom error"
+            }
+            .to_string(),
+            "error=custom error"
+        );
+    }
+
+    #[test]
+    fn test_resign_reason_equality() {
+        assert_eq!(ResignReason::Checkmate, ResignReason::Checkmate);
+        assert_ne!(ResignReason::Checkmate, ResignReason::NoPositionSet);
+
+        // Test that same error messages are equal
+        let reason1 = ResignReason::PositionRebuildFailed { error: "same" };
+        let reason2 = ResignReason::PositionRebuildFailed { error: "same" };
+        assert_eq!(reason1, reason2);
+    }
+
+    #[test]
+    fn test_bestmove_source_display() {
+        // Test a few important variants
+        assert_eq!(BestmoveSource::EmergencyFallback.to_string(), "emergency_fallback");
+        assert_eq!(BestmoveSource::Resign.to_string(), "resign");
+        assert_eq!(BestmoveSource::SessionOnStop.to_string(), "session_on_stop");
+        assert_eq!(
+            BestmoveSource::SessionInSearchFinished.to_string(),
+            "session_in_search_finished"
+        );
     }
 }

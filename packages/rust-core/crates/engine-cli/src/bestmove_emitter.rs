@@ -1,7 +1,9 @@
 //! Centralized bestmove emission with exactly-once guarantee
 //!
-//! This module ensures that bestmove is sent exactly once per search,
-//! and provides unified logging in tab-separated key=value format.
+//! This module ensures that bestmove emission is attempted exactly once per search.
+//! If the emission fails, the sent flag remains true to prevent double emission.
+//! Callers must create a new BestmoveEmitter for retry with different content.
+//! This design prevents accidental duplicate bestmoves to the GUI.
 
 use crate::types::BestmoveSource;
 use crate::usi::{send_info_string, send_response, UsiResponse};
@@ -9,8 +11,42 @@ use engine_core::search::types::StopInfo;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+#[cfg(test)]
+use once_cell::sync::Lazy;
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::Mutex;
+
+#[cfg(test)]
+/// Test-only tracking of last emitted BestmoveSource by search_id
+static LAST_EMIT_SOURCE_BY_ID: Lazy<Mutex<HashMap<u64, BestmoveSource>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+/// Get the last BestmoveSource for a specific search_id
+pub fn last_source_for(search_id: u64) -> Option<BestmoveSource> {
+    LAST_EMIT_SOURCE_BY_ID.lock().ok()?.get(&search_id).copied()
+}
+
+#[cfg(test)]
+/// Clear the last BestmoveSource for a specific search_id
+pub fn clear_last_source_for(search_id: u64) {
+    if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+        map.remove(&search_id);
+    }
+}
+
+#[cfg(test)]
+/// Clear all tracked BestmoveSources (for test isolation)
+pub fn clear_all_last_sources() {
+    if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+        map.clear();
+    }
+}
+
 /// Statistics for bestmove emission
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BestmoveStats {
     pub depth: u8,
     pub seldepth: Option<u8>,
@@ -20,7 +56,7 @@ pub struct BestmoveStats {
 }
 
 /// Metadata for bestmove emission
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BestmoveMeta {
     /// Source of the bestmove
     pub from: BestmoveSource,
@@ -38,6 +74,9 @@ pub struct BestmoveEmitter {
     search_id: u64,
     /// Search start time for elapsed calculation
     start_time: Instant,
+    /// Test-only flag to force emit() to return an error
+    #[cfg(test)]
+    force_error: bool,
 }
 
 impl BestmoveEmitter {
@@ -47,6 +86,19 @@ impl BestmoveEmitter {
             sent: AtomicBool::new(false),
             search_id,
             start_time: Instant::now(),
+            #[cfg(test)]
+            force_error: false,
+        }
+    }
+
+    /// Create a new bestmove emitter that will force an error on emit()
+    #[cfg(test)]
+    pub fn new_with_error(search_id: u64) -> Self {
+        Self {
+            sent: AtomicBool::new(false),
+            search_id,
+            start_time: Instant::now(),
+            force_error: true,
         }
     }
 
@@ -67,6 +119,21 @@ impl BestmoveEmitter {
             return Ok(());
         }
 
+        // Test-only: track the BestmoveSource by search_id
+        // This is done AFTER the sent flag check to ensure we only track actually sent moves
+        #[cfg(test)]
+        {
+            if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+                map.insert(self.search_id, meta.from);
+            }
+        }
+
+        // Test-only: force error if requested
+        #[cfg(test)]
+        if self.force_error {
+            return Err(anyhow::anyhow!("Test error: forced emit failure"));
+        }
+
         // Complement elapsed_ms and nps if needed
         let actual_elapsed = self.start_time.elapsed();
         let actual_elapsed_ms = actual_elapsed.as_millis() as u64;
@@ -82,9 +149,9 @@ impl BestmoveEmitter {
         }
 
         // Log null move usage for debugging
-        if best_move == "0000" {
+        if best_move.trim() == "0000" {
             let _ = send_info_string(
-                "using null move (0000) - position may be invalid or no legal moves",
+                "using null move (0000) - position may be invalid or no legal moves.",
             );
         }
 
@@ -111,7 +178,7 @@ impl BestmoveEmitter {
                 #[cfg(debug_assertions)]
                 {
                     let _ = send_info_string(format!(
-                        "Emitter: sent={} from={}",
+                        "Emitter: search_id={} from={}",
                         self.search_id, meta.from
                     ));
                 }
@@ -132,6 +199,7 @@ impl BestmoveEmitter {
                      stop_reason={}\t\
                      depth={}\t\
                      seldepth={}\t\
+                     depth_reached={}\t\
                      score={}\t\
                      nodes={}\t\
                      nps={}\t\
@@ -144,6 +212,7 @@ impl BestmoveEmitter {
                     stop_reason,
                     meta.stats.depth,
                     seldepth_str,
+                    meta.stop_info.depth_reached,
                     meta.stats.score,
                     meta.stats.nodes,
                     meta.stats.nps,
@@ -166,11 +235,9 @@ impl BestmoveEmitter {
                     self.search_id,
                     e
                 );
-                // Reset sent flag since we failed to send
-                // Note: In current implementation, callers use `?` which makes this fatal,
-                // so retry won't happen. This is intentional for now but allows future
-                // non-fatal error handling if needed.
-                self.sent.store(false, Ordering::Release);
+                // Note: We keep sent=true to maintain exactly-once guarantee.
+                // If the caller wants to retry with a different bestmove,
+                // they should create a new BestmoveEmitter instance.
                 Err(anyhow::anyhow!("Failed to send bestmove: {}", e))
             }
         }
@@ -343,5 +410,53 @@ mod tests {
         emitter.set_start_time(std::time::Instant::now());
         // 送信済み状態は維持される
         assert!(emitter.is_sent());
+    }
+
+    #[test]
+    fn test_error_does_not_allow_double_emission() {
+        // Clear any previous test data
+        clear_all_last_sources();
+
+        let emitter = BestmoveEmitter::new_with_error(999);
+        let meta = make_test_meta();
+
+        // First emit should fail due to forced error
+        let result1 = emitter.emit("7g7f".to_string(), None, meta.clone());
+        assert!(result1.is_err());
+        assert!(emitter.is_sent()); // But sent flag should be true
+
+        // Second emit should be ignored even after error
+        // (In production, we can't actually test this without mocking send_response,
+        // but we can verify the sent flag behavior)
+        assert!(emitter.sent.swap(true, Ordering::AcqRel)); // This returns true, meaning it was already true
+
+        // Verify that last_source was tracked despite the error
+        assert_eq!(last_source_for(999), Some(BestmoveSource::Test));
+    }
+
+    #[test]
+    fn test_clear_all_last_sources() {
+        clear_all_last_sources();
+
+        // Add some test data
+        let _emitter1 = BestmoveEmitter::new(1001);
+        let _emitter2 = BestmoveEmitter::new(1002);
+
+        // Simulate tracking
+        if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+            map.insert(1001, BestmoveSource::Test);
+            map.insert(1002, BestmoveSource::SessionOnStop);
+        }
+
+        // Verify data exists
+        assert_eq!(last_source_for(1001), Some(BestmoveSource::Test));
+        assert_eq!(last_source_for(1002), Some(BestmoveSource::SessionOnStop));
+
+        // Clear all
+        clear_all_last_sources();
+
+        // Verify all cleared
+        assert_eq!(last_source_for(1001), None);
+        assert_eq!(last_source_for(1002), None);
     }
 }

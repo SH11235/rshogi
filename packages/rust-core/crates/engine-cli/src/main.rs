@@ -13,12 +13,11 @@ mod utils;
 mod worker;
 
 use anyhow::Result;
-use bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
+use bestmove_emitter::BestmoveEmitter;
 use clap::Parser;
-use command_handler::{handle_command, CommandContext};
+use command_handler::{build_meta, handle_command, CommandContext};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
-use engine_core::search::types::{StopInfo, TerminationReason};
 use helpers::generate_fallback_move;
 use search_session::SearchSession;
 use state::SearchState;
@@ -44,7 +43,10 @@ struct Args {
     debug: bool,
 
     /// Use null move (0000) instead of resign for fallback
-    /// Note: null move is not defined in USI spec but handled by most GUIs
+    ///
+    /// Note: null move (0000) is not defined in USI specification but is widely
+    /// supported by most shogi GUIs as a graceful way to handle edge cases.
+    /// When disabled (default), the engine will send "resign" as per USI spec.
     #[arg(long)]
     allow_null_move: bool,
 }
@@ -100,6 +102,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_session: Option<SearchSession> = None; // Current search session
     let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
+    let mut last_position_cmd: Option<String> = None; // Last position command for recovery
 
     // Main event loop - process USI commands and worker messages concurrently
     loop {
@@ -136,6 +139,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
+                            last_position_cmd: &mut last_position_cmd,
                         };
                         handle_command(cmd, &mut ctx)?;
                     }
@@ -164,6 +168,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
+                            last_position_cmd: &mut last_position_cmd,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -276,7 +281,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                 // Send bestmove immediately if not ponder
                 if !*ctx.current_search_is_ponder {
-                    if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                    if let Some(ref _emitter) = ctx.current_bestmove_emitter {
                         // Try to use session-based bestmove
                         if let Some(ref session) = ctx.current_session {
                             log::debug!("Using session for bestmove generation");
@@ -303,37 +308,20 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                                             }
                                         });
 
-                                        let si = stop_info.unwrap_or(StopInfo {
-                                            reason: TerminationReason::Completed,
-                                            elapsed_ms: 0,
-                                            nodes: 0,
-                                            depth_reached: depth,
-                                            hard_timeout: false,
-                                        });
+                                        let meta = build_meta(
+                                            BestmoveSource::SessionInSearchFinished,
+                                            depth,
+                                            seldepth,
+                                            score_str,
+                                            stop_info,
+                                        );
 
-                                        let nodes = si.nodes;
-                                        let elapsed_ms = si.elapsed_ms;
-
-                                        let meta = BestmoveMeta {
-                                            from: BestmoveSource::SessionInSearchFinished,
-                                            stop_info: si,
-                                            stats: BestmoveStats {
-                                                depth,
-                                                seldepth,
-                                                score: score_str
-                                                    .unwrap_or_else(|| "unknown".to_string()),
-                                                nodes,
-                                                nps: if elapsed_ms > 0 {
-                                                    nodes.saturating_mul(1000) / elapsed_ms
-                                                } else {
-                                                    0
-                                                },
-                                            },
-                                        };
-
-                                        emitter.emit(best_move, ponder, meta)?;
-                                        ctx.finalize_search("SearchFinished with bestmove");
-                                        return Ok(());
+                                        return ctx.emit_and_finalize(
+                                            best_move,
+                                            ponder,
+                                            meta,
+                                            "SearchFinished with bestmove",
+                                        );
                                     }
                                     Err(e) => {
                                         log::warn!(
@@ -346,56 +334,40 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                         // Fallback if session validation failed
                         match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-                            Ok(fallback_move) => {
-                                let si = stop_info.unwrap_or(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
-                                });
+                            Ok((fallback_move, _used_partial)) => {
+                                let meta = build_meta(
+                                    BestmoveSource::EmergencyFallback,
+                                    0,         // depth
+                                    None,      // seldepth
+                                    None,      // score
+                                    stop_info, // Pass the provided stop_info
+                                );
 
-                                let meta = BestmoveMeta {
-                                    from: BestmoveSource::EmergencyFallback,
-                                    stop_info: si,
-                                    stats: BestmoveStats {
-                                        depth: 0,
-                                        seldepth: None,
-                                        score: "unknown".to_string(),
-                                        nodes: 0,
-                                        nps: 0,
-                                    },
-                                };
-
-                                emitter.emit(fallback_move, None, meta)?;
+                                ctx.emit_and_finalize(
+                                    fallback_move,
+                                    None,
+                                    meta,
+                                    "SearchFinished with fallback",
+                                )?;
                             }
                             Err(e) => {
                                 log::error!("Fallback move generation failed: {e}");
-                                let si = stop_info.unwrap_or(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
-                                });
+                                let meta = build_meta(
+                                    BestmoveSource::Resign,
+                                    0,         // depth
+                                    None,      // seldepth
+                                    None,      // score
+                                    stop_info, // Pass the provided stop_info
+                                );
 
-                                let meta = BestmoveMeta {
-                                    from: BestmoveSource::Resign,
-                                    stop_info: si,
-                                    stats: BestmoveStats {
-                                        depth: 0,
-                                        seldepth: None,
-                                        score: "unknown".to_string(),
-                                        nodes: 0,
-                                        nps: 0,
-                                    },
-                                };
-
-                                emitter.emit("resign".to_string(), None, meta)?;
+                                ctx.emit_and_finalize(
+                                    "resign".to_string(),
+                                    None,
+                                    meta,
+                                    "SearchFinished with fallback",
+                                )?;
                             }
                         }
-
-                        ctx.finalize_search("SearchFinished with fallback");
                     } else {
                         // No emitter available - send bestmove directly
                         log::error!("No BestmoveEmitter available for search {search_id}");
@@ -416,7 +388,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                         // Fallback
                         match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-                            Ok(fallback_move) => {
+                            Ok((fallback_move, _used_partial)) => {
                                 send_response(UsiResponse::BestMove {
                                     best_move: fallback_move,
                                     ponder: None,
@@ -448,6 +420,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 log::debug!("SearchFinished for search {} ignored (state=StopRequested, bestmove already sent by stop handler)", search_id);
                 // Still finalize to clean up state and transition to Idle
                 ctx.finalize_search("SearchFinished after stop");
+            } else if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Idle
+            {
+                // SearchFinished arrived after bestmove was already sent (typically from stop timeout)
+                log::debug!(
+                    "SearchFinished for search {} ignored (state=Idle, bestmove already sent)",
+                    search_id
+                );
             }
         }
 
@@ -660,21 +639,21 @@ mod tests {
     }
 
     #[test]
-    fn test_info_search_id_filtering() {
-        // Test that Info messages with old search_ids are filtered out
+    fn test_delayed_search_finished_idle_state() {
+        // Test that SearchFinished arriving after Idle state is properly logged
         let (worker_tx, worker_rx) = unbounded();
         let engine = Arc::new(Mutex::new(EngineAdapter::new()));
         let stop_flag = Arc::new(AtomicBool::new(false));
 
-        // Set up context with active search
         let mut worker_handle: Option<JoinHandle<()>> = None;
-        let mut search_state = SearchState::Searching;
-        let mut search_id_counter = 2u64;
-        let mut current_search_id = 2u64; // Current search is ID 2
+        let mut search_state = SearchState::Idle; // Already in Idle
+        let mut search_id_counter = 3u64;
+        let mut current_search_id = 3u64;
         let mut current_search_is_ponder = false;
         let mut current_session: Option<SearchSession> = None;
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
+        let mut last_position_cmd = None;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -690,6 +669,60 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Send SearchFinished for current search while already Idle
+        let msg = WorkerMessage::SearchFinished {
+            session_id: 1,
+            root_hash: 0,
+            search_id: 3,
+            stop_info: None,
+        };
+
+        // Process the message - should be ignored with debug log
+        match handle_worker_message(msg, &mut ctx) {
+            Ok(_) => {
+                // Should succeed but not do anything
+                assert_eq!(*ctx.search_state, SearchState::Idle);
+            }
+            Err(e) => panic!("handle_worker_message failed: {e}"),
+        }
+    }
+
+    #[test]
+    fn test_info_search_id_filtering() {
+        // Test that Info messages with old search_ids are filtered out
+        let (worker_tx, worker_rx) = unbounded();
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Set up context with active search
+        let mut worker_handle: Option<JoinHandle<()>> = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 2u64;
+        let mut current_search_id = 2u64; // Current search is ID 2
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter = None;
+        let mut current_stop_flag = None;
+        let mut last_position_cmd = None;
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &worker_tx,
+            worker_rx: &worker_rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
         };
 
         // Note: In a full test, we would mock send_response to capture sent Info messages

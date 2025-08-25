@@ -2,8 +2,6 @@
 //!
 //! This module contains helper functions for debugging, state management,
 //! and static search execution.
-
-use anyhow::Result;
 use engine_core::{
     engine::controller::Engine, search::limits::SearchLimits, search::SearchResult,
     shogi::Position, usi::move_to_usi,
@@ -77,11 +75,8 @@ impl EngineAdapter {
         limits: SearchLimits,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
     ) -> Result<ExtendedSearchResult, EngineError> {
-        info!("execute_search_static called");
-        info!("Search starting...");
-
         // Save original position state for verification
-        let original_hash = position.hash;
+        let original_hash = position.zobrist_hash();
         let original_side = position.side_to_move;
         let original_ply = position.ply;
 
@@ -144,15 +139,16 @@ impl EngineAdapter {
         };
 
         // Verify position wasn't modified
-        if position.hash != original_hash
+        if position.zobrist_hash() != original_hash
             || position.side_to_move != original_side
             || position.ply != original_ply
         {
             error!(
-                "Position was modified during search! Original: hash={:016x}, side={:?}, ply={} -> Current: hash={:016x}, side={:?}, ply={}",
+                "Position was modified during search! Original: hash={:#016x}, side={:?}, ply={} -> Current: hash={:#016x}, side={:?}, ply={}",
                 original_hash, original_side, original_ply,
-                position.hash, position.side_to_move, position.ply
+                position.zobrist_hash(), position.side_to_move, position.ply
             );
+            return Err(EngineError::PositionCorrupted);
         }
 
         // Convert to extended result

@@ -71,7 +71,7 @@ impl EngineAdapter {
         let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
 
         // Store search start state
-        self.search_start_position_hash = Some(position.hash);
+        self.search_start_position_hash = Some(position.zobrist_hash());
         self.search_start_side_to_move = Some(position.side_to_move);
 
         // Detect if this is byoyomi time control to determine overhead
@@ -149,7 +149,7 @@ impl EngineAdapter {
         position: &Position,
     ) -> Result<(String, Option<String>)> {
         // Check position consistency
-        if session.root_hash != position.hash {
+        if session.root_hash != position.zobrist_hash() {
             warn!("Position hash mismatch in validate_and_get_bestmove");
             return Err(anyhow!("Position changed during search"));
         }
@@ -209,6 +209,25 @@ impl EngineAdapter {
         }
     }
 
+    /// Check if the current position has any legal moves
+    pub fn has_legal_moves(&self) -> Result<bool> {
+        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?;
+
+        // Generate legal moves
+        let mut movegen = MoveGen::new();
+        let mut legal_moves = MoveList::new();
+        movegen.generate_all(position, &mut legal_moves);
+
+        Ok(!legal_moves.is_empty())
+    }
+
+    /// Check if the current position is in check
+    pub fn is_in_check(&self) -> Result<bool> {
+        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?;
+
+        Ok(position.is_in_check())
+    }
+
     /// Generate an emergency move using simple heuristics
     pub fn generate_emergency_move(&self) -> Result<String, EngineError> {
         let position = self
@@ -224,17 +243,44 @@ impl EngineAdapter {
             return Err(EngineError::NoLegalMoves);
         }
 
-        // Simple heuristic: prefer captures, then regular moves
-        // In a real implementation, this could be more sophisticated
-        let best_move = legal_moves.as_slice()[0];
+        // Simple heuristic: prefer captures, then common opening moves
+        let slice = legal_moves.as_slice();
+
+        // Common opening moves that are generally good
+        // For black (sente): pawn advances, king safety moves
+        // For white (gote): similar defensive/developing moves
+        let common_opening_moves = [
+            // Black (sente) common moves
+            "7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h",
+            // White (gote) common moves
+            "3c3d", "7c7d", "6a7b", "5a6b", "2b7b", "8c8d",
+        ];
+
+        let best_move = slice
+            .iter()
+            .copied()
+            .max_by_key(|m| {
+                let move_str = move_to_usi(m);
+                // Priority: captures > common opening moves > other moves
+                if m.is_capture_hint() {
+                    100
+                } else if common_opening_moves.contains(&move_str.as_str()) {
+                    10
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(slice[0]);
 
         Ok(move_to_usi(&best_move))
     }
 
     /// Force reset engine state
     pub fn force_reset_state(&mut self) {
-        // Clear position
-        self.position = None;
+        // NOTE: We do NOT clear position here anymore.
+        // The position should remain valid across engine resets since it represents
+        // the game state from the GUI. Only the GUI should control position state
+        // via position commands.
 
         // Clear ponder state
         self.clear_ponder_state();
@@ -253,7 +299,7 @@ impl EngineAdapter {
             }
         }
 
-        info!("Engine state forcefully reset");
+        info!("Engine state forcefully reset (position preserved)");
     }
 
     /// Check if the last search was using byoyomi time control
@@ -366,7 +412,7 @@ mod tests {
         // Create session with empty PV
         let session = SearchSession {
             id: 1,
-            root_hash: position.hash,
+            root_hash: position.zobrist_hash(),
             committed_best: Some(CommittedBest {
                 pv: SmallVec::new(), // Empty PV
                 score: Score::Cp(100),
@@ -435,5 +481,108 @@ mod tests {
         let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         // Ponder should use only regular overhead, even in byoyomi
         assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+    }
+
+    #[test]
+    fn test_has_legal_moves() {
+        let mut adapter = make_test_adapter();
+
+        // Test 1: No position set - should return error
+        assert!(adapter.has_legal_moves().is_err());
+
+        // Test 2: Normal position - should have legal moves
+        adapter.set_position(true, None, &[]).unwrap();
+        assert_eq!(adapter.has_legal_moves().unwrap(), true);
+
+        // Test 3: Position after some moves - should still have legal moves
+        adapter
+            .set_position(true, None, &["7g7f".to_string(), "3c3d".to_string()])
+            .unwrap();
+        assert_eq!(adapter.has_legal_moves().unwrap(), true);
+    }
+
+    #[test]
+    fn test_is_in_check() {
+        let mut adapter = make_test_adapter();
+
+        // Test 1: No position set - should return error
+        assert!(adapter.is_in_check().is_err());
+
+        // Test 2: Starting position - not in check
+        adapter.set_position(true, None, &[]).unwrap();
+        assert_eq!(adapter.is_in_check().unwrap(), false);
+
+        // Test 3: Simple position with limited pieces - check properties separately
+        // We'll test the methods work correctly, not necessarily create a real checkmate
+        let simple_sfen = "k8/9/9/9/9/9/9/9/K8 b - 1";
+        adapter.set_position(false, Some(simple_sfen), &[]).unwrap();
+        // Both methods should work without error
+        let _ = adapter.is_in_check().unwrap();
+        let _ = adapter.has_legal_moves().unwrap();
+    }
+
+    #[test]
+    fn test_generate_emergency_move() {
+        let mut adapter = make_test_adapter();
+
+        // Test 1: No position set - should return error
+        assert!(adapter.generate_emergency_move().is_err());
+
+        // Test 2: Starting position - should return a common opening move
+        adapter.set_position(true, None, &[]).unwrap();
+        let emergency_move = adapter.generate_emergency_move().unwrap();
+
+        // Should be one of the common opening moves (either sente or gote)
+        let common_moves = [
+            "7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h", "3c3d", "7c7d", "6a7b", "5a6b", "2b7b",
+            "8c8d",
+        ];
+        assert!(
+            common_moves.contains(&emergency_move.as_str()),
+            "Emergency move {} should be a common opening move",
+            emergency_move
+        );
+
+        // Test 3: Position with captures available
+        // Set up a position where captures are possible
+        let moves = vec!["7g7f", "3c3d", "2g2f", "8c8d", "2f2e", "2b3c", "2e2d"];
+        adapter
+            .set_position(true, None, &moves.into_iter().map(String::from).collect::<Vec<_>>())
+            .unwrap();
+
+        let emergency_move = adapter.generate_emergency_move().unwrap();
+        assert!(adapter.is_legal_move(&emergency_move), "Emergency move should be legal");
+
+        // In this position, 2d2c+ (capturing pawn with promotion) should be prioritized
+        // if captures are properly prioritized
+    }
+
+    #[test]
+    #[ignore = "Checkmate position testing requires complex SFEN - covered by integration tests"]
+    fn test_generate_emergency_move_no_legal_moves() {
+        // This test would require setting up a checkmate position
+        // which is complex and better tested in integration tests
+    }
+
+    #[test]
+    fn test_force_reset_state_preserves_position() {
+        let mut adapter = make_test_adapter();
+
+        // Set a position
+        adapter.set_position(true, None, &["7g7f".to_string()]).unwrap();
+        let pos_before = adapter.get_position().cloned();
+        assert!(pos_before.is_some());
+
+        // Force reset state
+        adapter.force_reset_state();
+
+        // Position should still be there
+        let pos_after = adapter.get_position().cloned();
+        assert!(pos_after.is_some());
+        assert_eq!(pos_before.unwrap().zobrist_hash(), pos_after.unwrap().zobrist_hash());
+
+        // Other state should be cleared
+        assert!(adapter.ponder_state.ponder_start.is_none());
+        assert!(adapter.search_start_position_hash.is_none());
     }
 }
