@@ -47,7 +47,7 @@ impl<'a> MoveGenImpl<'a> {
     }
 
     /// Check if a piece at the given square is a sliding piece
-    /// Dragons and horses are considered sliding pieces for blocking purposes
+    /// Note: Only non-promoted sliding pieces (Rook, Bishop, Lance) are checked
     #[inline]
     pub(super) fn is_sliding_piece(&self, sq: Square) -> bool {
         if let Some(piece) = self.pos.board.piece_on(sq) {
@@ -125,6 +125,10 @@ impl<'a> MoveGenImpl<'a> {
         let us = self.pos.side_to_move;
         let them = us.opposite();
 
+        // Get enemy king position once
+        let enemy_king_bb = self.pos.board.piece_bb[them as usize][PieceType::King as usize];
+        let enemy_king_sq = enemy_king_bb.lsb();
+
         // If in double check, only king moves are legal
         if self.checkers.count_ones() > 1 {
             // Check king moves only
@@ -168,10 +172,8 @@ impl<'a> MoveGenImpl<'a> {
                 }
 
                 // Filter out any moves that would capture the enemy king
-                let enemy_king_bb =
-                    self.pos.board.piece_bb[them as usize][PieceType::King as usize];
-                if let Some(enemy_king_sq) = enemy_king_bb.lsb() {
-                    self.moves.as_mut_vec().retain(|m| m.to() != enemy_king_sq);
+                if let Some(king_sq) = enemy_king_sq {
+                    self.moves.as_mut_vec().retain(|m| m.to() != king_sq);
                 }
 
                 if !self.moves.is_empty() {
@@ -185,9 +187,8 @@ impl<'a> MoveGenImpl<'a> {
         self.generate_drop_moves();
 
         // Filter out any drop moves that would capture the enemy king (should not happen)
-        let enemy_king_bb = self.pos.board.piece_bb[them as usize][PieceType::King as usize];
-        if let Some(enemy_king_sq) = enemy_king_bb.lsb() {
-            self.moves.as_mut_vec().retain(|m| m.to() != enemy_king_sq);
+        if let Some(king_sq) = enemy_king_sq {
+            self.moves.as_mut_vec().retain(|m| m.to() != king_sq);
         }
 
         !self.moves.is_empty()

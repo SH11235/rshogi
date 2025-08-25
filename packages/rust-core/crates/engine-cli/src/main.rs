@@ -126,6 +126,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
     let mut position_state: Option<PositionState> = None; // Position state for recovery
+    let mut legal_moves_check_logged = false; // Track if we've logged the legal moves check status
 
     // Main event loop - process USI commands and worker messages concurrently
     loop {
@@ -170,6 +171,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             allow_null_move,
                             position_state: &mut position_state,
                             program_start,
+                            legal_moves_check_logged: &mut legal_moves_check_logged,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -206,6 +208,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             allow_null_move,
                             position_state: &mut position_state,
                             program_start,
+                            legal_moves_check_logged: &mut legal_moves_check_logged,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
