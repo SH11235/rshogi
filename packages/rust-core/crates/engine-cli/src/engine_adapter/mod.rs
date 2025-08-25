@@ -84,6 +84,9 @@ impl Default for EngineAdapter {
 impl EngineAdapter {
     /// Create a new engine adapter with default settings
     pub fn new() -> Self {
+        // Initialize all static tables to prevent circular initialization deadlocks
+        engine_core::init::init_all_tables_once();
+
         let mut adapter = Self {
             engine: Some(Engine::new(EngineType::Material)), // Default to Material for stability
             position: None,
