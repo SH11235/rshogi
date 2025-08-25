@@ -331,7 +331,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                         // Fallback if session validation failed
                         match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-                            Ok(fallback_move) => {
+                            Ok((fallback_move, _used_partial)) => {
                                 let meta = build_meta(
                                     BestmoveSource::EmergencyFallback,
                                     0,         // depth
@@ -385,7 +385,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                         // Fallback
                         match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-                            Ok(fallback_move) => {
+                            Ok((fallback_move, _used_partial)) => {
                                 send_response(UsiResponse::BestMove {
                                     best_move: fallback_move,
                                     ponder: None,

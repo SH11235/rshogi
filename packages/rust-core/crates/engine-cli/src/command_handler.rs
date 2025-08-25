@@ -748,7 +748,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     partial_result.clone(),
                     ctx.allow_null_move,
                 ) {
-                    Ok(move_str) => {
+                    Ok((move_str, used_partial)) => {
                         // Log fallback source (info now handled by BestmoveEmitter)
                         if let Some((_, depth, score)) = partial_result {
                             log::debug!("Using partial result: depth={depth}, score={score}");
@@ -759,8 +759,18 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                         // Use BestmoveEmitter for centralized emission
                         if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                            let (from, depth, score_str) = if let Some((_, d, s)) = partial_result {
-                                (BestmoveSource::PartialResultTimeout, d, Some(format!("cp {s}")))
+                            // Determine the source based on what generate_fallback_move actually used
+                            let (from, depth, score_str) = if used_partial {
+                                if let Some((_, d, s)) = partial_result {
+                                    (
+                                        BestmoveSource::PartialResultTimeout,
+                                        d,
+                                        Some(format!("cp {s}")),
+                                    )
+                                } else {
+                                    // This shouldn't happen, but handle gracefully
+                                    (BestmoveSource::EmergencyFallbackTimeout, 0, None)
+                                }
                             } else {
                                 (BestmoveSource::EmergencyFallbackTimeout, 0, None)
                             };
@@ -947,7 +957,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             partial_result.clone(),
                             ctx.allow_null_move,
                         ) {
-                            Ok(move_str) => {
+                            Ok((move_str, used_partial)) => {
                                 // Log fallback source (info now handled by BestmoveEmitter)
                                 if let Some((_, depth, score)) = partial_result {
                                     log::debug!("Using partial result on finish: depth={depth}, score={score}");
@@ -956,7 +966,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 }
 
                                 if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                                    let (from, depth, score_str) =
+                                    let (from, depth, score_str) = if used_partial {
                                         if let Some((_, d, s)) = partial_result {
                                             (
                                                 BestmoveSource::PartialResultOnFinish,
@@ -964,8 +974,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                 Some(format!("cp {s}")),
                                             )
                                         } else {
+                                            // This shouldn't happen, but handle gracefully
                                             (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
-                                        };
+                                        }
+                                    } else {
+                                        (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
+                                    };
 
                                     let meta = build_meta(
                                         from, depth, None, // seldepth

@@ -21,11 +21,13 @@ pub const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// All operations are synchronous but designed to be fast.
 /// Total worst-case time: ~100ms (dominated by quick_search)
+///
+/// Returns: (move_string, used_partial_result)
 pub fn generate_fallback_move(
     engine: &Arc<Mutex<EngineAdapter>>,
     partial_result: Option<(String, u8, i32)>,
     allow_null_move: bool,
-) -> Result<String> {
+) -> Result<(String, bool)> {
     // Stage 1: Use partial result if available (instant)
     if let Some((best_move, depth, score)) = partial_result {
         // Validate the partial result move before using it
@@ -40,7 +42,7 @@ pub fn generate_fallback_move(
             log::info!(
                 "Using validated partial result: move={best_move}, depth={depth}, score={score}"
             );
-            return Ok(best_move);
+            return Ok((best_move, true));
         } else {
             // Include position SFEN in warning
             let sfen = adapter
@@ -73,7 +75,7 @@ pub fn generate_fallback_move(
     };
 
     if let Some(move_str) = shallow_result {
-        return Ok(move_str);
+        return Ok((move_str, false));
     }
 
     // Stage 3: Try emergency move generation (heuristic only, ~1ms)
@@ -86,7 +88,7 @@ pub fn generate_fallback_move(
     match emergency_result {
         Ok(move_str) => {
             log::info!("Generated emergency move: {move_str}");
-            Ok(move_str)
+            Ok((move_str, false))
         }
         Err(EngineError::NoLegalMoves) => {
             let sfen = {
@@ -99,17 +101,17 @@ pub fn generate_fallback_move(
             log::error!(
                 "No legal moves available in position {sfen} - position is checkmate or stalemate"
             );
-            Ok("resign".to_string())
+            Ok(("resign".to_string(), false))
         }
         Err(EngineError::EngineNotAvailable(msg)) if msg.contains("Position not set") => {
             if allow_null_move {
                 log::error!("Position not set - returning null move (0000)");
                 // Return null move (0000) which most GUIs handle gracefully
                 // Note: This is not defined in USI spec but widely supported
-                Ok("0000".to_string())
+                Ok(("0000".to_string(), false))
             } else {
                 log::error!("Position not set - returning resign");
-                Ok("resign".to_string())
+                Ok(("resign".to_string(), false))
             }
         }
         Err(e) => {
@@ -124,10 +126,10 @@ pub fn generate_fallback_move(
             if allow_null_move {
                 // Return null move for better GUI compatibility
                 // Note: This is not defined in USI spec but widely supported
-                Ok("0000".to_string())
+                Ok(("0000".to_string(), false))
             } else {
                 // Return resign as per USI spec
-                Ok("resign".to_string())
+                Ok(("resign".to_string(), false))
             }
         }
     }
@@ -209,7 +211,10 @@ mod tests {
 
         // Should not fail, but return a valid move from Stage 2 or 3
         assert!(result.is_ok());
-        let move_str = result.unwrap();
+        let (move_str, used_partial) = result.unwrap();
+
+        // Should not have used the partial result since it's invalid
+        assert!(!used_partial);
 
         // The move should not be the invalid format we provided
         assert_ne!(move_str, "invalid-move-format");
@@ -237,7 +242,10 @@ mod tests {
 
         // Should not fail
         assert!(result.is_ok());
-        let move_str = result.unwrap();
+        let (move_str, used_partial) = result.unwrap();
+
+        // Should not have used the partial result since it's illegal
+        assert!(!used_partial);
 
         // Should not return the illegal move
         assert_ne!(move_str, "1a1b");
