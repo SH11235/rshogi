@@ -2,8 +2,10 @@ use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::helpers::{generate_fallback_move, wait_for_search_completion};
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
-use crate::types::{BestmoveSource, ResignReason};
-use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
+use crate::types::{BestmoveSource, PositionState, ResignReason};
+use crate::usi::{
+    canonicalize_position_cmd, send_info_string, send_response, GoParams, UsiCommand, UsiResponse,
+};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender};
@@ -15,6 +17,31 @@ use std::time::{Duration, Instant};
 
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
 use engine_core::search::types::{StopInfo, TerminationReason};
+
+/// Create a TSV-formatted log string from key-value pairs
+/// Values are sanitized to prevent TSV format corruption
+fn log_tsv(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| {
+            // Sanitize value by replacing tabs and newlines with spaces
+            let sanitized = v.replace(['\t', '\n', '\r'], " ");
+            format!("{k}={sanitized}")
+        })
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+/// Handle position restoration failure by logging and sending resign
+fn fail_position_restore(reason: ResignReason, log_reason: &str) -> Result<()> {
+    send_info_string(log_tsv(&[("kind", "position_restore_fail"), ("reason", log_reason)]))?;
+    send_info_string(log_tsv(&[("kind", "resign"), ("resign_reason", &reason.to_string())]))?;
+    send_response(UsiResponse::BestMove {
+        best_move: "resign".to_string(),
+        ponder: None,
+    })?;
+    Ok(())
+}
 
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
@@ -31,7 +58,8 @@ pub struct CommandContext<'a> {
     pub current_bestmove_emitter: &'a mut Option<BestmoveEmitter>,
     pub current_stop_flag: &'a mut Option<Arc<AtomicBool>>, // Per-search stop flag
     pub allow_null_move: bool,
-    pub last_position_cmd: &'a mut Option<String>, // Store last position command for recovery
+    pub position_state: &'a mut Option<PositionState>, // Store position state for recovery
+    pub program_start: Instant, // Program start time for elapsed calculations
 }
 
 /// Build BestmoveMeta from common parameters
@@ -199,101 +227,85 @@ impl<'a> CommandContext<'a> {
         fallback_reason: &str,
     ) {
         // Prepare TSV log similar to BestmoveEmitter's format
-        let search_id = *self.current_search_id;
-        let (
-            from,
-            stop_reason,
-            depth,
-            seldepth,
-            depth_reached,
-            score,
-            nodes,
-            nps,
-            elapsed_ms,
-            hard_timeout,
-        ) = if let Some(m) = meta {
-            (
-                format!("{}", m.from),
-                m.stop_info.reason.to_string(),
-                m.stats.depth,
-                m.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
-                m.stop_info.depth_reached,
-                m.stats.score.clone(),
-                m.stats.nodes,
-                m.stats.nps,
-                m.stop_info.elapsed_ms,
-                m.stop_info.hard_timeout,
-            )
-        } else {
-            // Default values when no metadata is available
-            (
-                fallback_reason.to_string(),
-                "error".to_string(),
-                0,
-                "-".to_string(),
-                0,
-                "none".to_string(),
-                0,
-                0,
-                0,
-                false,
-            )
-        };
-
+        let search_id_str = self.current_search_id.to_string();
         let ponder_str = ponder.unwrap_or("none");
 
-        let info_string = format!(
-            "kind=bestmove_direct_fallback\t\
-             search_id={}\t\
-             bestmove_from={}\t\
-             stop_reason={}\t\
-             depth={}\t\
-             seldepth={}\t\
-             depth_reached={}\t\
-             score={}\t\
-             nodes={}\t\
-             nps={}\t\
-             elapsed_ms={}\t\
-             hard_timeout={}\t\
-             bestmove={}\t\
-             ponder={}\t\
-             fallback_reason={}",
-            search_id,
-            from,
-            stop_reason,
-            depth,
-            seldepth,
-            depth_reached,
-            score,
-            nodes,
-            nps,
-            elapsed_ms,
-            hard_timeout,
-            best_move,
-            ponder_str,
-            fallback_reason
-        );
+        let info_string = if let Some(m) = meta {
+            // Format metadata values as strings for log_tsv
+            let from_str = m.from.to_string();
+            let stop_reason_str = m.stop_info.reason.to_string();
+            let depth_str = m.stats.depth.to_string();
+            let seldepth_str =
+                m.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+            let depth_reached_str = m.stop_info.depth_reached.to_string();
+            let nodes_str = m.stats.nodes.to_string();
+            let nps_str = m.stats.nps.to_string();
+            let elapsed_ms_str = m.stop_info.elapsed_ms.to_string();
+            let hard_timeout_str = m.stop_info.hard_timeout.to_string();
+
+            log_tsv(&[
+                ("kind", "bestmove_direct_fallback"),
+                ("search_id", &search_id_str),
+                ("bestmove_from", &from_str),
+                ("stop_reason", &stop_reason_str),
+                ("depth", &depth_str),
+                ("seldepth", &seldepth_str),
+                ("depth_reached", &depth_reached_str),
+                ("score", &m.stats.score),
+                ("nodes", &nodes_str),
+                ("nps", &nps_str),
+                ("elapsed_ms", &elapsed_ms_str),
+                ("hard_timeout", &hard_timeout_str),
+                ("bestmove", best_move),
+                ("ponder", ponder_str),
+                ("fallback_reason", fallback_reason),
+            ])
+        } else {
+            // Default values when no metadata is available
+            log_tsv(&[
+                ("kind", "bestmove_direct_fallback"),
+                ("search_id", &search_id_str),
+                ("bestmove_from", fallback_reason),
+                ("stop_reason", "error"),
+                ("depth", "0"),
+                ("seldepth", "-"),
+                ("depth_reached", "0"),
+                ("score", "none"),
+                ("nodes", "0"),
+                ("nps", "0"),
+                ("elapsed_ms", "0"),
+                ("hard_timeout", "false"),
+                ("bestmove", best_move),
+                ("ponder", ponder_str),
+                ("fallback_reason", fallback_reason),
+            ])
+        };
 
         if let Err(e) = send_info_string(info_string) {
-            log::warn!("Failed to send fallback TSV log: {}", e);
+            log::warn!("Failed to send fallback TSV log: {e}");
         }
     }
 }
 
 /// Parse environment variable as positive f64, logging warning and returning default if invalid
 fn parse_positive_or_default(key: &str, default: f64) -> f64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| {
-            if f <= 0.0 {
-                log::warn!("{key} must be positive, using default {default}");
-                default
-            } else {
-                f
+    match std::env::var(key) {
+        Ok(s) => match s.parse::<f64>() {
+            Ok(f) => {
+                if f <= 0.0 {
+                    log::warn!("{key} must be positive (got {f}), using default {default}");
+                    default
+                } else {
+                    f
+                }
             }
-        })
-        .unwrap_or(default)
+            Err(e) => {
+                log::warn!("Failed to parse {key}='{s}' as f64: {e}, using default {default}");
+                default
+            }
+        },
+        Err(_) => default, // Environment variable not set, use default silently
+    }
 }
 
 pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
@@ -331,21 +343,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 "Handling position command - startpos: {startpos}, sfen: {sfen:?}, moves: {moves:?}"
             );
 
-            // Build the position command string
-            let mut position_cmd = String::from("position");
-            if startpos {
-                position_cmd.push_str(" startpos");
-            } else if let Some(sfen) = &sfen {
-                position_cmd.push_str(" sfen ");
-                position_cmd.push_str(sfen);
-            }
-            if !moves.is_empty() {
-                position_cmd.push_str(" moves");
-                for mv in &moves {
-                    position_cmd.push(' ');
-                    position_cmd.push_str(mv);
-                }
-            }
+            // Build the canonical position command string
+            let cmd_canonical = canonicalize_position_cmd(startpos, sfen.as_deref(), &moves);
 
             // Wait for any ongoing search to complete before updating position
             wait_for_search_completion(
@@ -363,34 +362,51 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.set_position(startpos, sfen.as_deref(), &moves) {
                 Ok(()) => {
-                    // Store the position command only on success
-                    *ctx.last_position_cmd = Some(position_cmd.clone());
-                    log::debug!("Stored position command: {}", position_cmd);
-
-                    // Get position info for logging
+                    // Get position info and create PositionState
                     if let Some(pos) = engine.get_position() {
-                        let sfen = position_to_sfen(pos);
+                        let sfen_snapshot = position_to_sfen(pos);
                         let root_hash = pos.zobrist_hash();
+                        let move_len = moves.len();
+
+                        // Store the position state
+                        let position_state = PositionState::new(
+                            cmd_canonical.clone(),
+                            root_hash,
+                            move_len,
+                            sfen_snapshot.clone(),
+                        );
+
+                        *ctx.position_state = Some(position_state);
+
+                        log::debug!(
+                            "Stored position state: cmd={}, hash={:#016x}",
+                            cmd_canonical,
+                            root_hash
+                        );
                         log::info!(
                             "Position command completed - SFEN: {}, root_hash: {:#016x}, side_to_move: {:?}, move_count: {}",
-                            sfen, root_hash, pos.side_to_move, moves.len()
+                            sfen_snapshot, root_hash, pos.side_to_move, move_len
                         );
-                        send_info_string(format!(
-                            "Position set: root_hash={:#016x} side={:?} moves={}",
-                            root_hash,
-                            pos.side_to_move,
-                            moves.len()
-                        ))?;
+
+                        // Send structured log for position store
+                        let stored_ms = ctx.program_start.elapsed().as_millis();
+                        send_info_string(log_tsv(&[
+                            ("kind", "position_store"),
+                            ("root_hash", &format!("{:#016x}", root_hash)),
+                            ("move_len", &move_len.to_string()),
+                            ("sfen_first_20", &sfen_snapshot.chars().take(20).collect::<String>()),
+                            ("stored_ms_since_start", &stored_ms.to_string()),
+                        ]))?;
                     } else {
-                        log::info!("Position command completed");
+                        log::error!("Position set but unable to retrieve for state storage");
                     }
                 }
                 Err(e) => {
                     // Log error but don't crash - USI engines should be robust
                     log::error!("Failed to set position: {e}");
                     send_info_string(format!("Error: Failed to set position - {e}"))?;
-                    // Don't update last_position_cmd on failure - keep the previous valid one
-                    log::debug!("Keeping previous position command due to error");
+                    // Don't update position_state on failure - keep the previous valid one
+                    log::debug!("Keeping previous position state due to error");
                 }
             }
         }
@@ -449,9 +465,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             // Reset to 0 so any late worker messages (old search_id) will be ignored
             *ctx.current_search_id = 0;
 
-            // Clear last position command to avoid carrying over to next game
-            *ctx.last_position_cmd = None;
-            log::debug!("Cleared last_position_cmd for new game");
+            // Clear position state to avoid carrying over to next game
+            *ctx.position_state = None;
+            log::debug!("Cleared position_state for new game");
 
             // Notify engine of game result
             let mut engine = lock_or_recover_adapter(ctx.engine);
@@ -476,9 +492,9 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             // Clean up any remaining search state
             ctx.finalize_search("UsiNewGame");
 
-            // Clear last position command for fresh start
-            *ctx.last_position_cmd = None;
-            log::debug!("Cleared last_position_cmd for new game");
+            // Clear position state for fresh start
+            *ctx.position_state = None;
+            log::debug!("Cleared position_state for new game");
 
             // Reset engine state for new game
             let mut engine = lock_or_recover_adapter(ctx.engine);
@@ -562,103 +578,217 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     {
         let mut engine = lock_or_recover_adapter(ctx.engine);
         if !engine.has_position() {
-            log::warn!("Position not set - attempting recovery from last position command");
+            log::warn!("Position not set - attempting recovery from position state");
 
-            // Try to recover from last position command
-            if let Some(last_cmd) = ctx.last_position_cmd.as_ref() {
-                log::debug!("Attempting to rebuild position from: {}", last_cmd);
+            // Try to recover from position state
+            if let Some(pos_state) = ctx.position_state.as_ref() {
+                let elapsed_ms = pos_state.elapsed().as_millis();
+                log::debug!(
+                    "Attempting to rebuild position from state: cmd={}, moves={}, age_ms={}",
+                    pos_state.cmd_canonical,
+                    pos_state.move_len,
+                    elapsed_ms
+                );
+                send_info_string(log_tsv(&[
+                    ("kind", "position_restore_try"),
+                    ("move_len", &pos_state.move_len.to_string()),
+                    ("age_ms", &elapsed_ms.to_string()),
+                ]))?;
 
-                // Parse and apply the last position command
-                match crate::usi::parse_usi_command(last_cmd) {
+                // Parse and apply the canonical position command
+                let mut need_fallback = false;
+                match crate::usi::parse_usi_command(&pos_state.cmd_canonical) {
                     Ok(UsiCommand::Position {
                         startpos,
                         sfen,
                         moves,
-                    }) => match engine.set_position(startpos, sfen.as_deref(), &moves) {
-                        Ok(()) => {
-                            log::info!("Successfully rebuilt position from last command");
-                            send_info_string("Position recovered from last command".to_string())?;
+                    }) => {
+                        // First check move_len consistency
+                        if moves.len() != pos_state.move_len {
+                            log::warn!(
+                                "Move count mismatch in stored command: expected {}, got {}. Attempting fallback.",
+                                pos_state.move_len,
+                                moves.len()
+                            );
+                            send_info_string(log_tsv(&[
+                                ("kind", "position_restore_fallback"),
+                                ("reason", "move_len_mismatch"),
+                                ("expected", &pos_state.move_len.to_string()),
+                                ("actual", &moves.len().to_string()),
+                            ]))?;
+                            need_fallback = true;
+                        } else {
+                            // Try to apply the canonical command
+                            match engine.set_position(startpos, sfen.as_deref(), &moves) {
+                                Ok(()) => {
+                                    // Verify hash matches
+                                    if let Some(pos) = engine.get_position() {
+                                        let current_hash = pos.zobrist_hash();
+                                        if current_hash == pos_state.root_hash {
+                                            log::info!(
+                                                "Successfully rebuilt position with matching hash"
+                                            );
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_success"),
+                                                ("source", "command"),
+                                            ]))?;
+                                        } else {
+                                            log::warn!(
+                                                "Position rebuilt but hash mismatch: expected {:#016x}, got {:#016x}, move_len={}",
+                                                pos_state.root_hash, current_hash, pos_state.move_len
+                                            );
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_fallback"),
+                                                ("reason", "hash_mismatch"),
+                                            ]))?;
+                                            need_fallback = true;
+                                        }
+                                    } else {
+                                        log::error!("Position set but unable to verify hash");
+                                        need_fallback = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to rebuild position: {}", e);
+                                    send_info_string(log_tsv(&[
+                                        ("kind", "position_restore_fallback"),
+                                        ("reason", "rebuild_failed"),
+                                    ]))?;
+                                    need_fallback = true;
+                                }
+                            }
                         }
-                        Err(e) => {
-                            log::error!("Failed to rebuild position: {}", e);
-                            let reason = ResignReason::PositionRebuildFailed {
-                                error: "see log for details",
-                            };
-                            send_info_string(format!("ResignReason: {reason}"))?;
-                            send_response(UsiResponse::BestMove {
-                                best_move: "resign".to_string(),
-                                ponder: None,
-                            })?;
-                            return Ok(());
+
+                        // Attempt fallback if needed
+                        if need_fallback {
+                            log::debug!(
+                                "Attempting fallback with sfen_snapshot: {}",
+                                pos_state.sfen_snapshot
+                            );
+
+                            // Directly use sfen_snapshot without parsing
+                            match engine.set_position(false, Some(&pos_state.sfen_snapshot), &[]) {
+                                Ok(()) => {
+                                    // Verify hash after fallback
+                                    if let Some(pos) = engine.get_position() {
+                                        let current_hash = pos.zobrist_hash();
+                                        if current_hash == pos_state.root_hash {
+                                            log::info!("Successfully restored position from sfen_snapshot with matching hash");
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_success"),
+                                                ("source", "sfen_snapshot"),
+                                            ]))?;
+                                        } else {
+                                            log::error!(
+                                                "SFEN fallback hash mismatch: expected {:#016x}, got {:#016x}",
+                                                pos_state.root_hash, current_hash
+                                            );
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_fail"),
+                                                ("reason", "sfen_hash_mismatch"),
+                                                (
+                                                    "expected",
+                                                    &format!("{:#016x}", pos_state.root_hash),
+                                                ),
+                                                ("actual", &format!("{:#016x}", current_hash)),
+                                            ]))?;
+                                            return fail_position_restore(
+                                                ResignReason::PositionRebuildFailed {
+                                                    error:
+                                                        "hash verification failed after fallback",
+                                                },
+                                                "sfen_hash_mismatch",
+                                            );
+                                        }
+                                    } else {
+                                        log::error!("Failed to get position after sfen_snapshot restoration");
+                                        return fail_position_restore(
+                                            ResignReason::PositionRebuildFailed {
+                                                error: "no position after sfen restoration",
+                                            },
+                                            "no_position_after_sfen",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to set position from sfen_snapshot: {}", e);
+                                    return fail_position_restore(
+                                        ResignReason::PositionRebuildFailed {
+                                            error: "sfen_snapshot failed",
+                                        },
+                                        "sfen_snapshot_failed",
+                                    );
+                                }
+                            }
                         }
-                    },
+                    }
                     _ => {
-                        log::error!("Invalid stored position command: {}", last_cmd);
-                        let reason = ResignReason::InvalidStoredPositionCmd;
-                        send_info_string(format!("ResignReason: {reason}"))?;
-                        send_response(UsiResponse::BestMove {
-                            best_move: "resign".to_string(),
-                            ponder: None,
-                        })?;
-                        return Ok(());
+                        log::error!("Invalid stored position command: {}", pos_state.cmd_canonical);
+                        return fail_position_restore(
+                            ResignReason::InvalidStoredPositionCmd,
+                            "invalid_cmd",
+                        );
                     }
                 }
             } else {
-                log::error!("No position set and no recovery command available");
-                let reason = ResignReason::NoPositionSet;
-                send_info_string(format!("ResignReason: {reason}"))?;
-                send_response(UsiResponse::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder: None,
-                })?;
-                return Ok(());
+                log::error!("No position set and no recovery state available");
+                return fail_position_restore(ResignReason::NoPositionSet, "no_position_set");
             }
         }
 
         // Sanity check: verify we have legal moves
-        match engine.has_legal_moves() {
-            Ok(true) => {
-                log::debug!("Position sanity check passed - legal moves available");
+        {
+            let engine = lock_or_recover_adapter(ctx.engine);
+            match engine.has_legal_moves() {
+                Ok(true) => {
+                    log::debug!("Position sanity check passed - legal moves available");
+                }
+                Ok(false) => {
+                    // Check if it's checkmate or error condition
+                    let in_check = engine.is_in_check().unwrap_or(false);
+                    let reason = if in_check {
+                        ResignReason::Checkmate
+                    } else {
+                        ResignReason::NoLegalMovesButNotInCheck
+                    };
+
+                    log::error!("Position has no legal moves - in_check: {in_check}");
+                    send_info_string(log_tsv(&[
+                        ("kind", "resign"),
+                        ("resign_reason", &reason.to_string()),
+                    ]))?;
+
+                    // Get position info for debugging
+                    let position_info = engine
+                        .get_position()
+                        .map(position_to_sfen)
+                        .unwrap_or_else(|| "<no position>".to_string());
+                    log::error!("Current position SFEN: {position_info}");
+
+                    send_response(UsiResponse::BestMove {
+                        best_move: "resign".to_string(),
+                        ponder: None,
+                    })?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::error!("Failed to check legal moves: {e}");
+                    let reason = ResignReason::OtherError {
+                        error: "legal move check failed",
+                    };
+                    send_info_string(log_tsv(&[
+                        ("kind", "resign"),
+                        ("resign_reason", &reason.to_string()),
+                    ]))?;
+
+                    send_response(UsiResponse::BestMove {
+                        best_move: "resign".to_string(),
+                        ponder: None,
+                    })?;
+                    return Ok(());
+                }
             }
-            Ok(false) => {
-                // Check if it's checkmate or error condition
-                let in_check = engine.is_in_check().unwrap_or(false);
-                let reason = if in_check {
-                    ResignReason::Checkmate
-                } else {
-                    ResignReason::NoLegalMovesButNotInCheck
-                };
-
-                log::error!("Position has no legal moves - in_check: {in_check}");
-                send_info_string(format!("ResignReason: {reason}"))?;
-
-                // Get position info for debugging
-                let position_info = engine
-                    .get_position()
-                    .map(position_to_sfen)
-                    .unwrap_or_else(|| "<no position>".to_string());
-                log::error!("Current position SFEN: {position_info}");
-
-                send_response(UsiResponse::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder: None,
-                })?;
-                return Ok(());
-            }
-            Err(e) => {
-                log::error!("Failed to check legal moves: {e}");
-                let reason = ResignReason::OtherError {
-                    error: "legal move check failed",
-                };
-                send_info_string(format!("ResignReason: {reason}"))?;
-
-                send_response(UsiResponse::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder: None,
-                })?;
-                return Ok(());
-            }
-        }
+        } // Engine lock is dropped here
     }
 
     // Clean up old stop flag before creating new one
@@ -1175,7 +1305,7 @@ mod tests {
         Option<SearchSession>,
         Option<BestmoveEmitter>,
         Option<Arc<AtomicBool>>,
-        Option<String>,
+        Option<PositionState>,
         Option<JoinHandle<()>>,
     ) {
         let engine = Arc::new(Mutex::new(EngineAdapter::new()));
@@ -1188,7 +1318,7 @@ mod tests {
         let current_session = None;
         let current_bestmove_emitter = None;
         let current_stop_flag = None;
-        let last_position_cmd = None;
+        let position_state = None;
         let worker_handle = None;
 
         (
@@ -1203,7 +1333,7 @@ mod tests {
             current_session,
             current_bestmove_emitter,
             current_stop_flag,
-            last_position_cmd,
+            position_state,
             worker_handle,
         )
     }
@@ -1255,7 +1385,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1273,7 +1403,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Test successful position command
@@ -1286,11 +1417,13 @@ mod tests {
         // Should succeed
         assert!(handle_command(cmd, &mut ctx).is_ok());
 
-        // Check that position command was stored
-        assert!(ctx.last_position_cmd.is_some());
-        let stored_cmd = ctx.last_position_cmd.as_ref().unwrap();
-        assert!(stored_cmd.contains("position startpos"));
-        assert!(stored_cmd.contains("moves 7g7f"));
+        // Check that position state was stored
+        assert!(ctx.position_state.is_some());
+        let state = ctx.position_state.as_ref().unwrap();
+        assert_eq!(state.cmd_canonical, "position startpos moves 7g7f");
+        assert_eq!(state.move_len, 1);
+        assert!(state.root_hash != 0); // Should have a valid hash
+        assert!(!state.sfen_snapshot.is_empty()); // Should have SFEN
     }
 
     #[test]
@@ -1307,7 +1440,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1325,12 +1458,19 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
-        // Set a valid previous position command
-        *ctx.last_position_cmd = Some("position startpos".to_string());
-        let previous_cmd = ctx.last_position_cmd.clone();
+        // Set a valid previous position state (mock)
+        let previous_state = PositionState::new(
+            "position startpos".to_string(),
+            12345678, // mock hash
+            0,
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1".to_string(),
+        );
+        *ctx.position_state = Some(previous_state.clone());
+        let previous_state_cmd = ctx.position_state.as_ref().unwrap().cmd_canonical.clone();
 
         // Test with invalid SFEN that will fail
         let cmd = UsiCommand::Position {
@@ -1342,8 +1482,9 @@ mod tests {
         // Command handling succeeds (it logs error but doesn't crash)
         assert!(handle_command(cmd, &mut ctx).is_ok());
 
-        // Check that previous position command is still stored
-        assert_eq!(*ctx.last_position_cmd, previous_cmd);
+        // Check that previous position state is still stored
+        assert!(ctx.position_state.is_some());
+        assert_eq!(ctx.position_state.as_ref().unwrap().cmd_canonical, previous_state_cmd);
     }
 
     #[test]
@@ -1360,7 +1501,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1378,22 +1519,28 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
-        // Set a position command
-        *ctx.last_position_cmd = Some("position startpos moves 7g7f".to_string());
+        // Set a position state
+        *ctx.position_state = Some(PositionState::new(
+            "position startpos moves 7g7f".to_string(),
+            12345678,
+            1,
+            "test_sfen".to_string(),
+        ));
 
-        // UsiNewGame should clear last_position_cmd
+        // UsiNewGame should clear position_state
         let cmd = UsiCommand::UsiNewGame;
         assert!(handle_command(cmd, &mut ctx).is_ok());
 
-        // Check that position command was cleared
-        assert!(ctx.last_position_cmd.is_none());
+        // Check that position state was cleared
+        assert!(ctx.position_state.is_none());
     }
 
     #[test]
-    fn test_gameover_clears_last_position() {
+    fn test_gameover_clears_position_state() {
         let (
             engine,
             stop_flag,
@@ -1406,7 +1553,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1424,20 +1571,26 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
-        // Set a position command
-        *ctx.last_position_cmd = Some("position startpos moves 7g7f".to_string());
+        // Set a position state
+        *ctx.position_state = Some(PositionState::new(
+            "position startpos moves 7g7f".to_string(),
+            12345678,
+            1,
+            "test_sfen".to_string(),
+        ));
 
-        // GameOver should clear last_position_cmd
+        // GameOver should clear position_state
         let cmd = UsiCommand::GameOver {
             result: crate::usi::GameResult::Win,
         };
         assert!(handle_command(cmd, &mut ctx).is_ok());
 
-        // Check that position command was cleared
-        assert!(ctx.last_position_cmd.is_none());
+        // Check that position state was cleared
+        assert!(ctx.position_state.is_none());
     }
 
     #[test]
@@ -1456,7 +1609,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1480,11 +1633,17 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
-        // Store a position command
-        *ctx.last_position_cmd = Some("position startpos moves 7g7f 3c3d".to_string());
+        // Store a position state
+        *ctx.position_state = Some(PositionState::new(
+            "position startpos moves 7g7f 3c3d".to_string(),
+            87654321, // Mock hash for startpos
+            2,
+            "test_sfen_after_moves".to_string(),
+        ));
 
         // Force clear position in engine to simulate position loss
         {
@@ -1525,7 +1684,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1543,11 +1702,17 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
-        // Store an invalid position command
-        *ctx.last_position_cmd = Some("position invalid command".to_string());
+        // Store an invalid position state
+        *ctx.position_state = Some(PositionState::new(
+            "position invalid command".to_string(),
+            0, // Invalid hash
+            0,
+            "invalid_sfen".to_string(),
+        ));
 
         // Send go command - recovery should fail
         let cmd = UsiCommand::Go(GoParams {
@@ -1577,7 +1742,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1595,7 +1760,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Ensure we're in idle state
@@ -1624,7 +1790,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1642,7 +1808,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Set up search state
@@ -1695,7 +1862,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1713,7 +1880,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Set up search state
@@ -1772,7 +1940,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1790,7 +1958,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Set up search state
@@ -1851,7 +2020,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -1878,7 +2047,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Set up search state
@@ -1988,7 +2158,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -2015,7 +2185,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Set up search state
@@ -2076,7 +2247,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -2094,7 +2265,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Set up search state
@@ -2154,7 +2326,7 @@ mod tests {
             mut current_session,
             mut current_bestmove_emitter,
             mut current_stop_flag,
-            mut last_position_cmd,
+            mut position_state,
             mut worker_handle,
         ) = create_test_context();
 
@@ -2180,7 +2352,8 @@ mod tests {
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
-            last_position_cmd: &mut last_position_cmd,
+            position_state: &mut position_state,
+            program_start: Instant::now(),
         };
 
         // Set up search state
