@@ -210,6 +210,7 @@ impl EngineAdapter {
     }
 
     /// Check if the current position has any legal moves
+    #[allow(dead_code)] // Temporarily unused due to subprocess hang issue
     pub fn has_legal_moves(&self) -> Result<bool> {
         let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
 
@@ -222,6 +223,7 @@ impl EngineAdapter {
     }
 
     /// Check if the current position is in check
+    #[allow(dead_code)] // Temporarily unused due to subprocess hang issue
     pub fn is_in_check(&self) -> Result<bool> {
         let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?;
 
