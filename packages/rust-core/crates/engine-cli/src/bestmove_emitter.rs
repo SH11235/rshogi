@@ -9,6 +9,13 @@ use engine_core::search::types::StopInfo;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+#[cfg(test)]
+use std::sync::Mutex;
+
+#[cfg(test)]
+/// Test-only tracking of last emitted BestmoveSource
+pub static LAST_EMIT_SOURCE: Mutex<Option<BestmoveSource>> = Mutex::new(None);
+
 /// Statistics for bestmove emission
 #[derive(Debug)]
 pub struct BestmoveStats {
@@ -77,6 +84,14 @@ impl BestmoveEmitter {
         #[cfg(test)]
         if self.force_error {
             return Err(anyhow::anyhow!("Test error: forced emit failure"));
+        }
+
+        // Test-only: track the BestmoveSource
+        #[cfg(test)]
+        {
+            if let Ok(mut last) = LAST_EMIT_SOURCE.lock() {
+                *last = Some(meta.from);
+            }
         }
 
         // Ensure exactly-once emission

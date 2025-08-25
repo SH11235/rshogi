@@ -138,7 +138,7 @@ impl<'a> CommandContext<'a> {
                 }
             }
         } else {
-            log::error!("BestmoveEmitter not available; sending bestmove directly");
+            log::warn!("BestmoveEmitter not available; sending bestmove directly");
             // Always finalize before sending
             self.finalize_search(finalize_label);
             send_response(UsiResponse::BestMove { best_move, ponder })?;
@@ -670,7 +670,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                         return ctx.emit_and_finalize(best_move, ponder, meta, "SessionOnStop");
                     } else {
-                        log::error!("BestmoveEmitter not available for current search; sending bestmove directly");
+                        log::warn!("BestmoveEmitter not available for current search; sending bestmove directly");
                         send_response(UsiResponse::BestMove { best_move, ponder })?;
                         ctx.finalize_search("DirectSend");
                         return Ok(());
@@ -686,12 +686,29 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         };
 
         // Use adaptive timeouts based on byoyomi safety settings
+        #[cfg(test)]
+        let stage1_timeout = if is_byoyomi {
+            // Test mode: minimal clamp for faster tests
+            Duration::from_millis((safety_ms / 2).max(1))
+        } else {
+            Duration::from_millis(10) // Test mode: very quick wait
+        };
+        #[cfg(not(test))]
         let stage1_timeout = if is_byoyomi {
             // Use half of safety margin for stage 1, clamped to reasonable range
             Duration::from_millis((safety_ms / 2).clamp(400, 1000))
         } else {
             Duration::from_millis(100) // Normal mode: quick wait
         };
+
+        #[cfg(test)]
+        let total_timeout = if is_byoyomi {
+            // Test mode: minimal clamp for faster tests
+            Duration::from_millis(safety_ms.max(1))
+        } else {
+            Duration::from_millis(15) // Test mode: very quick fallback
+        };
+        #[cfg(not(test))]
         let total_timeout = if is_byoyomi {
             // Use full safety margin for total timeout, clamped to reasonable range
             Duration::from_millis(safety_ms.clamp(800, 2000))
@@ -755,7 +772,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                             ctx.emit_and_finalize(move_str, None, meta, "TimeoutFallback")?;
                         } else {
-                            log::error!("BestmoveEmitter not available for timeout fallback; sending bestmove directly");
+                            log::warn!("BestmoveEmitter not available for timeout fallback; sending bestmove directly");
                             send_response(UsiResponse::BestMove {
                                 best_move: move_str,
                                 ponder: None,
@@ -783,7 +800,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 "ResignTimeout",
                             )?;
                         } else {
-                            log::error!("BestmoveEmitter not available for resign; sending bestmove directly");
+                            log::warn!("BestmoveEmitter not available for resign; sending bestmove directly");
                             send_response(UsiResponse::BestMove {
                                 best_move: "resign".to_string(),
                                 ponder: None,
@@ -958,7 +975,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                                     ctx.emit_and_finalize(move_str, None, meta, "BestmoveEmitter")?;
                                 } else {
-                                    log::error!("BestmoveEmitter not available for finish handler; sending bestmove directly");
+                                    log::warn!("BestmoveEmitter not available for finish handler; sending bestmove directly");
                                     send_response(UsiResponse::BestMove {
                                         best_move: move_str,
                                         ponder: None,
@@ -1710,8 +1727,16 @@ mod tests {
 
     #[test]
     fn test_stop_handler_partial_result_timeout() {
+        use crate::bestmove_emitter::LAST_EMIT_SOURCE;
         use std::thread;
         use std::time::Duration;
+
+        // Clear last emit source
+        {
+            if let Ok(mut last) = LAST_EMIT_SOURCE.lock() {
+                *last = None;
+            }
+        }
 
         let (
             engine,
@@ -1732,8 +1757,10 @@ mod tests {
         // Set up engine adapter with very short byoyomi_safety_ms
         {
             let mut adapter = lock_or_recover_adapter(&engine);
-            adapter.set_byoyomi_safety_ms_for_test(10); // Very short to trigger timeout
+            adapter.set_byoyomi_safety_ms_for_test(20); // Short enough to trigger timeout
             adapter.set_last_search_is_byoyomi(true);
+            // Set a position so fallback doesn't return "resign"
+            adapter.set_position(true, None, &[]).unwrap();
         }
 
         let mut ctx = CommandContext {
@@ -1763,7 +1790,8 @@ mod tests {
         // Spawn a thread that sends a partial result but delays bestmove
         let tx_clone = ctx.worker_tx.clone();
         let worker_thread = thread::spawn(move || {
-            // Send partial result immediately
+            // Send partial result quickly (well before timeout of 20ms)
+            thread::sleep(Duration::from_millis(5));
             let _ = tx_clone.send(WorkerMessage::PartialResult {
                 current_best: "7g7f".to_string(),
                 depth: 5,
@@ -1772,7 +1800,7 @@ mod tests {
             });
 
             // Sleep longer than the timeout to trigger timeout path
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(30));
 
             // Send SearchFinished too late
             let _ = tx_clone.send(WorkerMessage::SearchFinished {
@@ -1793,14 +1821,33 @@ mod tests {
         assert_eq!(*ctx.search_state, SearchState::Idle);
         assert!(ctx.current_bestmove_emitter.is_none());
 
+        // Verify the correct BestmoveSource was used
+        {
+            if let Ok(last) = LAST_EMIT_SOURCE.lock() {
+                assert_eq!(
+                    *last,
+                    Some(BestmoveSource::PartialResultTimeout),
+                    "Should have used PartialResultTimeout source"
+                );
+            }
+        }
+
         // Clean up worker thread
         let _ = worker_thread.join();
     }
 
     #[test]
     fn test_stop_handler_emergency_fallback_timeout() {
+        use crate::bestmove_emitter::LAST_EMIT_SOURCE;
         use std::thread;
         use std::time::Duration;
+
+        // Clear last emit source
+        {
+            if let Ok(mut last) = LAST_EMIT_SOURCE.lock() {
+                *last = None;
+            }
+        }
 
         let (
             engine,
@@ -1851,19 +1898,14 @@ mod tests {
         *ctx.current_stop_flag = Some(Arc::new(AtomicBool::new(false)));
         *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(300));
 
-        // Spawn a thread that delays both partial result and bestmove
+        // Spawn a thread that sends nothing within timeout
         let tx_clone = ctx.worker_tx.clone();
         let worker_thread = thread::spawn(move || {
             // Sleep longer than the timeout to trigger emergency fallback
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(20));
 
-            // These messages will arrive too late
-            let _ = tx_clone.send(WorkerMessage::PartialResult {
-                current_best: "7g7f".to_string(),
-                depth: 5,
-                score: 100,
-                search_id: 300,
-            });
+            // Do not send PartialResult at all to ensure EmergencyFallbackTimeout
+            // Only send SearchFinished after timeout
             let _ = tx_clone.send(WorkerMessage::SearchFinished {
                 session_id: 1,
                 root_hash: 0,
@@ -1881,6 +1923,17 @@ mod tests {
         // Verify search was finalized
         assert_eq!(*ctx.search_state, SearchState::Idle);
         assert!(ctx.current_bestmove_emitter.is_none());
+
+        // Verify the correct BestmoveSource was used
+        {
+            if let Ok(last) = LAST_EMIT_SOURCE.lock() {
+                assert_eq!(
+                    *last,
+                    Some(BestmoveSource::EmergencyFallbackTimeout),
+                    "Should have used EmergencyFallbackTimeout source"
+                );
+            }
+        }
 
         // Clean up worker thread
         let _ = worker_thread.join();
