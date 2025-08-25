@@ -31,6 +31,7 @@ pub struct CommandContext<'a> {
     pub current_bestmove_emitter: &'a mut Option<BestmoveEmitter>,
     pub current_stop_flag: &'a mut Option<Arc<AtomicBool>>, // Per-search stop flag
     pub allow_null_move: bool,
+    pub last_position_cmd: &'a mut Option<String>, // Store last position command for recovery
 }
 
 impl<'a> CommandContext<'a> {
@@ -83,6 +84,25 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             log::info!(
                 "Handling position command - startpos: {startpos}, sfen: {sfen:?}, moves: {moves:?}"
             );
+
+            // Store the position command for recovery
+            let mut position_cmd = String::from("position");
+            if startpos {
+                position_cmd.push_str(" startpos");
+            } else if let Some(sfen) = &sfen {
+                position_cmd.push_str(" sfen ");
+                position_cmd.push_str(sfen);
+            }
+            if !moves.is_empty() {
+                position_cmd.push_str(" moves");
+                for mv in &moves {
+                    position_cmd.push(' ');
+                    position_cmd.push_str(mv);
+                }
+            }
+            *ctx.last_position_cmd = Some(position_cmd.clone());
+            log::debug!("Stored position command: {}", position_cmd);
+
             // Wait for any ongoing search to complete before updating position
             wait_for_search_completion(
                 ctx.search_state,
@@ -99,7 +119,23 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.set_position(startpos, sfen.as_deref(), &moves) {
                 Ok(()) => {
-                    log::info!("Position command completed");
+                    // Get position info for logging
+                    if let Some(pos) = engine.get_position() {
+                        let sfen = position_to_sfen(pos);
+                        let zobrist = pos.zobrist_hash();
+                        log::info!(
+                            "Position command completed - SFEN: {}, zobrist: {:#x}, side_to_move: {:?}, move_count: {}",
+                            sfen, zobrist, pos.side_to_move, moves.len()
+                        );
+                        send_info_string(format!(
+                            "Position set: zobrist={:#x} side={:?} moves={}",
+                            zobrist,
+                            pos.side_to_move,
+                            moves.len()
+                        ))?;
+                    } else {
+                        log::info!("Position command completed");
+                    }
                 }
                 Err(e) => {
                     // Log error but don't crash - USI engines should be robust
@@ -240,7 +276,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 );
                 // Continue anyway - fallback mechanisms will handle this
             } else {
-                log::info!("Engine recovered after force reset (note: position was cleared)");
+                log::info!("Engine recovered after force reset");
             }
         }
     }
@@ -268,14 +304,81 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     // Verify position is set before starting search
     {
-        let engine = lock_or_recover_adapter(ctx.engine);
+        let mut engine = lock_or_recover_adapter(ctx.engine);
         if !engine.has_position() {
-            log::error!("Cannot start search: position not set");
-            send_response(UsiResponse::BestMove {
-                best_move: "resign".to_string(),
-                ponder: None,
-            })?;
-            return Ok(());
+            log::warn!("Position not set - attempting recovery from last position command");
+
+            // Try to recover from last position command
+            if let Some(last_cmd) = ctx.last_position_cmd.as_ref() {
+                log::info!("Attempting to rebuild position from: {}", last_cmd);
+
+                // Parse and apply the last position command
+                match crate::usi::parse_usi_command(last_cmd) {
+                    Ok(UsiCommand::Position {
+                        startpos,
+                        sfen,
+                        moves,
+                    }) => match engine.set_position(startpos, sfen.as_deref(), &moves) {
+                        Ok(()) => {
+                            log::info!("Successfully rebuilt position from last command");
+                            send_info_string("Position recovered from last command".to_string())?;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to rebuild position: {}", e);
+                            send_info_string(format!(
+                                "ResignReason: position_rebuild_failed error={}",
+                                e
+                            ))?;
+                            send_response(UsiResponse::BestMove {
+                                best_move: "resign".to_string(),
+                                ponder: None,
+                            })?;
+                            return Ok(());
+                        }
+                    },
+                    _ => {
+                        log::error!("Invalid stored position command: {}", last_cmd);
+                        send_info_string("ResignReason: invalid_stored_position_cmd".to_string())?;
+                        send_response(UsiResponse::BestMove {
+                            best_move: "resign".to_string(),
+                            ponder: None,
+                        })?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                log::error!("No position set and no recovery command available");
+                send_info_string("ResignReason: no_position_set".to_string())?;
+                send_response(UsiResponse::BestMove {
+                    best_move: "resign".to_string(),
+                    ponder: None,
+                })?;
+                return Ok(());
+            }
+        }
+
+        // Sanity check: verify we can generate at least one legal move
+        match engine.generate_emergency_move() {
+            Ok(_) => {
+                log::debug!("Position sanity check passed - legal moves available");
+            }
+            Err(e) => {
+                log::error!("Position sanity check failed: {}", e);
+                send_info_string(format!("ResignReason: no_legal_moves error={}", e))?;
+
+                // Get position info for debugging
+                let position_info = engine
+                    .get_position()
+                    .map(position_to_sfen)
+                    .unwrap_or_else(|| "<no position>".to_string());
+                log::error!("Current position SFEN: {}", position_info);
+
+                send_response(UsiResponse::BestMove {
+                    best_move: "resign".to_string(),
+                    ponder: None,
+                })?;
+                return Ok(());
+            }
         }
     }
 

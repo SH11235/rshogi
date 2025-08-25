@@ -233,8 +233,10 @@ impl EngineAdapter {
 
     /// Force reset engine state
     pub fn force_reset_state(&mut self) {
-        // Clear position
-        self.position = None;
+        // NOTE: We do NOT clear position here anymore.
+        // The position should remain valid across engine resets since it represents
+        // the game state from the GUI. Only the GUI should control position state
+        // via position commands.
 
         // Clear ponder state
         self.clear_ponder_state();
@@ -253,7 +255,7 @@ impl EngineAdapter {
             }
         }
 
-        info!("Engine state forcefully reset");
+        info!("Engine state forcefully reset (position preserved)");
     }
 
     /// Check if the last search was using byoyomi time control
