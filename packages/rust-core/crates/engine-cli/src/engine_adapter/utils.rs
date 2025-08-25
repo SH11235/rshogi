@@ -2,8 +2,6 @@
 //!
 //! This module contains helper functions for debugging, state management,
 //! and static search execution.
-
-use anyhow::Result;
 use engine_core::{
     engine::controller::Engine, search::limits::SearchLimits, search::SearchResult,
     shogi::Position, usi::move_to_usi,
