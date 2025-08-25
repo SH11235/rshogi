@@ -18,6 +18,26 @@ use std::time::{Duration, Instant};
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
 use engine_core::search::types::{StopInfo, TerminationReason};
 
+/// Create a TSV-formatted log string from key-value pairs
+fn log_tsv(pairs: &[(&str, &str)]) -> String {
+    pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\t")
+}
+
+/// Handle position restoration failure by logging and sending resign
+fn fail_position_restore(
+    _ctx: &mut CommandContext,
+    reason: ResignReason,
+    log_reason: &str,
+) -> Result<()> {
+    send_info_string(log_tsv(&[("kind", "position_restore_fail"), ("reason", log_reason)]))?;
+    send_info_string(log_tsv(&[("kind", "resign"), ("resign_reason", &reason.to_string())]))?;
+    send_response(UsiResponse::BestMove {
+        best_move: "resign".to_string(),
+        ponder: None,
+    })?;
+    Ok(())
+}
+
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
     pub engine: &'a Arc<Mutex<EngineAdapter>>,
@@ -381,13 +401,13 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
 
                         // Send structured log for position store
                         let stored_ms = ctx.program_start.elapsed().as_millis();
-                        send_info_string(format!(
-                            "kind=position_store root_hash={:#016x} move_len={} sfen_first_20={} stored_ms_since_start={}",
-                            root_hash,
-                            move_len,
-                            &sfen_snapshot.chars().take(20).collect::<String>(),
-                            stored_ms
-                        ))?;
+                        send_info_string(log_tsv(&[
+                            ("kind", "position_store"),
+                            ("root_hash", &format!("{:#016x}", root_hash)),
+                            ("move_len", &move_len.to_string()),
+                            ("sfen_first_20", &sfen_snapshot.chars().take(20).collect::<String>()),
+                            ("stored_ms_since_start", &stored_ms.to_string()),
+                        ]))?;
                     } else {
                         log::error!("Position set but unable to retrieve for state storage");
                     }
@@ -580,10 +600,11 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                     pos_state.move_len,
                     elapsed_ms
                 );
-                send_info_string(format!(
-                    "kind=position_restore_try move_len={} age_ms={}",
-                    pos_state.move_len, elapsed_ms
-                ))?;
+                send_info_string(log_tsv(&[
+                    ("kind", "position_restore_try"),
+                    ("move_len", &pos_state.move_len.to_string()),
+                    ("age_ms", &elapsed_ms.to_string()),
+                ]))?;
 
                 // Parse and apply the canonical position command
                 let mut need_fallback = false;
@@ -600,11 +621,12 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                 pos_state.move_len,
                                 moves.len()
                             );
-                            send_info_string(format!(
-                                "kind=position_restore_fallback reason=move_len_mismatch expected={} actual={}",
-                                pos_state.move_len,
-                                moves.len()
-                            ))?;
+                            send_info_string(log_tsv(&[
+                                ("kind", "position_restore_fallback"),
+                                ("reason", "move_len_mismatch"),
+                                ("expected", &pos_state.move_len.to_string()),
+                                ("actual", &moves.len().to_string()),
+                            ]))?;
                             need_fallback = true;
                         } else {
                             // Try to apply the canonical command
@@ -617,17 +639,19 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                             log::info!(
                                                 "Successfully rebuilt position with matching hash"
                                             );
-                                            send_info_string(
-                                                "kind=position_restore_success".to_string(),
-                                            )?;
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_success"),
+                                                ("source", "command"),
+                                            ]))?;
                                         } else {
                                             log::warn!(
                                                 "Position rebuilt but hash mismatch: expected {:#016x}, got {:#016x}, move_len={}",
                                                 pos_state.root_hash, current_hash, pos_state.move_len
                                             );
-                                            send_info_string(
-                                                "kind=position_restore_fallback reason=hash_mismatch".to_string()
-                                            )?;
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_fallback"),
+                                                ("reason", "hash_mismatch"),
+                                            ]))?;
                                             need_fallback = true;
                                         }
                                     } else {
@@ -638,8 +662,11 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                 Err(e) => {
                                     log::error!("Failed to rebuild position: {}", e);
                                     send_info_string(
-                                        "kind=position_restore_fallback reason=rebuild_failed"
-                                            .to_string(),
+                                        log_tsv(&[
+                                            ("kind", "position_restore_fallback"),
+                                            ("reason", "rebuild_failed"),
+                                        ])
+                                        .to_string(),
                                     )?;
                                     need_fallback = true;
                                 }
@@ -661,86 +688,74 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                                         let current_hash = pos.zobrist_hash();
                                         if current_hash == pos_state.root_hash {
                                             log::info!("Successfully restored position from sfen_snapshot with matching hash");
-                                            send_info_string("kind=position_restore_success source=sfen_snapshot".to_string())?;
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_success"),
+                                                ("source", "sfen_snapshot"),
+                                            ]))?;
                                         } else {
                                             log::error!(
                                                 "SFEN fallback hash mismatch: expected {:#016x}, got {:#016x}",
                                                 pos_state.root_hash, current_hash
                                             );
-                                            send_info_string(format!(
-                                                "kind=position_restore_fail reason=sfen_hash_mismatch expected={:#016x} actual={:#016x}",
-                                                pos_state.root_hash, current_hash
-                                            ))?;
-                                            let reason = ResignReason::PositionRebuildFailed {
-                                                error: "hash verification failed after fallback",
-                                            };
-                                            send_info_string(format!("ResignReason: {reason}"))?;
-                                            send_response(UsiResponse::BestMove {
-                                                best_move: "resign".to_string(),
-                                                ponder: None,
-                                            })?;
-                                            return Ok(());
+                                            send_info_string(log_tsv(&[
+                                                ("kind", "position_restore_fail"),
+                                                ("reason", "sfen_hash_mismatch"),
+                                                (
+                                                    "expected",
+                                                    &format!("{:#016x}", pos_state.root_hash),
+                                                ),
+                                                ("actual", &format!("{:#016x}", current_hash)),
+                                            ]))?;
+                                            return fail_position_restore(
+                                                ctx,
+                                                ResignReason::PositionRebuildFailed {
+                                                    error:
+                                                        "hash verification failed after fallback",
+                                                },
+                                                "sfen_hash_mismatch",
+                                            );
                                         }
                                     } else {
                                         log::error!("Failed to get position after sfen_snapshot restoration");
-                                        send_info_string("kind=position_restore_fail reason=no_position_after_sfen".to_string())?;
-                                        let reason = ResignReason::PositionRebuildFailed {
-                                            error: "no position after sfen restoration",
-                                        };
-                                        send_info_string(format!("ResignReason: {reason}"))?;
-                                        send_response(UsiResponse::BestMove {
-                                            best_move: "resign".to_string(),
-                                            ponder: None,
-                                        })?;
-                                        return Ok(());
+                                        return fail_position_restore(
+                                            ctx,
+                                            ResignReason::PositionRebuildFailed {
+                                                error: "no position after sfen restoration",
+                                            },
+                                            "no_position_after_sfen",
+                                        );
                                     }
                                 }
                                 Err(e) => {
                                     log::error!("Failed to set position from sfen_snapshot: {}", e);
-                                    send_info_string(
-                                        "kind=position_restore_fail reason=sfen_snapshot_failed"
-                                            .to_string(),
-                                    )?;
-                                    let reason = ResignReason::PositionRebuildFailed {
-                                        error: "sfen_snapshot failed",
-                                    };
-                                    send_info_string(format!("ResignReason: {reason}"))?;
-                                    send_response(UsiResponse::BestMove {
-                                        best_move: "resign".to_string(),
-                                        ponder: None,
-                                    })?;
-                                    return Ok(());
+                                    return fail_position_restore(
+                                        ctx,
+                                        ResignReason::PositionRebuildFailed {
+                                            error: "sfen_snapshot failed",
+                                        },
+                                        "sfen_snapshot_failed",
+                                    );
                                 }
                             }
                         }
                     }
                     _ => {
                         log::error!("Invalid stored position command: {}", pos_state.cmd_canonical);
-                        send_info_string(
-                            "kind=position_restore_fail reason=invalid_cmd".to_string(),
-                        )?;
-                        let reason = ResignReason::InvalidStoredPositionCmd;
-                        send_info_string(format!("ResignReason: {reason}"))?;
-                        send_response(UsiResponse::BestMove {
-                            best_move: "resign".to_string(),
-                            ponder: None,
-                        })?;
-                        return Ok(());
+                        return fail_position_restore(
+                            ctx,
+                            ResignReason::InvalidStoredPositionCmd,
+                            "invalid_cmd",
+                        );
                     }
                 }
             } else {
                 log::error!("No position set and no recovery state available");
-                let reason = ResignReason::NoPositionSet;
-                send_info_string(format!("ResignReason: {reason}"))?;
-                send_response(UsiResponse::BestMove {
-                    best_move: "resign".to_string(),
-                    ponder: None,
-                })?;
-                return Ok(());
+                return fail_position_restore(ctx, ResignReason::NoPositionSet, "no_position_set");
             }
         }
 
         // Sanity check: verify we have legal moves
+        let engine = lock_or_recover_adapter(ctx.engine);
         match engine.has_legal_moves() {
             Ok(true) => {
                 log::debug!("Position sanity check passed - legal moves available");
@@ -755,7 +770,10 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 };
 
                 log::error!("Position has no legal moves - in_check: {in_check}");
-                send_info_string(format!("ResignReason: {reason}"))?;
+                send_info_string(log_tsv(&[
+                    ("kind", "resign"),
+                    ("resign_reason", &reason.to_string()),
+                ]))?;
 
                 // Get position info for debugging
                 let position_info = engine
@@ -775,7 +793,10 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 let reason = ResignReason::OtherError {
                     error: "legal move check failed",
                 };
-                send_info_string(format!("ResignReason: {reason}"))?;
+                send_info_string(log_tsv(&[
+                    ("kind", "resign"),
+                    ("resign_reason", &reason.to_string()),
+                ]))?;
 
                 send_response(UsiResponse::BestMove {
                     best_move: "resign".to_string(),
