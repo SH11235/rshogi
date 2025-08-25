@@ -126,11 +126,11 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                         let sfen = position_to_sfen(pos);
                         let root_hash = pos.zobrist_hash();
                         log::info!(
-                            "Position command completed - SFEN: {}, root_hash: {:#x}, side_to_move: {:?}, move_count: {}",
+                            "Position command completed - SFEN: {}, root_hash: {:#016x}, side_to_move: {:?}, move_count: {}",
                             sfen, root_hash, pos.side_to_move, moves.len()
                         );
                         send_info_string(format!(
-                            "Position set: root_hash={:#x} side={:?} moves={}",
+                            "Position set: root_hash={:#016x} side={:?} moves={}",
                             root_hash,
                             pos.side_to_move,
                             moves.len()
@@ -1051,4 +1051,259 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bestmove_emitter::BestmoveEmitter;
+    use crate::engine_adapter::EngineAdapter;
+    use crate::state::SearchState;
+    use crossbeam_channel::{unbounded, Receiver, Sender};
+    use std::thread::JoinHandle;
+
+    /// Helper function to create a test CommandContext
+    fn create_test_context() -> (
+        Arc<Mutex<EngineAdapter>>,
+        Arc<AtomicBool>,
+        Sender<WorkerMessage>,
+        Receiver<WorkerMessage>,
+        SearchState,
+        u64,
+        u64,
+        bool,
+        Option<SearchSession>,
+        Option<BestmoveEmitter>,
+        Option<Arc<AtomicBool>>,
+        Option<String>,
+        Option<JoinHandle<()>>,
+    ) {
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = unbounded();
+        let search_state = SearchState::Idle;
+        let search_id_counter = 0;
+        let current_search_id = 0;
+        let current_search_is_ponder = false;
+        let current_session = None;
+        let current_bestmove_emitter = None;
+        let current_stop_flag = None;
+        let last_position_cmd = None;
+        let worker_handle = None;
+
+        (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            search_state,
+            search_id_counter,
+            current_search_id,
+            current_search_is_ponder,
+            current_session,
+            current_bestmove_emitter,
+            current_stop_flag,
+            last_position_cmd,
+            worker_handle,
+        )
+    }
+
+    #[test]
+    fn test_position_command_stored_on_success() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Test successful position command
+        let cmd = UsiCommand::Position {
+            startpos: true,
+            sfen: None,
+            moves: vec!["7g7f".to_string()],
+        };
+
+        // Should succeed
+        assert!(handle_command(cmd, &mut ctx).is_ok());
+
+        // Check that position command was stored
+        assert!(ctx.last_position_cmd.is_some());
+        let stored_cmd = ctx.last_position_cmd.as_ref().unwrap();
+        assert!(stored_cmd.contains("position startpos"));
+        assert!(stored_cmd.contains("moves 7g7f"));
+    }
+
+    #[test]
+    fn test_position_command_not_stored_on_failure() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set a valid previous position command
+        *ctx.last_position_cmd = Some("position startpos".to_string());
+        let previous_cmd = ctx.last_position_cmd.clone();
+
+        // Test with invalid SFEN that will fail
+        let cmd = UsiCommand::Position {
+            startpos: false,
+            sfen: Some("invalid sfen string".to_string()),
+            moves: vec![],
+        };
+
+        // Command handling succeeds (it logs error but doesn't crash)
+        assert!(handle_command(cmd, &mut ctx).is_ok());
+
+        // Check that previous position command is still stored
+        assert_eq!(*ctx.last_position_cmd, previous_cmd);
+    }
+
+    #[test]
+    fn test_usinewgame_clears_last_position() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set a position command
+        *ctx.last_position_cmd = Some("position startpos moves 7g7f".to_string());
+
+        // UsiNewGame should clear last_position_cmd
+        let cmd = UsiCommand::UsiNewGame;
+        assert!(handle_command(cmd, &mut ctx).is_ok());
+
+        // Check that position command was cleared
+        assert!(ctx.last_position_cmd.is_none());
+    }
+
+    #[test]
+    fn test_gameover_clears_last_position() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set a position command
+        *ctx.last_position_cmd = Some("position startpos moves 7g7f".to_string());
+
+        // GameOver should clear last_position_cmd
+        let cmd = UsiCommand::GameOver {
+            result: crate::usi::GameResult::Win,
+        };
+        assert!(handle_command(cmd, &mut ctx).is_ok());
+
+        // Check that position command was cleared
+        assert!(ctx.last_position_cmd.is_none());
+    }
 }

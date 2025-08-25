@@ -71,7 +71,7 @@ impl EngineAdapter {
         let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
 
         // Store search start state
-        self.search_start_position_hash = Some(position.hash);
+        self.search_start_position_hash = Some(position.zobrist_hash());
         self.search_start_side_to_move = Some(position.side_to_move);
 
         // Detect if this is byoyomi time control to determine overhead
@@ -456,5 +456,65 @@ mod tests {
         let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         // Ponder should use only regular overhead, even in byoyomi
         assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+    }
+
+    #[test]
+    fn test_has_legal_moves() {
+        let mut adapter = make_test_adapter();
+
+        // Test 1: No position set - should return error
+        assert!(adapter.has_legal_moves().is_err());
+
+        // Test 2: Normal position - should have legal moves
+        adapter.set_position(true, None, &[]).unwrap();
+        assert_eq!(adapter.has_legal_moves().unwrap(), true);
+
+        // Test 3: Position after some moves - should still have legal moves
+        adapter
+            .set_position(true, None, &["7g7f".to_string(), "3c3d".to_string()])
+            .unwrap();
+        assert_eq!(adapter.has_legal_moves().unwrap(), true);
+    }
+
+    #[test]
+    fn test_is_in_check() {
+        let mut adapter = make_test_adapter();
+
+        // Test 1: No position set - should return error
+        assert!(adapter.is_in_check().is_err());
+
+        // Test 2: Starting position - not in check
+        adapter.set_position(true, None, &[]).unwrap();
+        assert_eq!(adapter.is_in_check().unwrap(), false);
+
+        // Test 3: Simple position with limited pieces - check properties separately
+        // We'll test the methods work correctly, not necessarily create a real checkmate
+        let simple_sfen = "k8/9/9/9/9/9/9/9/K8 b - 1";
+        adapter.set_position(false, Some(simple_sfen), &[]).unwrap();
+        // Both methods should work without error
+        let _ = adapter.is_in_check().unwrap();
+        let _ = adapter.has_legal_moves().unwrap();
+    }
+
+    #[test]
+    fn test_force_reset_state_preserves_position() {
+        let mut adapter = make_test_adapter();
+
+        // Set a position
+        adapter.set_position(true, None, &["7g7f".to_string()]).unwrap();
+        let pos_before = adapter.get_position().cloned();
+        assert!(pos_before.is_some());
+
+        // Force reset state
+        adapter.force_reset_state();
+
+        // Position should still be there
+        let pos_after = adapter.get_position().cloned();
+        assert!(pos_after.is_some());
+        assert_eq!(pos_before.unwrap().zobrist_hash(), pos_after.unwrap().zobrist_hash());
+
+        // Other state should be cleared
+        assert!(adapter.ponder_state.ponder_start.is_none());
+        assert!(adapter.search_start_position_hash.is_none());
     }
 }

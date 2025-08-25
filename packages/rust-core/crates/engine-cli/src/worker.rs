@@ -283,7 +283,8 @@ pub fn search_worker(
                         // Try to generate emergency move before resigning (only if not pondering)
                         if !params.ponder {
                             // Get position hash for session
-                            let position_hash = adapter.get_position().map(|p| p.hash).unwrap_or(0);
+                            let position_hash =
+                                adapter.get_position().map(|p| p.zobrist_hash()).unwrap_or(0);
 
                             match adapter.generate_emergency_move() {
                                 Ok(emergency_move) => {
@@ -489,7 +490,7 @@ pub fn search_worker(
     drop(ponder_hit_flag);
 
     // Create search session
-    let mut session = SearchSession::new(search_id, position.hash);
+    let mut session = SearchSession::new(search_id, position.zobrist_hash());
 
     // Wrap session in Arc<Mutex<>> for shared access in callback
     let session_arc = Arc::new(Mutex::new(session.clone()));
