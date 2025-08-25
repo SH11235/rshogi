@@ -106,7 +106,20 @@ impl ZobristTable {
 
 // Global Zobrist table instance
 lazy_static! {
-    pub static ref ZOBRIST: ZobristTable = ZobristTable::new();
+    pub static ref ZOBRIST: ZobristTable = {
+        #[cfg(debug_assertions)]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static ZOBRIST_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+            if ZOBRIST_INIT_STARTED.swap(true, Ordering::SeqCst) {
+                panic!("ZOBRIST initialization re-entered! Circular dependency detected.");
+            }
+            // Debug output removed to prevent I/O deadlock in subprocess context
+        }
+
+        // Debug output removed to prevent I/O deadlock in subprocess context
+        ZobristTable::new()
+    };
 }
 
 /// Extension trait for Position to add Zobrist hashing

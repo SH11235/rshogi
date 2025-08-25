@@ -9,6 +9,7 @@ use std::time::Instant;
 /// Reason for resignation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[allow(dead_code)] // Some variants are temporarily unused due to subprocess hang issue
 pub enum ResignReason {
     /// Position not set
     NoPositionSet,

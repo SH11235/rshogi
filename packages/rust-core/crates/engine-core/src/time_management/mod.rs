@@ -93,7 +93,20 @@ struct TimeManagerInner {
 }
 
 lazy_static! {
-    static ref MONO_BASE: Instant = Instant::now();
+    static ref MONO_BASE: Instant = {
+        #[cfg(debug_assertions)]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static MONO_BASE_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+            if MONO_BASE_INIT_STARTED.swap(true, Ordering::SeqCst) {
+                panic!("MONO_BASE initialization re-entered! Circular dependency detected.");
+            }
+            // Debug output removed to prevent I/O deadlock in subprocess context
+        }
+
+        // Debug output removed to prevent I/O deadlock in subprocess context
+        Instant::now()
+    };
 }
 
 /// Get current monotonic time in milliseconds since process start
