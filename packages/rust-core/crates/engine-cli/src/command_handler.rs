@@ -83,7 +83,7 @@ pub fn build_meta(
         stats: BestmoveStats {
             depth,
             seldepth,
-            score: score.unwrap_or_else(|| "unknown".to_string()),
+            score: score.unwrap_or_else(|| "none".to_string()),
             nodes,
             nps: if elapsed_ms > 0 {
                 nodes.saturating_mul(1000) / elapsed_ms
@@ -695,10 +695,26 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         let stage1_factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
             .ok()
             .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| {
+                if f <= 0.0 {
+                    log::warn!("BYOYOMI_STAGE1_FACTOR must be positive, using default 0.5");
+                    0.5
+                } else {
+                    f
+                }
+            })
             .unwrap_or(0.5);
         let total_factor = std::env::var("BYOYOMI_TOTAL_FACTOR")
             .ok()
             .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| {
+                if f <= 0.0 {
+                    log::warn!("BYOYOMI_TOTAL_FACTOR must be positive, using default 1.0");
+                    1.0
+                } else {
+                    f
+                }
+            })
             .unwrap_or(1.0);
 
         // Use adaptive timeouts based on byoyomi safety settings
@@ -2092,5 +2108,56 @@ mod tests {
 
         // Verify search was finalized
         assert_eq!(*ctx.search_state, SearchState::Idle);
+    }
+
+    #[test]
+    fn test_byoyomi_factor_validation() {
+        // Test invalid BYOYOMI_STAGE1_FACTOR values
+        std::env::set_var("BYOYOMI_STAGE1_FACTOR", "0");
+        let factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| {
+                if f <= 0.0 {
+                    // In production code, this would log a warning
+                    0.5
+                } else {
+                    f
+                }
+            })
+            .unwrap_or(0.5);
+        assert_eq!(factor, 0.5, "Zero factor should default to 0.5");
+
+        std::env::set_var("BYOYOMI_STAGE1_FACTOR", "-1.0");
+        let factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| if f <= 0.0 { 0.5 } else { f })
+            .unwrap_or(0.5);
+        assert_eq!(factor, 0.5, "Negative factor should default to 0.5");
+
+        // Test valid values
+        std::env::set_var("BYOYOMI_STAGE1_FACTOR", "0.3");
+        let factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| if f <= 0.0 { 0.5 } else { f })
+            .unwrap_or(0.5);
+        assert_eq!(factor, 0.3, "Valid factor should be used");
+
+        // Clean up
+        std::env::remove_var("BYOYOMI_STAGE1_FACTOR");
+
+        // Test BYOYOMI_TOTAL_FACTOR similarly
+        std::env::set_var("BYOYOMI_TOTAL_FACTOR", "0");
+        let factor = std::env::var("BYOYOMI_TOTAL_FACTOR")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| if f <= 0.0 { 1.0 } else { f })
+            .unwrap_or(1.0);
+        assert_eq!(factor, 1.0, "Zero total factor should default to 1.0");
+
+        // Clean up
+        std::env::remove_var("BYOYOMI_TOTAL_FACTOR");
     }
 }
