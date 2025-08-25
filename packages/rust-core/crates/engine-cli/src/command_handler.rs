@@ -46,12 +46,19 @@ pub fn build_meta(
     // Use provided stop_info or create default one
     let si = stop_info.unwrap_or(StopInfo {
         reason: match from {
+            // Timeout cases -> TimeLimit
             BestmoveSource::ResignTimeout
-            | BestmoveSource::ResignOnFinish
-            | BestmoveSource::Resign => TerminationReason::Error,
-            BestmoveSource::EmergencyFallbackTimeout | BestmoveSource::PartialResultTimeout => {
-                TerminationReason::TimeLimit
-            }
+            | BestmoveSource::EmergencyFallbackTimeout
+            | BestmoveSource::PartialResultTimeout => TerminationReason::TimeLimit,
+            // Normal completion cases -> Completed
+            BestmoveSource::EmergencyFallbackOnFinish
+            | BestmoveSource::PartialResultOnFinish
+            | BestmoveSource::SessionInSearchFinished => TerminationReason::Completed,
+            // User stop cases -> UserStop
+            BestmoveSource::SessionOnStop => TerminationReason::UserStop,
+            // Error cases -> Error
+            BestmoveSource::Resign | BestmoveSource::ResignOnFinish => TerminationReason::Error,
+            // Default fallback
             _ => TerminationReason::UserStop,
         },
         elapsed_ms: 0, // BestmoveEmitter will complement this
@@ -94,10 +101,9 @@ impl<'a> CommandContext<'a> {
         *self.current_bestmove_emitter = None;
         *self.current_session = None;
 
-        // Reset stop flag to false before dropping to ensure clean state
-        if let Some(flag) = self.current_stop_flag.take() {
-            flag.store(false, Ordering::Release);
-        }
+        // Drop the current stop flag without resetting it
+        // This prevents race conditions where worker might miss the stop signal
+        let _ = self.current_stop_flag.take();
     }
 
     /// Emit bestmove and always finalize search, even on error
@@ -502,9 +508,9 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     }
 
     // Clean up old stop flag before creating new one
-    if let Some(old_flag) = ctx.current_stop_flag.take() {
-        // Reset to false before dropping to ensure clean state
-        old_flag.store(false, Ordering::Release);
+    // Following the same policy as finalize_search: once a stop flag is set,
+    // we don't reset it to avoid race conditions
+    if let Some(_old_flag) = ctx.current_stop_flag.take() {
         log::debug!("Cleaned up old stop flag before creating new one");
     }
 
@@ -1476,5 +1482,76 @@ mod tests {
         // Should succeed (ignored)
         assert!(result.is_ok(), "Stop while idle should be handled gracefully");
         assert_eq!(*ctx.search_state, SearchState::Idle, "Should remain idle");
+    }
+
+    #[test]
+    fn test_emit_and_finalize_with_error() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set up search state
+        *ctx.search_state = SearchState::Searching;
+        *ctx.current_search_id = 42;
+        *ctx.current_search_is_ponder = false;
+
+        // Set up BestmoveEmitter - in a real error scenario, emit() would fail
+        // but we can't easily mock that here, so we test the structure
+        *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(42));
+
+        // Test emit_and_finalize
+        let meta = build_meta(
+            BestmoveSource::SessionOnStop,
+            10,
+            Some(15),
+            Some("cp 100".to_string()),
+            None,
+        );
+
+        // Call emit_and_finalize
+        let result = ctx.emit_and_finalize(
+            "7g7f".to_string(),
+            Some("8c8d".to_string()),
+            meta,
+            "test_finalize",
+        );
+
+        // Should succeed
+        assert!(result.is_ok(), "emit_and_finalize should handle errors gracefully");
+
+        // Verify search was finalized
+        assert_eq!(*ctx.search_state, SearchState::Idle, "Search should be finalized");
+        assert!(ctx.current_bestmove_emitter.is_none(), "Emitter should be cleared");
+        assert!(ctx.current_stop_flag.is_none(), "Stop flag should be cleared");
+        assert!(!*ctx.current_search_is_ponder, "Ponder flag should be reset");
     }
 }
