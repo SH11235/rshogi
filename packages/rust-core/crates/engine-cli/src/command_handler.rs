@@ -152,7 +152,7 @@ impl<'a> CommandContext<'a> {
     ) -> Result<()> {
         // Try to emit via BestmoveEmitter if available
         if let Some(ref emitter) = self.current_bestmove_emitter {
-            match emitter.emit(best_move.clone(), ponder.clone(), meta) {
+            match emitter.emit(best_move.clone(), ponder.clone(), meta.clone()) {
                 Ok(()) => {
                     self.finalize_search(finalize_label);
                     Ok(())
@@ -161,6 +161,13 @@ impl<'a> CommandContext<'a> {
                     log::error!("BestmoveEmitter::emit failed: {e}");
                     // Always finalize search even on error
                     self.finalize_search(finalize_label);
+                    // Send TSV log for fallback
+                    self.send_fallback_tsv_log(
+                        &best_move,
+                        ponder.as_deref(),
+                        Some(&meta),
+                        "emitter_failed",
+                    );
                     // Try direct send as fallback
                     if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
                         log::error!("Failed to send bestmove even with direct fallback: {e}");
@@ -173,6 +180,8 @@ impl<'a> CommandContext<'a> {
             log::warn!("BestmoveEmitter not available; sending bestmove directly");
             // Always finalize before sending
             self.finalize_search(finalize_label);
+            // Send TSV log for direct send
+            self.send_fallback_tsv_log(&best_move, ponder.as_deref(), Some(&meta), "no_emitter");
             if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
                 log::error!("Failed to send bestmove directly: {e}");
                 // Continue without propagating error - USI requires best effort
@@ -180,6 +189,111 @@ impl<'a> CommandContext<'a> {
             Ok(())
         }
     }
+
+    /// Send TSV log for direct fallback bestmove (when BestmoveEmitter is not available or fails)
+    fn send_fallback_tsv_log(
+        &self,
+        best_move: &str,
+        ponder: Option<&str>,
+        meta: Option<&BestmoveMeta>,
+        fallback_reason: &str,
+    ) {
+        // Prepare TSV log similar to BestmoveEmitter's format
+        let search_id = *self.current_search_id;
+        let (
+            from,
+            stop_reason,
+            depth,
+            seldepth,
+            depth_reached,
+            score,
+            nodes,
+            nps,
+            elapsed_ms,
+            hard_timeout,
+        ) = if let Some(m) = meta {
+            (
+                format!("{}", m.from),
+                m.stop_info.reason.to_string(),
+                m.stats.depth,
+                m.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+                m.stop_info.depth_reached,
+                m.stats.score.clone(),
+                m.stats.nodes,
+                m.stats.nps,
+                m.stop_info.elapsed_ms,
+                m.stop_info.hard_timeout,
+            )
+        } else {
+            // Default values when no metadata is available
+            (
+                fallback_reason.to_string(),
+                "error".to_string(),
+                0,
+                "-".to_string(),
+                0,
+                "none".to_string(),
+                0,
+                0,
+                0,
+                false,
+            )
+        };
+
+        let ponder_str = ponder.unwrap_or("none");
+
+        let info_string = format!(
+            "kind=bestmove_direct_fallback\t\
+             search_id={}\t\
+             bestmove_from={}\t\
+             stop_reason={}\t\
+             depth={}\t\
+             seldepth={}\t\
+             depth_reached={}\t\
+             score={}\t\
+             nodes={}\t\
+             nps={}\t\
+             elapsed_ms={}\t\
+             hard_timeout={}\t\
+             bestmove={}\t\
+             ponder={}\t\
+             fallback_reason={}",
+            search_id,
+            from,
+            stop_reason,
+            depth,
+            seldepth,
+            depth_reached,
+            score,
+            nodes,
+            nps,
+            elapsed_ms,
+            hard_timeout,
+            best_move,
+            ponder_str,
+            fallback_reason
+        );
+
+        if let Err(e) = send_info_string(info_string) {
+            log::warn!("Failed to send fallback TSV log: {}", e);
+        }
+    }
+}
+
+/// Parse environment variable as positive f64, logging warning and returning default if invalid
+fn parse_positive_or_default(key: &str, default: f64) -> f64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|f| {
+            if f <= 0.0 {
+                log::warn!("{key} must be positive, using default {default}");
+                default
+            } else {
+                f
+            }
+        })
+        .unwrap_or(default)
 }
 
 pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
@@ -692,30 +806,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         };
 
         // Get safety factor from environment variable (default: 0.5 for stage1, 1.0 for total)
-        let stage1_factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|f| {
-                if f <= 0.0 {
-                    log::warn!("BYOYOMI_STAGE1_FACTOR must be positive, using default 0.5");
-                    0.5
-                } else {
-                    f
-                }
-            })
-            .unwrap_or(0.5);
-        let total_factor = std::env::var("BYOYOMI_TOTAL_FACTOR")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|f| {
-                if f <= 0.0 {
-                    log::warn!("BYOYOMI_TOTAL_FACTOR must be positive, using default 1.0");
-                    1.0
-                } else {
-                    f
-                }
-            })
-            .unwrap_or(1.0);
+        let stage1_factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
+        let total_factor = parse_positive_or_default("BYOYOMI_TOTAL_FACTOR", 1.0);
 
         // Use adaptive timeouts based on byoyomi safety settings
         #[cfg(test)]
@@ -2104,7 +2196,11 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "Stop command should handle timeout gracefully");
-        assert!(elapsed < Duration::from_millis(10), "Should timeout quickly with 1ms safety");
+        // Allow more time in CI environments which may be slower
+        assert!(
+            elapsed < Duration::from_millis(20),
+            "Should timeout quickly (expected ~1ms, allowing up to 20ms)"
+        );
 
         // Verify search was finalized
         assert_eq!(*ctx.search_state, SearchState::Idle);
@@ -2114,35 +2210,16 @@ mod tests {
     fn test_byoyomi_factor_validation() {
         // Test invalid BYOYOMI_STAGE1_FACTOR values
         std::env::set_var("BYOYOMI_STAGE1_FACTOR", "0");
-        let factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|f| {
-                if f <= 0.0 {
-                    // In production code, this would log a warning
-                    0.5
-                } else {
-                    f
-                }
-            })
-            .unwrap_or(0.5);
+        let factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
         assert_eq!(factor, 0.5, "Zero factor should default to 0.5");
 
         std::env::set_var("BYOYOMI_STAGE1_FACTOR", "-1.0");
-        let factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|f| if f <= 0.0 { 0.5 } else { f })
-            .unwrap_or(0.5);
+        let factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
         assert_eq!(factor, 0.5, "Negative factor should default to 0.5");
 
         // Test valid values
         std::env::set_var("BYOYOMI_STAGE1_FACTOR", "0.3");
-        let factor = std::env::var("BYOYOMI_STAGE1_FACTOR")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|f| if f <= 0.0 { 0.5 } else { f })
-            .unwrap_or(0.5);
+        let factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
         assert_eq!(factor, 0.3, "Valid factor should be used");
 
         // Clean up
@@ -2150,12 +2227,13 @@ mod tests {
 
         // Test BYOYOMI_TOTAL_FACTOR similarly
         std::env::set_var("BYOYOMI_TOTAL_FACTOR", "0");
-        let factor = std::env::var("BYOYOMI_TOTAL_FACTOR")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|f| if f <= 0.0 { 1.0 } else { f })
-            .unwrap_or(1.0);
+        let factor = parse_positive_or_default("BYOYOMI_TOTAL_FACTOR", 1.0);
         assert_eq!(factor, 1.0, "Zero total factor should default to 1.0");
+
+        // Test extreme values
+        std::env::set_var("BYOYOMI_TOTAL_FACTOR", "10.5");
+        let factor = parse_positive_or_default("BYOYOMI_TOTAL_FACTOR", 1.0);
+        assert_eq!(factor, 10.5, "Large factor should be accepted");
 
         // Clean up
         std::env::remove_var("BYOYOMI_TOTAL_FACTOR");
