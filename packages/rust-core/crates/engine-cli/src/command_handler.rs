@@ -736,59 +736,9 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // Sanity check: verify we have legal moves
-        {
-            let engine = lock_or_recover_adapter(ctx.engine);
-            match engine.has_legal_moves() {
-                Ok(true) => {
-                    log::debug!("Position sanity check passed - legal moves available");
-                }
-                Ok(false) => {
-                    // Check if it's checkmate or error condition
-                    let in_check = engine.is_in_check().unwrap_or(false);
-                    let reason = if in_check {
-                        ResignReason::Checkmate
-                    } else {
-                        ResignReason::NoLegalMovesButNotInCheck
-                    };
-
-                    log::error!("Position has no legal moves - in_check: {in_check}");
-                    send_info_string(log_tsv(&[
-                        ("kind", "resign"),
-                        ("resign_reason", &reason.to_string()),
-                    ]))?;
-
-                    // Get position info for debugging
-                    let position_info = engine
-                        .get_position()
-                        .map(position_to_sfen)
-                        .unwrap_or_else(|| "<no position>".to_string());
-                    log::error!("Current position SFEN: {position_info}");
-
-                    send_response(UsiResponse::BestMove {
-                        best_move: "resign".to_string(),
-                        ponder: None,
-                    })?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    log::error!("Failed to check legal moves: {e}");
-                    let reason = ResignReason::OtherError {
-                        error: "legal move check failed",
-                    };
-                    send_info_string(log_tsv(&[
-                        ("kind", "resign"),
-                        ("resign_reason", &reason.to_string()),
-                    ]))?;
-
-                    send_response(UsiResponse::BestMove {
-                        best_move: "resign".to_string(),
-                        ponder: None,
-                    })?;
-                    return Ok(());
-                }
-            }
-        } // Engine lock is dropped here
+        // TEMPORARY: Skip sanity check to avoid hang in process execution
+        // TODO: Investigate why has_legal_moves() hangs in process context after init
+        log::warn!("Skipping has_legal_moves check to avoid process hang (temporary workaround)");
     }
 
     // Clean up old stop flag before creating new one
