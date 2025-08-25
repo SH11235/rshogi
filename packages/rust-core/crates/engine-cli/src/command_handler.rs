@@ -58,8 +58,14 @@ pub fn build_meta(
             BestmoveSource::SessionOnStop => TerminationReason::UserStop,
             // Error cases -> Error
             BestmoveSource::Resign | BestmoveSource::ResignOnFinish => TerminationReason::Error,
-            // Default fallback
-            _ => TerminationReason::UserStop,
+            // Fallback cases (should use specific mapping above)
+            BestmoveSource::EmergencyFallback => {
+                log::warn!("Unmapped BestmoveSource: {:?}, defaulting to UserStop", from);
+                TerminationReason::UserStop
+            }
+            // Test variant
+            #[cfg(test)]
+            BestmoveSource::Test => TerminationReason::UserStop,
         },
         elapsed_ms: 0, // BestmoveEmitter will complement this
         nodes: 0,      // BestmoveEmitter will complement this
@@ -1553,5 +1559,82 @@ mod tests {
         assert!(ctx.current_bestmove_emitter.is_none(), "Emitter should be cleared");
         assert!(ctx.current_stop_flag.is_none(), "Stop flag should be cleared");
         assert!(!*ctx.current_search_is_ponder, "Ponder flag should be reset");
+    }
+
+    #[test]
+    fn test_emit_and_finalize_with_actual_error() {
+        let (
+            engine,
+            stop_flag,
+            tx,
+            rx,
+            mut search_state,
+            mut search_id_counter,
+            mut current_search_id,
+            mut current_search_is_ponder,
+            mut current_session,
+            mut current_bestmove_emitter,
+            mut current_stop_flag,
+            mut last_position_cmd,
+            mut worker_handle,
+        ) = create_test_context();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            last_position_cmd: &mut last_position_cmd,
+        };
+
+        // Set up search state
+        *ctx.search_state = SearchState::Searching;
+        *ctx.current_search_id = 42;
+        *ctx.current_search_is_ponder = false;
+
+        // Set up BestmoveEmitter that will force an error
+        *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new_with_error(42));
+
+        // Test emit_and_finalize
+        let meta = build_meta(
+            BestmoveSource::SessionOnStop,
+            10,
+            Some(15),
+            Some("cp 100".to_string()),
+            None,
+        );
+
+        // Call emit_and_finalize - should handle the error gracefully
+        let result = ctx.emit_and_finalize(
+            "7g7f".to_string(),
+            Some("8c8d".to_string()),
+            meta,
+            "test_finalize",
+        );
+
+        // Should succeed despite emit() error (due to fallback)
+        assert!(result.is_ok(), "emit_and_finalize should handle emit errors gracefully");
+
+        // Verify search was finalized even though emit() failed
+        assert_eq!(
+            *ctx.search_state,
+            SearchState::Idle,
+            "Search should be finalized even on emit error"
+        );
+        assert!(ctx.current_bestmove_emitter.is_none(), "Emitter should be cleared");
+        assert!(ctx.current_stop_flag.is_none(), "Stop flag should be cleared");
+        assert!(!*ctx.current_search_is_ponder, "Ponder flag should be reset");
+
+        // Note: In a real scenario, the fallback send_response() would send the bestmove
+        // We can't easily verify that in unit tests without mocking the global writer
     }
 }
