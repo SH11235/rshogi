@@ -20,33 +20,42 @@ static INIT_ONCE: Once = Once::new();
 /// - Each table's initialization must not depend on other lazy_static tables
 pub fn init_all_tables_once() {
     INIT_ONCE.call_once(|| {
-        // Force initialization of all static tables in safe dependency order
-        // Note: No logging during initialization to avoid I/O lock cycles
+        // Wrap initialization in panic handler to catch any issues
+        let result = std::panic::catch_unwind(|| {
+            // Force initialization of all static tables in safe dependency order
+            // Note: No logging during initialization to avoid I/O lock cycles
 
-        // Since the static tables are private, we initialize them by calling
-        // functions that use them. This ensures they are initialized in a
-        // controlled order without circular dependencies.
+            // Since the static tables are private, we initialize them by calling
+            // functions that use them. This ensures they are initialized in a
+            // controlled order without circular dependencies.
 
-        // 1. Initialize zobrist by creating a position (uses ZOBRIST internally)
-        use crate::Position;
-        let _ = Position::startpos();
+            // 1. Initialize zobrist by creating a position (uses ZOBRIST internally)
+            use crate::Position;
+            let _ = Position::startpos();
 
-        // 2. Initialize attack tables by using attacks module functions
-        use crate::shogi::attacks;
-        use crate::Square;
-        let _ = attacks::king_attacks(Square::new(4, 4)); // Center square (5e)
+            // 2. Initialize attack tables by using attacks module functions
+            use crate::shogi::attacks;
+            use crate::Square;
+            let _ = attacks::king_attacks(Square::new(4, 4)); // Center square (5e)
 
-        // 3. Initialize time management tables
-        // The MONO_BASE table is initialized on first access, so we don't need
-        // to explicitly initialize it here. It will be initialized when needed.
+            // 3. Initialize time management tables
+            // The MONO_BASE table is initialized on first access, so we don't need
+            // to explicitly initialize it here. It will be initialized when needed.
 
-        // 4. Initialize MoveGen related tables by creating an instance
-        use crate::MoveGen;
-        let _ = MoveGen::new();
+            // 4. Initialize MoveGen related tables by creating an instance
+            use crate::MoveGen;
+            let _ = MoveGen::new();
 
-        // Note: OnceLock-based tables (SharedStopInfo, SIMD KIND, START_TIME)
-        // don't need explicit initialization as they're initialized on first use
-        // and don't have circular dependencies
+            // Note: OnceLock-based tables (SharedStopInfo, SIMD KIND, START_TIME)
+            // don't need explicit initialization as they're initialized on first use
+            // and don't have circular dependencies
+        });
+
+        if let Err(e) = result {
+            // Avoid any I/O during initialization to prevent deadlock
+            // Re-panic to maintain original behavior
+            std::panic::resume_unwind(e);
+        }
     });
 }
 

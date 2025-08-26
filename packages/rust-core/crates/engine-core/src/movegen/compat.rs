@@ -46,6 +46,13 @@ impl MoveGen {
         }
     }
 
+    /// Check if there is any legal move from the current position
+    /// Returns true as soon as the first legal move is found (early exit optimization)
+    pub fn has_any_legal_move(&mut self, pos: &Position) -> bool {
+        let mut gen = MoveGenImpl::new(pos);
+        gen.has_any_legal_move()
+    }
+
     /// Generate evasion moves (when in check)
     pub fn generate_evasions(&mut self, pos: &Position, moves: &mut MoveList) {
         // For now, just generate all moves

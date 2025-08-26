@@ -34,6 +34,7 @@ crossbeam = "0.8"
 crossbeam-utils = "0.8"
 crossbeam-deque = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.0", features = ["derive"] }
 
 # Loom is only available for non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

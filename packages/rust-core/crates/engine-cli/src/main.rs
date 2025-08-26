@@ -3,6 +3,7 @@
 mod bestmove_emitter;
 mod command_handler;
 mod engine_adapter;
+mod flushing_logger;
 mod helpers;
 mod search_session;
 mod state;
@@ -55,15 +56,31 @@ fn main() {
     let args = Args::parse();
 
     // Initialize logging
-    if args.debug {
-        env_logger::init_from_env(
-            env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "debug"),
-        );
+    use std::io::Write;
+    let log_level = if args.debug { "debug" } else { "info" };
+
+    // Use FlushingStderrWriter only when explicitly requested via environment variable
+    // This prevents unnecessary syscalls for every log write in normal operation
+    let use_flushing_stderr = std::env::var("FORCE_FLUSH_STDERR").as_deref() == Ok("1");
+
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, log_level),
+    );
+
+    builder
+        .format(|buf, record| {
+            writeln!(buf, "[{}] {}: {}", record.level(), record.target(), record.args())
+        })
+        .write_style(env_logger::WriteStyle::Never); // Disable color to reduce output size
+
+    if use_flushing_stderr {
+        use flushing_logger::FlushingStderrWriter;
+        builder.target(env_logger::Target::Pipe(Box::new(FlushingStderrWriter::new())));
     } else {
-        env_logger::init_from_env(
-            env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
-        );
+        builder.target(env_logger::Target::Stderr);
     }
+
+    builder.init();
 
     // Set up flush on exit hooks
     ensure_flush_on_exit();
@@ -109,6 +126,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
     let mut position_state: Option<PositionState> = None; // Position state for recovery
+    let mut legal_moves_check_logged = false; // Track if we've logged the legal moves check status
 
     // Main event loop - process USI commands and worker messages concurrently
     loop {
@@ -153,6 +171,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             allow_null_move,
                             position_state: &mut position_state,
                             program_start,
+                            legal_moves_check_logged: &mut legal_moves_check_logged,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -189,6 +208,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             allow_null_move,
                             position_state: &mut position_state,
                             program_start,
+                            legal_moves_check_logged: &mut legal_moves_check_logged,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
