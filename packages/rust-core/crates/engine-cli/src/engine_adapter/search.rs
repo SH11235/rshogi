@@ -15,6 +15,7 @@ use engine_core::{
 use log::{info, warn};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::{sync::mpsc, thread, time::Duration};
 
 use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::search_session::SearchSession;
@@ -231,6 +232,45 @@ impl EngineAdapter {
         // Use optimized early-exit version
         let mut movegen = MoveGen::new();
         Ok(movegen.has_any_legal_move(&position))
+    }
+
+    /// Check if the current position has any legal moves with timeout protection
+    /// Only enabled in subprocess with piped I/O context
+    pub fn has_legal_moves_with_timeout(&self, timeout_ms: u64) -> Result<bool> {
+        // Check if we're in subprocess with piped I/O
+        let is_subprocess = std::env::var("SUBPROCESS_MODE").is_ok();
+        let is_piped = !atty::is(atty::Stream::Stdin)
+            || !atty::is(atty::Stream::Stdout)
+            || !atty::is(atty::Stream::Stderr);
+
+        if !(is_subprocess || is_piped) {
+            // Neither subprocess nor piped - use normal version
+            return self.has_legal_moves();
+        }
+
+        // Subprocess or piped I/O - use timeout protection
+        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let mut movegen = MoveGen::new();
+            let mut legal_moves = MoveList::new();
+            movegen.generate_all(&position, &mut legal_moves);
+            let _ = tx.send(!legal_moves.is_empty());
+        });
+
+        match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+            Ok(has_moves) => Ok(has_moves),
+            Err(_) => {
+                // Timeout occurred - log and use safe fallback
+                warn!(
+                    "has_legal_moves timeout after {}ms; falling back to search-side handling",
+                    timeout_ms
+                );
+                // Safe fallback: assume there are legal moves (search will handle checkmate naturally)
+                Ok(true)
+            }
+        }
     }
 
     /// Check if the current position is in check

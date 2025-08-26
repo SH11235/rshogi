@@ -758,8 +758,21 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         // - Positions without legal moves are extremely rare
         // - The search algorithm handles checkmate/stalemate naturally
         // - See docs/movegen-hang-investigation-final.md for details
-        let skip_legal_moves_check = std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
+        // Force skip in subprocess mode to prevent hangs
+        let is_piped = !atty::is(atty::Stream::Stdin)
+            || !atty::is(atty::Stream::Stdout)
+            || !atty::is(atty::Stream::Stderr);
+        let is_subprocess = std::env::var("SUBPROCESS_MODE").is_ok() || is_piped;
+        let skip_legal_moves_check =
+            is_subprocess || std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
         let use_any_legal = std::env::var("USE_ANY_LEGAL").as_deref() == Ok("1");
+
+        // Log subprocess/pipe detection
+        if is_piped && !*ctx.legal_moves_check_logged {
+            log::info!("Piped I/O detected - forcing SKIP_LEGAL_MOVES=1 to prevent hangs");
+        } else if std::env::var("SUBPROCESS_MODE").is_ok() && !*ctx.legal_moves_check_logged {
+            log::info!("Subprocess mode detected - forcing SKIP_LEGAL_MOVES=1 to prevent hangs");
+        }
 
         // Safety guard: warn strongly if enabling the check in release builds
         #[cfg(not(debug_assertions))]
@@ -807,7 +820,8 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 if use_any_legal {
                     adapter.has_any_legal_move()?
                 } else {
-                    adapter.has_legal_moves()?
+                    // Use timeout version to prevent hangs in subprocess
+                    adapter.has_legal_moves_with_timeout(100)? // 100ms timeout
                 }
             };
 

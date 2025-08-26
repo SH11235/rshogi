@@ -37,6 +37,11 @@ pub fn should_trace_phase(phase: &str) -> bool {
 #[cold]
 #[inline(never)]
 pub fn trace_phase(phase: &str) {
+    // Early return if MOVEGEN_TRACE is not set to avoid OnceCell initialization
+    if std::env::var_os("MOVEGEN_TRACE").is_none() {
+        return;
+    }
+
     if should_trace_phase(phase) {
         let count = PHASE_COUNTER.fetch_add(1, Ordering::SeqCst);
         let timestamp =

@@ -99,8 +99,8 @@ fn main() {
 }
 
 fn run_engine(allow_null_move: bool) -> Result<()> {
-    // Initialize all static tables to prevent circular initialization deadlocks
-    engine_core::init::init_all_tables_once();
+    // Unified initialization - prevents circular dependencies and subprocess deadlocks
+    engine_core::init_engine_tables();
 
     // Install signal handler for debugging (Unix only)
     #[cfg(unix)]
