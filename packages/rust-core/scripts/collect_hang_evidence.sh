@@ -59,6 +59,12 @@ echo "Sending SIGUSR1 for stack dump..."
 kill -USR1 $PID
 sleep 1
 
+# 3.5. GDBで全スレッドのバックトレースを取得
+echo "Collecting GDB backtrace..."
+gdb -p $PID -batch -ex "set pagination off" \
+    -ex "thread apply all bt full" > "$DIR/gdb_bt.txt" 2>&1 || true
+echo "GDB backtrace saved to $DIR/gdb_bt.txt"
+
 # 4. straceを少し実行
 echo "Collecting system calls for 3 seconds..."
 sleep 3
@@ -114,5 +120,6 @@ echo ""
 echo "Evidence collected in: $DIR/"
 echo "Next steps:"
 echo "1. Review $DIR/strace.log for patterns"
-echo "2. Check stderr output for SIGUSR1 stack trace"
-echo "3. Run Phase 2 minimization based on hang type"
+echo "2. Check $DIR/gdb_bt.txt for thread backtraces"
+echo "3. Check stderr output for SIGUSR1 stack trace"
+echo "4. Run Phase 2 minimization based on hang type"
