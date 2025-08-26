@@ -13,7 +13,7 @@ use engine_core::{
     usi::move_to_usi,
 };
 use log::{info, warn};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{sync::mpsc, thread, time::Duration};
 
@@ -235,37 +235,41 @@ impl EngineAdapter {
     }
 
     /// Check if the current position has any legal moves with timeout protection
-    /// Only enabled in subprocess with piped I/O context
+    /// 
+    /// **WARNING**: This function should NOT be called in subprocess/piped environments
+    /// as it's disabled to prevent hangs. When timeout occurs, the spawned thread
+    /// will continue running and cannot be safely terminated in Rust.
+    /// 
+    /// Only enabled when NOT in subprocess or piped I/O context.
     pub fn has_legal_moves_with_timeout(&self, timeout_ms: u64) -> Result<bool> {
         // Check if we're in subprocess with piped I/O
-        let is_subprocess = std::env::var("SUBPROCESS_MODE").is_ok();
-        let is_piped = !atty::is(atty::Stream::Stdin)
-            || !atty::is(atty::Stream::Stdout)
-            || !atty::is(atty::Stream::Stderr);
-
-        if !(is_subprocess || is_piped) {
-            // Neither subprocess nor piped - use normal version
-            return self.has_legal_moves();
+        if crate::utils::is_subprocess_or_piped() {
+            // Subprocess or piped I/O - skip to prevent hangs
+            log::warn!("has_legal_moves_with_timeout called in subprocess/piped mode - returning true to prevent hang");
+            return Ok(true);
         }
 
-        // Subprocess or piped I/O - use timeout protection
+        // Non-subprocess/piped mode - use timeout protection
         let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
         let (tx, rx) = mpsc::channel();
 
-        thread::spawn(move || {
-            let mut movegen = MoveGen::new();
-            let mut legal_moves = MoveList::new();
-            movegen.generate_all(&position, &mut legal_moves);
-            let _ = tx.send(!legal_moves.is_empty());
-        });
+        // Spawn named thread for debugging
+        thread::Builder::new()
+            .name("legal-moves-timeout".into())
+            .spawn(move || {
+                let mut movegen = MoveGen::new();
+                let mut legal_moves = MoveList::new();
+                movegen.generate_all(&position, &mut legal_moves);
+                let _ = tx.send(!legal_moves.is_empty());
+            })?;
 
         match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
             Ok(has_moves) => Ok(has_moves),
             Err(_) => {
-                // Timeout occurred - log and use safe fallback
+                // Timeout occurred - increment counter and log
+                let hung_count = crate::utils::HUNG_MOVEGEN_CHECKS.fetch_add(1, Ordering::Relaxed) + 1;
                 warn!(
-                    "has_legal_moves timeout after {}ms; falling back to search-side handling",
-                    timeout_ms
+                    "has_legal_moves timeout after {timeout_ms}ms (thread 'legal-moves-timeout' still running). Total timeouts: {hung_count}. Returning true to prevent hang."
                 );
                 // Safe fallback: assume there are legal moves (search will handle checkmate naturally)
                 Ok(true)
@@ -367,6 +371,7 @@ mod tests {
     use crate::usi::GoParams;
 
     fn make_test_adapter() -> EngineAdapter {
+        crate::test_helpers::test_utils::ensure_engine_initialized();
         EngineAdapter::new()
     }
 

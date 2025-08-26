@@ -5,6 +5,7 @@ pub mod test_utils {
     use crate::types::ResignReason;
     use crate::usi::output::SearchInfo;
     use engine_core::shogi::Position;
+    use once_cell::sync::Lazy;
 
     /// Check if ResignReason matches expected checkmate/no-legal-moves conditions
     pub fn verify_resign_reason(
@@ -32,6 +33,31 @@ pub mod test_utils {
             string: Some("test".to_string()),
             ..Default::default()
         }
+    }
+
+    /// Ensure engine static tables are initialized for tests
+    ///
+    /// This function ensures that the engine's static tables are initialized
+    /// exactly once across all tests. Since we removed initialization from
+    /// EngineAdapter::new(), tests need to call this to ensure proper setup.
+    ///
+    /// # Usage
+    /// 
+    /// Call this at the beginning of any test that uses EngineAdapter:
+    /// ```
+    /// #[test]
+    /// fn my_test() {
+    ///     ensure_engine_initialized();
+    ///     let adapter = EngineAdapter::new();
+    ///     // ... test code ...
+    /// }
+    /// ```
+    pub fn ensure_engine_initialized() {
+        static INIT: Lazy<()> = Lazy::new(|| {
+            engine_core::init_engine_tables();
+        });
+        // Force evaluation of the lazy static
+        Lazy::force(&INIT);
     }
 }
 

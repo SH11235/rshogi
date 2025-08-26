@@ -6,6 +6,7 @@ use crate::types::{BestmoveSource, PositionState, ResignReason};
 use crate::usi::{
     canonicalize_position_cmd, send_info_string, send_response, GoParams, UsiCommand, UsiResponse,
 };
+use crate::utils::{is_piped_stdio, is_subprocess_or_piped};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender};
@@ -759,12 +760,10 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         // - The search algorithm handles checkmate/stalemate naturally
         // - See docs/movegen-hang-investigation-final.md for details
         // Force skip in subprocess mode to prevent hangs
-        let is_piped = !atty::is(atty::Stream::Stdin)
-            || !atty::is(atty::Stream::Stdout)
-            || !atty::is(atty::Stream::Stderr);
-        let is_subprocess = std::env::var("SUBPROCESS_MODE").is_ok() || is_piped;
+        let is_piped = is_piped_stdio();
+        let subprocess_or_piped = is_subprocess_or_piped();
         let skip_legal_moves_check =
-            is_subprocess || std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
+            subprocess_or_piped || std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
         let use_any_legal = std::env::var("USE_ANY_LEGAL").as_deref() == Ok("1");
 
         // Log subprocess/pipe detection
@@ -827,7 +826,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
             let check_duration = check_start.elapsed();
             if check_duration > Duration::from_millis(5) {
-                log::warn!(
+                log::info!(
                     "Legal moves check took {:?} (method: {})",
                     check_duration,
                     if use_any_legal {

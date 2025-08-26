@@ -1,10 +1,13 @@
 //! Common utility functions
 //!
 //! This module contains shared utility functions used across the engine adapter,
-//! including move comparison, score conversion, and synchronization utilities.
+//! including move comparison, score conversion, synchronization utilities,
+//! and I/O detection for subprocess handling.
 
 use crate::usi::output::Score;
 use engine_core::search::constants::{MATE_SCORE, MAX_PLY};
+use once_cell::sync::OnceCell;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, MutexGuard};
 
 /// Generic helper function to lock a mutex with recovery for Poisoned state
@@ -62,10 +65,45 @@ pub fn to_usi_score(raw_score: i32) -> Score {
     }
 }
 
+/// Counter for tracking timeout occurrences in has_legal_moves_with_timeout
+pub static HUNG_MOVEGEN_CHECKS: AtomicU64 = AtomicU64::new(0);
+
+/// Check if any of the standard I/O streams are piped (not TTY)
+///
+/// This function detects if the engine is running with piped I/O, which typically
+/// indicates it's being used as a subprocess by a GUI or other controller.
+/// The result is cached for efficiency.
+///
+/// # Returns
+///
+/// `true` if any of stdin, stdout, or stderr are piped; `false` if all are TTY
+pub fn is_piped_stdio() -> bool {
+    static CACHED: OnceCell<bool> = OnceCell::new();
+    *CACHED.get_or_init(|| {
+        !atty::is(atty::Stream::Stdin)
+            || !atty::is(atty::Stream::Stdout)
+            || !atty::is(atty::Stream::Stderr)
+    })
+}
+
+/// Check if running as subprocess or with piped I/O
+///
+/// This combines the SUBPROCESS_MODE environment variable check with piped I/O detection.
+/// Used to determine when to apply subprocess-specific behavior like skipping
+/// potentially hanging operations.
+///
+/// # Returns
+///
+/// `true` if either SUBPROCESS_MODE is set or any I/O is piped
+pub fn is_subprocess_or_piped() -> bool {
+    std::env::var("SUBPROCESS_MODE").is_ok() || is_piped_stdio()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::thread;
 
     #[test]
@@ -228,5 +266,55 @@ mod tests {
         // Score just below mate threshold
         assert_eq!(to_usi_score(mate_threshold - 1), Score::Cp(mate_threshold - 1));
         assert_eq!(to_usi_score(-(mate_threshold - 1)), Score::Cp(-(mate_threshold - 1)));
+    }
+
+    #[test]
+    fn test_is_piped_stdio() {
+        // This test is primarily for ensuring the function doesn't panic
+        // The actual result depends on the test environment
+        let _ = is_piped_stdio();
+        // Calling again should use cached value
+        let _ = is_piped_stdio();
+    }
+
+    #[test]
+    fn test_is_subprocess_or_piped() {
+        // Save original env var state
+        let original = std::env::var("SUBPROCESS_MODE").ok();
+        
+        // Test without SUBPROCESS_MODE
+        std::env::remove_var("SUBPROCESS_MODE");
+        let without_env = is_subprocess_or_piped();
+        
+        // Test with SUBPROCESS_MODE
+        std::env::set_var("SUBPROCESS_MODE", "1");
+        let with_env = is_subprocess_or_piped();
+        
+        // With env var set, should always be true
+        assert!(with_env);
+        
+        // Restore original state
+        if let Some(val) = original {
+            std::env::set_var("SUBPROCESS_MODE", val);
+        } else {
+            std::env::remove_var("SUBPROCESS_MODE");
+        }
+        
+        // Without env var, result depends on actual I/O state
+        let _ = without_env;
+    }
+
+    #[test]
+    fn test_hung_movegen_counter() {
+        // Store initial value
+        let initial = HUNG_MOVEGEN_CHECKS.load(Ordering::Relaxed);
+        
+        // Increment counter
+        HUNG_MOVEGEN_CHECKS.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(HUNG_MOVEGEN_CHECKS.load(Ordering::Relaxed), initial + 1);
+        
+        // Increment again
+        HUNG_MOVEGEN_CHECKS.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(HUNG_MOVEGEN_CHECKS.load(Ordering::Relaxed), initial + 2);
     }
 }
