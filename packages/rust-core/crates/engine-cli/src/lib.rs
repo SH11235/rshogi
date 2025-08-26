@@ -8,4 +8,4 @@ pub mod usi;
 pub mod utils;
 
 #[cfg(test)]
-mod test_helpers;
+pub mod test_helpers;

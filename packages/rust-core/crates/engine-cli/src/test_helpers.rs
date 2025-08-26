@@ -42,7 +42,7 @@ pub mod test_utils {
     /// EngineAdapter::new(), tests need to call this to ensure proper setup.
     ///
     /// # Usage
-    /// 
+    ///
     /// Call this at the beginning of any test that uses EngineAdapter:
     /// ```
     /// #[test]

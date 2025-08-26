@@ -102,7 +102,7 @@ impl EngineAdapter {
 
         // Check stop flag before applying go params
         let stop_value_before = stop_flag.load(std::sync::atomic::Ordering::Acquire);
-        log::info!("prepare_search: stop_flag value before apply_go_params = {stop_value_before}");
+        log::debug!("prepare_search: stop_flag value before apply_go_params = {stop_value_before}");
 
         // Apply go parameters to get search limits
         let limits = crate::engine_adapter::time_control::apply_go_params(
@@ -118,7 +118,7 @@ impl EngineAdapter {
 
         // Check stop flag after applying go params
         let stop_value_after = stop_flag.load(std::sync::atomic::Ordering::Acquire);
-        log::info!("prepare_search: stop_flag value after apply_go_params = {stop_value_after}");
+        log::debug!("prepare_search: stop_flag value after apply_go_params = {stop_value_after}");
 
         // Detect if this is actually byoyomi time control by looking at the real TimeControl
         self.last_search_is_byoyomi = match &limits.time_control {
@@ -235,12 +235,13 @@ impl EngineAdapter {
     }
 
     /// Check if the current position has any legal moves with timeout protection
-    /// 
+    ///
     /// **WARNING**: This function should NOT be called in subprocess/piped environments
     /// as it's disabled to prevent hangs. When timeout occurs, the spawned thread
     /// will continue running and cannot be safely terminated in Rust.
-    /// 
-    /// Only enabled when NOT in subprocess or piped I/O context.
+    ///
+    /// Only enabled when NOT in subprocess or piped I/O context. If called in such
+    /// environments, it will return `Ok(true)` immediately to prevent hangs.
     pub fn has_legal_moves_with_timeout(&self, timeout_ms: u64) -> Result<bool> {
         // Check if we're in subprocess with piped I/O
         if crate::utils::is_subprocess_or_piped() {
@@ -254,20 +255,19 @@ impl EngineAdapter {
         let (tx, rx) = mpsc::channel();
 
         // Spawn named thread for debugging
-        thread::Builder::new()
-            .name("legal-moves-timeout".into())
-            .spawn(move || {
-                let mut movegen = MoveGen::new();
-                let mut legal_moves = MoveList::new();
-                movegen.generate_all(&position, &mut legal_moves);
-                let _ = tx.send(!legal_moves.is_empty());
-            })?;
+        thread::Builder::new().name("legal-moves-timeout".into()).spawn(move || {
+            let mut movegen = MoveGen::new();
+            let mut legal_moves = MoveList::new();
+            movegen.generate_all(&position, &mut legal_moves);
+            let _ = tx.send(!legal_moves.is_empty());
+        })?;
 
         match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
             Ok(has_moves) => Ok(has_moves),
             Err(_) => {
                 // Timeout occurred - increment counter and log
-                let hung_count = crate::utils::HUNG_MOVEGEN_CHECKS.fetch_add(1, Ordering::Relaxed) + 1;
+                let hung_count =
+                    crate::utils::HUNG_MOVEGEN_CHECKS.fetch_add(1, Ordering::Relaxed) + 1;
                 warn!(
                     "has_legal_moves timeout after {timeout_ms}ms (thread 'legal-moves-timeout' still running). Total timeouts: {hung_count}. Returning true to prevent hang."
                 );
@@ -371,7 +371,8 @@ mod tests {
     use crate::usi::GoParams;
 
     fn make_test_adapter() -> EngineAdapter {
-        crate::test_helpers::test_utils::ensure_engine_initialized();
+        // Ensure engine tables are initialized for tests
+        engine_core::init_engine_tables();
         EngineAdapter::new()
     }
 

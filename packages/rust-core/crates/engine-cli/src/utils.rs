@@ -66,6 +66,10 @@ pub fn to_usi_score(raw_score: i32) -> Score {
 }
 
 /// Counter for tracking timeout occurrences in has_legal_moves_with_timeout
+///
+/// This is an observability metric that counts how many times the legal moves
+/// check timed out. It does NOT indicate process health - the process continues
+/// normally after timeouts (though a spawned thread may remain).
 pub static HUNG_MOVEGEN_CHECKS: AtomicU64 = AtomicU64::new(0);
 
 /// Check if any of the standard I/O streams are piped (not TTY)
@@ -102,8 +106,8 @@ pub fn is_subprocess_or_piped() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
     use std::thread;
 
     #[test]
@@ -281,25 +285,25 @@ mod tests {
     fn test_is_subprocess_or_piped() {
         // Save original env var state
         let original = std::env::var("SUBPROCESS_MODE").ok();
-        
+
         // Test without SUBPROCESS_MODE
         std::env::remove_var("SUBPROCESS_MODE");
         let without_env = is_subprocess_or_piped();
-        
+
         // Test with SUBPROCESS_MODE
         std::env::set_var("SUBPROCESS_MODE", "1");
         let with_env = is_subprocess_or_piped();
-        
+
         // With env var set, should always be true
         assert!(with_env);
-        
+
         // Restore original state
         if let Some(val) = original {
             std::env::set_var("SUBPROCESS_MODE", val);
         } else {
             std::env::remove_var("SUBPROCESS_MODE");
         }
-        
+
         // Without env var, result depends on actual I/O state
         let _ = without_env;
     }
@@ -308,11 +312,11 @@ mod tests {
     fn test_hung_movegen_counter() {
         // Store initial value
         let initial = HUNG_MOVEGEN_CHECKS.load(Ordering::Relaxed);
-        
+
         // Increment counter
         HUNG_MOVEGEN_CHECKS.fetch_add(1, Ordering::Relaxed);
         assert_eq!(HUNG_MOVEGEN_CHECKS.load(Ordering::Relaxed), initial + 1);
-        
+
         // Increment again
         HUNG_MOVEGEN_CHECKS.fetch_add(1, Ordering::Relaxed);
         assert_eq!(HUNG_MOVEGEN_CHECKS.load(Ordering::Relaxed), initial + 2);

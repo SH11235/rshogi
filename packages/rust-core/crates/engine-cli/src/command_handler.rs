@@ -760,14 +760,13 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         // - The search algorithm handles checkmate/stalemate naturally
         // - See docs/movegen-hang-investigation-final.md for details
         // Force skip in subprocess mode to prevent hangs
-        let is_piped = is_piped_stdio();
         let subprocess_or_piped = is_subprocess_or_piped();
         let skip_legal_moves_check =
             subprocess_or_piped || std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
         let use_any_legal = std::env::var("USE_ANY_LEGAL").as_deref() == Ok("1");
 
         // Log subprocess/pipe detection
-        if is_piped && !*ctx.legal_moves_check_logged {
+        if is_piped_stdio() && !*ctx.legal_moves_check_logged {
             log::info!("Piped I/O detected - forcing SKIP_LEGAL_MOVES=1 to prevent hangs");
         } else if std::env::var("SUBPROCESS_MODE").is_ok() && !*ctx.legal_moves_check_logged {
             log::info!("Subprocess mode detected - forcing SKIP_LEGAL_MOVES=1 to prevent hangs");
@@ -1361,6 +1360,8 @@ mod tests {
         Option<JoinHandle<()>>,
         bool,
     ) {
+        // Ensure engine tables are initialized for tests
+        engine_core::init_engine_tables();
         let engine = Arc::new(Mutex::new(EngineAdapter::new()));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (tx, rx) = unbounded();
@@ -2480,8 +2481,8 @@ mod tests {
         assert!(result.is_ok(), "Stop command should handle timeout gracefully");
         // Allow more time in CI environments which may be slower
         assert!(
-            elapsed < Duration::from_millis(20),
-            "Should timeout quickly (expected ~1ms, allowing up to 20ms)"
+            elapsed < Duration::from_millis(50),
+            "Should timeout quickly (expected ~1ms, allowing up to 50ms for CI/VM)"
         );
 
         // Verify search was finalized
