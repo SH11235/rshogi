@@ -35,3 +35,4 @@ opt-level = 1  # Basic optimizations for debug builds
 debug-assertions = true   # Release buildでもアサート有効
 overflow-checks = true    # オーバーフロー検出
 lto = "thin"             # 最適化は維持
+debug = true             # 関数名を出すため（ハング調査用）

@@ -35,7 +35,11 @@ impl<'a> MoveGenImpl<'a> {
         };
 
         // Calculate checkers and pins
-        gen.calculate_checkers_and_pins();
+        use crate::movegen::debug::*;
+        trace_phase(PHASE_CHECKERS_PINS);
+        if !is_phase_disabled(PHASE_CHECKERS_PINS) {
+            gen.calculate_checkers_and_pins();
+        }
 
         gen
     }
@@ -59,6 +63,10 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Generate all legal moves
     pub fn generate_all(&mut self) -> MoveList {
+        use crate::movegen::debug::*;
+        
+        trace_phase(PHASE_PRE);
+        
         self.moves.clear();
 
         let us = self.pos.side_to_move;
@@ -69,14 +77,21 @@ impl<'a> MoveGenImpl<'a> {
 
         // If in double check, only king moves are legal
         if self.checkers.count_ones() > 1 {
-            self.generate_king_moves();
+            trace_phase("double_check");
+            if !is_phase_disabled(PHASE_KING) {
+                self.generate_king_moves();
+            }
             return std::mem::take(&mut self.moves);
         }
 
         // Generate king moves first (always needed)
-        self.generate_king_moves();
+        trace_phase(PHASE_KING);
+        if !is_phase_disabled(PHASE_KING) {
+            self.generate_king_moves();
+        }
 
         // Generate moves for other piece types
+        trace_phase(PHASE_PIECES);
         for &piece_type_enum in &ALL_PIECE_TYPES {
             if piece_type_enum == PieceType::King {
                 continue; // Already generated
@@ -90,15 +105,48 @@ impl<'a> MoveGenImpl<'a> {
                 let promoted = piece.map(|p| p.promoted).unwrap_or(false);
 
                 match piece_type_enum {
-                    PieceType::Rook => self.generate_sliding_moves(from, piece_type_enum, promoted),
-                    PieceType::Bishop => {
-                        self.generate_sliding_moves(from, piece_type_enum, promoted)
+                    PieceType::Rook => {
+                        trace_phase(PHASE_ROOK);
+                        if !is_phase_disabled(PHASE_ROOK) {
+                            self.generate_sliding_moves(from, piece_type_enum, promoted);
+                        }
                     }
-                    PieceType::Gold => self.generate_gold_moves(from, promoted),
-                    PieceType::Silver => self.generate_silver_moves(from, promoted),
-                    PieceType::Knight => self.generate_knight_moves(from, promoted),
-                    PieceType::Lance => self.generate_lance_moves(from, promoted),
-                    PieceType::Pawn => self.generate_pawn_moves(from, promoted),
+                    PieceType::Bishop => {
+                        trace_phase(PHASE_BISHOP);
+                        if !is_phase_disabled(PHASE_BISHOP) {
+                            self.generate_sliding_moves(from, piece_type_enum, promoted);
+                        }
+                    }
+                    PieceType::Gold => {
+                        trace_phase(PHASE_GOLD);
+                        if !is_phase_disabled(PHASE_GOLD) {
+                            self.generate_gold_moves(from, promoted);
+                        }
+                    }
+                    PieceType::Silver => {
+                        trace_phase(PHASE_SILVER);
+                        if !is_phase_disabled(PHASE_SILVER) {
+                            self.generate_silver_moves(from, promoted);
+                        }
+                    }
+                    PieceType::Knight => {
+                        trace_phase(PHASE_KNIGHT);
+                        if !is_phase_disabled(PHASE_KNIGHT) {
+                            self.generate_knight_moves(from, promoted);
+                        }
+                    }
+                    PieceType::Lance => {
+                        trace_phase(PHASE_LANCE);
+                        if !is_phase_disabled(PHASE_LANCE) {
+                            self.generate_lance_moves(from, promoted);
+                        }
+                    }
+                    PieceType::Pawn => {
+                        trace_phase(PHASE_PAWN);
+                        if !is_phase_disabled(PHASE_PAWN) {
+                            self.generate_pawn_moves(from, promoted);
+                        }
+                    }
                     _ => unreachable!("King moves already generated"),
                 }
             }
@@ -106,11 +154,15 @@ impl<'a> MoveGenImpl<'a> {
 
         // Generate drop moves
         // When in check, drops can still be legal if they block the check
-        self.generate_drop_moves();
+        trace_phase(PHASE_DROPS);
+        if !is_phase_disabled(PHASE_DROPS) {
+            self.generate_drop_moves();
+        }
 
         // Note: promoted pieces are already handled in the piece-specific methods
 
         // Filter out any moves that would capture the enemy king (should not happen)
+        trace_phase(PHASE_POST);
         let enemy_king_bb = self.pos.board.piece_bb[them as usize][PieceType::King as usize];
         if let Some(enemy_king_sq) = enemy_king_bb.lsb() {
             self.moves.as_mut_vec().retain(|m| m.to() != enemy_king_sq);
