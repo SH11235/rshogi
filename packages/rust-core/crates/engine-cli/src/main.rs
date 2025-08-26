@@ -703,6 +703,7 @@ mod tests {
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
         let mut position_state = None;
+        let mut legal_moves_check_logged = false;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -717,6 +718,7 @@ mod tests {
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             allow_null_move: false,
             position_state: &mut position_state,
             program_start: Instant::now(),
@@ -757,6 +759,7 @@ mod tests {
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
         let mut position_state = None;
+        let mut legal_moves_check_logged = false;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -771,6 +774,7 @@ mod tests {
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
             current_stop_flag: &mut current_stop_flag,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             allow_null_move: false,
             position_state: &mut position_state,
             program_start: Instant::now(),

@@ -8,6 +8,8 @@
 //! - Evidence collection (stderr, dumps)
 //! - Environment variable matrix testing
 
+#![cfg(unix)] // This test uses Unix-specific signals
+
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -216,16 +218,38 @@ fn run_hang_test(config: &HangTestConfig) -> TestEvidence {
     // Wait briefly for graceful exit
     thread::sleep(Duration::from_millis(500));
 
-    // Force kill if still running
+    // Staged kill process: try graceful termination first
     match engine.try_wait() {
         Ok(Some(status)) => {
             evidence.lock().unwrap().exit_code = status.code();
         }
         Ok(None) => {
-            println!("Force killing engine process...");
-            let _ = engine.kill();
-            if let Ok(status) = engine.wait() {
-                evidence.lock().unwrap().exit_code = status.code();
+            // Process still running - try SIGTERM first
+            println!("Sending SIGTERM to engine process...");
+            unsafe {
+                libc::kill(engine_pid as i32, libc::SIGTERM);
+            }
+
+            // Give time for graceful shutdown
+            thread::sleep(Duration::from_millis(1000));
+
+            // Check again
+            match engine.try_wait() {
+                Ok(Some(status)) => {
+                    evidence.lock().unwrap().exit_code = status.code();
+                }
+                Ok(None) => {
+                    // Still running - force kill
+                    println!("Force killing engine process with SIGKILL...");
+                    let _ = engine.kill();
+                    if let Ok(status) = engine.wait() {
+                        evidence.lock().unwrap().exit_code = status.code();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error checking process status after SIGTERM: {}", e);
+                    let _ = engine.kill();
+                }
             }
         }
         Err(e) => {
@@ -246,13 +270,14 @@ fn run_hang_test(config: &HangTestConfig) -> TestEvidence {
 
 fn save_evidence(evidence: &TestEvidence, config: &HangTestConfig, evidence_dir: &Path) {
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let test_dir = evidence_dir.join(format!("{}_{}", timestamp, config.test_name));
+    let test_dir = evidence_dir.join(format!("{}_{}", config.test_name, timestamp));
     fs::create_dir_all(&test_dir).unwrap();
 
-    // Save configuration
-    let config_path = test_dir.join("config.txt");
+    // Save configuration with timestamp
+    let config_path = test_dir.join(format!("config_{}.txt", timestamp));
     let mut config_file = File::create(config_path).unwrap();
     writeln!(config_file, "Test Name: {}", config.test_name).unwrap();
+    writeln!(config_file, "Timestamp: {}", timestamp).unwrap();
     writeln!(config_file, "SKIP_LEGAL_MOVES: {}", config.skip_legal_moves).unwrap();
     writeln!(config_file, "USE_ANY_LEGAL: {}", config.use_any_legal).unwrap();
     writeln!(config_file, "FORCE_FLUSH_STDERR: {}", config.force_flush_stderr).unwrap();
@@ -264,15 +289,15 @@ fn save_evidence(evidence: &TestEvidence, config: &HangTestConfig, evidence_dir:
         writeln!(config_file, "Exit Code: {}", code).unwrap();
     }
 
-    // Save stdout
-    let stdout_path = test_dir.join("stdout.log");
+    // Save stdout with timestamp
+    let stdout_path = test_dir.join(format!("stdout_{}.log", timestamp));
     let mut stdout_file = File::create(stdout_path).unwrap();
     for line in &evidence.stdout_lines {
         writeln!(stdout_file, "{}", line).unwrap();
     }
 
-    // Save stderr
-    let stderr_path = test_dir.join("stderr.log");
+    // Save stderr with timestamp
+    let stderr_path = test_dir.join(format!("stderr_{}.log", timestamp));
     let mut stderr_file = File::create(stderr_path).unwrap();
     for line in &evidence.stderr_lines {
         writeln!(stderr_file, "{}", line).unwrap();

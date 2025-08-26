@@ -24,8 +24,9 @@ fn log_tsv(pairs: &[(&str, &str)]) -> String {
     pairs
         .iter()
         .map(|(k, v)| {
-            // Sanitize value by replacing tabs and newlines with spaces
-            let sanitized = v.replace(['\t', '\n', '\r'], " ");
+            // Sanitize value by replacing all control characters with spaces
+            let sanitized =
+                v.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>();
             format!("{k}={sanitized}")
         })
         .collect::<Vec<_>>()
@@ -767,17 +768,29 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
+
+            // Log to stderr via logger
             log::error!(
                 "timestamp={timestamp}\tkind=unsafe_config\tconfig=SKIP_LEGAL_MOVES=0\tbuild=release\tmessage=WARNING: has_legal_moves check enabled in RELEASE build - this may cause hangs in subprocess execution!"
             );
             log::error!(
                 "timestamp={timestamp}\tkind=unsafe_config\trecommendation=Use SKIP_LEGAL_MOVES=1 (default) for production"
             );
+
+            // Send as info string for GUI collection
+            send_info_string(log_tsv(&[
+                ("kind", "unsafe_config"),
+                ("config", "SKIP_LEGAL_MOVES=0"),
+                ("build", "release"),
+                ("message", "WARNING: has_legal_moves check enabled - may cause hangs"),
+            ]))?;
+
             eprintln!(
                 "\n*** WARNING: SKIP_LEGAL_MOVES=0 in RELEASE build ***\n\
                  This configuration may cause hangs in subprocess execution.\n\
                  Recommended: Set SKIP_LEGAL_MOVES=1 or unset for production use.\n"
             );
+            *ctx.legal_moves_check_logged = true;
         }
 
         if skip_legal_moves_check {
@@ -789,10 +802,13 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
         } else {
             // Check is enabled - perform it with timing
             let check_start = Instant::now();
-            let has_legal_moves = if use_any_legal {
-                engine.has_any_legal_move()?
-            } else {
-                engine.has_legal_moves()?
+            let has_legal_moves = {
+                let adapter = lock_or_recover_adapter(ctx.engine);
+                if use_any_legal {
+                    adapter.has_any_legal_move()?
+                } else {
+                    adapter.has_legal_moves()?
+                }
             };
 
             let check_duration = check_start.elapsed();

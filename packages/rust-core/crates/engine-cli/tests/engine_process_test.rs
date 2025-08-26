@@ -20,7 +20,7 @@ fn test_engine_process_with_has_legal_moves() {
     let stderr = engine.stderr.take().expect("Failed to get stderr");
 
     // Start stderr reader to capture error logs
-    let stderr_handle = thread::spawn(move || {
+    let _stderr_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             if let Ok(line) = line {
@@ -31,12 +31,14 @@ fn test_engine_process_with_has_legal_moves() {
 
     // Start stdout reader
     let (tx, rx) = std::sync::mpsc::channel();
-    let stdout_handle = thread::spawn(move || {
+    let _stdout_handle = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             if let Ok(line) = line {
                 println!("ENGINE: {}", line);
-                let _ = tx.send(line);
+                if tx.send(line).is_err() {
+                    break; // Receiver dropped
+                }
             }
         }
     });

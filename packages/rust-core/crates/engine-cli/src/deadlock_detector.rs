@@ -61,10 +61,23 @@ fn deadlock_detection_thread() {
                     let bt = thread.backtrace();
                     let bt_str = format!("{:?}", bt);
 
-                    for (frame_idx, frame) in bt_str.lines().enumerate() {
+                    // Limit frame output based on environment variable
+                    let max_frames = std::env::var("DEADLOCK_MAX_FRAMES")
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(20);
+
+                    for (frame_idx, frame) in bt_str.lines().take(max_frames).enumerate() {
                         warn!(
                             "timestamp={timestamp}\tkind=deadlock_backtrace\tcycle_id={i}\tthread_index={j}\tframe_id={frame_idx}\tframe_data={}",
                             frame.trim()
+                        );
+                    }
+
+                    let total_frames = bt_str.lines().count();
+                    if total_frames > max_frames {
+                        warn!(
+                            "timestamp={timestamp}\tkind=deadlock_backtrace_truncated\tcycle_id={i}\tthread_index={j}\ttotal_frames={total_frames}\tshown_frames={max_frames}"
                         );
                     }
                 }
