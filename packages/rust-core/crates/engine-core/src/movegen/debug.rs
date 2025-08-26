@@ -1,6 +1,7 @@
 //! Debug utilities for MoveGen hang investigation
 
 use once_cell::sync::OnceCell;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,11 +11,14 @@ pub static PHASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 // Cached trace list
 static TRACE_LIST: OnceCell<Vec<String>> = OnceCell::new();
 
+// Cached disabled phases
+static DISABLE_SET: OnceCell<HashSet<String>> = OnceCell::new();
+
 /// Get cached trace list
 fn trace_list() -> &'static Vec<String> {
     TRACE_LIST.get_or_init(|| {
         std::env::var("MOVEGEN_TRACE")
-            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .map(|v| v.split(',').map(|s| s.trim().to_lowercase()).collect())
             .unwrap_or_default()
     })
 }
@@ -25,7 +29,8 @@ pub fn should_trace_phase(phase: &str) -> bool {
     if list.iter().any(|s| s == "all" || s == "*") {
         return true;
     }
-    list.iter().any(|s| s == phase)
+    let phase_lower = phase.to_lowercase();
+    list.iter().any(|s| s == &phase_lower)
 }
 
 /// Trace entry into a phase
@@ -40,11 +45,19 @@ pub fn trace_phase(phase: &str) {
     }
 }
 
+/// Get cached disabled phases set
+fn disabled_set() -> &'static HashSet<String> {
+    DISABLE_SET.get_or_init(|| {
+        std::env::vars()
+            .filter(|(k, v)| k.starts_with("MOVEGEN_DISABLE_") && v == "1")
+            .map(|(k, _)| k["MOVEGEN_DISABLE_".len()..].to_string())
+            .collect()
+    })
+}
+
 /// Check if a phase is disabled
 pub fn is_phase_disabled(phase: &str) -> bool {
-    std::env::var(format!("MOVEGEN_DISABLE_{}", phase.to_uppercase()))
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    disabled_set().contains(&phase.to_uppercase())
 }
 
 /// Phase names

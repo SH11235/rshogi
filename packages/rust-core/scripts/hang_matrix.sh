@@ -181,7 +181,8 @@ echo ""
 # Analysis
 echo "=== Analysis ==="
 echo "Configurations that hang:"
-grep -E "timeout|hang" "$RESULTS_FILE" 2>/dev/null | cut -f2-8 | column -t || echo "No hangs detected"
+awk -F'\t' 'NR>1 && ($9=="timeout" || $11=="true") { print }' "$RESULTS_FILE" 2>/dev/null \
+  | cut -f2-8 | column -t || echo "No hangs detected"
 
 echo ""
 echo "Results saved to: $RESULTS_FILE"

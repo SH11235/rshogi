@@ -90,9 +90,16 @@ if [ -s trace_output.txt ]; then
     
     echo ""
     echo "Phase counts:"
-    cut -d= -f2 trace_output.txt | cut -f2 | sort | uniq -c | sort -nr || true
+    # フェーズ頻度
+    awk -F'\t' '{ for(i=1;i<=NF;i++) if($i ~ /^phase=/){ split($i,a,"="); print a[2] } }' \
+      trace_output.txt | sort | uniq -c | sort -nr || true
     
-    LAST_PHASE=$(tail -1 trace_output.txt | cut -d= -f2 | cut -f2 || echo "unknown")
+    # 最後のフェーズ
+    LAST_PHASE=$(
+      awk -F'\t' '{
+        for(i=1;i<=NF;i++) if($i ~ /^phase=/){ split($i,a,"="); p=a[2] }
+      } END{ if(p=="") print "unknown"; else print p }' trace_output.txt
+    )
     echo ""
     echo "⚠️  Last phase before hang: $LAST_PHASE"
 else
