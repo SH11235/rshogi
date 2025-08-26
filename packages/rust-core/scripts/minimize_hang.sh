@@ -2,7 +2,7 @@
 # MoveGenハング最小化スクリプト
 # Phase 2: 最小再現USIシーケンスを特定
 
-set -u
+set -euo pipefail
 
 echo "=== MoveGen Hang Minimization ==="
 echo "Finding minimal USI sequence that triggers hang..."
@@ -63,10 +63,18 @@ fi
 echo ""
 echo "=== USE_ANY_LEGAL Comparison ==="
 echo -n "USE_ANY_LEGAL=0: "
-echo -e "position startpos\ngo depth 1" | SKIP_LEGAL_MOVES=0 USE_ANY_LEGAL=0 timeout 3 ./target/release/engine-cli >/dev/null 2>&1 && echo "✅ NO HANG" || echo "❌ HANG"
+if echo -e "position startpos\ngo depth 1" | SKIP_LEGAL_MOVES=0 USE_ANY_LEGAL=0 timeout 3 ./target/release/engine-cli >/dev/null 2>&1; then
+    echo "✅ NO HANG"
+else
+    [ $? -eq 124 ] && echo "❌ HANG" || echo "⚠️  ERROR (exit code: $?)"
+fi
 
 echo -n "USE_ANY_LEGAL=1: "
-echo -e "position startpos\ngo depth 1" | SKIP_LEGAL_MOVES=0 USE_ANY_LEGAL=1 timeout 3 ./target/release/engine-cli >/dev/null 2>&1 && echo "✅ NO HANG" || echo "❌ HANG"
+if echo -e "position startpos\ngo depth 1" | SKIP_LEGAL_MOVES=0 USE_ANY_LEGAL=1 timeout 3 ./target/release/engine-cli >/dev/null 2>&1; then
+    echo "✅ NO HANG"
+else
+    [ $? -eq 124 ] && echo "❌ HANG" || echo "⚠️  ERROR (exit code: $?)"
+fi
 
 echo ""
 echo "=== Direct vs Subprocess ==="
@@ -74,8 +82,12 @@ echo "=== Direct vs Subprocess ==="
 echo -n "Direct execution test: "
 (
     export SKIP_LEGAL_MOVES=0
-    echo -e "position startpos\ngo depth 1\nquit" | timeout 3 ./target/release/engine-cli 2>&1 | grep -q "bestmove"
-) && echo "✅ Works directly" || echo "❌ Also hangs directly"
+    if echo -e "position startpos\ngo depth 1\nquit" | timeout 3 ./target/release/engine-cli 2>&1 | grep -q "bestmove"; then
+        echo "✅ Works directly"
+    else
+        echo "❌ Also hangs directly"
+    fi
+) || echo "⚠️  Test error"
 
 echo ""
 echo "=== Summary ==="

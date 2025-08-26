@@ -2,7 +2,7 @@
 # MoveGenハング局所化スクリプト
 # Phase 3: MoveGen内の特定フェーズを二分探索で特定
 
-set -u
+set -euo pipefail
 
 echo "=== MoveGen Hang Localization ==="
 echo "Binary search to identify the hanging phase..."
@@ -82,7 +82,7 @@ echo "Running with full trace (5 second timeout)..."
 echo -e "position startpos\ngo depth 1" | \
     env SKIP_LEGAL_MOVES=0 MOVEGEN_TRACE=pre,checkers_pins,king,pieces,rook,bishop,gold,silver,knight,lance,pawn,drops,post \
     timeout 5 ./target/release/engine-cli 2>&1 | \
-    grep "phase=" > trace_output.txt || true
+    grep "phase=" > trace_output.txt 2>/dev/null || true
 
 if [ -s trace_output.txt ]; then
     echo "Trace output (last 10 phases):"
@@ -90,9 +90,9 @@ if [ -s trace_output.txt ]; then
     
     echo ""
     echo "Phase counts:"
-    cut -d= -f2 trace_output.txt | cut -f2 | sort | uniq -c | sort -nr
+    cut -d= -f2 trace_output.txt | cut -f2 | sort | uniq -c | sort -nr || true
     
-    LAST_PHASE=$(tail -1 trace_output.txt | cut -d= -f2 | cut -f2)
+    LAST_PHASE=$(tail -1 trace_output.txt | cut -d= -f2 | cut -f2 || echo "unknown")
     echo ""
     echo "⚠️  Last phase before hang: $LAST_PHASE"
 else

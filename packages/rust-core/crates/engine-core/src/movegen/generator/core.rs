@@ -1,6 +1,7 @@
 //! Core move generation implementation
 
 use crate::{
+    movegen::debug::{trace_phase, PHASE_EARLY_EXIT},
     shogi::{MoveList, ALL_PIECE_TYPES},
     Bitboard, Color, PieceType, Position, Square,
 };
@@ -64,9 +65,9 @@ impl<'a> MoveGenImpl<'a> {
     /// Generate all legal moves
     pub fn generate_all(&mut self) -> MoveList {
         use crate::movegen::debug::*;
-        
+
         trace_phase(PHASE_PRE);
-        
+
         self.moves.clear();
 
         let us = self.pos.side_to_move;
@@ -77,7 +78,7 @@ impl<'a> MoveGenImpl<'a> {
 
         // If in double check, only king moves are legal
         if self.checkers.count_ones() > 1 {
-            trace_phase("double_check");
+            trace_phase(PHASE_DOUBLE_CHECK);
             if !is_phase_disabled(PHASE_KING) {
                 self.generate_king_moves();
             }
@@ -191,6 +192,7 @@ impl<'a> MoveGenImpl<'a> {
         // Check king moves first (always needed)
         self.generate_king_moves();
         if !self.moves.is_empty() {
+            trace_phase(PHASE_EARLY_EXIT);
             return true;
         }
 
@@ -229,6 +231,7 @@ impl<'a> MoveGenImpl<'a> {
                 }
 
                 if !self.moves.is_empty() {
+                    trace_phase(PHASE_EARLY_EXIT);
                     return true;
                 }
             }

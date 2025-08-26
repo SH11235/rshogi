@@ -2,7 +2,7 @@
 # MoveGenハング完全分析スクリプト
 # 分類 → 最小化 → 局所化を一気に実行
 
-set -u
+set -euo pipefail
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 REPORT_DIR="hang_analysis_${TIMESTAMP}"
@@ -20,7 +20,7 @@ echo "=========================================="
 ./scripts/collect_hang_evidence.sh > "$REPORT_DIR/phase1_classification.log" 2>&1
 
 # Extract classification from the log
-CLASSIFICATION=$(grep "Type:" "$REPORT_DIR/phase1_classification.log" | tail -1 | cut -d: -f2- | xargs)
+CLASSIFICATION=$(grep "Type:" "$REPORT_DIR/phase1_classification.log" | tail -1 | cut -d: -f2- | xargs || echo "UNKNOWN")
 echo "Hang type detected: $CLASSIFICATION"
 echo ""
 
@@ -32,7 +32,7 @@ echo "=========================================="
 ./scripts/minimize_hang.sh > "$REPORT_DIR/phase2_minimization.log" 2>&1
 
 # Extract minimal sequence
-MINIMAL_SEQ=$(grep -A1 "Minimal command sequence" "$REPORT_DIR/phase2_minimization.log" | tail -1 || echo "Not determined")
+MINIMAL_SEQ=$(grep -A1 "Minimal command sequence" "$REPORT_DIR/phase2_minimization.log" 2>/dev/null | tail -1 || echo "Not determined")
 echo "Minimal sequence: $MINIMAL_SEQ"
 echo ""
 
@@ -45,10 +45,10 @@ echo "=========================================="
 
 # Extract problematic phases
 echo "Phases that prevent hang when disabled:"
-grep "✅ NO HANG when" "$REPORT_DIR/phase3_localization.log" || echo "None found"
+grep "✅ NO HANG when" "$REPORT_DIR/phase3_localization.log" 2>/dev/null || echo "None found"
 
 # Extract last phase from trace
-LAST_PHASE=$(grep "Last phase before hang:" "$REPORT_DIR/phase3_localization.log" | cut -d: -f2- | xargs)
+LAST_PHASE=$(grep "Last phase before hang:" "$REPORT_DIR/phase3_localization.log" 2>/dev/null | cut -d: -f2- | xargs || echo "Unknown")
 echo "Last phase in trace: $LAST_PHASE"
 echo ""
 
@@ -72,7 +72,7 @@ case "$CLASSIFICATION" in
     *"LOCK"*|*"MUTEX"*)
         echo "Lock/Mutex issue detected - checking for static initializers..."
         # Look for lazy_static or Once usage
-        grep -r "lazy_static\|Once::new\|ONCE_INIT" crates/engine-core/src/movegen/ > "$REPORT_DIR/static_init_usage.txt" || true
+        grep -r "lazy_static\|Once::new\|ONCE_INIT" crates/engine-core/src/movegen/ > "$REPORT_DIR/static_init_usage.txt" 2>/dev/null || true
         echo "Static initializer usage saved to $REPORT_DIR/static_init_usage.txt"
         ;;
         
@@ -108,12 +108,12 @@ Generated: $(date)
 
 ## Minimization
 - **Minimal USI Sequence**: $MINIMAL_SEQ
-- **Subprocess-specific**: $(grep -q "Works directly" "$REPORT_DIR/phase2_minimization.log" && echo "Yes" || echo "No")
+- **Subprocess-specific**: $(grep -q "Works directly" "$REPORT_DIR/phase2_minimization.log" 2>/dev/null && echo "Yes" || echo "No")
 
 ## Localization
 - **Last Phase Before Hang**: $LAST_PHASE
 - **Phases That Prevent Hang**:
-$(grep "✅ NO HANG when" "$REPORT_DIR/phase3_localization.log" | sed 's/^/  - /')
+$(grep "✅ NO HANG when" "$REPORT_DIR/phase3_localization.log" 2>/dev/null | sed 's/^/  - /' || echo "  - None found")
 
 ## Recommendations
 
@@ -132,7 +132,7 @@ if [[ "$LAST_PHASE" == *"checkers_pins"* ]]; then
 EOF
 fi
 
-if grep -q "NO HANG when .* is disabled" "$REPORT_DIR/phase3_localization.log"; then
+if grep -q "NO HANG when .* is disabled" "$REPORT_DIR/phase3_localization.log" 2>/dev/null; then
     cat >> "$REPORT_DIR/SUMMARY.md" << EOF
 2. **Isolated to specific phase(s)**
    - Add detailed logging within the problematic phase

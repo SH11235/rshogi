@@ -2,7 +2,7 @@
 # MoveGenハング証拠収集スクリプト
 # Phase 1: 分類（CPU/IO/ロック）のための証拠を収集
 
-set -u
+set -euo pipefail
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 DIR="hang_evidence_${TIMESTAMP}"
@@ -37,11 +37,11 @@ cat "$DIR/ps_threads.txt"
 echo ""
 
 # 高CPU使用率のチェック
-if grep -E '(9[0-9]|100)\..*engine-cli' "$DIR/ps_threads.txt" > /dev/null; then
+if grep -E '(9[0-9]|100)\..*engine-cli' "$DIR/ps_threads.txt" 2>/dev/null || false; then
     echo "⚠️  HIGH CPU DETECTED - Likely a computation loop"
-elif grep -E 'futex_wait' "$DIR/ps_threads.txt" > /dev/null; then
+elif grep -E 'futex_wait' "$DIR/ps_threads.txt" 2>/dev/null || false; then
     echo "🔒 FUTEX WAIT DETECTED - Likely a lock/mutex issue"
-elif grep -E '(pipe_wait|poll_schedule|do_wait)' "$DIR/ps_threads.txt" > /dev/null; then
+elif grep -E '(pipe_wait|poll_schedule|do_wait)' "$DIR/ps_threads.txt" 2>/dev/null || false; then
     echo "📝 IO WAIT DETECTED - Likely an I/O blocking issue"
 fi
 
@@ -65,26 +65,26 @@ sleep 3
 
 # 5. すべて終了
 echo "Terminating strace..."
-kill $STRACE_PID 2>/dev/null
+kill $STRACE_PID 2>/dev/null || true
 
 echo "Terminating engine..."
-kill -TERM $PID 2>/dev/null
+kill -TERM $PID 2>/dev/null || true
 sleep 1
-kill -KILL $PID 2>/dev/null
+kill -KILL $PID 2>/dev/null || true
 
 # 6. ログの解析
 echo ""
 echo "=== Strace Summary ==="
 if [ -f "$DIR/strace.log" ]; then
     echo "Last 20 system calls:"
-    tail -20 "$DIR/strace.log" | grep -v "SIGCHLD"
+    tail -20 "$DIR/strace.log" | grep -v "SIGCHLD" || true
     
     echo ""
     echo "Futex calls:"
-    grep -c "futex" "$DIR/strace.log" || echo "0"
+    grep -c "futex" "$DIR/strace.log" 2>/dev/null || echo "0"
     
     echo "Write calls:"
-    grep -c "write" "$DIR/strace.log" || echo "0"
+    grep -c "write" "$DIR/strace.log" 2>/dev/null || echo "0"
 fi
 
 # 7. ハングの分類
@@ -92,9 +92,9 @@ echo ""
 echo "=== Hang Classification ==="
 echo "Based on collected evidence:"
 
-CPU_USAGE=$(awk '$3 > 90 {print $3}' "$DIR/ps_threads.txt" | head -1)
+CPU_USAGE=$(awk '$3 > 90 {print $3}' "$DIR/ps_threads.txt" | head -1 || true)
 FUTEX_COUNT=$(grep -c "futex.*FUTEX_WAIT" "$DIR/strace.log" 2>/dev/null || echo "0")
-WRITE_BLOCKED=$(grep -E "write.*<unfinished" "$DIR/strace.log" | grep -v "resumed>" | wc -l)
+WRITE_BLOCKED=$(grep -E "write.*<unfinished" "$DIR/strace.log" 2>/dev/null | grep -v "resumed>" | wc -l || echo "0")
 
 if [ -n "$CPU_USAGE" ]; then
     echo "Type: CPU LOOP (${CPU_USAGE}% CPU usage)"
