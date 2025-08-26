@@ -536,7 +536,20 @@ impl AttackTables {
 
 // Global attack tables instance
 lazy_static! {
-    static ref ATTACK_TABLES: AttackTables = AttackTables::new();
+    static ref ATTACK_TABLES: AttackTables = {
+        #[cfg(debug_assertions)]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static ATTACK_TABLES_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+            if ATTACK_TABLES_INIT_STARTED.swap(true, Ordering::SeqCst) {
+                panic!("ATTACK_TABLES initialization re-entered! Circular dependency detected.");
+            }
+            // Debug output removed to prevent I/O deadlock in subprocess context
+        }
+
+        // Debug output removed to prevent I/O deadlock in subprocess context
+        AttackTables::new()
+    };
 }
 
 // ============================================================================

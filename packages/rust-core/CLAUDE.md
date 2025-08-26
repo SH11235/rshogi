@@ -44,6 +44,15 @@ Before committing any Rust code changes, ALWAYS run:
 2. `cargo clippy -- -D warnings` - Run clippy with warnings as errors
 3. `cargo test` - Ensure all tests pass
 
+If Clippy reports warnings:
+
+- First, try automatic fixes:
+	- `cargo clippy --fix --allow-dirty`
+- Then re-run Clippy with warnings as errors:
+	- `cargo clippy -- -D warnings`
+- If warnings remain, fix them manually.
+- Optionally run `cargo fmt` again if auto-fixes introduced formatting changes.
+
 ### Additional Best Practices
 
 - Use `Result` types for error handling instead of panicking

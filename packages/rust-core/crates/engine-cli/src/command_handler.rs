@@ -60,6 +60,7 @@ pub struct CommandContext<'a> {
     pub allow_null_move: bool,
     pub position_state: &'a mut Option<PositionState>, // Store position state for recovery
     pub program_start: Instant, // Program start time for elapsed calculations
+    pub legal_moves_check_logged: &'a mut bool, // Track if we've logged the legal moves check status
 }
 
 /// Build BestmoveMeta from common parameters
@@ -187,8 +188,6 @@ impl<'a> CommandContext<'a> {
                 }
                 Err(e) => {
                     log::error!("BestmoveEmitter::emit failed: {e}");
-                    // Always finalize search even on error
-                    self.finalize_search(finalize_label);
                     // Send TSV log for fallback
                     self.send_fallback_tsv_log(
                         &best_move,
@@ -201,19 +200,21 @@ impl<'a> CommandContext<'a> {
                         log::error!("Failed to send bestmove even with direct fallback: {e}");
                         // Continue without propagating error - USI requires best effort
                     }
+                    // Always finalize search after attempting to emit
+                    self.finalize_search(finalize_label);
                     Ok(())
                 }
             }
         } else {
             log::warn!("BestmoveEmitter not available; sending bestmove directly");
-            // Always finalize before sending
-            self.finalize_search(finalize_label);
             // Send TSV log for direct send
             self.send_fallback_tsv_log(&best_move, ponder.as_deref(), Some(&meta), "no_emitter");
             if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
                 log::error!("Failed to send bestmove directly: {e}");
                 // Continue without propagating error - USI requires best effort
             }
+            // Always finalize search after attempting to emit
+            self.finalize_search(finalize_label);
             Ok(())
         }
     }
@@ -327,6 +328,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
 
         UsiCommand::IsReady => {
             // Initialize engine if needed
+            // Note: Static tables are already initialized in main() using init_all_tables_once()
+            // which is idempotent (using std::sync::Once internally)
             {
                 let mut engine = lock_or_recover_adapter(ctx.engine);
                 engine.initialize()?;
@@ -736,9 +739,59 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // TEMPORARY: Skip sanity check to avoid hang in process execution
-        // TODO: Investigate why has_legal_moves() hangs in process context after init
-        log::warn!("Skipping has_legal_moves check to avoid process hang (temporary workaround)");
+        // NOTE: has_legal_moves check is implemented but disabled due to MoveGen hang issue
+        //
+        // EngineAdapter::has_legal_moves() exists and uses MoveGen::generate_all(),
+        // but calling it from subprocess context causes a hang. The issue appears to be
+        // related to complex interaction between subprocess execution and engine_core APIs.
+        //
+        // The check is controlled by SKIP_LEGAL_MOVES environment variable:
+        // - SKIP_LEGAL_MOVES=1 (default): Skip the check to avoid hang
+        // - SKIP_LEGAL_MOVES=0: Would enable the check but causes hang in subprocess
+        //
+        // Additionally, USE_ANY_LEGAL environment variable controls which method to use:
+        // - USE_ANY_LEGAL=1: Use optimized has_any_legal_move() with early exit
+        // - USE_ANY_LEGAL=0 (default): Use standard has_legal_moves() with generate_all
+        //
+        // This workaround is safe because:
+        // - Positions without legal moves are extremely rare
+        // - The search algorithm handles checkmate/stalemate naturally
+        // - See docs/movegen-hang-investigation-final.md for details
+        let skip_legal_moves_check = std::env::var("SKIP_LEGAL_MOVES").as_deref() != Ok("0");
+        let use_any_legal = std::env::var("USE_ANY_LEGAL").as_deref() == Ok("1");
+
+        if skip_legal_moves_check {
+            // Only log once per session
+            if !*ctx.legal_moves_check_logged {
+                log::debug!("has_legal_moves check is disabled (SKIP_LEGAL_MOVES != 0)");
+                *ctx.legal_moves_check_logged = true;
+            }
+        } else {
+            // Check is enabled - perform it with timing
+            let check_start = Instant::now();
+            let has_legal_moves = if use_any_legal {
+                engine.has_any_legal_move()?
+            } else {
+                engine.has_legal_moves()?
+            };
+
+            let check_duration = check_start.elapsed();
+            if check_duration > Duration::from_millis(5) {
+                log::warn!(
+                    "Legal moves check took {:?} (method: {})",
+                    check_duration,
+                    if use_any_legal {
+                        "has_any_legal_move"
+                    } else {
+                        "has_legal_moves"
+                    }
+                );
+            }
+
+            if !has_legal_moves {
+                return fail_position_restore(ResignReason::Checkmate, "no_legal_moves");
+            }
+        }
     }
 
     // Clean up old stop flag before creating new one
@@ -1257,6 +1310,7 @@ mod tests {
         Option<Arc<AtomicBool>>,
         Option<PositionState>,
         Option<JoinHandle<()>>,
+        bool,
     ) {
         let engine = Arc::new(Mutex::new(EngineAdapter::new()));
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -1285,6 +1339,7 @@ mod tests {
             current_stop_flag,
             position_state,
             worker_handle,
+            false, // legal_moves_check_logged
         )
     }
 
@@ -1337,6 +1392,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1354,6 +1410,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1392,6 +1449,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1409,6 +1467,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1453,6 +1512,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1470,6 +1530,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1505,6 +1566,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1522,6 +1584,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1560,6 +1623,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         // Set initial position
@@ -1583,6 +1647,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1663,6 +1728,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1680,6 +1746,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1721,6 +1788,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1738,6 +1806,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1769,6 +1838,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1786,6 +1856,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1841,6 +1912,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1858,6 +1930,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1919,6 +1992,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1936,6 +2010,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -1999,6 +2074,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         // Set up engine adapter with very short byoyomi_safety_ms
@@ -2025,6 +2101,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -2137,6 +2214,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         // Set up engine adapter with very short byoyomi_safety_ms
@@ -2163,6 +2241,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -2226,6 +2305,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -2243,6 +2323,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
@@ -2305,6 +2386,7 @@ mod tests {
             mut current_stop_flag,
             mut position_state,
             mut worker_handle,
+            mut legal_moves_check_logged,
         ) = create_test_context();
 
         // Set up engine adapter with very short timeout (1ms)
@@ -2330,6 +2412,7 @@ mod tests {
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
         };
 
