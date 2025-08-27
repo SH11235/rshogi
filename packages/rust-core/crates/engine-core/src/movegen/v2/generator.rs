@@ -1,6 +1,6 @@
 use crate::shogi::attacks::{between_bb, sliding_attacks};
 use crate::shogi::board_constants::{
-    RANK_1_2_MASK, RANK_1_MASK, RANK_8_9_MASK, RANK_9_MASK, SHOGI_BOARD_SIZE,
+    FILE_MASKS, RANK_1_2_MASK, RANK_1_MASK, RANK_8_9_MASK, RANK_9_MASK, SHOGI_BOARD_SIZE,
 };
 use crate::shogi::moves::Move;
 use crate::shogi::{Bitboard, Color, PieceType, Position, Square};
@@ -474,19 +474,17 @@ impl<'a> MoveGenImpl<'a> {
                 let lance_forward_squares = match us {
                     Color::Black => {
                         // Black lance moves toward rank 0 (up)
-                        let mut forward = Bitboard::EMPTY;
-                        for r in 0..from.rank() {
-                            forward.set(Square::new(lance_file, r));
-                        }
-                        forward
+                        // Get all squares on the file up to (but not including) current rank
+                        let file_mask = Bitboard(FILE_MASKS[lance_file as usize]);
+                        let rank_mask = Bitboard((1u128 << (from.rank() * 9)) - 1);
+                        file_mask & rank_mask
                     }
                     Color::White => {
                         // White lance moves toward rank 8 (down)
-                        let mut forward = Bitboard::EMPTY;
-                        for r in (from.rank() + 1)..=8 {
-                            forward.set(Square::new(lance_file, r));
-                        }
-                        forward
+                        // Get all squares on the file from rank+1 to rank 8
+                        let file_mask = Bitboard(FILE_MASKS[lance_file as usize]);
+                        let rank_mask = !Bitboard((1u128 << ((from.rank() + 1) * 9)) - 1);
+                        file_mask & rank_mask & Bitboard::ALL
                     }
                 };
 
