@@ -735,7 +735,37 @@ pub fn search_worker(
                 // - Not a ponder search OR
                 // - Ponder search that was converted via ponderhit
                 if !was_ponder || ponder_hit_occurred {
-                    // Normal search or ponder-hit search that was stopped - send emergency move
+                    // 優先: 既にコミット済みのベストがあればそれを返す
+                    if session.committed_best.is_some() {
+                        if let Err(e) = tx.send(WorkerMessage::IterationComplete {
+                            session: Box::new(session.clone()),
+                            search_id,
+                        }) {
+                            log::error!("Failed to send committed session on stop: {e}");
+                        }
+                        if let Err(e) = tx.send(WorkerMessage::SearchFinished {
+                            session_id: session.id,
+                            root_hash: session.root_hash,
+                            search_id,
+                            stop_info: Some(StopInfo {
+                                reason: TerminationReason::UserStop,
+                                elapsed_ms: 0,
+                                nodes: 0,
+                                depth_reached: session
+                                    .committed_best
+                                    .as_ref()
+                                    .map(|b| b.depth)
+                                    .unwrap_or(0),
+                                hard_timeout: false,
+                            }),
+                        }) {
+                            log::error!("Failed to send SearchFinished with committed best: {e}");
+                        }
+                        // Done
+                        return;
+                    }
+
+                    // コミットがない場合のみ非常手にフォールバック
                     match emergency_result {
                         Ok(emergency_move) => {
                             log::info!("Generated emergency move after stop: {emergency_move}");
