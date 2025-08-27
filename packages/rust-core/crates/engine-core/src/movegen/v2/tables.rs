@@ -36,10 +36,10 @@ impl AttackTables {
         for i in 0..81 {
             let sq = Square::new((i % 9) as u8, (i / 9) as u8);
             let index = sq.index();
-            
+
             // King attacks (8 directions)
             tables.king_attacks[index] = generate_king_attacks(sq);
-            
+
             // Piece attacks for both colors
             for &color in &[Color::Black, Color::White] {
                 let color_idx = color as usize;
@@ -103,8 +103,8 @@ impl ZobristKeys {
 }
 
 // Global static instances using once_cell
-pub static ATTACK_TABLES: Lazy<AttackTables> = Lazy::new(|| AttackTables::generate());
-pub static ZOBRIST_KEYS: Lazy<ZobristKeys> = Lazy::new(|| ZobristKeys::generate());
+pub static ATTACK_TABLES: Lazy<AttackTables> = Lazy::new(AttackTables::generate);
+pub static ZOBRIST_KEYS: Lazy<ZobristKeys> = Lazy::new(ZobristKeys::generate);
 
 // Helper functions to generate attack patterns
 
@@ -114,16 +114,21 @@ fn generate_king_attacks(sq: Square) -> Bitboard {
 
     // All 8 directions
     let offsets = [
-        (-1, -1), (0, -1), (1, -1),
-        (-1,  0),          (1,  0),
-        (-1,  1), (0,  1), (1,  1),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
     ];
 
     for (df, dr) in offsets {
         let new_file = file as i8 + df;
         let new_rank = rank as i8 + dr;
-        
-        if new_file >= 0 && new_file <= 8 && new_rank >= 0 && new_rank <= 8 {
+
+        if (0..=8).contains(&new_file) && (0..=8).contains(&new_rank) {
             let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
@@ -139,22 +144,28 @@ fn generate_gold_attacks(sq: Square, color: Color) -> Bitboard {
     // Gold moves like king except backward diagonals
     let offsets = match color {
         Color::Black => [
-            (-1, -1), (0, -1), (1, -1),  // Forward
-            (-1,  0),          (1,  0),  // Sides
-            (0,  1),                     // Back
+            (-1, -1),
+            (0, -1),
+            (1, -1), // Forward
+            (-1, 0),
+            (1, 0), // Sides
+            (0, 1), // Back
         ],
         Color::White => [
-            (-1,  1), (0,  1), (1,  1),  // Forward (reversed)
-            (-1,  0),          (1,  0),  // Sides
-            (0, -1),                     // Back
+            (-1, 1),
+            (0, 1),
+            (1, 1), // Forward (reversed)
+            (-1, 0),
+            (1, 0),  // Sides
+            (0, -1), // Back
         ],
     };
 
     for (df, dr) in offsets {
         let new_file = file as i8 + df;
         let new_rank = rank as i8 + dr;
-        
-        if new_file >= 0 && new_file <= 8 && new_rank >= 0 && new_rank <= 8 {
+
+        if (0..=8).contains(&new_file) && (0..=8).contains(&new_rank) {
             let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
@@ -170,20 +181,26 @@ fn generate_silver_attacks(sq: Square, color: Color) -> Bitboard {
     // Silver moves forward and diagonally
     let offsets = match color {
         Color::Black => [
-            (-1, -1), (0, -1), (1, -1),  // Forward
-            (-1,  1),          (1,  1),  // Backward diagonals
+            (-1, -1),
+            (0, -1),
+            (1, -1), // Forward
+            (-1, 1),
+            (1, 1), // Backward diagonals
         ],
         Color::White => [
-            (-1,  1), (0,  1), (1,  1),  // Forward (reversed)
-            (-1, -1),          (1, -1),  // Backward diagonals
+            (-1, 1),
+            (0, 1),
+            (1, 1), // Forward (reversed)
+            (-1, -1),
+            (1, -1), // Backward diagonals
         ],
     };
 
     for (df, dr) in offsets {
         let new_file = file as i8 + df;
         let new_rank = rank as i8 + dr;
-        
-        if new_file >= 0 && new_file <= 8 && new_rank >= 0 && new_rank <= 8 {
+
+        if (0..=8).contains(&new_file) && (0..=8).contains(&new_rank) {
             let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
@@ -198,15 +215,15 @@ fn generate_knight_attacks(sq: Square, color: Color) -> Bitboard {
 
     // Knight jumps in L-shape
     let offsets = match color {
-        Color::Black => [(-1, -2), (1, -2)],  // Two squares forward, one to the side
-        Color::White => [(-1,  2), (1,  2)],  // Reversed for white
+        Color::Black => [(-1, -2), (1, -2)], // Two squares forward, one to the side
+        Color::White => [(-1, 2), (1, 2)],   // Reversed for white
     };
 
     for (df, dr) in offsets {
         let new_file = file as i8 + df;
         let new_rank = rank as i8 + dr;
-        
-        if new_file >= 0 && new_file <= 8 && new_rank >= 0 && new_rank <= 8 {
+
+        if (0..=8).contains(&new_file) && (0..=8).contains(&new_rank) {
             let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
@@ -217,13 +234,13 @@ fn generate_knight_attacks(sq: Square, color: Color) -> Bitboard {
 
 fn generate_pawn_attacks(sq: Square, color: Color) -> Bitboard {
     let (file, rank) = (sq.file(), sq.rank());
-    
+
     let new_rank = match color {
         Color::Black => rank as i8 - 1,
         Color::White => rank as i8 + 1,
     };
 
-    if new_rank >= 0 && new_rank <= 8 {
+    if (0..=8).contains(&new_rank) {
         let target = Square::new(file, new_rank as u8);
         Bitboard::from_square(target)
     } else {
