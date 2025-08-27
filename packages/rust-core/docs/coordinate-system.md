@@ -156,13 +156,12 @@ match mv.from() {
 ### 手の合法性を確認
 ```rust
 // 任意の局面で合法手を列挙
-let mut move_gen = MoveGen::new();
-let mut legal_moves = MoveList::new();
-move_gen.generate_all(&position, &mut legal_moves);
+let move_gen = MoveGenerator::new();
+let legal_moves = move_gen.generate_all(&position).expect("Failed to generate moves");
 
 // USI形式で表示
-for i in 0..legal_moves.len() {
-    println!("{}: {}", i, move_to_usi(&legal_moves[i]));
+for (i, mv) in legal_moves.iter().enumerate() {
+    println!("{}: {}", i, move_to_usi(&mv));
 }
 ```
 
@@ -181,14 +180,13 @@ parse_usi_moveで生成した手は、フラグ（成り/不成など）が不�
 
 ```rust
 fn parse_and_validate_move(position: &Position, usi_move: &str) -> Result<Move> {
-    let mut move_gen = MoveGen::new();
-    let mut legal_moves = MoveList::new();
-    move_gen.generate_all(position, &mut legal_moves);
+    let move_gen = MoveGenerator::new();
+    let legal_moves = move_gen.generate_all(position)?;
     
     // USI文字列で比較
-    for i in 0..legal_moves.len() {
-        if move_to_usi(&legal_moves[i]) == usi_move {
-            return Ok(legal_moves[i]);
+    for mv in legal_moves.iter() {
+        if move_to_usi(&mv) == usi_move {
+            return Ok(*mv);
         }
     }
     
