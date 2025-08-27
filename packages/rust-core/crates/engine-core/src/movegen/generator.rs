@@ -59,6 +59,7 @@ struct MoveGenImpl<'a> {
     pin_rays: [Bitboard; SHOGI_BOARD_SIZE],
     non_king_check_mask: Bitboard,
     drop_block_mask: Bitboard,
+    king_danger_squares: Bitboard, // Squares where king cannot move
     us: Color,
     them: Color,
     our_pieces: Bitboard,
@@ -90,12 +91,18 @@ impl<'a> MoveGenImpl<'a> {
             pin_rays: [Bitboard::EMPTY; SHOGI_BOARD_SIZE],
             non_king_check_mask: Bitboard::ALL, // 0チェック時は制約なし
             drop_block_mask: Bitboard::ALL,     // 0チェック時は制約なし
+            king_danger_squares: Bitboard::EMPTY, // 王が移動できない危険マス
             us,
             them,
             our_pieces,
             their_pieces,
             occupied,
         };
+
+        // Always exclude enemy king square from non_king_check_mask
+        if let Some(their_king_sq) = pos.board.king_square(them) {
+            gen.non_king_check_mask &= !Bitboard::from_square(their_king_sq);
+        }
 
         // Now calculate pin rays after we have the mutable gen
         gen.calculate_pin_rays();
@@ -107,6 +114,12 @@ impl<'a> MoveGenImpl<'a> {
                 // Single check - can block or capture
                 let checker_sq = gen.checkers.lsb().unwrap();
                 gen.non_king_check_mask = gen.checkers; // Can capture checker
+
+                // Exclude enemy king square to prevent illegal king capture
+                // (Already excluded in initialization, but we need to re-apply after setting to checkers)
+                if let Some(their_king_sq) = gen.pos.board.king_square(them) {
+                    gen.non_king_check_mask &= !Bitboard::from_square(their_king_sq);
+                }
 
                 // Add blocking squares if checker is a sliding piece
                 if gen.is_sliding_piece(checker_sq) {
@@ -120,6 +133,11 @@ impl<'a> MoveGenImpl<'a> {
                 // Double check - only king moves allowed
                 gen.non_king_check_mask = Bitboard::EMPTY;
                 gen.drop_block_mask = Bitboard::EMPTY;
+            }
+
+            // Calculate king danger squares for single check from sliding pieces
+            if gen.checkers.count_ones() == 1 {
+                gen.calculate_king_danger_squares();
             }
         }
 
@@ -209,7 +227,7 @@ impl<'a> MoveGenImpl<'a> {
     /// Generate king moves
     fn generate_king_moves(&mut self, moves: &mut MoveList) {
         let attacks = king_attacks(self.king_sq);
-        let valid_targets = attacks & !self.our_pieces;
+        let valid_targets = attacks & !self.our_pieces & !self.king_danger_squares;
 
         for to_sq in valid_targets {
             // Check if king would be safe on this square
@@ -300,19 +318,21 @@ impl<'a> MoveGenImpl<'a> {
                 // Only need to check squares where pawn would give check
                 let them = us.opposite();
                 if let Some(their_king_sq) = self.pos.board.king_square(them) {
+                    #[cfg(test)]
+                    println!("Checking drop pawn mate: their_king at {}", their_king_sq);
                     let potential_check_sq = match us {
                         Color::Black => {
-                            // Black pawn checks from one rank below (toward white)
-                            if their_king_sq.rank() > 0 {
-                                Some(Square::new(their_king_sq.file(), their_king_sq.rank() - 1))
+                            // Black pawn attacks toward rank 0, so it checks from one rank above
+                            if their_king_sq.rank() < 8 {
+                                Some(Square::new(their_king_sq.file(), their_king_sq.rank() + 1))
                             } else {
                                 None
                             }
                         }
                         Color::White => {
-                            // White pawn checks from one rank above (toward black)
-                            if their_king_sq.rank() < 8 {
-                                Some(Square::new(their_king_sq.file(), their_king_sq.rank() + 1))
+                            // White pawn attacks toward rank 8, so it checks from one rank below
+                            if their_king_sq.rank() > 0 {
+                                Some(Square::new(their_king_sq.file(), their_king_sq.rank() - 1))
                             } else {
                                 None
                             }
@@ -320,6 +340,13 @@ impl<'a> MoveGenImpl<'a> {
                     };
 
                     if let Some(check_sq) = potential_check_sq {
+                        #[cfg(test)]
+                        println!(
+                            "Potential check square: {}, valid: {}",
+                            check_sq,
+                            valid.test(check_sq)
+                        );
+
                         if valid.test(check_sq) && self.is_drop_pawn_mate(check_sq, them) {
                             valid.clear(check_sq);
                         }
@@ -644,6 +671,58 @@ impl<'a> MoveGenImpl<'a> {
             matches!(piece.piece_type, PieceType::Rook | PieceType::Bishop | PieceType::Lance)
         } else {
             false
+        }
+    }
+
+    /// Calculate danger squares where king cannot move when in check from sliding pieces
+    fn calculate_king_danger_squares(&mut self) {
+        if let Some(checker_sq) = self.checkers.lsb() {
+            if let Some(checker_piece) = self.pos.board.piece_on(checker_sq) {
+                match checker_piece.piece_type {
+                    PieceType::Rook => {
+                        // For rook, the entire rank and file through king position are dangerous
+                        if self.king_sq.file() == checker_sq.file() {
+                            // Same file - entire file is dangerous
+                            self.king_danger_squares |=
+                                Bitboard(FILE_MASKS[self.king_sq.file() as usize]);
+                        }
+                        if self.king_sq.rank() == checker_sq.rank() {
+                            // Same rank - entire rank is dangerous
+                            for file in 0..9 {
+                                self.king_danger_squares
+                                    .set(Square::new(file, self.king_sq.rank()));
+                            }
+                        }
+                    }
+                    PieceType::Bishop => {
+                        // For bishop, the diagonal lines through king position are dangerous
+                        let file_diff =
+                            (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                        let rank_diff =
+                            (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+
+                        // Calculate both directions along the diagonal
+                        for dir in [-1, 1] {
+                            let mut file = self.king_sq.file() as i8 + file_diff * dir;
+                            let mut rank = self.king_sq.rank() as i8 + rank_diff * dir;
+
+                            while (0..9).contains(&file) && (0..9).contains(&rank) {
+                                self.king_danger_squares.set(Square::new(file as u8, rank as u8));
+                                file += file_diff * dir;
+                                rank += rank_diff * dir;
+                            }
+                        }
+                    }
+                    PieceType::Lance => {
+                        // For lance, the entire file in the direction of attack is dangerous
+                        if self.king_sq.file() == checker_sq.file() {
+                            self.king_danger_squares |=
+                                Bitboard(FILE_MASKS[self.king_sq.file() as usize]);
+                        }
+                    }
+                    _ => {} // Other pieces don't have ray attacks
+                }
+            }
         }
     }
 
@@ -1381,7 +1460,7 @@ impl<'a> MoveGenImpl<'a> {
         attackers |= king_attacks & enemy_king;
 
         // Gold attacks (including promoted pieces)
-        let gold_attacks = gold_attacks(sq, by);
+        let gold_attacks = gold_attacks(sq, by.opposite());
         let enemy_golds = self.pos.board.piece_bb[by as usize][PieceType::Gold as usize] & pieces;
         let promoted_pieces = self.pos.board.promoted_bb & pieces;
         let gold_movers = enemy_golds
@@ -1393,7 +1472,7 @@ impl<'a> MoveGenImpl<'a> {
         attackers |= gold_attacks & gold_movers;
 
         // Silver attacks
-        let silver_attacks = silver_attacks(sq, by);
+        let silver_attacks = silver_attacks(sq, by.opposite());
         let enemy_silvers = self.pos.board.piece_bb[by as usize][PieceType::Silver as usize]
             & !self.pos.board.promoted_bb
             & pieces;
@@ -1461,9 +1540,20 @@ impl<'a> MoveGenImpl<'a> {
             return false; // Not even a check
         }
 
+        // Debug logging - use println for immediate output
+        #[cfg(test)]
+        {
+            println!(
+                "=== is_drop_pawn_mate called for pawn at {} with king at {} ===",
+                to, their_king_sq
+            );
+        }
+
         // Early return if the pawn is not supported (king can just capture it)
         let pawn_support = self.attackers_to_with_occupancy(to, us, self.pos.board.all_bb);
         if pawn_support.is_empty() {
+            #[cfg(test)]
+            log::debug!("Pawn at {} is not supported", to);
             return false;
         }
 
@@ -1479,6 +1569,8 @@ impl<'a> MoveGenImpl<'a> {
         let king_capturer_attackers =
             self.attackers_to_with_occupancy(to, us, occ_after_king_capture);
         if king_capturer_attackers.is_empty() {
+            #[cfg(test)]
+            println!("  King can safely capture pawn at {}", to);
             return false; // King can safely capture
         }
 
@@ -1491,37 +1583,56 @@ impl<'a> MoveGenImpl<'a> {
         // A piece is pinned if it's on the line between king and an attacker
         let mut defenders = non_king_defenders;
         while let Some(def_sq) = defenders.pop_lsb() {
-            // Quick check: if defender is not on any line to the king, it can't be pinned
-            let between = between_bb(def_sq, their_king_sq);
-            if between.is_empty() {
-                // Not on same line as king, definitely not pinned
-                return false;
+            #[cfg(test)]
+            println!("  Checking defender at {} for pawn at {}", def_sq, to);
+
+            // Quick check: if defender is not aligned with king, it can't be pinned
+            if !self.is_aligned(def_sq, their_king_sq) {
+                #[cfg(test)]
+                println!("    Defender at {} not aligned with king at {}", def_sq, their_king_sq);
+                return false; // Not aligned = not pinned
             }
 
-            // Check if removing defender exposes king to check
-            let mut occ_test = self.pos.board.all_bb;
-            occ_test.clear(def_sq);
+            // Check if removing defender exposes king to check from sliding pieces
+            // Use current board occupancy (before pawn drop) to check pins
+            let mut occ_without_defender = self.pos.board.all_bb;
+            occ_without_defender.clear(def_sq);
 
-            // Only check attackers that could pin through this defender
-            let potential_pinners =
-                self.pos.board.occupied_bb[us as usize] & !Bitboard::from_square(to);
-            let through_defender_attackers = self.check_attacks_through_square(
-                their_king_sq,
-                def_sq,
-                us,
-                potential_pinners,
-                occ_test,
-            );
+            // Check only sliding pieces that could pin
+            let attackers = self.sliding_attackers_to(their_king_sq, us, occ_without_defender);
 
-            if through_defender_attackers.is_empty() {
-                return false; // Defender can capture
+            if attackers.is_empty() {
+                #[cfg(test)]
+                println!("    Defender at {} is not pinned", def_sq);
+                return false; // Defender is not pinned and can capture the pawn
             }
+
+            #[cfg(test)]
+            println!("    Defender at {} is pinned by {:?}", def_sq, attackers);
         }
 
         // 3) Check if king has escape squares
         let king_attacks = king_attacks(their_king_sq);
         let their_pieces = self.pos.board.occupied_bb[them as usize];
         let escape_squares = king_attacks & !their_pieces;
+
+        #[cfg(test)]
+        {
+            log::debug!(
+                "Checking escapes: king at {}, escape_squares: {:?}",
+                their_king_sq,
+                escape_squares
+            );
+        }
+
+        #[cfg(test)]
+        {
+            println!("  Escape checking with occupied_after_drop:");
+            // Show key pieces
+            if let Some(gold_1d) = self.pos.board.piece_on(Square::new(8, 3)) {
+                println!("  Gold at 1d present: {:?}", gold_1d);
+            }
+        }
 
         let mut escapes = escape_squares;
         while let Some(escape_sq) = escapes.pop_lsb() {
@@ -1540,89 +1651,56 @@ impl<'a> MoveGenImpl<'a> {
                 occ_after_escape.set(escape_sq); // King takes its place
             }
 
+            #[cfg(test)]
+            {
+                let piece_on_escape = self.pos.board.piece_on(escape_sq);
+                println!("  Checking escape to {}, piece there: {:?}", escape_sq, piece_on_escape);
+            }
+
             let escape_attackers =
                 self.attackers_to_with_occupancy(escape_sq, us, occ_after_escape);
+
+            #[cfg(test)]
+            {
+                if self.pos.board.occupied_bb[us as usize].test(escape_sq) {
+                    println!("  King would capture piece at {}", escape_sq);
+                }
+                // Debug: check if gold at 1d attacks 2c
+                if escape_sq == Square::new(7, 2) {
+                    // 2c
+                    let gold_1d_sq = Square::new(8, 3); // 1d
+                    let gold_attacks_2c = gold_attacks(gold_1d_sq, us);
+                    println!("  Gold at 1d attacks: {:?}", gold_attacks_2c);
+                    println!("  Does it include 2c? {}", gold_attacks_2c.test(escape_sq));
+
+                    // Check if gold is in the bitboards
+                    let gold_bb = self.pos.board.piece_bb[us as usize][PieceType::Gold as usize];
+                    println!("  Gold bitboard includes 1d? {}", gold_bb.test(gold_1d_sq));
+
+                    // Debug attackers_to calculation step by step
+                    println!("  Debugging attackers_to for 2c:");
+                    let gold_attackers = gold_attacks_2c & gold_bb;
+                    println!("    Gold attackers: {:?}", gold_attackers);
+                }
+                println!(
+                    "  Attackers to {}: {:?} (empty={})",
+                    escape_sq,
+                    escape_attackers,
+                    escape_attackers.is_empty()
+                );
+            }
+
             if escape_attackers.is_empty() {
+                #[cfg(test)]
+                println!("  King has safe escape to {}", escape_sq);
                 return false; // Safe escape exists
             }
+
+            #[cfg(test)]
+            println!("  Escape to {} is blocked by {:?}", escape_sq, escape_attackers);
         }
 
         true // No defense - it's mate
-    }
-
-    /// Check if there are attackers on the line through a square
-    fn check_attacks_through_square(
-        &self,
-        target: Square,
-        through: Square,
-        by: Color,
-        potential_attackers: Bitboard,
-        occupancy: Bitboard,
-    ) -> Bitboard {
-        let mut attackers = Bitboard::EMPTY;
-
-        // Early exit if through is not on a line with target
-        let between = between_bb(target, through);
-        if !between.test(through) {
-            return Bitboard::EMPTY;
-        }
-
-        // Check alignment type
-        let same_file = target.file() == through.file();
-        let same_rank = target.rank() == through.rank();
-        let rank_diff = (target.rank() as i8 - through.rank() as i8).abs();
-        let file_diff = (target.file() as i8 - through.file() as i8).abs();
-        let same_diag = rank_diff == file_diff && rank_diff != 0;
-
-        // Rooks and promoted rooks (on ranks and files)
-        if same_rank || same_file {
-            let rooks = self.pos.board.piece_bb[by as usize][PieceType::Rook as usize]
-                & potential_attackers;
-            for rook_sq in rooks {
-                // Check if rook-target line passes through 'through'
-                if between_bb(rook_sq, target).test(through) {
-                    let attacks = sliding_attacks(rook_sq, occupancy, PieceType::Rook);
-                    if attacks.test(target) {
-                        attackers.set(rook_sq);
-                    }
-                }
-            }
-
-            // Lances (only on files, directional)
-            if same_file {
-                let lances = self.pos.board.piece_bb[by as usize][PieceType::Lance as usize]
-                    & !self.pos.board.promoted_bb
-                    & potential_attackers;
-                for lance_sq in lances {
-                    let can_attack = match by {
-                        Color::Black => lance_sq.rank() > target.rank(),
-                        Color::White => lance_sq.rank() < target.rank(),
-                    };
-                    if can_attack {
-                        let lance_between = between_bb(lance_sq, target);
-                        if lance_between.test(through) && (lance_between & occupancy).is_empty() {
-                            attackers.set(lance_sq);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Bishops and promoted bishops (on diagonals)
-        if same_diag {
-            let bishops = self.pos.board.piece_bb[by as usize][PieceType::Bishop as usize]
-                & potential_attackers;
-            for bishop_sq in bishops {
-                if between_bb(bishop_sq, target).test(through) {
-                    let attacks = sliding_attacks(bishop_sq, occupancy, PieceType::Bishop);
-                    if attacks.test(target) {
-                        attackers.set(bishop_sq);
-                    }
-                }
-            }
-        }
-
-        attackers
     }
 
     /// Calculate file mask for all squares in the bitboard
@@ -1653,6 +1731,54 @@ impl<'a> MoveGenImpl<'a> {
                     | self.pos.board.piece_bb[us as usize][PieceType::Knight as usize]
                     | self.pos.board.piece_bb[us as usize][PieceType::Lance as usize]
                     | self.pos.board.piece_bb[us as usize][PieceType::Pawn as usize]))
+    }
+
+    /// Check if two squares are aligned (same file, rank, or diagonal)
+    fn is_aligned(&self, sq1: Square, sq2: Square) -> bool {
+        // Same file or rank
+        sq1.file() == sq2.file()
+            || sq1.rank() == sq2.rank()
+            || // Same diagonal
+        (sq1.file() as i8 - sq2.file() as i8).abs() == (sq1.rank() as i8 - sq2.rank() as i8).abs()
+    }
+
+    /// Get sliding piece attackers to a square with given occupancy
+    fn sliding_attackers_to(&self, sq: Square, by: Color, occ: Bitboard) -> Bitboard {
+        let mut attackers = Bitboard::EMPTY;
+
+        // Rooks and dragons
+        let rooks = self.pos.board.piece_bb[by as usize][PieceType::Rook as usize];
+        let rook_attacks = sliding_attacks(sq, occ, PieceType::Rook);
+        attackers |= rooks & rook_attacks;
+
+        // Bishops and horses
+        let bishops = self.pos.board.piece_bb[by as usize][PieceType::Bishop as usize];
+        let bishop_attacks = sliding_attacks(sq, occ, PieceType::Bishop);
+        attackers |= bishops & bishop_attacks;
+
+        // Lances (directional) - special handling since they only move in one direction
+        let lances = self.pos.board.piece_bb[by as usize][PieceType::Lance as usize]
+            & !self.pos.board.promoted_bb;
+        if !lances.is_empty() {
+            // For each lance, check if it attacks the square through the given occupancy
+            for lance_sq in lances {
+                // Lance can only attack forward (toward enemy)
+                let can_attack = match by {
+                    Color::Black => lance_sq.file() == sq.file() && lance_sq.rank() > sq.rank(),
+                    Color::White => lance_sq.file() == sq.file() && lance_sq.rank() < sq.rank(),
+                };
+
+                if can_attack {
+                    // Check if path is clear
+                    let between = between_bb(lance_sq, sq);
+                    if (between & occ).is_empty() {
+                        attackers.set(lance_sq);
+                    }
+                }
+            }
+        }
+
+        attackers
     }
 }
 
