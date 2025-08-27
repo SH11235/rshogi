@@ -1,5 +1,5 @@
 use crate::shogi::{Bitboard, Color, PieceType, Square, Position};
-use crate::shogi::moves::{Move, NormalMove, DropMove};
+use crate::shogi::moves::Move;
 
 use super::error::MoveGenError;
 use super::movelist::MoveList;
@@ -59,13 +59,12 @@ impl<'a> MoveGenImpl<'a> {
         let them = us.opposite();
         
         // Find king square
-        let king_sq = pos.board.pieces_bb(us, PieceType::King)
-            .to_square()
+        let king_sq = pos.board.king_square(us)
             .ok_or(MoveGenError::KingNotFound(us))?;
 
-        let our_pieces = pos.board.pieces_c(us);
-        let their_pieces = pos.board.pieces_c(them);
-        let occupied = our_pieces | their_pieces;
+        let our_pieces = pos.board.occupied_bb[us as usize];
+        let their_pieces = pos.board.occupied_bb[them as usize];
+        let occupied = pos.board.all_bb;
 
         // Calculate checkers and pinned pieces
         let (checkers, pinned) = calculate_pins_and_checkers(pos, king_sq, us);
@@ -165,14 +164,9 @@ impl<'a> MoveGenImpl<'a> {
         for to_sq in valid_targets {
             // Check if king would be safe on this square
             if !self.is_attacked_by(to_sq, self.them) {
-                let captured = self.pos.board.piece_at(to_sq);
-                let mv = Move::Normal(NormalMove {
-                    from: self.king_sq,
-                    to: to_sq,
-                    piece: self.pos.board.piece_at(self.king_sq).unwrap(),
-                    captured,
-                    promote: false,
-                });
+                let piece = self.pos.board.piece_on(self.king_sq).unwrap();
+                let captured_type = self.pos.board.piece_on(to_sq).map(|p| p.piece_type);
+                let mv = Move::normal_with_piece(self.king_sq, to_sq, false, piece.piece_type, captured_type);
                 moves.push(mv);
             }
         }
@@ -199,14 +193,9 @@ impl<'a> MoveGenImpl<'a> {
 
         for to_sq in captures {
             if !self.is_attacked_by(to_sq, self.them) {
-                let captured = self.pos.board.piece_at(to_sq);
-                let mv = Move::Normal(NormalMove {
-                    from: self.king_sq,
-                    to: to_sq,
-                    piece: self.pos.board.piece_at(self.king_sq).unwrap(),
-                    captured,
-                    promote: false,
-                });
+                let piece = self.pos.board.piece_on(self.king_sq).unwrap();
+                let captured_piece = self.pos.board.piece_on(to_sq).unwrap();
+                let mv = Move::normal_with_piece(self.king_sq, to_sq, false, piece.piece_type, Some(captured_piece.piece_type));
                 moves.push(mv);
             }
         }
@@ -219,13 +208,8 @@ impl<'a> MoveGenImpl<'a> {
 
         for to_sq in quiet {
             if !self.is_attacked_by(to_sq, self.them) {
-                let mv = Move::Normal(NormalMove {
-                    from: self.king_sq,
-                    to: to_sq,
-                    piece: self.pos.board.piece_at(self.king_sq).unwrap(),
-                    captured: None,
-                    promote: false,
-                });
+                let piece = self.pos.board.piece_on(self.king_sq).unwrap();
+                let mv = Move::normal_with_piece(self.king_sq, to_sq, false, piece.piece_type, None);
                 moves.push(mv);
             }
         }
@@ -279,7 +263,7 @@ impl<'a> MoveGenImpl<'a> {
 fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (Bitboard, Bitboard) {
     // TODO: Implement pin and checker calculation
     // This is a placeholder implementation
-    (Bitboard::empty(), Bitboard::empty())
+    (Bitboard::EMPTY, Bitboard::EMPTY)
 }
 
 #[cfg(test)]

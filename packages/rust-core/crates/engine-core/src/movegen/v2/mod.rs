@@ -32,8 +32,8 @@ impl MoveGenDebugInfo {
     /// Create empty debug info
     pub fn empty() -> Self {
         Self {
-            checkers: crate::shogi::Bitboard::empty(),
-            pinned: crate::shogi::Bitboard::empty(),
+            checkers: crate::shogi::Bitboard::EMPTY,
+            pinned: crate::shogi::Bitboard::EMPTY,
             move_count: 0,
             generation_time_ns: 0,
         }

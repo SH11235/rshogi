@@ -113,8 +113,8 @@ impl From<MoveList> for Vec<Move> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shogi::moves::{Move, NormalMove};
-    use crate::shogi::{Piece, PieceType, Color, Square};
+    use crate::shogi::moves::Move;
+    use crate::shogi::{PieceType, Square};
 
     #[test]
     fn test_movelist_basic_operations() {
@@ -123,18 +123,15 @@ mod tests {
         assert_eq!(list.len(), 0);
 
         // Create a test move
-        let mv = Move::Normal(NormalMove {
-            from: Square::SQ_77,
-            to: Square::SQ_76,
-            piece: Piece {
-                piece_type: PieceType::Pawn,
-                owner: Color::Black,
-            },
-            captured: None,
-            promote: false,
-        });
+        let mv = Move::normal_with_piece(
+            Square::new(2, 2), // 77 in shogi notation
+            Square::new(2, 3), // 76 in shogi notation
+            false,
+            PieceType::Pawn,
+            None, // No capture
+        );
 
-        list.push(mv.clone());
+        list.push(mv);
         assert_eq!(list.len(), 1);
         assert!(!list.is_empty());
 
@@ -149,16 +146,12 @@ mod tests {
         
         // Add multiple moves
         for i in 0..10 {
-            let mv = Move::Normal(NormalMove {
-                from: Square::SQ_77,
-                to: Square::from_index(i),
-                piece: Piece {
-                    piece_type: PieceType::Pawn,
-                    owner: Color::Black,
-                },
-                captured: None,
-                promote: false,
-            });
+            let mv = Move::normal_with_piece(
+                Square::new(2, 2), // 77 in shogi notation
+                Square::new(i % 9, i / 9),
+                false,
+                PieceType::Pawn,
+            );
             list.push(mv);
         }
 
@@ -181,19 +174,16 @@ mod tests {
     fn test_movelist_to_vec() {
         let mut list = MoveList::new();
         
-        let mv = Move::Normal(NormalMove {
-            from: Square::SQ_77,
-            to: Square::SQ_76,
-            piece: Piece {
-                piece_type: PieceType::Pawn,
-                owner: Color::Black,
-            },
-            captured: None,
-            promote: false,
-        });
+        let mv = Move::normal_with_piece(
+            Square::new(2, 2), // 77 in shogi notation
+            Square::new(2, 3), // 76 in shogi notation
+            false,
+            PieceType::Pawn,
+            None, // No capture
+        );
         
-        list.push(mv.clone());
-        list.push(mv.clone());
+        list.push(mv);
+        list.push(mv);
         
         let vec: Vec<Move> = list.into();
         assert_eq!(vec.len(), 2);

@@ -1,4 +1,4 @@
-use crate::shogi::{Bitboard, Color, PieceType, Square};
+use crate::shogi::{Bitboard, Color, Square};
 use once_cell::sync::Lazy;
 
 /// Attack tables for various piece types
@@ -21,16 +21,17 @@ impl AttackTables {
     /// Generate all attack tables
     pub fn generate() -> Self {
         let mut tables = Self {
-            king_attacks: [Bitboard::empty(); 81],
-            gold_attacks: [[Bitboard::empty(); 81]; 2],
-            silver_attacks: [[Bitboard::empty(); 81]; 2],
-            knight_attacks: [[Bitboard::empty(); 81]; 2],
-            pawn_attacks: [[Bitboard::empty(); 81]; 2],
-            lance_attacks: [[Bitboard::empty(); 81]; 2],
+            king_attacks: [Bitboard::EMPTY; 81],
+            gold_attacks: [[Bitboard::EMPTY; 81]; 2],
+            silver_attacks: [[Bitboard::EMPTY; 81]; 2],
+            knight_attacks: [[Bitboard::EMPTY; 81]; 2],
+            pawn_attacks: [[Bitboard::EMPTY; 81]; 2],
+            lance_attacks: [[Bitboard::EMPTY; 81]; 2],
         };
 
         // Generate attack patterns for each square
-        for sq in Square::all() {
+        for i in 0..81 {
+            let sq = Square::new((i % 9) as u8, (i / 9) as u8);
             let index = sq.index();
             
             // King attacks (8 directions)
@@ -105,7 +106,7 @@ pub static ZOBRIST_KEYS: Lazy<ZobristKeys> = Lazy::new(|| ZobristKeys::generate(
 // Helper functions to generate attack patterns
 
 fn generate_king_attacks(sq: Square) -> Bitboard {
-    let mut attacks = Bitboard::empty();
+    let mut attacks = Bitboard::EMPTY;
     let (file, rank) = (sq.file(), sq.rank());
 
     // All 8 directions
@@ -120,7 +121,7 @@ fn generate_king_attacks(sq: Square) -> Bitboard {
         let new_rank = rank as i8 + dr;
         
         if new_file >= 1 && new_file <= 9 && new_rank >= 1 && new_rank <= 9 {
-            let target = Square::from_file_rank(new_file as u8, new_rank as u8);
+            let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
     }
@@ -129,7 +130,7 @@ fn generate_king_attacks(sq: Square) -> Bitboard {
 }
 
 fn generate_gold_attacks(sq: Square, color: Color) -> Bitboard {
-    let mut attacks = Bitboard::empty();
+    let mut attacks = Bitboard::EMPTY;
     let (file, rank) = (sq.file(), sq.rank());
 
     // Gold moves like king except backward diagonals
@@ -151,7 +152,7 @@ fn generate_gold_attacks(sq: Square, color: Color) -> Bitboard {
         let new_rank = rank as i8 + dr;
         
         if new_file >= 1 && new_file <= 9 && new_rank >= 1 && new_rank <= 9 {
-            let target = Square::from_file_rank(new_file as u8, new_rank as u8);
+            let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
     }
@@ -160,7 +161,7 @@ fn generate_gold_attacks(sq: Square, color: Color) -> Bitboard {
 }
 
 fn generate_silver_attacks(sq: Square, color: Color) -> Bitboard {
-    let mut attacks = Bitboard::empty();
+    let mut attacks = Bitboard::EMPTY;
     let (file, rank) = (sq.file(), sq.rank());
 
     // Silver moves forward and diagonally
@@ -180,7 +181,7 @@ fn generate_silver_attacks(sq: Square, color: Color) -> Bitboard {
         let new_rank = rank as i8 + dr;
         
         if new_file >= 1 && new_file <= 9 && new_rank >= 1 && new_rank <= 9 {
-            let target = Square::from_file_rank(new_file as u8, new_rank as u8);
+            let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
     }
@@ -189,7 +190,7 @@ fn generate_silver_attacks(sq: Square, color: Color) -> Bitboard {
 }
 
 fn generate_knight_attacks(sq: Square, color: Color) -> Bitboard {
-    let mut attacks = Bitboard::empty();
+    let mut attacks = Bitboard::EMPTY;
     let (file, rank) = (sq.file(), sq.rank());
 
     // Knight jumps in L-shape
@@ -203,7 +204,7 @@ fn generate_knight_attacks(sq: Square, color: Color) -> Bitboard {
         let new_rank = rank as i8 + dr;
         
         if new_file >= 1 && new_file <= 9 && new_rank >= 1 && new_rank <= 9 {
-            let target = Square::from_file_rank(new_file as u8, new_rank as u8);
+            let target = Square::new(new_file as u8, new_rank as u8);
             attacks |= Bitboard::from_square(target);
         }
     }
@@ -220,15 +221,15 @@ fn generate_pawn_attacks(sq: Square, color: Color) -> Bitboard {
     };
 
     if new_rank >= 1 && new_rank <= 9 {
-        let target = Square::from_file_rank(file, new_rank as u8);
+        let target = Square::new(file, new_rank as u8);
         Bitboard::from_square(target)
     } else {
-        Bitboard::empty()
+        Bitboard::EMPTY
     }
 }
 
 fn generate_lance_attacks(sq: Square, color: Color) -> Bitboard {
-    let mut attacks = Bitboard::empty();
+    let mut attacks = Bitboard::EMPTY;
     let file = sq.file();
     let rank = sq.rank();
 
@@ -236,13 +237,13 @@ fn generate_lance_attacks(sq: Square, color: Color) -> Bitboard {
     match color {
         Color::Black => {
             for r in 1..rank {
-                let target = Square::from_file_rank(file, r);
+                let target = Square::new(file, r);
                 attacks |= Bitboard::from_square(target);
             }
         }
         Color::White => {
             for r in (rank + 1)..=9 {
-                let target = Square::from_file_rank(file, r);
+                let target = Square::new(file, r);
                 attacks |= Bitboard::from_square(target);
             }
         }
@@ -255,6 +256,12 @@ fn generate_lance_attacks(sq: Square, color: Color) -> Bitboard {
 #[inline]
 pub fn king_attacks(sq: Square) -> Bitboard {
     ATTACK_TABLES.king_attacks[sq.index()]
+}
+
+// Get the first square from a bitboard (for iterating)
+#[inline]
+pub fn to_square(bb: Bitboard) -> Option<Square> {
+    bb.lsb()
 }
 
 #[inline]

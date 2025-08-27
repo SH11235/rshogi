@@ -7,6 +7,7 @@ mod check_evasion;
 #[cfg(test)]
 mod checks;
 #[cfg(test)]
+#[allow(dead_code)] // Temporarily disable
 mod compatibility_test;
 #[cfg(test)]
 mod drops;
