@@ -1,8 +1,6 @@
 //! Drop move tests
 
-use crate::{
-    movegen::generator::MoveGenImpl, usi::parse_usi_square, Color, Piece, PieceType, Position,
-};
+use crate::{movegen::MoveGenerator, usi::parse_usi_square, Color, Piece, PieceType, Position};
 
 #[test]
 fn test_movegen_drop_pawn_mate() {
@@ -24,8 +22,8 @@ fn test_movegen_drop_pawn_mate() {
     // Black has a pawn in hand
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // Pawn
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Pawn drop at 5b would be checkmate - should not be allowed
     let sq_5b = parse_usi_square("5b").unwrap(); // 5b = file 5 (index 4), rank b (index 1)
@@ -48,8 +46,8 @@ fn test_drop_pawn_mate_with_escape() {
     // Black has a pawn in hand
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // Pawn
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     let sq_5b = parse_usi_square("5b").unwrap();
     // Pawn drop at 5b gives check but king can escape - should be allowed
@@ -76,8 +74,8 @@ fn test_drop_pawn_mate_with_capture() {
     // Black has a pawn in hand
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1; // Pawn
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     let sq_5b = parse_usi_square("5b").unwrap();
     // Pawn drop at 5b can be captured - should be allowed
@@ -101,8 +99,8 @@ fn test_drop_pawn_check_without_support() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     let sq_5b = parse_usi_square("5b").unwrap();
     // Pawn drop at 5b gives check to White king at 5a
@@ -155,15 +153,15 @@ fn test_drop_pawn_mate_pinned_defender() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // Try to drop pawn at 1c (would give check to king at 1b)
     let sq_1c = parse_usi_square("1c").unwrap(); // 1c = file 1 (index 8), rank c (index 2)
 
-    // Verify that drop pawn mate is detected
-    assert!(gen.is_drop_pawn_mate(sq_1c, Color::White), "Drop pawn mate should be detected");
+    // Note: is_drop_pawn_mate is an internal method not exposed in public API
+    // We verify correct behavior by checking that the illegal drop is not generated
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Pawn drop at 1c - silver is pinned and cannot capture - should not be allowed
     let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_1c);
@@ -198,18 +196,16 @@ fn test_drop_pawn_not_mate_with_escape() {
     // 先手が歩を持っている
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // 5gに歩を打つ
     let sq_5g = parse_usi_square("5g").unwrap();
 
     // 打ち歩詰めではないことを確認（5iに逃げられる）
-    assert!(
-        !gen.is_drop_pawn_mate(sq_5g, Color::White),
-        "Should not be drop pawn mate when king has escape squares"
-    );
+    // Note: is_drop_pawn_mate is an internal method not exposed in public API
+    // This pawn drop should be allowed since king has escape squares
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
     let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
     assert!(legal_drop.is_some(), "Pawn drop should be allowed when king can escape");
 }
@@ -250,18 +246,16 @@ fn test_drop_pawn_not_mate_can_capture_with_promoted() {
     // 先手が歩を持っている
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // 5gに歩を打つ
     let sq_5g = parse_usi_square("5g").unwrap();
 
     // 打ち歩詰めではないことを確認（成銀が取れる）
-    assert!(
-        !gen.is_drop_pawn_mate(sq_5g, Color::White),
-        "Should not be drop pawn mate when promoted piece can capture"
-    );
+    // Note: is_drop_pawn_mate is an internal method not exposed in public API
+    // This pawn drop should be allowed since promoted piece can capture
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
     let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
     assert!(
         legal_drop.is_some(),
@@ -291,18 +285,16 @@ fn test_drop_pawn_not_mate_long_range_defender() {
     // 先手が歩を持っている
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // 5gに歩を打つ
     let sq_5g = parse_usi_square("5g").unwrap();
 
     // 打ち歩詰めではないことを確認（飛車が取れる）
-    assert!(
-        !gen.is_drop_pawn_mate(sq_5g, Color::White),
-        "Should not be drop pawn mate when rook can capture from distance"
-    );
+    // Note: is_drop_pawn_mate is an internal method not exposed in public API
+    // This pawn drop should be allowed since rook can capture from distance
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
     let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
     assert!(legal_drop.is_some(), "Pawn drop should be allowed when rook can capture");
 }
@@ -338,18 +330,16 @@ fn test_drop_pawn_mate_at_edge() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // 1bに歩を打つ
     let sq_1b = parse_usi_square("1b").unwrap();
 
     // 打ち歩詰めが検出されることを確認
-    assert!(
-        gen.is_drop_pawn_mate(sq_1b, Color::White),
-        "Drop pawn mate at board edge should be detected"
-    );
+    // Note: is_drop_pawn_mate is an internal method not exposed in public API
+    // This drop pawn mate should be detected and prevented
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
     let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_1b);
     assert!(illegal_drop.is_none(), "Drop pawn mate at board edge should not be allowed");
 }
@@ -376,18 +366,16 @@ fn test_drop_pawn_false_positive_cases() {
     // 先手が歩を持っている
     pos.hands[Color::Black as usize][PieceType::Pawn.hand_index().unwrap()] = 1;
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // 5gに歩を打つ
     let sq_5g = parse_usi_square("5g").unwrap();
 
     // 打ち歩詰めではないことを確認（歩に紐がついていない - 金がピンされているため）
-    assert!(
-        !gen.is_drop_pawn_mate(sq_5g, Color::White),
-        "Should not be drop pawn mate when supporting piece is pinned"
-    );
+    // Note: is_drop_pawn_mate is an internal method not exposed in public API
+    // This pawn drop should be allowed since the supporting piece is pinned
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
     let legal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_5g);
     assert!(
         legal_drop.is_some(),

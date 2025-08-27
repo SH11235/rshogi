@@ -3,8 +3,8 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        movegen::generator::MoveGenImpl,
         shogi::{position::Position, Color, Piece, PieceType, Square},
+        MoveGenerator,
     };
 
     #[test]
@@ -28,8 +28,8 @@ mod tests {
         pos.side_to_move = Color::Black;
 
         // This should not panic even with overflow checks
-        let mut generator = MoveGenImpl::new(&pos);
-        let moves = generator.generate_all();
+        let generator = MoveGenerator::new();
+        let moves = generator.generate_all(&pos).expect("Failed to generate moves");
 
         // The pawn at rank 0 should not generate any moves
         let pawn_moves: Vec<_> = moves
@@ -65,8 +65,8 @@ mod tests {
         pos.side_to_move = Color::White;
 
         // This should not panic even with overflow checks
-        let mut generator = MoveGenImpl::new(&pos);
-        let moves = generator.generate_all();
+        let generator = MoveGenerator::new();
+        let moves = generator.generate_all(&pos).expect("Failed to generate moves");
 
         // The pawn at rank 8 should not generate any moves
         let pawn_moves: Vec<_> = moves

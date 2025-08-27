@@ -1,8 +1,8 @@
 //! Conversion between USI notation and engine types
 
 use anyhow::{anyhow, Result};
-use engine_core::movegen::MoveGen;
-use engine_core::shogi::{Move, MoveList, Position};
+use engine_core::movegen::MoveGenerator;
+use engine_core::shogi::{Move, Position};
 use engine_core::usi::{parse_sfen, parse_usi_move, position_to_sfen};
 use log::debug;
 
@@ -20,20 +20,18 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
     };
 
     // Apply moves with validation
-    // Note: Currently MoveGen is stateless and can be reused across multiple calls.
-    // If MoveGen becomes stateful in the future, consider creating a new instance
+    // Note: Currently MoveGenerator is stateless and can be reused across multiple calls.
+    // If MoveGenerator becomes stateful in the future, consider creating a new instance
     // for each position or ensuring proper state reset.
-    let mut move_gen = MoveGen::new();
-    let mut legal_moves = MoveList::new();
+    let move_gen = MoveGenerator::new();
 
     for (i, move_str) in moves.iter().enumerate() {
         let mv = parse_usi_move(move_str).map_err(|e| anyhow!(e))?;
 
-        // Clear legal moves list before generating new moves
-        legal_moves.clear();
-
         // Generate all legal moves for current position
-        move_gen.generate_all(&pos, &mut legal_moves);
+        let legal_moves = move_gen
+            .generate_all(&pos)
+            .map_err(|e| anyhow!("Failed to generate legal moves: {}", e))?;
 
         // Find matching legal move with promotion priority
         let mut fallback: Option<Move> = None;

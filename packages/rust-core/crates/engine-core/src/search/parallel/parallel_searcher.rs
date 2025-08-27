@@ -3,11 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     movegen::MoveGenerator,
-    search::{
-        constants::SEARCH_INF,
-        types::{NodeType, StopInfo},
-        SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable,
-    },
+    search::{SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
     shogi::{Move, Position},
     time_management::{GamePhase, TimeManager},
 };
