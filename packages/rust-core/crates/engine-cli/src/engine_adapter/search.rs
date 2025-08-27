@@ -165,7 +165,17 @@ impl EngineAdapter {
 
         // Get ponder move if available and ponder is enabled
         let ponder_move_str = if self.ponder {
-            best_entry.pv.get(1).map(|&mv| move_to_usi(&mv))
+            // Prefer PV[1]
+            if let Some(&mv) = best_entry.pv.get(1) {
+                Some(move_to_usi(&mv))
+            } else {
+                // Fallback: try current iteration PV if it has a second move
+                if let Some(cur) = &session.current_iteration_best {
+                    cur.pv.get(1).map(|&mv| move_to_usi(&mv))
+                } else {
+                    None
+                }
+            }
         } else {
             None
         };

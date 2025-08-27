@@ -267,8 +267,8 @@ where
                 self.aspiration_window.update_score(score, best_node_type);
 
                 // Try to reconstruct PV from TT if we have TT enabled
-                // This is disabled by default due to reliability issues with hash collisions
-                const ENABLE_TT_PV_RECONSTRUCTION: bool = false;
+                // Enabled to improve PV completeness and ponder extraction
+                const ENABLE_TT_PV_RECONSTRUCTION: bool = true;
 
                 if USE_TT && ENABLE_TT_PV_RECONSTRUCTION {
                     if let Some(ref tt) = self.tt {
@@ -279,7 +279,7 @@ where
                         // Use TT PV if it's longer or if triangular PV is incomplete
                         if !tt_pv.is_empty()
                             && (tt_pv.len() > self.stats.pv.len()
-                                || (self.stats.pv.len() == 1 && tt_pv.len() > 1))
+                                || (self.stats.pv.len() <= 1 && tt_pv.len() > 1))
                         {
                             log::debug!(
                                 "Using TT PV (length: {}) instead of triangular PV (length: {})",
