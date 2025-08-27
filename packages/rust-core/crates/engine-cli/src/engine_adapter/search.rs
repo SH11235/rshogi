@@ -136,26 +136,11 @@ impl EngineAdapter {
         log::info!("prepare_search: stop_flag value after apply_go_params = {stop_value_after}");
 
         // Detect if this is actually byoyomi time control by looking at the real TimeControl
-        // and store the byoyomi time
-        match &limits.time_control {
-            TimeControl::Byoyomi { byoyomi_ms, .. } => {
-                self.last_search_is_byoyomi = true;
-                self.last_byoyomi_time_ms = Some(*byoyomi_ms);
-            }
-            TimeControl::Ponder(inner) => {
-                if let TimeControl::Byoyomi { byoyomi_ms, .. } = &**inner {
-                    self.last_search_is_byoyomi = true;
-                    self.last_byoyomi_time_ms = Some(*byoyomi_ms);
-                } else {
-                    self.last_search_is_byoyomi = false;
-                    self.last_byoyomi_time_ms = None;
-                }
-            }
-            _ => {
-                self.last_search_is_byoyomi = false;
-                self.last_byoyomi_time_ms = None;
-            }
-        }
+        self.last_search_is_byoyomi = match &limits.time_control {
+            TimeControl::Byoyomi { .. } => true,
+            TimeControl::Ponder(inner) => matches!(**inner, TimeControl::Byoyomi { .. }),
+            _ => false,
+        };
 
         // Setup ponder state if applicable
         let ponder_hit_flag = if params.ponder {
