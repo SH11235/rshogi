@@ -466,6 +466,36 @@ impl<'a> MoveGenImpl<'a> {
         let lances = self.pos.board.piece_bb[us as usize][PieceType::Lance as usize]
             & !self.pos.board.promoted_bb;
         for from in lances {
+            // Early exit: pinned lances can only move forward along the pin ray
+            if self.pinned.test(from) {
+                let pin_ray = self.pin_rays[from.index()];
+                // Check if pin direction matches lance movement direction
+                let lance_file = from.file();
+                let lance_forward_squares = match us {
+                    Color::Black => {
+                        // Black lance moves toward rank 0 (up)
+                        let mut forward = Bitboard::EMPTY;
+                        for r in 0..from.rank() {
+                            forward.set(Square::new(lance_file, r));
+                        }
+                        forward
+                    }
+                    Color::White => {
+                        // White lance moves toward rank 8 (down)
+                        let mut forward = Bitboard::EMPTY;
+                        for r in (from.rank() + 1)..=8 {
+                            forward.set(Square::new(lance_file, r));
+                        }
+                        forward
+                    }
+                };
+
+                // If pin ray doesn't intersect with lance's forward movement, skip
+                if (pin_ray & lance_forward_squares).is_empty() {
+                    continue; // This lance cannot move
+                }
+            }
+
             // Get all potential lance moves (without considering blockers)
             let attacks = tables::lance_attacks(from, us);
 
