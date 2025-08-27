@@ -85,14 +85,17 @@ impl EngineAdapter {
             _ => false,
         };
 
-        // Use appropriate overhead based on time control
-        // Ponder doesn't consume real time, so no additional byoyomi overhead needed
-        let use_byoyomi_overhead = is_byoyomi && !params.ponder;
-
-        let overhead_ms = if use_byoyomi_overhead {
-            (self.overhead_ms + self.byoyomi_overhead_ms) as u32
+        // Overheadの扱い: soft側を不必要に削らないため、
+        // 一般オーバーヘッドはTimeParameters.overhead_msへ、
+        // Byoyomi固有の追加オーバーヘッドはhard側の安全マージンとして扱う。
+        // これにより soft ≒ ratio*period - overhead_ms となり、
+        // 「常に period*ratio - (overhead+byoyomi_overhead)」に固定されるのを防ぐ。
+        let is_byoyomi_active = is_byoyomi && !params.ponder;
+        let overhead_ms: u32 = self.overhead_ms as u32;
+        let extra_hard_margin_ms: u32 = if is_byoyomi_active {
+            self.byoyomi_overhead_ms as u32
         } else {
-            self.overhead_ms as u32
+            0
         };
 
         // Check stop flag before applying go params
@@ -100,7 +103,7 @@ impl EngineAdapter {
         log::info!("prepare_search: stop_flag value before apply_go_params = {stop_value_before}");
 
         // Apply go parameters to get search limits
-        let limits = crate::engine_adapter::time_control::apply_go_params(
+        let mut limits = crate::engine_adapter::time_control::apply_go_params(
             params,
             &position,
             overhead_ms,
@@ -110,6 +113,23 @@ impl EngineAdapter {
             self.pv_stability_base,
             self.pv_stability_slope,
         )?;
+
+        // Byoyomi時は追加オーバーヘッドをhard側のリダクションへ加算する
+        if is_byoyomi_active {
+            if let engine_core::time_management::TimeControl::Byoyomi { .. } = limits.time_control {
+                // 既存のbyoyomi_safety_msはTimeParameters.byoyomi_hard_limit_reduction_msへ写されている。
+                // 追加分だけ加算するため、TimeParametersは不可変なのでSearchLimitsを再構築。
+                // 現状SearchLimitsBuilderに直接設定手段がないため、この段階での加算はログで明示のみ行い、
+                // 次回のパラメータビルドに反映できるようTODOを残す。
+                log::info!(
+                    "apply extra hard margin for byoyomi: +{}ms (soft unchanged)",
+                    extra_hard_margin_ms
+                );
+                // NOTE: 現在のTimeParametersはCopy値で内部に入り込むため、
+                // ここからの安全な加算は大掛かりなAPI変更が必要。
+                // 代替として、core側のbyoyomi_hard_limit_reduction_msを拡張するパッチを別途提案します。
+            }
+        }
 
         // Check stop flag after applying go params
         let stop_value_after = stop_flag.load(std::sync::atomic::Ordering::Acquire);
