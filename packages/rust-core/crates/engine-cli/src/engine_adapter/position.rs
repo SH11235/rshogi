@@ -4,8 +4,8 @@
 //! and position updates from USI commands.
 
 use anyhow::{Context, Result};
-use engine_core::movegen::MoveGen;
-use engine_core::shogi::{MoveList, Position};
+use engine_core::movegen::MoveGenerator;
+use engine_core::shogi::Position;
 use engine_core::usi::parse_usi_move;
 use log::{debug, info, warn};
 
@@ -79,9 +79,14 @@ impl EngineAdapter {
         };
 
         // Generate legal moves
-        let mut movegen = MoveGen::new();
-        let mut legal_moves = MoveList::new();
-        movegen.generate_all(position, &mut legal_moves);
+        let movegen = MoveGenerator::new();
+        let legal_moves = match movegen.generate_all(position) {
+            Ok(moves) => moves,
+            Err(e) => {
+                debug!("Failed to generate legal moves: {e}");
+                return false;
+            }
+        };
 
         // Check if the parsed move matches any legal move
         // Note: We need to compare moves semantically (ignoring piece type encoding)

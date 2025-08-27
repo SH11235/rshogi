@@ -1,8 +1,6 @@
 //! Tests for check evasion move generation
 
-use crate::{
-    movegen::generator::MoveGenImpl, usi::parse_usi_square, Color, Piece, PieceType, Position,
-};
+use crate::{movegen::MoveGenerator, usi::parse_usi_square, Color, Piece, PieceType, Position};
 
 #[test]
 fn test_single_check_non_sliding_piece() {
@@ -31,8 +29,8 @@ fn test_single_check_non_sliding_piece() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Gold can capture knight
     let gold_capture = moves.as_slice().iter().any(|m| {
@@ -82,8 +80,8 @@ fn test_single_check_sliding_piece() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Gold can block at 5h
     let gold_block = moves.as_slice().iter().any(|m| {
@@ -141,8 +139,8 @@ fn test_double_check_only_king_moves() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Only king moves should be generated
     for mv in moves.as_slice() {
@@ -185,14 +183,14 @@ fn test_pinned_piece_can_capture_checker() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // Debug info
     println!("\ntest_pinned_piece_can_capture_checker:");
-    println!("Checkers: {}", gen.checkers.count_ones());
+    // Note: checkers field is not exposed in public API
     println!("King at 5i, Gold at 5g, Rook at 5a, Gold at 5h (checking)");
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
     println!("Generated {} moves", moves.len());
     for m in moves.as_slice() {
         if !m.is_drop() {
@@ -245,14 +243,14 @@ fn test_promotion_required_to_escape_check() {
     // Rebuild occupancy bitboards after manual piece placement
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
+    let gen = MoveGenerator::new();
 
     // Debug
     println!("\ntest_promotion_required_to_escape_check:");
-    println!("Checkers: {}", gen.checkers.count_ones());
+    // Note: checkers field is not exposed in public API
     println!("King at 5i, Rook at 5a giving check, Knight at 4c");
 
-    let moves = gen.generate_all();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
     println!("Generated {} moves", moves.len());
     for m in moves.as_slice() {
         if !m.is_drop() {

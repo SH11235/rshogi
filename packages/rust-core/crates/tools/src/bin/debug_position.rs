@@ -1,8 +1,7 @@
 use clap::Parser;
 use engine_core::engine::controller::{Engine, EngineType};
-use engine_core::movegen::MoveGen;
+use engine_core::movegen::MoveGenerator;
 use engine_core::search::limits::SearchLimits;
-use engine_core::shogi::moves::MoveList;
 use engine_core::usi::{move_to_usi, parse_usi_move};
 use engine_core::Position;
 use std::sync::atomic::AtomicBool;
@@ -84,9 +83,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Show legal moves if requested
     if args.moves {
         println!("\nLegal moves:");
-        let mut move_gen = MoveGen::new();
-        let mut move_list = MoveList::new();
-        move_gen.generate_all(&position, &mut move_list);
+        let move_gen = MoveGenerator::new();
+        let move_list = match move_gen.generate_all(&position) {
+            Ok(moves) => moves,
+            Err(e) => {
+                eprintln!("Failed to generate moves: {e}");
+                return Err(e.into());
+            }
+        };
 
         // Filter legal moves
         let mut legal_moves = Vec::new();
@@ -193,9 +197,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Show move ordering info if requested
     if args.show_ordering {
         println!("\n=== Move Ordering Analysis ===");
-        let mut move_gen = MoveGen::new();
-        let mut move_list = MoveList::new();
-        move_gen.generate_all(&position, &mut move_list);
+        let move_gen = MoveGenerator::new();
+        let move_list = match move_gen.generate_all(&position) {
+            Ok(moves) => moves,
+            Err(e) => {
+                println!("Failed to generate moves: {e}");
+                return Ok(());
+            }
+        };
         println!("Total pseudo-legal moves: {}", move_list.len());
         // This would require exposing move ordering logic
         println!("(Detailed move ordering not yet implemented)");
@@ -210,9 +219,11 @@ fn perft(position: &Position, depth: u8) -> u64 {
     }
 
     let mut nodes = 0;
-    let mut move_gen = MoveGen::new();
-    let mut move_list = MoveList::new();
-    move_gen.generate_all(position, &mut move_list);
+    let move_gen = MoveGenerator::new();
+    let move_list = match move_gen.generate_all(position) {
+        Ok(moves) => moves,
+        Err(_) => return 0,
+    };
 
     for mv in move_list.as_slice() {
         let mut new_position = position.clone();
@@ -232,6 +243,7 @@ fn perft(position: &Position, depth: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::movegen::MoveGenerator;
 
     #[test]
     fn test_perft_calculation() {
@@ -273,9 +285,8 @@ mod tests {
         let position =
             Position::from_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
                 .unwrap();
-        let mut move_gen = MoveGen::new();
-        let mut move_list = MoveList::new();
-        move_gen.generate_all(&position, &mut move_list);
+        let move_gen = MoveGenerator::new();
+        let move_list = move_gen.generate_all(&position).expect("Failed to generate moves");
 
         // Filter legal moves
         let mut legal_count = 0;

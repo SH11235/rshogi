@@ -23,7 +23,7 @@ mod underflow_test;
 #[cfg(test)]
 mod lance_edge_tests {
     use crate::{
-        movegen::generator::MoveGenImpl,
+        movegen::MoveGenerator,
         shogi::{Color, Piece, PieceType, Position},
         usi,
     };
@@ -37,8 +37,8 @@ mod lance_edge_tests {
         println!("Position SFEN: {}", usi::position_to_sfen(&pos));
 
         // Generate moves
-        let mut gen = MoveGenImpl::new(&pos);
-        let moves = gen.generate_all();
+        let gen = MoveGenerator::new();
+        let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
         // In starting position, lance at 9i (file 0, rank 8) should be blocked by pawn at 9g
         let lance_sq = usi::parse_usi_square("9i").unwrap(); // 9i
@@ -89,8 +89,8 @@ mod lance_edge_tests {
         );
 
         // Generate moves
-        let mut gen = MoveGenImpl::new(&pos);
-        let moves = gen.generate_all();
+        let gen = MoveGenerator::new();
+        let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
         // Check no moves from the lance at 1a
         let lance_moves: Vec<_> = moves
