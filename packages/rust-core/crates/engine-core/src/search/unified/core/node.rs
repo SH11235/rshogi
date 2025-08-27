@@ -26,8 +26,10 @@ where
     // Note: Node count is incremented in alpha_beta() to avoid double counting
     // searcher.stats.nodes += 1; // Removed to prevent double counting
 
-    // Clear PV at this ply on entry
-    searcher.pv_table.clear_len_at(ply as usize);
+    // Clear PV at this ply on entry (stack-based PV)
+    if crate::search::types::SearchStack::is_valid_ply(ply) {
+        searcher.search_stack[ply as usize].pv_line.clear();
+    }
 
     // Get adaptive polling mask based on time control (unified with alpha_beta)
     let time_check_mask = super::time_control::get_event_poll_mask(searcher);
@@ -314,7 +316,7 @@ where
 
         // Save child hash for PV owner validation (avoids second do/undo)
         // This is the Zobrist hash of the child position after making the move
-        let child_hash_for_pv = pos.zobrist_hash;
+        let _child_hash_for_pv = pos.zobrist_hash;
 
         // Check if this move gives check (opponent is now in check)
         // This is more efficient than calling gives_check before do_move
@@ -451,7 +453,7 @@ where
             if score > alpha {
                 alpha = score;
 
-                // Update PV without allocation using the new method
+                // Update PV on the search stack without global table
                 // Validate that the move is still pseudo-legal before adding to PV
                 // This prevents TT pollution from causing invalid PVs
                 if pos.is_pseudo_legal(mv) {
@@ -467,46 +469,19 @@ where
                     };
 
                     if move_valid {
-                        // Set the owner hash for the current ply
-                        searcher.pv_table.set_owner(ply as usize, hash);
-
-                        // Check if child PV is from the correct position
-                        let child_ply = (ply + 1) as usize;
-
-                        // Only use child PV if it was written by the correct position
-                        // (using the child hash we saved during do_move above)
-                        let child_owner = searcher.pv_table.owner(child_ply);
-                        if child_owner.is_some() {
-                            // Only count as a check if there was actually a child PV to verify
-                            crate::search::SearchStats::bump(
-                                &mut searcher.stats.pv_owner_checks,
-                                1,
-                            );
-                        }
-                        if child_owner == Some(child_hash_for_pv) {
-                            searcher.pv_table.update_from_child(ply as usize, mv, child_ply);
-                        } else {
-                            // Mixed PV detected - only use the head move
-                            searcher.pv_table.set_line(ply as usize, mv, &[]);
-                            if child_owner.is_some() {
-                                // Only count as a mismatch if there was a child PV (not empty)
-                                crate::search::SearchStats::bump(
-                                    &mut searcher.stats.pv_owner_mismatches,
-                                    1,
-                                );
-                            }
-                            #[cfg(debug_assertions)]
-                            if std::env::var("SHOGI_DEBUG_PV").is_ok() {
-                                eprintln!(
-                                    "[PV MIX] Detected PV mix at ply {ply}: child owner mismatch"
-                                );
-                                eprintln!("  Expected child hash: {child_hash_for_pv:016x}");
-                                if let Some(actual) = child_owner {
-                                    eprintln!("  Actual child owner: {actual:016x}");
-                                } else {
-                                    eprintln!("  Actual child owner: None");
-                                }
-                            }
+                        // Stack-based PV: head is mv, tail is child stack PV
+                        if crate::search::types::SearchStack::is_valid_ply(ply) {
+                            let child_ply = (ply + 1) as usize;
+                            let child_tail = if crate::search::types::SearchStack::is_valid_ply(ply + 1)
+                            {
+                                searcher.search_stack[child_ply].pv_line.clone()
+                            } else {
+                                smallvec::SmallVec::<[crate::shogi::Move; 16]>::new()
+                            };
+                            let entry = &mut searcher.search_stack[ply as usize];
+                            entry.pv_line.clear();
+                            entry.pv_line.push(mv);
+                            entry.pv_line.extend_from_slice(&child_tail);
                         }
                     } else {
                         #[cfg(debug_assertions)]
@@ -530,8 +505,10 @@ where
                 // Validate PV immediately in debug builds
                 #[cfg(debug_assertions)]
                 {
-                    let local_pv = searcher.pv_table.get_line(ply as usize).to_vec();
-                    super::pv_validation::pv_local_sanity(pos, &local_pv);
+                    if crate::search::types::SearchStack::is_valid_ply(ply) {
+                        let local_pv = searcher.search_stack[ply as usize].pv_line.to_vec();
+                        super::pv_validation::pv_local_sanity(pos, &local_pv);
+                    }
                 }
 
                 if alpha >= beta {
