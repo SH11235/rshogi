@@ -7,6 +7,7 @@
 ### ガイド
 - [**benchmark-guide.md**](benchmark-guide.md) - 各種ベンチマークコマンドの使用方法
 - [**profiling-guide.md**](profiling-guide.md) - flamegraphなどのプロファイリングツールのセットアップと使用方法
+- [**tt-architecture**](../implementation/transposition-table.md) - 置換表（TT）設計と運用
 
 ### 分析結果
 - [**analysis/**](analysis/) - 各機能のパフォーマンス分析結果

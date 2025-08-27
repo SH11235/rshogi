@@ -6,7 +6,7 @@ use super::entry::TTEntry;
 use super::metrics::DetailedTTMetrics;
 use super::prefetch::prefetch_memory;
 use super::utils::{try_update_entry_generic, UpdateResult};
-use crate::search::tt_simd::simd_enabled;
+use crate::search::tt::simd::simd_enabled;
 use crate::util::sync_compat::{AtomicU64, Ordering};
 
 use super::constants::BUCKET_SIZE;
