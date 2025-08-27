@@ -77,6 +77,29 @@ impl Bitboard {
     }
 }
 
+/// Iterator over set squares in bitboard
+pub struct BitboardIterator {
+    bb: Bitboard,
+}
+
+impl Iterator for BitboardIterator {
+    type Item = Square;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.bb.pop_lsb()
+    }
+}
+
+impl IntoIterator for Bitboard {
+    type Item = Square;
+    type IntoIter = BitboardIterator;
+
+    fn into_iter(self) -> Self::IntoIter {
+        BitboardIterator { bb: self }
+    }
+}
+
 impl std::ops::BitOr for Bitboard {
     type Output = Self;
 

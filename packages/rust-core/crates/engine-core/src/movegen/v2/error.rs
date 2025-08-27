@@ -1,4 +1,4 @@
-use crate::shogi::{Color, Square};
+use crate::shogi::Color;
 use std::fmt;
 
 /// Errors that can occur during move generation
