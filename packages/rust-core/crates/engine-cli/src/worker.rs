@@ -182,13 +182,23 @@ pub fn search_worker(
     search_id: u64,
 ) {
     log::debug!("Search worker thread started with params: {params:?}");
-    let initial_stop_value = stop_flag.load(Ordering::Acquire);
+    let initial_stop_value = stop_flag.load(Ordering::SeqCst);
     log::info!(
         "Worker: search_id={search_id}, ponder={}, stop_flag_ptr={:p}, stop_flag_value={}",
         params.ponder,
         stop_flag.as_ref(),
         initial_stop_value
     );
+
+    // Early return if stop was already requested
+    if initial_stop_value && !params.ponder {
+        log::warn!("Worker: stop flag already set at start, aborting search");
+        let _ = tx.send(WorkerMessage::Finished {
+            from_guard: false,
+            search_id,
+        });
+        return;
+    }
 
     let _worker_start_time = Instant::now();
 
@@ -206,7 +216,14 @@ pub fn search_worker(
     let tx_info = tx.clone();
     let tx_partial = tx.clone();
     let last_partial_depth = Arc::new(Mutex::new(0u8));
+    let stop_flag_for_info = stop_flag.clone();
     let info_callback = move |info: SearchInfo| {
+        // Check stop flag before sending messages
+        if stop_flag_for_info.load(Ordering::SeqCst) {
+            log::trace!("Info callback: stop flag set, skipping message");
+            return;
+        }
+
         // Always send the info message
         let _ = tx_info.send(WorkerMessage::Info {
             info: info.clone(),
@@ -563,6 +580,15 @@ pub fn search_worker(
 
                     // Update session
                     if let Ok(mut session_guard) = session_for_callback.lock() {
+                        // Update partial result with the first move
+                        if let Some(first_move) = info.pv.first() {
+                            session_guard.update_partial_result(
+                                first_move.clone(),
+                                info.depth.unwrap_or(0) as u8,
+                                raw_score,
+                            );
+                        }
+
                         // Note: During iterative deepening, we don't have NodeType information
                         // from the info callback, so we default to Exact. The actual NodeType
                         // will be set when the final search result is available.
@@ -720,7 +746,7 @@ pub fn search_worker(
                 adapter.generate_emergency_move()
             };
 
-            if stop_flag.load(Ordering::Acquire) {
+            if stop_flag.load(Ordering::SeqCst) {
                 // Check if ponderhit occurred for ponder search
                 let ponder_hit_occurred = if was_ponder {
                     ponder_hit_flag_ref

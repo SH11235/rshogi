@@ -486,6 +486,7 @@ mod tests {
                 seldepth: Some(10),
             }),
             current_iteration_best: None,
+            partial_result: None,
         };
 
         // Validation should fail with proper error

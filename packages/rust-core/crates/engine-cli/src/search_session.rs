@@ -10,6 +10,19 @@ use smallvec::SmallVec;
 // Re-export Score from usi::output for backward compatibility
 pub use crate::usi::output::Score;
 
+/// Partial search result for fallback when search is interrupted
+#[derive(Clone, Debug)]
+pub struct PartialResult {
+    /// Best move found so far (USI format)
+    pub move_str: String,
+
+    /// Search depth when this result was found
+    pub depth: u8,
+
+    /// Evaluation score
+    pub score: i32,
+}
+
 /// Search session data encapsulated per worker thread
 #[derive(Clone)]
 pub struct SearchSession {
@@ -24,6 +37,9 @@ pub struct SearchSession {
 
     /// Current iteration's best (not sent to GUI)
     pub current_iteration_best: Option<CommittedBest>,
+
+    /// Partial result for fallback (updated during search)
+    pub partial_result: Option<PartialResult>,
 }
 
 impl SearchSession {
@@ -34,6 +50,7 @@ impl SearchSession {
             root_hash,
             committed_best: None,
             current_iteration_best: None,
+            partial_result: None,
         }
     }
 
@@ -67,6 +84,18 @@ impl SearchSession {
             seldepth,
             score: to_usi_score(score),
             pv: pv.into_iter().collect(),
+        });
+    }
+
+    /// Update partial result for fallback purposes
+    ///
+    /// This is called during search to store intermediate results
+    /// that can be used if the search is interrupted.
+    pub fn update_partial_result(&mut self, move_str: String, depth: u8, score: i32) {
+        self.partial_result = Some(PartialResult {
+            move_str,
+            depth,
+            score,
         });
     }
 }

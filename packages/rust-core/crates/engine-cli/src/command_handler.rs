@@ -175,7 +175,7 @@ impl<'a> CommandContext<'a> {
     #[inline]
     pub fn finalize_search(&mut self, where_: &str) {
         log::debug!("Finalize search {} ({})", *self.current_search_id, where_);
-        *self.search_state = SearchState::Idle;
+        self.search_state.set_idle();
         *self.current_search_is_ponder = false;
         *self.current_bestmove_emitter = None;
         *self.current_session = None;
@@ -551,6 +551,15 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     let wait_duration = wait_start.elapsed();
     log::debug!("Wait for search completion took: {wait_duration:?}");
 
+    // Clear any pending messages from previous search to prevent interference
+    let mut cleared_messages = 0;
+    while let Ok(_msg) = ctx.worker_rx.try_recv() {
+        cleared_messages += 1;
+    }
+    if cleared_messages > 0 {
+        log::debug!("Cleared {cleared_messages} old messages from worker queue");
+    }
+
     // Check engine availability before proceeding
     {
         let mut adapter = lock_or_recover_adapter(ctx.engine);
@@ -869,7 +878,9 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     });
 
     *ctx.worker_handle = Some(handle);
-    *ctx.search_state = SearchState::Searching;
+    if !ctx.search_state.try_start_search() {
+        log::error!("Failed to transition to searching state from {:?}", ctx.search_state);
+    }
     log::debug!("Worker thread handle stored, search_state = Searching");
 
     // Send immediate info depth 1 to confirm search started (ensures GUI sees activity)
@@ -910,9 +921,9 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         );
 
         // Signal stop to worker thread using per-search flag
-        *ctx.search_state = SearchState::StopRequested;
+        ctx.search_state.request_stop();
         if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::Release);
+            stop_flag.store(true, Ordering::SeqCst);
         }
 
         // Mark that we're no longer in ponder mode since stop was received
@@ -923,17 +934,18 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
     // Signal stop to worker thread for normal searches
     if ctx.search_state.is_searching() {
-        *ctx.search_state = SearchState::StopRequested;
+        ctx.search_state.request_stop();
         if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::Release);
+            stop_flag.store(true, Ordering::SeqCst);
             log::debug!(
                 "Per-search stop flag set to true for search_id={}, search_state = StopRequested",
                 *ctx.current_search_id
             );
 
-            // Debug: Verify stop flag was actually set
-            let stop_value = stop_flag.load(Ordering::Acquire);
-            log::debug!("Stop flag verification (Acquire read): {stop_value}");
+            // Debug: Verify stop flag was actually set with memory barrier
+            std::sync::atomic::fence(Ordering::SeqCst);
+            let stop_value = stop_flag.load(Ordering::SeqCst);
+            log::debug!("Stop flag verification after fence (SeqCst read): {stop_value}");
         } else {
             log::warn!("No current stop flag available for search_id={}", *ctx.current_search_id);
         }
@@ -979,7 +991,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 ((safety_ms as f64 * stage1_factor) as u64).clamp(min_stage1, max_stage1),
             )
         } else {
-            Duration::from_millis(100) // Normal mode: quick wait
+            Duration::from_millis(50) // Normal mode: wait 50ms for SearchFinished
         };
 
         #[cfg(test)]
@@ -987,7 +999,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             // Test mode: minimal clamp for faster tests
             Duration::from_millis(((safety_ms as f64 * total_factor) as u64).max(1))
         } else {
-            Duration::from_millis(15) // Test mode: very quick fallback
+            Duration::from_millis(20) // Test mode: very quick fallback
         };
         #[cfg(not(test))]
         let total_timeout = if is_byoyomi {
@@ -999,12 +1011,11 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 ((safety_ms as f64 * total_factor) as u64).clamp(min_total, max_total),
             )
         } else {
-            Duration::from_millis(150) // Normal mode: quick fallback
+            Duration::from_millis(100) // Normal mode: 100ms total timeout
         };
 
         // Wait for bestmove with staged timeouts
         let start = Instant::now();
-        let mut partial_result: Option<(String, u8, i32)> = None;
         let mut stage = 1;
 
         loop {
@@ -1028,15 +1039,22 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 // Log timeout error
                 log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
 
+                // Get partial result from session if available
+                let partial_result_tuple = ctx
+                    .current_session
+                    .as_ref()
+                    .and_then(|session| session.partial_result.as_ref())
+                    .map(|pr| (pr.move_str.clone(), pr.depth, pr.score));
+
                 // Use emergency fallback (session already tried at the beginning)
                 match generate_fallback_move(
                     ctx.engine,
-                    partial_result.clone(),
+                    partial_result_tuple.clone(),
                     ctx.allow_null_move,
                 ) {
                     Ok((move_str, used_partial)) => {
                         // Log fallback source (info now handled by BestmoveEmitter)
-                        if let Some((_, depth, score)) = partial_result {
+                        if let Some((_, depth, score)) = partial_result_tuple.as_ref() {
                             log::debug!("Using partial result: depth={depth}, score={score}");
                         } else {
                             log::debug!("Using emergency fallback after timeout");
@@ -1047,7 +1065,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         if let Some(ref _emitter) = ctx.current_bestmove_emitter {
                             // Determine the source based on what generate_fallback_move actually used
                             let (from, depth, score_str) = if used_partial {
-                                if let Some((_, d, s)) = partial_result {
+                                if let Some((_, d, s)) = partial_result_tuple {
                                     (
                                         BestmoveSource::PartialResultTimeout,
                                         d,
@@ -1110,7 +1128,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
             // Calculate remaining time for adaptive polling
             let remaining = total_timeout.saturating_sub(elapsed);
-            let poll_timeout = std::cmp::min(remaining, Duration::from_millis(3));
+            #[cfg(test)]
+            let poll_timeout = std::cmp::min(remaining, Duration::from_millis(1));
+            #[cfg(not(test))]
+            let poll_timeout = std::cmp::min(remaining, Duration::from_millis(10)); // Increased from 3ms to 10ms
 
             // Check for bestmove message with timeout
             match ctx.worker_rx.recv_timeout(poll_timeout) {
@@ -1132,14 +1153,19 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     }
                 }
                 Ok(WorkerMessage::PartialResult {
-                    current_best,
-                    depth,
-                    score,
+                    current_best: _,
+                    depth: _,
+                    score: _,
                     search_id,
                 }) => {
-                    // Store partial result for fallback only if it's from current search
-                    if search_id == *ctx.current_search_id {
-                        partial_result = Some((current_best, depth, score));
+                    // Partial results are now stored in the session itself
+                    // Just validate search ID
+                    if search_id != *ctx.current_search_id {
+                        log::trace!(
+                            "Ignoring PartialResult from old search_id: {} (current: {})",
+                            search_id,
+                            *ctx.current_search_id
+                        );
                     }
                 }
                 Ok(WorkerMessage::IterationComplete { session, search_id }) => {
@@ -1154,7 +1180,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     search_id,
                     stop_info,
                 }) => {
-                    // Handle SearchFinished in stop command context
+                    // Handle SearchFinished in stop command context - prioritize this message
                     if search_id == *ctx.current_search_id {
                         log::debug!("SearchFinished received in stop handler, sending bestmove");
                         // Try to use session-based bestmove
@@ -1162,16 +1188,86 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             if ctx.emit_best_from_session(
                                 &session,
                                 BestmoveSource::SessionInSearchFinished,
-                                stop_info, // Pass the provided stop_info if any
+                                stop_info.clone(), // Pass the provided stop_info if any
                                 "BestmoveEmitter",
                             )? {
                                 break;
                             } else {
-                                // Continue to wait for BestMove or use fallback
+                                // Session validation failed, but we have SearchFinished
+                                // Try fallback immediately rather than continuing to wait
                                 log::debug!(
-                                    "Session validation failed in stop handler, continuing to wait"
+                                    "Session validation failed in SearchFinished handler, using fallback"
                                 );
+                                
+                                // Get partial result from session
+                                let partial_result_tuple = session.partial_result.as_ref()
+                                    .map(|pr| (pr.move_str.clone(), pr.depth, pr.score));
+                                
+                                match generate_fallback_move(
+                                    ctx.engine,
+                                    partial_result_tuple.clone(),
+                                    ctx.allow_null_move,
+                                ) {
+                                    Ok((move_str, used_partial)) => {
+                                        let (from, depth, score_str) = if used_partial {
+                                            if let Some((_, d, s)) = partial_result_tuple {
+                                                (
+                                                    BestmoveSource::PartialResultOnFinish,
+                                                    d,
+                                                    Some(format!("cp {s}")),
+                                                )
+                                            } else {
+                                                (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
+                                            }
+                                        } else {
+                                            (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
+                                        };
+
+                                        let meta = build_meta(from, depth, None, score_str, stop_info.clone());
+                                        ctx.emit_and_finalize(move_str, None, meta, "SearchFinished fallback")?;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        log::error!("Fallback failed in SearchFinished handler: {e}");
+                                        let meta = build_meta(
+                                            BestmoveSource::ResignOnFinish,
+                                            0,
+                                            None,
+                                            None,
+                                            stop_info.clone(),
+                                        );
+                                        ctx.emit_and_finalize("resign".to_string(), None, meta, "SearchFinished resign")?;
+                                        break;
+                                    }
+                                }
                             }
+                        } else {
+                            // If no session, still use fallback
+                            log::warn!("SearchFinished but no session available, using fallback");
+                            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
+                                Ok((move_str, _)) => {
+                                    let meta = build_meta(
+                                        BestmoveSource::EmergencyFallbackOnFinish,
+                                        0,
+                                        None,
+                                        None,
+                                        stop_info.clone(),
+                                    );
+                                    ctx.emit_and_finalize(move_str, None, meta, "SearchFinished no session")?;
+                                }
+                                Err(e) => {
+                                    log::error!("Fallback failed with no session: {e}");
+                                    let meta = build_meta(
+                                        BestmoveSource::ResignOnFinish,
+                                        0,
+                                        None,
+                                        None,
+                                        stop_info,
+                                    );
+                                    ctx.emit_and_finalize("resign".to_string(), None, meta, "SearchFinished no session resign")?;
+                                }
+                            }
+                            break;
                         }
                     }
                 }
@@ -1179,18 +1275,26 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     from_guard,
                     search_id,
                 }) => {
-                    // Only process if it's for current search
-                    if search_id == *ctx.current_search_id {
+                    // Only process if it's for current search and we're in stage 2
+                    if search_id == *ctx.current_search_id && stage >= 2 {
                         log::warn!("Worker finished without bestmove (from_guard: {from_guard})");
+
+                        // Get partial result from session
+                        let partial_result_tuple = ctx
+                            .current_session
+                            .as_ref()
+                            .and_then(|session| session.partial_result.as_ref())
+                            .map(|pr| (pr.move_str.clone(), pr.depth, pr.score));
+
                         // Use fallback strategy
                         match generate_fallback_move(
                             ctx.engine,
-                            partial_result.clone(),
+                            partial_result_tuple.clone(),
                             ctx.allow_null_move,
                         ) {
                             Ok((move_str, used_partial)) => {
                                 // Log fallback source (info now handled by BestmoveEmitter)
-                                if let Some((_, depth, score)) = partial_result {
+                                if let Some((_, depth, score)) = partial_result_tuple.as_ref() {
                                     log::debug!("Using partial result on finish: depth={depth}, score={score}");
                                 } else {
                                     log::debug!("Using emergency fallback on finish");
@@ -1198,7 +1302,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
                                 if let Some(ref _emitter) = ctx.current_bestmove_emitter {
                                     let (from, depth, score_str) = if used_partial {
-                                        if let Some((_, d, s)) = partial_result {
+                                        if let Some((_, d, s)) = partial_result_tuple {
                                             (
                                                 BestmoveSource::PartialResultOnFinish,
                                                 d,
@@ -2131,18 +2235,17 @@ mod tests {
         *ctx.current_stop_flag = Some(Arc::new(AtomicBool::new(false)));
         *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(200));
 
-        // Spawn a thread that sends a partial result but delays bestmove
+        // Create a session with partial result
+        let session = {
+            let mut s = SearchSession::new(200, 0);
+            s.update_partial_result("7g7f".to_string(), 5, 100);
+            s
+        };
+        *ctx.current_session = Some(session);
+
+        // Spawn a thread that delays any response past timeout
         let tx_clone = ctx.worker_tx.clone();
         let worker_thread = thread::spawn(move || {
-            // Send partial result quickly (well before timeout of 20ms)
-            thread::sleep(Duration::from_millis(5));
-            let _ = tx_clone.send(WorkerMessage::PartialResult {
-                current_best: "7g7f".to_string(),
-                depth: 5,
-                score: 100,
-                search_id: 200,
-            });
-
             // Sleep longer than the timeout to trigger timeout path
             thread::sleep(Duration::from_millis(30));
 
