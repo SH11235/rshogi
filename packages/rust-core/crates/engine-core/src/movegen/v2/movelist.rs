@@ -25,9 +25,7 @@ impl MoveList {
     #[inline]
     pub fn push(&mut self, mv: Move) {
         debug_assert!(self.len < 256, "Move list overflow");
-        unsafe {
-            self.moves[self.len].write(mv);
-        }
+        self.moves[self.len].write(mv);
         self.len += 1;
     }
 
@@ -151,6 +149,7 @@ mod tests {
                 Square::new(i % 9, i / 9),
                 false,
                 PieceType::Pawn,
+                None, // No capture
             );
             list.push(mv);
         }
