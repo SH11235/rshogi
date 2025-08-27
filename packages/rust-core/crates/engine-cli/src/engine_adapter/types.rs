@@ -29,3 +29,24 @@ pub struct PonderState {
     /// Time when pondering started
     pub ponder_start: Option<std::time::Instant>,
 }
+
+/// Source of ponder move for observability/metrics
+#[derive(Clone, Copy, Debug)]
+pub enum PonderSource {
+    Pv,
+    CurrentIteration,
+    TT,
+    None,
+}
+
+impl std::fmt::Display for PonderSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            PonderSource::Pv => "pv",
+            PonderSource::CurrentIteration => "current_iter",
+            PonderSource::TT => "tt",
+            PonderSource::None => "none",
+        };
+        write!(f, "{}", s)
+    }
+}

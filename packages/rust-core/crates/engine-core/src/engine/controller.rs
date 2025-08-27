@@ -321,6 +321,60 @@ impl Engine {
         }
     }
 
+    /// Try to get a ponder move directly from TT for the child position after `best_move`.
+    /// Uses shared TT in parallel mode or the underlying searcher's TT otherwise.
+    pub fn get_ponder_from_tt(&self, pos: &Position, best_move: crate::shogi::Move) -> Option<crate::shogi::Move> {
+        // Apply best move to reach child position
+        let mut child = pos.clone();
+        let _undo = child.do_move(best_move);
+        let child_hash = child.zobrist_hash;
+
+        // Choose TT source
+        let tt_opt: Option<std::sync::Arc<ShardedTranspositionTable>> = if self.use_parallel {
+            Some(self.shared_tt.clone())
+        } else {
+            // Get the active searcher's TT handle
+            match self.engine_type {
+                EngineType::Material => self
+                    .material_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::Nnue => self
+                    .nnue_basic_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::Enhanced => self
+                    .material_enhanced_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::EnhancedNnue => self
+                    .nnue_enhanced_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            }
+        };
+
+        let tt = tt_opt?;
+        let entry = tt.probe(child_hash)?;
+        if !entry.matches(child_hash) {
+            return None;
+        }
+        if entry.node_type() != crate::search::NodeType::Exact {
+            return None;
+        }
+        if let Some(mv) = entry.get_move() {
+            // Validate legality in child position
+            if child.is_legal_move(mv) {
+                return Some(mv);
+            }
+        }
+        None
+    }
+
     /// Parallel search with material evaluator
     fn search_parallel_material(
         &mut self,

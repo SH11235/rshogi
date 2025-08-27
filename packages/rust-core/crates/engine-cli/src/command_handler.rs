@@ -135,7 +135,7 @@ impl<'a> CommandContext<'a> {
     ) -> Result<bool> {
         let adapter = lock_or_recover_adapter(self.engine);
         if let Some(position) = adapter.get_position() {
-            if let Ok((best_move, ponder)) = adapter.validate_and_get_bestmove(session, position) {
+            if let Ok((best_move, ponder, ponder_source)) = adapter.validate_and_get_bestmove(session, position) {
                 // Extract common score formatting and metadata
                 let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
                 let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
@@ -145,6 +145,22 @@ impl<'a> CommandContext<'a> {
                 });
 
                 log::debug!("Validated bestmove from session: depth={depth}");
+
+                // Metrics: PV長・Ponderソース
+                let pv_len_str = session
+                    .committed_best
+                    .as_ref()
+                    .map(|b| b.pv.len().to_string())
+                    .unwrap_or_else(|| "0".to_string());
+                let ponder_src_str = ponder_source.to_string();
+                let metrics = log_tsv(&[
+                    ("kind", "bestmove_metrics"),
+                    ("search_id", &self.current_search_id.to_string()),
+                    ("pv_len", &pv_len_str),
+                    ("ponder_source", &ponder_src_str),
+                    ("ponder_present", if ponder.is_some() {"true"} else {"false"}),
+                ]);
+                let _ = send_info_string(metrics);
 
                 let meta = build_meta(from, depth, seldepth, score_str, stop_info);
                 self.emit_and_finalize(best_move, ponder, meta, finalize_label)?;
@@ -179,6 +195,7 @@ impl<'a> CommandContext<'a> {
         meta: BestmoveMeta,
         finalize_label: &str,
     ) -> Result<()> {
+        // Metrics logging is handled before this call in emit_best_from_session
         // Try to emit via BestmoveEmitter if available
         if let Some(ref emitter) = self.current_bestmove_emitter {
             match emitter.emit(best_move.clone(), ponder.clone(), meta.clone()) {

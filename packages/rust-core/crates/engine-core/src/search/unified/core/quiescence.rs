@@ -14,6 +14,7 @@ use crate::{
 };
 use smallvec::SmallVec;
 use std::sync::atomic::Ordering;
+use once_cell::sync::Lazy;
 
 // Import victim_score from move_ordering module
 use super::move_ordering::victim_score;
@@ -145,6 +146,11 @@ where
         }
     }
 
+    // Debug logging gate (read once)
+    static QS_DEBUG: Lazy<bool> = Lazy::new(|| {
+        std::env::var("SHOGI_DEBUG_QS").as_deref() == Ok("1")
+    });
+
     // Primary limit: relative qsearch depth
     // This ensures consistent qsearch behavior regardless of main search depth
     // Note: In check positions, we skip this limit to ensure proper check evasion
@@ -152,11 +158,12 @@ where
         let qply_limit = crate::search::constants::MAX_QPLY;
 
         if qply >= qply_limit {
-            // Use rate limiter to avoid log spam
-            if log::log_enabled!(log::Level::Warn)
+            // Debug-only logging (opt-in via SHOGI_DEBUG_QS=1) with rate limiting
+            if *QS_DEBUG
+                && log::log_enabled!(log::Level::Debug)
                 && super::log_rate_limiter::QUIESCE_DEPTH_LIMITER.should_log()
             {
-                log::warn!("Hit relative quiescence depth limit qply={qply} (limit={qply_limit})");
+                log::debug!("Hit relative quiescence depth limit qply={qply} (limit={qply_limit})");
             }
             // Not in check, return stand pat evaluation with proper window handling
             let stand_pat = searcher.evaluator.evaluate(pos);
@@ -173,11 +180,12 @@ where
     // Secondary safeguard: absolute ply limit
     // This is a safety net to prevent stack overflow in extreme cases
     if ply >= MAX_PLY as u16 {
-        // Use rate limiter for this warning too
-        if log::log_enabled!(log::Level::Warn)
+        // Debug-only logging (opt-in) with rate limiting
+        if *QS_DEBUG
+            && log::log_enabled!(log::Level::Debug)
             && super::log_rate_limiter::QUIESCE_DEPTH_LIMITER.should_log()
         {
-            log::warn!("Hit absolute ply limit {ply} in quiescence search");
+            log::debug!("Hit absolute ply limit {ply} in quiescence search");
         }
         // In check at max depth is rare but we can't recurse further
         // Return pessimistic value rather than static eval which could be illegal
@@ -191,11 +199,12 @@ where
     // Tertiary safeguard: absolute quiescence depth (relaxed to 96)
     // This prevents explosion in complex positions with many captures
     if ply >= crate::search::constants::MAX_QUIESCE_DEPTH {
-        // Use rate limiter to avoid log spam
-        if log::log_enabled!(log::Level::Warn)
+        // Debug-only logging (opt-in) with rate limiting
+        if *QS_DEBUG
+            && log::log_enabled!(log::Level::Debug)
             && super::log_rate_limiter::QUIESCE_DEPTH_LIMITER.should_log()
         {
-            log::warn!("Hit absolute quiescence depth limit at ply {ply}");
+            log::debug!("Hit absolute quiescence depth limit at ply {ply}");
         }
         // Hard stop at reasonable depth
         // Return evaluation-based value instead of fixed constants to avoid discontinuity
