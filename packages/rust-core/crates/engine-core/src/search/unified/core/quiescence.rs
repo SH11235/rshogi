@@ -12,9 +12,9 @@ use crate::{
     },
     shogi::{Move, Position},
 };
+use once_cell::sync::Lazy;
 use smallvec::SmallVec;
 use std::sync::atomic::Ordering;
-use once_cell::sync::Lazy;
 
 // Import victim_score from move_ordering module
 use super::move_ordering::victim_score;
@@ -147,9 +147,8 @@ where
     }
 
     // Debug logging gate (read once)
-    static QS_DEBUG: Lazy<bool> = Lazy::new(|| {
-        std::env::var("SHOGI_DEBUG_QS").as_deref() == Ok("1")
-    });
+    static QS_DEBUG: Lazy<bool> =
+        Lazy::new(|| std::env::var("SHOGI_DEBUG_QS").as_deref() == Ok("1"));
 
     // Primary limit: relative qsearch depth
     // This ensures consistent qsearch behavior regardless of main search depth

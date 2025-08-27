@@ -8,7 +8,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         unified::UnifiedSearcher, SearchLimits, SearchLimitsBuilder, SearchResult, SearchStats,
-        ShardedTranspositionTable,
+        TranspositionTable,
     },
     shogi::Position,
     time_management::TimeControl,
@@ -30,7 +30,7 @@ pub struct LazySmpSearcher<E: Evaluator> {
     /// Evaluator for position evaluation
     evaluator: Arc<E>,
     /// Shared transposition table
-    tt: Arc<ShardedTranspositionTable>,
+    tt: Arc<TranspositionTable>,
 }
 
 impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
@@ -39,7 +39,7 @@ impl<E: Evaluator + Clone + Send + Sync + 'static> LazySmpSearcher<E> {
         Self {
             num_threads,
             evaluator: Arc::new(evaluator),
-            tt: Arc::new(ShardedTranspositionTable::new(tt_size_mb)),
+            tt: Arc::new(TranspositionTable::new(tt_size_mb)),
         }
     }
 

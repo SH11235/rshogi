@@ -472,12 +472,12 @@ where
                         // Stack-based PV: head is mv, tail is child stack PV
                         if crate::search::types::SearchStack::is_valid_ply(ply) {
                             let child_ply = (ply + 1) as usize;
-                            let child_tail = if crate::search::types::SearchStack::is_valid_ply(ply + 1)
-                            {
-                                searcher.search_stack[child_ply].pv_line.clone()
-                            } else {
-                                smallvec::SmallVec::<[crate::shogi::Move; 16]>::new()
-                            };
+                            let child_tail =
+                                if crate::search::types::SearchStack::is_valid_ply(ply + 1) {
+                                    searcher.search_stack[child_ply].pv_line.clone()
+                                } else {
+                                    smallvec::SmallVec::<[crate::shogi::Move; 16]>::new()
+                                };
                             let entry = &mut searcher.search_stack[ply as usize];
                             entry.pv_line.clear();
                             entry.pv_line.push(mv);

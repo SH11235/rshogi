@@ -3,7 +3,7 @@
 use crate::{
     evaluation::evaluate::Evaluator,
     movegen::MoveGenerator,
-    search::{SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
+    search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     shogi::{Move, Position},
     time_management::{GamePhase, TimeManager},
 };
@@ -36,7 +36,7 @@ const INITIAL_SEED_HELPERS: usize = 2;
 /// Simplified parallel searcher
 pub struct ParallelSearcher<E: Evaluator + Send + Sync + 'static> {
     /// Shared transposition table
-    tt: Arc<ShardedTranspositionTable>,
+    tt: Arc<TranspositionTable>,
 
     /// Shared evaluator
     evaluator: Arc<E>,
@@ -409,7 +409,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
     }
 
     /// Create new parallel searcher
-    pub fn new(evaluator: Arc<E>, tt: Arc<ShardedTranspositionTable>, num_threads: usize) -> Self {
+    pub fn new(evaluator: Arc<E>, tt: Arc<TranspositionTable>, num_threads: usize) -> Self {
         assert!(num_threads > 0, "Need at least one thread");
 
         let stop_flag = Arc::new(AtomicBool::new(false));

@@ -7,8 +7,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         adaptive_prefetcher::AdaptivePrefetcher, history::History,
-        parallel::shared::DuplicationStats, types::SearchStack, SearchStats,
-        ShardedTranspositionTable,
+        parallel::shared::DuplicationStats, types::SearchStack, SearchStats, TranspositionTable,
     },
 };
 use std::sync::{Arc, Mutex};
@@ -21,7 +20,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     evaluator: Arc<E>,
-    tt: Option<Arc<ShardedTranspositionTable>>,
+    tt: Option<Arc<TranspositionTable>>,
     history: Option<Arc<Mutex<History>>>,
     duplication_stats: Option<Arc<DuplicationStats>>,
     disable_prefetch: bool,
@@ -57,7 +56,7 @@ where
     }
 
     /// Set a shared transposition table
-    pub fn with_shared_tt(mut self, tt: Arc<ShardedTranspositionTable>) -> Self {
+    pub fn with_shared_tt(mut self, tt: Arc<TranspositionTable>) -> Self {
         self.tt = Some(tt);
         self
     }
@@ -95,10 +94,7 @@ where
 
         // Create or use shared TT
         let tt = if USE_TT {
-            Some(
-                self.tt
-                    .unwrap_or_else(|| Arc::new(ShardedTranspositionTable::new(self.tt_size_mb))),
-            )
+            Some(self.tt.unwrap_or_else(|| Arc::new(TranspositionTable::new(self.tt_size_mb))))
         } else {
             None
         };
@@ -165,7 +161,7 @@ where
     }
 
     /// Create a new unified searcher with shared transposition table
-    pub fn with_shared_tt(evaluator: Arc<E>, tt: Arc<ShardedTranspositionTable>) -> Self {
+    pub fn with_shared_tt(evaluator: Arc<E>, tt: Arc<TranspositionTable>) -> Self {
         UnifiedSearcherBuilder::with_arc(evaluator).with_shared_tt(tt).build()
     }
 }
@@ -186,7 +182,7 @@ mod tests {
     #[test]
     fn test_builder_with_shared_tt() {
         let evaluator = Arc::new(MaterialEvaluator);
-        let tt = Arc::new(ShardedTranspositionTable::new(16));
+        let tt = Arc::new(TranspositionTable::new(16));
 
         let searcher1: UnifiedSearcher<_, true, false> =
             UnifiedSearcherBuilder::with_arc(evaluator.clone())
@@ -227,7 +223,7 @@ mod tests {
         assert_eq!(searcher3.nodes(), 0);
 
         // Test with_shared_tt()
-        let tt = Arc::new(ShardedTranspositionTable::new(8));
+        let tt = Arc::new(TranspositionTable::new(8));
         let searcher4 = UnifiedSearcher::<_, true, false>::with_shared_tt(evaluator, tt);
         assert_eq!(searcher4.nodes(), 0);
     }

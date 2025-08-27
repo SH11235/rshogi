@@ -135,7 +135,9 @@ impl<'a> CommandContext<'a> {
     ) -> Result<bool> {
         let adapter = lock_or_recover_adapter(self.engine);
         if let Some(position) = adapter.get_position() {
-            if let Ok((best_move, ponder, ponder_source)) = adapter.validate_and_get_bestmove(session, position) {
+            if let Ok((best_move, ponder, ponder_source)) =
+                adapter.validate_and_get_bestmove(session, position)
+            {
                 // Extract common score formatting and metadata
                 let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
                 let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
@@ -158,7 +160,7 @@ impl<'a> CommandContext<'a> {
                     ("search_id", &self.current_search_id.to_string()),
                     ("pv_len", &pv_len_str),
                     ("ponder_source", &ponder_src_str),
-                    ("ponder_present", if ponder.is_some() {"true"} else {"false"}),
+                    ("ponder_present", if ponder.is_some() { "true" } else { "false" }),
                 ]);
                 let _ = send_info_string(metrics);
 

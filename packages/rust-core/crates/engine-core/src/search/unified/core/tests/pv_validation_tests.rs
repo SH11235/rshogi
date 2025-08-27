@@ -4,7 +4,7 @@ use crate::evaluation::evaluate::MaterialEvaluator;
 use crate::search::unified::core::{pv_validation, PVTable};
 use crate::search::unified::{TTOperations, UnifiedSearcher};
 use crate::search::NodeType;
-use crate::search::ShardedTranspositionTable;
+use crate::search::TranspositionTable;
 use crate::shogi::{Move, Square};
 use crate::usi::{parse_usi_move, parse_usi_square};
 use crate::Position;
@@ -105,7 +105,7 @@ fn test_tt_move_validation_in_search() {
     let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false>::new(evaluator);
 
     // Initialize TT
-    searcher.tt = Some(Arc::new(ShardedTranspositionTable::new(1)));
+    searcher.tt = Some(Arc::new(TranspositionTable::new(1)));
 
     // Position where 4b5b is invalid
     let sfen = "lnsgkgsnl/r6b1/pppppppp1/8p/9/9/PPPPPPPPP/1BG3K1R/LNS2GSNL w - 4";
@@ -188,7 +188,7 @@ fn test_hash_collision_move_validation() {
 
     let evaluator = MaterialEvaluator;
     let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, false>::new(evaluator);
-    searcher.tt = Some(Arc::new(ShardedTranspositionTable::new(1)));
+    searcher.tt = Some(Arc::new(TranspositionTable::new(1)));
 
     // Create two positions with potentially colliding hashes
     let pos1 = Position::startpos();

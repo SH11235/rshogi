@@ -103,7 +103,7 @@ impl EngineAdapter {
         log::info!("prepare_search: stop_flag value before apply_go_params = {stop_value_before}");
 
         // Apply go parameters to get search limits
-        let mut limits = crate::engine_adapter::time_control::apply_go_params(
+        let limits = crate::engine_adapter::time_control::apply_go_params(
             params,
             &position,
             overhead_ms,
@@ -191,12 +191,18 @@ impl EngineAdapter {
             } else if let Some(cur) = &session.current_iteration_best {
                 // Fallback: try current iteration PV if it has a second move
                 if let Some(&mv) = cur.pv.get(1) {
-                    (Some(move_to_usi(&mv)), crate::engine_adapter::types::PonderSource::CurrentIteration)
+                    (
+                        Some(move_to_usi(&mv)),
+                        crate::engine_adapter::types::PonderSource::CurrentIteration,
+                    )
                 } else {
                     // As a last resort, query TT for the child position after bestmove
                     if let Some(ref engine) = self.engine {
                         if let Some(ponder_mv) = engine.get_ponder_from_tt(position, best_move) {
-                            (Some(move_to_usi(&ponder_mv)), crate::engine_adapter::types::PonderSource::TT)
+                            (
+                                Some(move_to_usi(&ponder_mv)),
+                                crate::engine_adapter::types::PonderSource::TT,
+                            )
                         } else {
                             (None, crate::engine_adapter::types::PonderSource::None)
                         }

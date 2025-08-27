@@ -62,4 +62,3 @@ fn main() {
     println!("  Avg PV length: {:.2}", avg_pv_len);
     println!("  Avg NPS: {:.0}", avg_nps);
 }
-

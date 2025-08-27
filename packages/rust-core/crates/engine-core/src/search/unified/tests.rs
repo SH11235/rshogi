@@ -18,7 +18,7 @@ fn test_unified_searcher_creation() {
 fn test_shared_tt_creation() {
     // Test that we can create a searcher with a shared TT
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(crate::search::TranspositionTable::new(16));
 
     // Create two searchers with the same TT
     let searcher1 =

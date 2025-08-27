@@ -4,7 +4,7 @@ use super::work_queue::{get_job, Queues, WorkItem};
 use super::{SearchThread, SharedSearchState};
 use crate::{
     evaluation::evaluate::Evaluator,
-    search::{SearchLimits, ShardedTranspositionTable},
+    search::{SearchLimits, TranspositionTable},
 };
 use crossbeam_deque::Worker as DequeWorker;
 use log::{debug, error};
@@ -24,7 +24,7 @@ pub struct WorkerConfig<E: Evaluator + Send + Sync + 'static> {
     pub worker: DequeWorker<WorkItem>,
     pub limits: SearchLimits,
     pub evaluator: Arc<E>,
-    pub tt: Arc<ShardedTranspositionTable>,
+    pub tt: Arc<TranspositionTable>,
     pub shared_state: Arc<SharedSearchState>,
     pub queues: Arc<Queues>,
     pub active_workers: Arc<AtomicUsize>,

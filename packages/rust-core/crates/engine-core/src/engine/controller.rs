@@ -10,7 +10,7 @@ use crate::{
     evaluation::nnue::NNUEEvaluatorWrapper,
     search::parallel::ParallelSearcher,
     search::unified::UnifiedSearcher,
-    search::{SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
+    search::{SearchLimits, SearchResult, SearchStats, TranspositionTable},
     Position,
 };
 
@@ -97,7 +97,7 @@ pub struct Engine {
     material_parallel_searcher: Arc<Mutex<Option<MaterialParallelSearcher>>>,
     nnue_parallel_searcher: Arc<Mutex<Option<NnueParallelSearcher>>>,
     // Shared transposition table for parallel search
-    shared_tt: Arc<ShardedTranspositionTable>,
+    shared_tt: Arc<TranspositionTable>,
     // Number of threads for parallel search
     num_threads: usize,
     // Whether to use parallel search
@@ -167,7 +167,7 @@ impl Engine {
         };
 
         // Create shared TT for parallel search
-        let shared_tt = Arc::new(ShardedTranspositionTable::new(default_tt_size)); // Use same TT size for shared TT
+        let shared_tt = Arc::new(TranspositionTable::new(default_tt_size));
 
         Engine {
             engine_type,
@@ -323,14 +323,18 @@ impl Engine {
 
     /// Try to get a ponder move directly from TT for the child position after `best_move`.
     /// Uses shared TT in parallel mode or the underlying searcher's TT otherwise.
-    pub fn get_ponder_from_tt(&self, pos: &Position, best_move: crate::shogi::Move) -> Option<crate::shogi::Move> {
+    pub fn get_ponder_from_tt(
+        &self,
+        pos: &Position,
+        best_move: crate::shogi::Move,
+    ) -> Option<crate::shogi::Move> {
         // Apply best move to reach child position
         let mut child = pos.clone();
         let _undo = child.do_move(best_move);
         let child_hash = child.zobrist_hash;
 
         // Choose TT source
-        let tt_opt: Option<std::sync::Arc<ShardedTranspositionTable>> = if self.use_parallel {
+        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = if self.use_parallel {
             Some(self.shared_tt.clone())
         } else {
             // Get the active searcher's TT handle
@@ -537,8 +541,7 @@ impl Engine {
             }
 
             // Recreate shared TT with new size
-            self.shared_tt = Arc::new(ShardedTranspositionTable::new(new_size));
-            let num_shards = self.shared_tt.num_shards();
+            self.shared_tt = Arc::new(TranspositionTable::new(new_size));
 
             // Recreate the single-threaded searcher for the current engine type
             match self.engine_type {
@@ -581,8 +584,8 @@ impl Engine {
             }
 
             info!(
-                "Applied hash size: {}MB, shards: {}, recreated {:?} searcher",
-                self.tt_size_mb, num_shards, self.engine_type
+                "Applied hash size: {}MB, recreated {:?} searcher",
+                self.tt_size_mb, self.engine_type
             );
         }
     }
@@ -727,14 +730,13 @@ impl Engine {
 
     /// Clear the transposition table
     pub fn clear_hash(&mut self) {
-        // Since shared_tt is Arc<ShardedTranspositionTable>, we need to recreate it
+        // Recreate shared_tt with new size
         // This will effectively clear all entries
-        self.shared_tt = Arc::new(ShardedTranspositionTable::new(self.tt_size_mb));
-        let num_shards = self.shared_tt.num_shards();
+        self.shared_tt = Arc::new(TranspositionTable::new(self.tt_size_mb));
 
         info!(
-            "Hash table cleared (engine: {:?}, size: {}MB, shards: {})",
-            self.engine_type, self.tt_size_mb, num_shards
+            "Hash table cleared (engine: {:?}, size: {}MB)",
+            self.engine_type, self.tt_size_mb
         );
 
         // Also need to clear searchers as they might have cached TT references
