@@ -6,6 +6,9 @@ use super::error::MoveGenError;
 use super::movelist::MoveList;
 use super::tables;
 
+/// Number of squares on a shogi board (9x9)
+const SHOGI_BOARD_SIZE: usize = 81;
+
 /// Move generator for generating legal moves
 pub struct MoveGenerator;
 
@@ -52,7 +55,7 @@ struct MoveGenImpl<'a> {
     king_sq: Square,
     checkers: Bitboard,
     pinned: Bitboard,
-    pin_rays: [Bitboard; 81],
+    pin_rays: [Bitboard; SHOGI_BOARD_SIZE],
     non_king_check_mask: Bitboard,
     drop_block_mask: Bitboard,
     us: Color,
@@ -83,7 +86,7 @@ impl<'a> MoveGenImpl<'a> {
             king_sq,
             checkers,
             pinned,
-            pin_rays: [Bitboard::EMPTY; 81],
+            pin_rays: [Bitboard::EMPTY; SHOGI_BOARD_SIZE],
             non_king_check_mask: Bitboard::ALL, // 0チェック時は制約なし
             drop_block_mask: Bitboard::ALL,     // 0チェック時は制約なし
             us,
@@ -282,14 +285,10 @@ impl<'a> MoveGenImpl<'a> {
                 let our_pawns = self.pos.board.piece_bb[us as usize][PieceType::Pawn as usize]
                     & !self.pos.board.promoted_bb;
 
-                // Remove files with our pawns
-                for sq in our_pawns {
-                    let file = sq.file();
-                    // Remove all squares in this file
-                    for rank in 0..9 {
-                        let file_sq = Square::new(file, rank);
-                        valid.clear(file_sq);
-                    }
+                // Remove files with our pawns using bitboard operations
+                for pawn_sq in our_pawns {
+                    let file = pawn_sq.file();
+                    valid &= !crate::shogi::attacks::file_mask(file);
                 }
 
                 // Pawns cannot be dropped on the promotion rank
@@ -811,7 +810,6 @@ impl<'a> MoveGenImpl<'a> {
     /// Generate all lance moves
     fn generate_all_lance_moves(&mut self, moves: &mut MoveList) {
         let us = self.pos.side_to_move;
-        let our_pieces = self.pos.board.occupied_bb[us as usize];
 
         let lances = self.pos.board.piece_bb[us as usize][PieceType::Lance as usize];
         let unpromoted_lances = lances & !self.pos.board.promoted_bb;
@@ -823,56 +821,54 @@ impl<'a> MoveGenImpl<'a> {
             let attacks = tables::lance_attacks(from, us);
             let blockers = attacks & self.pos.board.all_bb;
 
-            // Find first blocker
-            let first_blocker = match us {
-                Color::Black => {
-                    // For black, find the highest rank (smallest number) blocker
-                    let mut min_sq: Option<Square> = None;
-                    for sq in blockers {
-                        if min_sq.is_none() || sq.rank() < min_sq.unwrap().rank() {
-                            min_sq = Some(sq);
+            // Find valid moves for lance
+            let to_bb = if !blockers.is_empty() {
+                // Find first blocker efficiently
+                // Since lance moves only vertically on same file, we can optimize
+                let from_file = from.file();
+                let from_rank = from.rank();
+                let mut first_blocker = None;
+
+                // Find the closest blocker in the direction of movement
+                match us {
+                    Color::Black => {
+                        // Black lance moves up (decreasing rank)
+                        for rank in (0..from_rank).rev() {
+                            let sq = Square::new(from_file, rank);
+                            if blockers.test(sq) {
+                                first_blocker = Some(sq);
+                                break;
+                            }
                         }
                     }
-                    min_sq
-                }
-                Color::White => {
-                    // For white, find the lowest rank (largest number) blocker
-                    let mut max_sq: Option<Square> = None;
-                    for sq in blockers {
-                        if max_sq.is_none() || sq.rank() > max_sq.unwrap().rank() {
-                            max_sq = Some(sq);
+                    Color::White => {
+                        // White lance moves down (increasing rank)
+                        for rank in (from_rank + 1)..9 {
+                            let sq = Square::new(from_file, rank);
+                            if blockers.test(sq) {
+                                first_blocker = Some(sq);
+                                break;
+                            }
                         }
                     }
-                    max_sq
                 }
-            };
 
-            let to_bb = if let Some(blocker) = first_blocker {
-                // Can move to squares up to and including first blocker (if enemy)
-                let mut valid_moves = Bitboard::EMPTY;
+                if let Some(blocker_sq) = first_blocker {
+                    // Get all squares between from and blocker using between_bb
+                    let moves_between = between_bb(from, blocker_sq);
 
-                // Add squares between from and blocker
-                for sq in attacks {
-                    let sq_rank = sq.rank();
-                    let blocker_rank = blocker.rank();
-
-                    let is_before_blocker = match us {
-                        Color::Black => sq_rank > blocker_rank,
-                        Color::White => sq_rank < blocker_rank,
-                    };
-
-                    if is_before_blocker {
-                        valid_moves.set(sq);
+                    // Include blocker square only if it contains an enemy piece
+                    if self.their_pieces.test(blocker_sq) {
+                        moves_between | Bitboard::from_square(blocker_sq)
+                    } else {
+                        moves_between
                     }
+                } else {
+                    // This shouldn't happen if blockers is not empty, but handle gracefully
+                    attacks
                 }
-
-                // Include blocker square if it has enemy piece
-                if !our_pieces.test(blocker) {
-                    valid_moves.set(blocker);
-                }
-
-                valid_moves
             } else {
+                // No blockers, can move to all attacked squares
                 attacks
             };
 
@@ -1366,76 +1362,157 @@ impl<'a> MoveGenImpl<'a> {
             return false; // Not even a check
         }
 
+        // Early return if the pawn is not supported (king can just capture it)
+        let pawn_support = self.attackers_to_with_occupancy(to, us, self.pos.board.all_bb);
+        if pawn_support.is_empty() {
+            return false;
+        }
+
         // Simulate position after pawn drop
         let occupied_after_drop = self.pos.board.all_bb | Bitboard::from_square(to);
 
         // 1) Check if king can capture the pawn safely
-        {
-            // King captures the pawn - create virtual occupancy
-            let mut occ_after_king_capture = occupied_after_drop;
-            occ_after_king_capture.clear(their_king_sq);
-            // The pawn at 'to' is captured, so we just have the king at 'to'
+        // If the king captures, check if 'to' is still attacked
+        let mut occ_after_king_capture = occupied_after_drop;
+        occ_after_king_capture.clear(their_king_sq);
+        occ_after_king_capture.set(to); // King is now on 'to'
 
-            // Check if 'to' is attacked by any of our pieces after king capture
-            let attackers = self.attackers_to_with_occupancy(to, us, occ_after_king_capture);
-            if attackers.is_empty() {
-                return false; // King can safely capture the pawn
-            }
+        let king_capturer_attackers =
+            self.attackers_to_with_occupancy(to, us, occ_after_king_capture);
+        if king_capturer_attackers.is_empty() {
+            return false; // King can safely capture
         }
 
-        // 2) Check if any piece (except king) can legally capture the dropped pawn
-        let defenders_all = self.attackers_to_with_occupancy(to, them, occupied_after_drop);
-        let king_bb = self.pos.board.piece_bb[them as usize][PieceType::King as usize];
-        let mut defenders = defenders_all & !king_bb;
+        // 2) Check if any non-king piece can capture the pawn
+        // Use bitboard operations to check defenders more efficiently
+        let non_king_defenders = self.attackers_to_with_occupancy(to, them, occupied_after_drop)
+            & !self.pos.board.piece_bb[them as usize][PieceType::King as usize];
 
+        // For each defender, check if it's pinned
+        // A piece is pinned if it's on the line between king and an attacker
+        let mut defenders = non_king_defenders;
         while let Some(def_sq) = defenders.pop_lsb() {
-            // Check if this defender is pinned to the king
-            // A piece is pinned if removing it would expose the king to attack
-            let mut occ_without_defender = self.pos.board.all_bb;
-            occ_without_defender.clear(def_sq);
-
-            // Check if king would be in check after removing defender
-            let king_attackers =
-                self.attackers_to_with_occupancy(their_king_sq, us, occ_without_defender);
-            if !king_attackers.is_empty() {
-                // This defender is pinned, can't move
-                continue;
+            // Quick check: if defender is not on any line to the king, it can't be pinned
+            let between = between_bb(def_sq, their_king_sq);
+            if between.is_empty() {
+                // Not on same line as king, definitely not pinned
+                return false;
             }
 
-            // Defender is not pinned, can capture the pawn
-            return false;
+            // Check if removing defender exposes king to check
+            let mut occ_test = self.pos.board.all_bb;
+            occ_test.clear(def_sq);
+
+            // Only check attackers that could pin through this defender
+            let potential_pinners =
+                self.pos.board.occupied_bb[us as usize] & !Bitboard::from_square(to);
+            let through_defender_attackers = self.check_attacks_through_square(
+                their_king_sq,
+                def_sq,
+                us,
+                potential_pinners,
+                occ_test,
+            );
+
+            if through_defender_attackers.is_empty() {
+                return false; // Defender can capture
+            }
         }
 
-        // 3) Check if king has any escape squares
+        // 3) Check if king has escape squares
         let king_attacks = tables::king_attacks(their_king_sq);
         let their_pieces = self.pos.board.occupied_bb[them as usize];
-        let our_pieces = self.pos.board.occupied_bb[us as usize];
-
-        // King can move to empty squares or capture enemy pieces
         let escape_squares = king_attacks & !their_pieces;
 
         let mut escapes = escape_squares;
         while let Some(escape_sq) = escapes.pop_lsb() {
-            let mut occ_after_escape = occupied_after_drop;
-            occ_after_escape.clear(their_king_sq);
-
-            // If king captures a piece, remove it from occupancy
-            if our_pieces.test(escape_sq) {
-                occ_after_escape.clear(escape_sq);
+            // Optimize: only check squares not attacked by the dropped pawn
+            if pawn_attacks.test(escape_sq) {
+                continue; // This escape is blocked by the pawn
             }
 
-            // King moves to escape_sq
+            let mut occ_after_escape = occupied_after_drop;
+            occ_after_escape.clear(their_king_sq);
             occ_after_escape.set(escape_sq);
 
-            // Check if escape square is safe
-            let attackers = self.attackers_to_with_occupancy(escape_sq, us, occ_after_escape);
-            if attackers.is_empty() {
-                return false; // King has safe escape
+            // If king captures on escape, remove the captured piece
+            if self.pos.board.occupied_bb[us as usize].test(escape_sq) {
+                occ_after_escape.clear(escape_sq);
+                occ_after_escape.set(escape_sq); // King takes its place
+            }
+
+            let escape_attackers =
+                self.attackers_to_with_occupancy(escape_sq, us, occ_after_escape);
+            if escape_attackers.is_empty() {
+                return false; // Safe escape exists
             }
         }
 
-        // No escapes, no captures - it's mate
-        true
+        true // No defense - it's mate
+    }
+
+    /// Check if there are attackers on the line through a square
+    fn check_attacks_through_square(
+        &self,
+        target: Square,
+        through: Square,
+        by: Color,
+        potential_attackers: Bitboard,
+        occupancy: Bitboard,
+    ) -> Bitboard {
+        // This is a helper to check sliding attacks that go through a square
+        let mut attackers = Bitboard::EMPTY;
+
+        // Check rooks and queens (promoted rooks) on same rank/file
+        if target.rank() == through.rank() || target.file() == through.file() {
+            let rooks = self.pos.board.piece_bb[by as usize][PieceType::Rook as usize]
+                & potential_attackers;
+            for rook_sq in rooks {
+                if between_bb(rook_sq, target).test(through) {
+                    let attacks = sliding_attacks(rook_sq, occupancy, PieceType::Rook);
+                    if attacks.test(target) {
+                        attackers.set(rook_sq);
+                    }
+                }
+            }
+        }
+
+        // Check bishops and horses (promoted bishops) on diagonals
+        let rank_diff = (target.rank() as i8 - through.rank() as i8).abs();
+        let file_diff = (target.file() as i8 - through.file() as i8).abs();
+        if rank_diff == file_diff {
+            let bishops = self.pos.board.piece_bb[by as usize][PieceType::Bishop as usize]
+                & potential_attackers;
+            for bishop_sq in bishops {
+                if between_bb(bishop_sq, target).test(through) {
+                    let attacks = sliding_attacks(bishop_sq, occupancy, PieceType::Bishop);
+                    if attacks.test(target) {
+                        attackers.set(bishop_sq);
+                    }
+                }
+            }
+        }
+
+        // Check lances on same file
+        if target.file() == through.file() {
+            let lances = self.pos.board.piece_bb[by as usize][PieceType::Lance as usize]
+                & !self.pos.board.promoted_bb
+                & potential_attackers;
+            for lance_sq in lances {
+                let can_attack = match by {
+                    Color::Black => lance_sq.rank() > target.rank(),
+                    Color::White => lance_sq.rank() < target.rank(),
+                };
+                if can_attack && between_bb(lance_sq, target).test(through) {
+                    let between = between_bb(lance_sq, target);
+                    if (between & occupancy).is_empty() {
+                        attackers.set(lance_sq);
+                    }
+                }
+            }
+        }
+
+        attackers
     }
 }
 
