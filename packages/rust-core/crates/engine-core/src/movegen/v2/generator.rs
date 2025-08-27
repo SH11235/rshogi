@@ -1,29 +1,13 @@
 use crate::shogi::attacks::{between_bb, sliding_attacks};
+use crate::shogi::board_constants::{
+    RANK_1_2_MASK, RANK_1_MASK, RANK_8_9_MASK, RANK_9_MASK, SHOGI_BOARD_SIZE,
+};
 use crate::shogi::moves::Move;
 use crate::shogi::{Bitboard, Color, PieceType, Position, Square};
 
 use super::error::MoveGenError;
 use super::movelist::MoveList;
 use super::tables;
-
-/// Number of squares on a shogi board (9x9)
-const SHOGI_BOARD_SIZE: usize = 81;
-
-/// Board dimensions
-#[allow(dead_code)]
-const BOARD_FILES: usize = 9;
-#[allow(dead_code)]
-const BOARD_RANKS: usize = 9;
-
-/// Rank mask constants for optimization
-const RANK_1_MASK: u128 = 0x1FF; // 1st rank (9 bits)
-#[allow(dead_code)]
-const RANK_2_MASK: u128 = 0x1FF << 9; // 2nd rank
-#[allow(dead_code)]
-const RANK_8_MASK: u128 = 0x1FF << 63; // 8th rank
-const RANK_9_MASK: u128 = 0x1FF << 72; // 9th rank
-const RANK_1_2_MASK: u128 = 0x3FFFF; // 1st and 2nd ranks (18 bits)
-const RANK_8_9_MASK: u128 = 0x3FFFF << 63; // 8th and 9th ranks
 
 /// Move generator for generating legal moves
 pub struct MoveGenerator;
@@ -482,16 +466,18 @@ impl<'a> MoveGenImpl<'a> {
         let lances = self.pos.board.piece_bb[us as usize][PieceType::Lance as usize]
             & !self.pos.board.promoted_bb;
         for from in lances {
-            let direction = if us == Color::Black { -9i8 } else { 9i8 };
-            let mut to_sq =
-                Square::new_safe(from.file(), (from.rank() as i8 + direction / 9) as u8);
+            // Get all potential lance moves (without considering blockers)
+            let attacks = tables::lance_attacks(from, us);
 
-            while let Some(to) = to_sq {
-                if self.occupied.test(to) {
-                    break; // Blocked
+            // For each potential move, check if it's actually reachable
+            for to in attacks {
+                // Check if path is blocked
+                let between = between_bb(from, to);
+                if !(between & self.occupied).is_empty() {
+                    continue; // Blocked by another piece
                 }
 
-                // Check if this is a valid move
+                // Check if this is a valid target
                 let target_bb = Bitboard::from_square(to);
                 if self.pinned.test(from) {
                     // Must move along pin ray
@@ -501,9 +487,6 @@ impl<'a> MoveGenImpl<'a> {
                 } else if !(target_bb & target_mask).is_empty() {
                     return true;
                 }
-
-                // Next square
-                to_sq = Square::new_safe(to.file(), (to.rank() as i8 + direction / 9) as u8);
             }
         }
 
@@ -838,10 +821,10 @@ impl<'a> MoveGenImpl<'a> {
                     Color::Black => to.rank() == 0, // rank 1 (9段)
                     Color::White => to.rank() == 8, // rank 9 (1段)
                 };
-                let can_promote = match us {
-                    Color::Black => from.rank() <= 2 || to.rank() <= 2, // ranks 0-2 (a-c)
-                    Color::White => from.rank() >= 6 || to.rank() >= 6, // ranks 6-8 (g-i)
-                };
+                // Branchless promotion check
+                let black_promote = from.rank() <= 2 || to.rank() <= 2;
+                let white_promote = from.rank() >= 6 || to.rank() >= 6;
+                let can_promote = [black_promote, white_promote][us as usize];
 
                 if must_promote {
                     moves.push(Move::normal_with_piece(
@@ -922,38 +905,26 @@ impl<'a> MoveGenImpl<'a> {
 
             // Find valid moves for lance
             let to_bb = if !blockers.is_empty() {
-                // Find first blocker efficiently
-                // Since lance moves only vertically on same file, we can optimize
-                let from_file = from.file();
-                let from_rank = from.rank();
-                let mut first_blocker = None;
-
-                // Find the closest blocker in the direction of movement
-                match us {
+                // Find first blocker using bitboard operations
+                let blocker_sq = match us {
                     Color::Black => {
-                        // Black lance moves up (decreasing rank)
-                        for rank in (0..from_rank).rev() {
-                            let sq = Square::new(from_file, rank);
-                            if blockers.test(sq) {
-                                first_blocker = Some(sq);
-                                break;
-                            }
-                        }
+                        // Black lance moves up (towards rank 0)
+                        // Find the highest rank (closest to from) blocker
+                        let blockers_on_path = blockers & attacks;
+                        // Get the last bit set (highest rank = closest to from)
+                        blockers_on_path.into_iter().last()
                     }
                     Color::White => {
-                        // White lance moves down (increasing rank)
-                        for rank in (from_rank + 1)..9 {
-                            let sq = Square::new(from_file, rank);
-                            if blockers.test(sq) {
-                                first_blocker = Some(sq);
-                                break;
-                            }
-                        }
+                        // White lance moves down (towards rank 8)
+                        // Find the lowest rank (closest to from) blocker
+                        let blockers_on_path = blockers & attacks;
+                        // Get the first bit set (lowest rank = closest to from)
+                        blockers_on_path.lsb()
                     }
-                }
+                };
 
-                if let Some(blocker_sq) = first_blocker {
-                    // Get all squares between from and blocker using between_bb
+                if let Some(blocker_sq) = blocker_sq {
+                    // Get all squares between from and blocker
                     let moves_between = between_bb(from, blocker_sq);
 
                     // Include blocker square only if it contains an enemy piece
@@ -963,7 +934,7 @@ impl<'a> MoveGenImpl<'a> {
                         moves_between
                     }
                 } else {
-                    // This shouldn't happen if blockers is not empty, but handle gracefully
+                    // Fallback: no valid blocker found, use all attacks
                     attacks
                 }
             } else {
@@ -981,10 +952,10 @@ impl<'a> MoveGenImpl<'a> {
                     Color::Black => to.rank() == 0, // rank a = Japanese rank 1
                     Color::White => to.rank() == 8, // rank i = Japanese rank 9
                 };
-                let can_promote = match us {
-                    Color::Black => from.rank() <= 2 || to.rank() <= 2, // ranks 0-2 (a-c)
-                    Color::White => from.rank() >= 6 || to.rank() >= 6, // ranks 6-8 (g-i)
-                };
+                // Branchless promotion check
+                let black_promote = from.rank() <= 2 || to.rank() <= 2;
+                let white_promote = from.rank() >= 6 || to.rank() >= 6;
+                let can_promote = [black_promote, white_promote][us as usize];
 
                 if must_promote {
                     moves.push(Move::normal_with_piece(
@@ -1049,10 +1020,10 @@ impl<'a> MoveGenImpl<'a> {
                     Color::Black => to.rank() <= 1, // ranks 0-1 (a-b)
                     Color::White => to.rank() >= 7, // ranks 7-8 (h-i)
                 };
-                let can_promote = match us {
-                    Color::Black => from.rank() <= 2 || to.rank() <= 2, // ranks 0-2 (a-c)
-                    Color::White => from.rank() >= 6 || to.rank() >= 6, // ranks 6-8 (g-i)
-                };
+                // Branchless promotion check
+                let black_promote = from.rank() <= 2 || to.rank() <= 2;
+                let white_promote = from.rank() >= 6 || to.rank() >= 6;
+                let can_promote = [black_promote, white_promote][us as usize];
 
                 if must_promote {
                     moves.push(Move::normal_with_piece(
@@ -1113,10 +1084,10 @@ impl<'a> MoveGenImpl<'a> {
                 }
 
                 let captured_type = self.get_captured_type(to);
-                let can_promote = match us {
-                    Color::Black => from.rank() <= 2 || to.rank() <= 2, // ranks 0-2 (a-c)
-                    Color::White => from.rank() >= 6 || to.rank() >= 6, // ranks 6-8 (g-i)
-                };
+                // Branchless promotion check
+                let black_promote = from.rank() <= 2 || to.rank() <= 2;
+                let white_promote = from.rank() >= 6 || to.rank() >= 6;
+                let can_promote = [black_promote, white_promote][us as usize];
 
                 if can_promote {
                     moves.push(Move::normal_with_piece(
@@ -1181,10 +1152,10 @@ impl<'a> MoveGenImpl<'a> {
                 }
 
                 let captured_type = self.get_captured_type(to);
-                let can_promote = match us {
-                    Color::Black => from.rank() <= 2 || to.rank() <= 2, // ranks 0-2 (a-c)
-                    Color::White => from.rank() >= 6 || to.rank() >= 6, // ranks 6-8 (g-i)
-                };
+                // Branchless promotion check
+                let black_promote = from.rank() <= 2 || to.rank() <= 2;
+                let white_promote = from.rank() >= 6 || to.rank() >= 6;
+                let can_promote = [black_promote, white_promote][us as usize];
 
                 if can_promote {
                     moves.push(Move::normal_with_piece(
@@ -1275,10 +1246,10 @@ impl<'a> MoveGenImpl<'a> {
                 }
 
                 let captured_type = self.get_captured_type(to);
-                let can_promote = match us {
-                    Color::Black => from.rank() <= 2 || to.rank() <= 2, // ranks 0-2 (a-c)
-                    Color::White => from.rank() >= 6 || to.rank() >= 6, // ranks 6-8 (g-i)
-                };
+                // Branchless promotion check
+                let black_promote = from.rank() <= 2 || to.rank() <= 2;
+                let white_promote = from.rank() >= 6 || to.rank() >= 6;
+                let can_promote = [black_promote, white_promote][us as usize];
 
                 if can_promote {
                     moves.push(Move::normal_with_piece(
@@ -1598,10 +1569,9 @@ impl<'a> MoveGenImpl<'a> {
                         Color::Black => lance_sq.rank() > target.rank(),
                         Color::White => lance_sq.rank() < target.rank(),
                     };
-                    if can_attack && between_bb(lance_sq, target).test(through) {
-                        // Re-use the already calculated between bitboard
+                    if can_attack {
                         let lance_between = between_bb(lance_sq, target);
-                        if (lance_between & occupancy).is_empty() {
+                        if lance_between.test(through) && (lance_between & occupancy).is_empty() {
                             attackers.set(lance_sq);
                         }
                     }
@@ -1628,10 +1598,19 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Calculate file mask for all squares in the bitboard
     fn get_files_from_squares(&self, squares: Bitboard) -> Bitboard {
+        use crate::shogi::board_constants::FILE_MASKS;
+
         let mut files = Bitboard::EMPTY;
-        for sq in squares {
-            files |= crate::shogi::attacks::file_mask(sq.file());
+
+        // Check each file for any pieces
+        for &file_mask in &FILE_MASKS {
+            // If any square in this file contains a piece
+            if (squares.0 & file_mask) != 0 {
+                // Add the entire file to the result
+                files.0 |= file_mask;
+            }
         }
+
         files
     }
 
