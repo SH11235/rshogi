@@ -18,7 +18,6 @@ This package contains the WebAssembly (WASM) implementation for advanced Shogi f
 
 - Rust toolchain (install from https://rustup.rs/)
 - wasm-pack (`cargo install wasm-pack`)
-- Make (optional, for convenience commands)
 - cargo-tarpaulin (optional, for coverage reports): `cargo install cargo-tarpaulin`
 
 ## Project Structure
@@ -116,12 +115,6 @@ npm run build:wasm      # Production build (optimized)
 npm run build:wasm:dev  # Development build (faster)
 ```
 
-### From this directory
-```bash
-make build      # Production build
-make build-dev  # Development build
-make clean      # Clean build artifacts
-```
 
 ## Important Notes
 
@@ -141,8 +134,6 @@ The generated files in `packages/web/src/wasm/` are:
 
 1. Make changes to Rust code
 2. Run quality checks: `cargo fmt`, `cargo clippy`, `cargo test`
-3. Build WASM: `npm run build:wasm` (from root) or `make build`
-4. Test changes in the web application
 
 ## Testing
 
@@ -152,10 +143,6 @@ cargo test
 
 # Run WASM tests in browser (requires Chrome)
 wasm-pack test --chrome --headless
-
-# Or use Make commands
-make test       # Standard tests
-make test-wasm  # Browser tests
 
 # Generate code coverage report (requires cargo-tarpaulin)
 cargo tarpaulin --out html --lib  # Generates tarpaulin-report.html
@@ -181,13 +168,6 @@ cargo check                  # Fast type checking
 cargo audit      # Security vulnerability scan
 cargo outdated   # Check for outdated dependencies
 cargo machete    # Find unused dependencies (requires installation)
-```
-
-### Quick Commands
-```bash
-make check-all        # Run all quality checks
-make format-check     # Check formatting without modifying
-make install-dev-tools # Install additional development tools
 ```
 
 ## API Documentation
