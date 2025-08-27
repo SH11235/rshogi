@@ -964,16 +964,9 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         }
 
         // Check if the last search was using byoyomi time control and get safety ms
-        let (is_byoyomi, safety_ms, byoyomi_time_ms) = {
+        let (is_byoyomi, safety_ms) = {
             let adapter = lock_or_recover_adapter(ctx.engine);
-            let is_byo = adapter.last_search_is_byoyomi();
-            let safety = adapter.byoyomi_safety_ms();
-            let byo_time = if is_byo {
-                adapter.last_byoyomi_time_ms().unwrap_or(6000) // Get actual byoyomi time
-            } else {
-                0
-            };
-            (is_byo, safety, byo_time)
+            (adapter.last_search_is_byoyomi(), adapter.byoyomi_safety_ms())
         };
 
         // Get safety factor from environment variable (default: 0.5 for stage1, 1.0 for total)
@@ -989,21 +982,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             Duration::from_millis(10) // Test mode: very quick wait
         };
         #[cfg(not(test))]
-        let stage1_timeout = if is_byoyomi && byoyomi_time_ms > 0 {
-            // Calculate timeout as a percentage of actual byoyomi time
-            // For 6 seconds byoyomi: use ~15% for stage1 (900ms)
-            // For shorter byoyomi: scale proportionally
-            let percentage_timeout = (byoyomi_time_ms as f64 * 0.15) as u64;
-            let safety_based = (safety_ms as f64 * stage1_factor) as u64;
-
-            // Use the larger of percentage-based or safety-based, but respect byoyomi time
-            let timeout = percentage_timeout.max(safety_based);
-
-            // Clamp between reasonable bounds, but scale with byoyomi time
-            let min_timeout = (byoyomi_time_ms / 30).max(200); // At least 200ms
-            let max_timeout = (byoyomi_time_ms / 6).min(1500); // Up to 1/6 of byoyomi
-
-            Duration::from_millis(timeout.clamp(min_timeout, max_timeout))
+        let stage1_timeout = if is_byoyomi {
+            // Use configured fraction of safety margin for stage 1
+            // For very short byoyomi (< 800ms safety), allow shorter minimums
+            let min_stage1 = if safety_ms < 800 { 200 } else { 400 };
+            let max_stage1 = if safety_ms < 800 { 600 } else { 1000 };
+            Duration::from_millis(
+                ((safety_ms as f64 * stage1_factor) as u64).clamp(min_stage1, max_stage1),
+            )
         } else {
             Duration::from_millis(50) // Normal mode: wait 50ms for SearchFinished
         };
@@ -1016,21 +1002,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             Duration::from_millis(20) // Test mode: very quick fallback
         };
         #[cfg(not(test))]
-        let total_timeout = if is_byoyomi && byoyomi_time_ms > 0 {
-            // Calculate timeout as a percentage of actual byoyomi time
-            // For 6 seconds byoyomi: use ~25% for total (1500ms)
-            // For shorter byoyomi: scale proportionally
-            let percentage_timeout = (byoyomi_time_ms as f64 * 0.25) as u64;
-            let safety_based = (safety_ms as f64 * total_factor) as u64;
-
-            // Use the larger of percentage-based or safety-based, but respect byoyomi time
-            let timeout = percentage_timeout.max(safety_based);
-
-            // Clamp between reasonable bounds, but scale with byoyomi time
-            let min_timeout = (byoyomi_time_ms / 15).max(400); // At least 400ms
-            let max_timeout = (byoyomi_time_ms / 4).min(2000); // Up to 1/4 of byoyomi
-
-            Duration::from_millis(timeout.clamp(min_timeout, max_timeout))
+        let total_timeout = if is_byoyomi {
+            // Use configured fraction of safety margin for total timeout
+            // For very short byoyomi (< 1600ms safety), allow shorter minimums
+            let min_total = if safety_ms < 1600 { 400 } else { 800 };
+            let max_total = if safety_ms < 1600 { 1200 } else { 2000 };
+            Duration::from_millis(
+                ((safety_ms as f64 * total_factor) as u64).clamp(min_total, max_total),
+            )
         } else {
             Duration::from_millis(100) // Normal mode: 100ms total timeout
         };

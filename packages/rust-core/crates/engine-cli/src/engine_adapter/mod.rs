@@ -73,8 +73,6 @@ pub struct EngineAdapter {
     byoyomi_safety_ms: u64,
     /// Whether the last search was using byoyomi time control
     last_search_is_byoyomi: bool,
-    /// The byoyomi time in milliseconds for the last search (if it was byoyomi)
-    last_byoyomi_time_ms: Option<u64>,
 }
 
 impl Default for EngineAdapter {
@@ -111,7 +109,6 @@ impl EngineAdapter {
             byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
             last_search_is_byoyomi: false,
-            last_byoyomi_time_ms: None,
         };
 
         // Initialize options
@@ -122,11 +119,6 @@ impl EngineAdapter {
     /// Get the byoyomi safety milliseconds setting
     pub fn byoyomi_safety_ms(&self) -> u64 {
         self.byoyomi_safety_ms
-    }
-
-    /// Get the last byoyomi time in milliseconds
-    pub fn last_byoyomi_time_ms(&self) -> Option<u64> {
-        self.last_byoyomi_time_ms
     }
 
     /// Set byoyomi safety ms for testing
