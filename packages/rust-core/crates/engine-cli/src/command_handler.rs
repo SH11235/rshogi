@@ -1198,11 +1198,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 log::debug!(
                                     "Session validation failed in SearchFinished handler, using fallback"
                                 );
-                                
+
                                 // Get partial result from session
-                                let partial_result_tuple = session.partial_result.as_ref()
+                                let partial_result_tuple = session
+                                    .partial_result
+                                    .as_ref()
                                     .map(|pr| (pr.move_str.clone(), pr.depth, pr.score));
-                                
+
                                 match generate_fallback_move(
                                     ctx.engine,
                                     partial_result_tuple.clone(),
@@ -1223,12 +1225,25 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                             (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
                                         };
 
-                                        let meta = build_meta(from, depth, None, score_str, stop_info.clone());
-                                        ctx.emit_and_finalize(move_str, None, meta, "SearchFinished fallback")?;
+                                        let meta = build_meta(
+                                            from,
+                                            depth,
+                                            None,
+                                            score_str,
+                                            stop_info.clone(),
+                                        );
+                                        ctx.emit_and_finalize(
+                                            move_str,
+                                            None,
+                                            meta,
+                                            "SearchFinished fallback",
+                                        )?;
                                         break;
                                     }
                                     Err(e) => {
-                                        log::error!("Fallback failed in SearchFinished handler: {e}");
+                                        log::error!(
+                                            "Fallback failed in SearchFinished handler: {e}"
+                                        );
                                         let meta = build_meta(
                                             BestmoveSource::ResignOnFinish,
                                             0,
@@ -1236,7 +1251,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                             None,
                                             stop_info.clone(),
                                         );
-                                        ctx.emit_and_finalize("resign".to_string(), None, meta, "SearchFinished resign")?;
+                                        ctx.emit_and_finalize(
+                                            "resign".to_string(),
+                                            None,
+                                            meta,
+                                            "SearchFinished resign",
+                                        )?;
                                         break;
                                     }
                                 }
@@ -1253,7 +1273,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                         None,
                                         stop_info.clone(),
                                     );
-                                    ctx.emit_and_finalize(move_str, None, meta, "SearchFinished no session")?;
+                                    ctx.emit_and_finalize(
+                                        move_str,
+                                        None,
+                                        meta,
+                                        "SearchFinished no session",
+                                    )?;
                                 }
                                 Err(e) => {
                                     log::error!("Fallback failed with no session: {e}");
@@ -1264,7 +1289,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                         None,
                                         stop_info,
                                     );
-                                    ctx.emit_and_finalize("resign".to_string(), None, meta, "SearchFinished no session resign")?;
+                                    ctx.emit_and_finalize(
+                                        "resign".to_string(),
+                                        None,
+                                        meta,
+                                        "SearchFinished no session resign",
+                                    )?;
                                 }
                             }
                             break;
