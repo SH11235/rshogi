@@ -984,9 +984,9 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         #[cfg(not(test))]
         let stage1_timeout = if is_byoyomi {
             // Use configured fraction of safety margin for stage 1
-            // For very short byoyomi (< 800ms safety), allow shorter minimums
+            // Increase max limits to handle longer byoyomi periods properly
             let min_stage1 = if safety_ms < 800 { 200 } else { 400 };
-            let max_stage1 = if safety_ms < 800 { 600 } else { 1000 };
+            let max_stage1 = if safety_ms < 800 { 1000 } else { 2000 }; // Increased from 1000 to 2000
             Duration::from_millis(
                 ((safety_ms as f64 * stage1_factor) as u64).clamp(min_stage1, max_stage1),
             )
@@ -1004,9 +1004,9 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         #[cfg(not(test))]
         let total_timeout = if is_byoyomi {
             // Use configured fraction of safety margin for total timeout
-            // For very short byoyomi (< 1600ms safety), allow shorter minimums
+            // Increase max limits to prevent premature timeouts
             let min_total = if safety_ms < 1600 { 400 } else { 800 };
-            let max_total = if safety_ms < 1600 { 1200 } else { 2000 };
+            let max_total = if safety_ms < 1600 { 2000 } else { 4000 }; // Increased from 2000 to 4000
             Duration::from_millis(
                 ((safety_ms as f64 * total_factor) as u64).clamp(min_total, max_total),
             )
