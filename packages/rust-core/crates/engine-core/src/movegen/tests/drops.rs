@@ -163,11 +163,67 @@ fn test_drop_pawn_mate_pinned_defender() {
 
     let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
+    // Debug: Print position and all drop moves
+    println!("\ntest_drop_pawn_mate_pinned_defender:");
+
+    // Print actual squares
+    println!("Actual squares (file, rank):");
+    let king_sq = parse_usi_square("1b").unwrap();
+    let pawn_sq = parse_usi_square("1c").unwrap();
+    println!(
+        "White King at 1b = {} (file={}, rank={})",
+        king_sq,
+        king_sq.file(),
+        king_sq.rank()
+    );
+    println!(
+        "Pawn drop target 1c = {} (file={}, rank={})",
+        pawn_sq,
+        pawn_sq.file(),
+        pawn_sq.rank()
+    );
+    println!(
+        "Black Gold at 1d = {} (file={}, rank={})",
+        parse_usi_square("1d").unwrap(),
+        parse_usi_square("1d").unwrap().file(),
+        parse_usi_square("1d").unwrap().rank()
+    );
+    println!(
+        "Black Gold at 2c = {} (file={}, rank={})",
+        parse_usi_square("2c").unwrap(),
+        parse_usi_square("2c").unwrap().file(),
+        parse_usi_square("2c").unwrap().rank()
+    );
+
+    // Check if gold at 1d can defend 2c
+    println!("\nChecking if gold at 1d can defend 2c:");
+    let gold_1d = parse_usi_square("1d").unwrap();
+    let target_2c = parse_usi_square("2c").unwrap();
+    println!(
+        "  File diff: {} - {} = {}",
+        target_2c.file(),
+        gold_1d.file(),
+        target_2c.file() as i8 - gold_1d.file() as i8
+    );
+    println!(
+        "  Rank diff: {} - {} = {}",
+        target_2c.rank(),
+        gold_1d.rank(),
+        target_2c.rank() as i8 - gold_1d.rank() as i8
+    );
+    println!("\nAll drop moves:");
+    for m in moves.as_slice() {
+        if m.is_drop() {
+            println!("Drop move: {}", m);
+        }
+    }
+
     // Pawn drop at 1c - silver is pinned and cannot capture - should not be allowed
     let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_1c);
     assert!(
         illegal_drop.is_none(),
-        "Drop pawn mate with pinned defender should not be allowed"
+        "Drop pawn mate with pinned defender should not be allowed. Found: {:?}",
+        illegal_drop
     );
 }
 
@@ -340,8 +396,20 @@ fn test_drop_pawn_mate_at_edge() {
     // This drop pawn mate should be detected and prevented
 
     let moves = gen.generate_all(&pos).expect("Failed to generate moves");
+
+    // Debug: Print all drop moves
+    for m in moves.as_slice() {
+        if m.is_drop() {
+            println!("Drop move: {}", m);
+        }
+    }
+
     let illegal_drop = moves.as_slice().iter().find(|m| m.is_drop() && m.to() == sq_1b);
-    assert!(illegal_drop.is_none(), "Drop pawn mate at board edge should not be allowed");
+    assert!(
+        illegal_drop.is_none(),
+        "Drop pawn mate at board edge should not be allowed. Found: {:?}",
+        illegal_drop
+    );
 }
 
 #[test]
