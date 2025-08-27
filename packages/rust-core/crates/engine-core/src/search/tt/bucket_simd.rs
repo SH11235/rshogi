@@ -18,7 +18,7 @@ pub(crate) fn probe_simd(
     }
 
     // Use SIMD to find matching key
-    if let Some(idx) = crate::search::tt_simd::simd::find_matching_key(&keys, target_key) {
+    if let Some(idx) = crate::search::tt::simd::find_matching_key(&keys, target_key) {
         // Use Relaxed for data since Acquire on key already synchronized
         let data = entries[idx * 2 + 1].load(Ordering::Relaxed);
         let entry = TTEntry {
@@ -70,7 +70,7 @@ pub(crate) fn find_worst_entry_simd(
     }
 
     // Calculate all priority scores using SIMD
-    let mut scores = crate::search::tt_simd::simd::calculate_priority_scores(
+    let mut scores = crate::search::tt::simd::calculate_priority_scores(
         &depths,
         &ages,
         &is_pv,

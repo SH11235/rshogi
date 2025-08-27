@@ -9,9 +9,7 @@ pub mod search_basic;
 pub mod search_enhanced;
 pub mod tt;
 pub mod tt_filter;
-pub mod tt_simd;
-pub mod tt_stats;
-pub mod tt_trait;
+// tt_simd was moved into tt/simd.rs
 pub mod types;
 pub mod unified;
 

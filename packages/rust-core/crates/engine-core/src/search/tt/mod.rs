@@ -1,5 +1,12 @@
-//! Optimized transposition table with bucket structure
+//! Optimized transposition table with bucket structure (single table)
 //!
+//! Overview
+//! - Single-table design with cache-friendly buckets (no sharding)
+//! - Lock-free writes via atomic publication order (value -> meta -> key/flag)
+//! - Generation (age) management and incremental GC
+//! - EXACT-chain PV reconstruction integrated here
+//!
+//! Bucket structure
 //! This implementation uses a bucket structure to optimize cache performance:
 //! - 4 entries per bucket (64 bytes = 1 cache line)
 //! - Improved replacement strategy within buckets
@@ -13,7 +20,7 @@ pub mod flexible_bucket;
 pub mod gc;
 pub mod metrics;
 pub mod prefetch;
-pub mod pv_reconstruction;
+// pub mod pv_reconstruction; // merged into this module
 pub mod utils;
 
 #[cfg(test)]
@@ -25,7 +32,7 @@ use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
 use flexible_bucket::FlexibleTTBucket;
 use prefetch::AdaptivePrefetcher;
-use pv_reconstruction::{reconstruct_pv_generic, TTProbe};
+// Integrated PV reconstruction here
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
 use util::sync_compat::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
@@ -42,7 +49,8 @@ pub use entry::{TTEntry, TTEntryParams};
 pub use metrics::DetailedTTMetrics;
 
 // Re-export SIMD types
-pub use crate::search::tt_simd::{simd_enabled, simd_kind, SimdKind};
+pub mod simd;
+pub use simd::{simd_enabled, simd_kind, SimdKind};
 
 // Re-export BUCKET_SIZE from constants
 pub use constants::BUCKET_SIZE;
@@ -1104,3 +1112,55 @@ mod pv_reconstruction_tests {
 }
 
 // Helper functions and additional implementations are in utils.rs
+
+// --- Integrated PV reconstruction (moved from pv_reconstruction.rs) ---
+pub trait TTProbe {
+    fn probe(&self, hash: u64) -> Option<TTEntry>;
+}
+
+/// Generic PV reconstruction from transposition table
+pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth: u8) -> Vec<Move> {
+    use crate::movegen::MoveGenerator;
+    use crate::search::NodeType;
+    use std::collections::HashSet;
+
+    let mut pv = Vec::new();
+    let mut visited: HashSet<u64> = HashSet::new();
+    let max_len = max_depth.min(crate::search::constants::MAX_PLY as u8) as usize;
+
+    for _ in 0..max_len {
+        let hash = pos.zobrist_hash;
+        if !visited.insert(hash) {
+            break;
+        }
+        let entry = match tt.probe(hash) {
+            Some(e) if e.matches(hash) => e,
+            _ => break,
+        };
+        if entry.node_type() != NodeType::Exact {
+            break;
+        }
+        const MIN_DEPTH_FOR_PV_TRUST: u8 = 4;
+        if entry.depth() < MIN_DEPTH_FOR_PV_TRUST && !pv.is_empty() {
+            break;
+        }
+        let Some(best) = entry.get_move() else { break };
+        let mg = MoveGenerator::new();
+        let Ok(legals) = mg.generate_all(pos) else {
+            break;
+        };
+        let Some(found) = legals.as_slice().iter().find(|m| m.equals_without_piece_type(&best))
+        else {
+            break;
+        };
+        let mv = *found;
+        pv.push(mv);
+        let _undo = pos.do_move(mv);
+        // terminal check
+        let mg2 = MoveGenerator::new();
+        if mg2.generate_all(pos).map(|v| v.is_empty()).unwrap_or(true) {
+            break;
+        }
+    }
+    pv
+}

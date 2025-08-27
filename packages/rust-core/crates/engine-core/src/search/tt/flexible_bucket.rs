@@ -5,7 +5,7 @@ use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
 use super::utils::{try_update_entry_generic, UpdateResult};
-use crate::search::tt_simd::simd_enabled;
+use crate::search::tt::simd::simd_enabled;
 use crate::search::NodeType;
 use crate::util::sync_compat::{AtomicU64, Ordering};
 
@@ -78,8 +78,7 @@ impl FlexibleTTBucket {
                 *key = self.entries[i * 2].load(Ordering::Acquire);
             }
 
-            if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_8(&keys, target_key)
-            {
+            if let Some(idx) = crate::search::tt::simd::find_matching_key_8(&keys, target_key) {
                 // Use Relaxed for data since Acquire on key already synchronized
                 let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
                 let entry = TTEntry {
@@ -118,8 +117,7 @@ impl FlexibleTTBucket {
                 *key = self.entries[i * 2].load(Ordering::Acquire);
             }
 
-            if let Some(idx) = crate::search::tt_simd::simd::find_matching_key_16(&keys, target_key)
-            {
+            if let Some(idx) = crate::search::tt::simd::find_matching_key_16(&keys, target_key) {
                 // Use Relaxed for data since Acquire on key already synchronized
                 let data = self.entries[idx * 2 + 1].load(Ordering::Relaxed);
                 let entry = TTEntry {
@@ -369,7 +367,7 @@ impl FlexibleTTBucket {
 
     /// SIMD implementation for finding worst entry in 16-entry bucket
     fn find_worst_entry_simd_16(&self, current_age: u8) -> (usize, i32) {
-        use crate::search::tt_simd::simd;
+        use crate::search::tt::simd;
 
         // Prepare data arrays
         let mut depths = [0u8; 16];
@@ -462,7 +460,7 @@ impl FlexibleTTBucket {
 
     /// SIMD implementation for finding worst entry in 8-entry bucket
     fn find_worst_entry_simd_8(&self, current_age: u8) -> (usize, i32) {
-        use crate::search::tt_simd::simd;
+        use crate::search::tt::simd;
 
         // Prepare data arrays
         let mut depths = [0u8; 8];
