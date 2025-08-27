@@ -4,6 +4,7 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
+    movegen::MoveGenerator,
     search::{
         common::mate_score,
         constants::SEARCH_INF,
@@ -49,8 +50,14 @@ where
     let mut pv = Vec::new();
 
     // Generate all legal moves
-    let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
-    let moves = move_gen_impl.generate_all();
+    let move_gen = MoveGenerator::new();
+    let moves = match move_gen.generate_all(pos) {
+        Ok(moves) => moves,
+        Err(_) => {
+            // King not found - should not happen in valid position
+            return (-SEARCH_INF, pv);
+        }
+    };
 
     if moves.is_empty() {
         // No legal moves - checkmate or stalemate

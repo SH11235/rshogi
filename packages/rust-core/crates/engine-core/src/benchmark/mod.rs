@@ -4,11 +4,10 @@
 // pub mod parallel;  // Temporarily removed during parallel searcher refactoring
 
 use crate::evaluate::{Evaluator, MaterialEvaluator};
-use crate::movegen::MoveGen;
+use crate::movegen::MoveGenerator;
 use crate::nnue::NNUEEvaluatorWrapper;
 use crate::search::unified::UnifiedSearcher;
 use crate::search::SearchLimits;
-use crate::shogi::MoveList;
 use crate::shogi::{Color, Piece, PieceType, Position};
 use crate::usi::parse_usi_square;
 use std::time::{Duration, Instant};
@@ -77,9 +76,8 @@ fn benchmark_movegen() -> u64 {
     let start = Instant::now();
 
     for _ in 0..iterations {
-        let mut gen = MoveGen::new();
-        let mut moves = MoveList::new();
-        gen.generate_all(&pos, &mut moves);
+        let gen = MoveGenerator::new();
+        let moves = gen.generate_all(&pos).expect("Failed to generate moves in benchmark");
         // Force evaluation to prevent optimization
         std::hint::black_box(moves.len());
     }

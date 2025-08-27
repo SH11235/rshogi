@@ -148,8 +148,8 @@ fn test_quiescence_check_no_relative_limit() {
 #[test]
 fn test_quiescence_long_distance_checking_drops() {
     // Test that long distance checking drops (rook/bishop) are considered in quiescence search
-    use crate::movegen::MoveGen;
-    use crate::shogi::{Color, MoveList, PieceType};
+    use crate::movegen::MoveGenerator;
+    use crate::shogi::{Color, PieceType};
 
     // Create a position where we can drop rook/bishop at distance to give check
     // Enemy king at 5e (55), we have rook and bishop in hand
@@ -160,9 +160,8 @@ fn test_quiescence_long_distance_checking_drops() {
     let enemy_king_sq = pos.board.king_square(Color::White).unwrap();
 
     // Manually test the checking drop logic used in quiescence search
-    let mut move_gen = MoveGen::new();
-    let mut all_moves = MoveList::new();
-    move_gen.generate_all(&pos, &mut all_moves);
+    let move_gen = MoveGenerator::new();
+    let all_moves = move_gen.generate_all(&pos).unwrap();
 
     // Filter drops that would give check (similar to quiescence search logic)
     let checking_drops: Vec<_> = all_moves

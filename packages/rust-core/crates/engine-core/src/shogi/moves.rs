@@ -308,6 +308,19 @@ impl MoveList {
         }
     }
 
+    /// Create with specific capacity (for move generation)
+    pub fn with_capacity(capacity: usize) -> Self {
+        MoveList {
+            moves: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Reserve additional capacity if needed
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.moves.reserve(additional);
+    }
+
     /// Add a move to the list
     #[inline]
     pub fn push(&mut self, m: Move) {
