@@ -87,7 +87,7 @@ where
                 if tt.should_trigger_gc() {
                     // Adjust batch size based on search depth
                     let gc_batch_size = if depth < 10 { 128 } else { 256 };
-                    tt.incremental_gc(gc_batch_size);
+                    tt.perform_incremental_gc(gc_batch_size);
                 }
             }
         }

@@ -46,6 +46,7 @@ pub trait TranspositionTableTrait: Send + Sync {
     /// Get hashfull estimate
     fn hashfull(&self) -> u16;
 }
+// End of trait definition
 
 /// Implement the trait for TranspositionTable
 impl TranspositionTableTrait for TranspositionTable {
@@ -98,7 +99,8 @@ impl TranspositionTableTrait for TranspositionTable {
     }
 }
 
-/// Implement the trait for ShardedTranspositionTable
+// ShardedTranspositionTable support removed; single TranspositionTable is used.
+/*
 impl TranspositionTableTrait for super::ShardedTranspositionTable {
     fn probe(&self, hash: u64) -> Option<TTEntry> {
         self.probe(hash)
@@ -148,3 +150,4 @@ impl TranspositionTableTrait for super::ShardedTranspositionTable {
         self.hashfull()
     }
 }
+*/

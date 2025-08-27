@@ -5,7 +5,7 @@
 
 use crate::{
     search::NodeType,
-    search::{adaptive_prefetcher::AdaptivePrefetcher, tt::TTEntry, ShardedTranspositionTable},
+    search::{adaptive_prefetcher::AdaptivePrefetcher, tt::TTEntry, TranspositionTable},
     shogi::Move,
 };
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// with compile-time optimization based on const generics.
 pub trait TTOperations<const USE_TT: bool> {
     /// Get reference to the transposition table
-    fn tt(&self) -> &Option<Arc<ShardedTranspositionTable>>;
+    fn tt(&self) -> &Option<Arc<TranspositionTable>>;
 
     /// Get reference to the adaptive prefetcher
     fn adaptive_prefetcher(&self) -> &Option<AdaptivePrefetcher>;
@@ -130,7 +130,7 @@ where
     E: crate::evaluation::evaluate::Evaluator + Send + Sync + 'static,
 {
     #[inline(always)]
-    fn tt(&self) -> &Option<Arc<ShardedTranspositionTable>> {
+    fn tt(&self) -> &Option<Arc<TranspositionTable>> {
         &self.tt
     }
 

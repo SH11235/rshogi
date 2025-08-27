@@ -38,7 +38,7 @@ where
                 && gc_iterations < MAX_GC_ITERATIONS
                 && gc_start.elapsed() < MAX_GC_BUDGET
             {
-                tt.incremental_gc(512); // Larger batch size before search starts
+                tt.perform_incremental_gc(512); // Larger batch size before search starts
                 gc_iterations += 1;
             }
         }
@@ -179,11 +179,12 @@ where
             pv.push(mv);
 
             // Get PV from recursive search (stack-based)
-            let child_pv: &[crate::shogi::Move] = if crate::search::types::SearchStack::is_valid_ply(1) {
-                &searcher.search_stack[1].pv_line
-            } else {
-                &[]
-            };
+            let child_pv: &[crate::shogi::Move] =
+                if crate::search::types::SearchStack::is_valid_ply(1) {
+                    &searcher.search_stack[1].pv_line
+                } else {
+                    &[]
+                };
 
             // Debug logging for PV construction at root
             #[cfg(debug_assertions)]

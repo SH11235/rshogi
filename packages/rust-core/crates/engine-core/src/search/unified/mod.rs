@@ -26,7 +26,7 @@ use crate::{
         history::{CounterMoveHistory, History},
         parallel::shared::DuplicationStats,
         types::{NodeType, SearchStack},
-        SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable,
+        SearchLimits, SearchResult, SearchStats, TranspositionTable,
     },
     shogi::{Move, Position},
 };
@@ -66,7 +66,7 @@ where
 
     /// Transposition table (conditionally compiled)
     /// Wrapped in Arc for sharing between parallel searchers
-    tt: Option<Arc<ShardedTranspositionTable>>,
+    tt: Option<Arc<TranspositionTable>>,
 
     /// Move ordering history (shared with move ordering)
     history: Arc<Mutex<History>>,
@@ -113,7 +113,7 @@ where
     E: Evaluator + Send + Sync + 'static,
 {
     /// Expose TT handle for auxiliary queries (e.g., ponder extraction)
-    pub fn tt_handle(&self) -> Option<Arc<ShardedTranspositionTable>> {
+    pub fn tt_handle(&self) -> Option<Arc<TranspositionTable>> {
         self.tt.clone()
     }
     /// Disable prefetching (for benchmarking TTOnly mode)

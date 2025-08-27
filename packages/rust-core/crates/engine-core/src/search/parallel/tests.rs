@@ -3,7 +3,7 @@
 use super::parallel_searcher::*;
 use crate::{
     evaluation::evaluate::MaterialEvaluator,
-    search::{SearchLimits, ShardedTranspositionTable},
+    search::{SearchLimits, TranspositionTable},
     shogi::Position,
 };
 use std::sync::{atomic::Ordering, Arc};
@@ -20,7 +20,7 @@ fn create_capture_heavy_position() -> Position {
 #[test]
 fn test_parallel_qnodes_budget() {
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
 
     let mut pos = create_capture_heavy_position();
@@ -51,7 +51,7 @@ fn test_parallel_qnodes_budget() {
 #[test]
 fn test_parallel_qnodes_aggregation() {
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
 
     // Use a position with captures available to ensure quiescence search
@@ -83,7 +83,7 @@ fn test_parallel_qnodes_aggregation() {
 #[test]
 fn test_qnodes_counter_sharing() {
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let searcher = ParallelSearcher::new(evaluator, tt, 4);
 
     // Get the qnodes counter
@@ -102,7 +102,7 @@ fn test_qnodes_counter_sharing() {
 #[test]
 fn test_parallel_qnodes_overshoot_minimal() {
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let num_threads = 4;
     let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
 
@@ -139,7 +139,7 @@ fn test_parallel_qnodes_overshoot_minimal() {
 fn test_completion_wait_robustness() {
     // Test that completion detection properly waits for all work
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let num_threads = 4;
     let mut searcher = ParallelSearcher::new(evaluator, tt, num_threads);
 
@@ -173,7 +173,7 @@ fn test_completion_wait_robustness() {
 fn test_pending_work_counter_accuracy() {
     // Test that pending_work_items accurately tracks work
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let mut searcher = ParallelSearcher::new(evaluator, tt, 2);
 
     // Verify initial state
@@ -197,7 +197,7 @@ fn test_pending_work_counter_accuracy() {
 fn test_fallback_bestmove() {
     // Test that parallel searcher always returns a move, even in edge cases
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let mut searcher = ParallelSearcher::new(evaluator, tt, 1); // Single thread to simplify
 
     let mut pos = Position::startpos();
@@ -238,7 +238,7 @@ fn test_fallback_bestmove() {
 fn test_fallback_bestmove_extreme_limits() {
     // Test fallback with extremely restrictive limits
     let evaluator = Arc::new(MaterialEvaluator);
-    let tt = Arc::new(ShardedTranspositionTable::new(16));
+    let tt = Arc::new(TranspositionTable::new(16));
     let mut searcher = ParallelSearcher::new(evaluator, tt, 4);
 
     // Use a complex middle game position
