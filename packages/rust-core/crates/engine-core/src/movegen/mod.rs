@@ -1,9 +1,6 @@
 /// Error types for move generation
 pub mod error;
 
-/// Static tables for move generation
-pub mod tables;
-
 /// Core move generator implementation
 pub mod generator;
 

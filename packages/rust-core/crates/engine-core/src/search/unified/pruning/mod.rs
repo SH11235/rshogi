@@ -1068,10 +1068,7 @@ mod tests {
 
     #[test]
     fn test_likely_could_give_check_no_false_negatives() {
-        use crate::{
-            movegen::MoveGenerator,
-            shogi::Position,
-        };
+        use crate::{movegen::MoveGenerator, shogi::Position};
 
         // Test that likely_could_give_check never returns false when gives_check is true
         // This ensures our lightweight filter doesn't miss any actual checks
@@ -1133,10 +1130,7 @@ mod tests {
 
     #[test]
     fn test_likely_could_give_check_property_random_positions() {
-        use crate::{
-            movegen::MoveGenerator,
-            shogi::Position,
-        };
+        use crate::{movegen::MoveGenerator, shogi::Position};
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -1199,10 +1193,7 @@ mod tests {
 
     #[test]
     fn test_likely_could_give_check_discovered_checks() {
-        use crate::{
-            movegen::MoveGenerator,
-            shogi::Position,
-        };
+        use crate::{movegen::MoveGenerator, shogi::Position};
 
         // Specific test for discovered checks
         // Position where moving a piece uncovers an attack from behind
