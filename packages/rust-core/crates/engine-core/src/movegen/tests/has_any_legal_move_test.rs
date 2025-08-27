@@ -54,9 +54,12 @@ fn test_has_any_legal_move_block_check_with_drop() {
     let pos = Position::from_sfen("4k4/9/9/9/4r4/9/9/9/4K4 b G 1").unwrap();
 
     assert!(pos.is_in_check(), "King should be in check");
-    
+
     let movegen = MoveGenerator::new();
-    assert!(movegen.has_legal_moves(&pos).unwrap(), "Should be able to block check with gold drop");
+    assert!(
+        movegen.has_legal_moves(&pos).unwrap(),
+        "Should be able to block check with gold drop"
+    );
 
     // Verify at least one drop move exists
     let all_moves = movegen.generate_all(&pos).unwrap();

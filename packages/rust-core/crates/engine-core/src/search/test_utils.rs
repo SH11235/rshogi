@@ -10,9 +10,7 @@ pub mod test_helpers {
     /// This ensures the move has proper piece type information from the move generator
     pub fn legal_usi(pos: &Position, usi: &str) -> Move {
         let gen = MoveGenerator::new();
-        let moves = gen
-            .generate_all(pos)
-            .expect("Should be able to generate moves in legal_usi");
+        let moves = gen.generate_all(pos).expect("Should be able to generate moves in legal_usi");
         *moves
             .as_slice()
             .iter()

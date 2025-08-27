@@ -457,9 +457,7 @@ mod tests {
 
         // Generate legal moves and find the ones we want
         let move_gen = MoveGenerator::new();
-        let moves = move_gen
-            .generate_all(&pos)
-            .expect("Should be able to generate moves in test");
+        let moves = move_gen.generate_all(&pos).expect("Should be able to generate moves in test");
 
         // Find specific moves by their USI representation
         let move1 = moves
@@ -472,9 +470,8 @@ mod tests {
         // Make move1 and generate White's moves
         let undo1 = pos.do_move(move1);
         let move_gen2 = MoveGenerator::new();
-        let moves2 = move_gen2
-            .generate_all(&pos)
-            .expect("Should be able to generate moves in test");
+        let moves2 =
+            move_gen2.generate_all(&pos).expect("Should be able to generate moves in test");
 
         // Find a White move (3c3d is a common response)
         let move2 = moves2
@@ -487,9 +484,8 @@ mod tests {
         // Make move2 and generate Black's next moves
         let undo2 = pos.do_move(move2);
         let move_gen3 = MoveGenerator::new();
-        let moves3 = move_gen3
-            .generate_all(&pos)
-            .expect("Should be able to generate moves in test");
+        let moves3 =
+            move_gen3.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move3 = moves3
             .as_slice()
@@ -565,9 +561,7 @@ mod tests {
 
         // Generate legal moves and find the ones we want
         let move_gen = MoveGenerator::new();
-        let moves = move_gen
-            .generate_all(&pos)
-            .expect("Should be able to generate moves in test");
+        let moves = move_gen.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move1 = moves
             .as_slice()
@@ -578,9 +572,8 @@ mod tests {
 
         let undo1 = pos.do_move(move1);
         let move_gen2 = MoveGenerator::new();
-        let moves2 = move_gen2
-            .generate_all(&pos)
-            .expect("Should be able to generate moves in test");
+        let moves2 =
+            move_gen2.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move2 = moves2
             .as_slice()
@@ -591,9 +584,8 @@ mod tests {
 
         let undo2 = pos.do_move(move2);
         let move_gen3 = MoveGenerator::new();
-        let moves3 = move_gen3
-            .generate_all(&pos)
-            .expect("Should be able to generate moves in test");
+        let moves3 =
+            move_gen3.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move3 = moves3
             .as_slice()
