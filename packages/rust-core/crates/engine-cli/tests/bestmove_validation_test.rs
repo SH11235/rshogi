@@ -264,7 +264,7 @@ fn test_session_bestmove_validation() {
     let result = adapter.validate_and_get_bestmove(&session, position);
     assert!(result.is_ok(), "Valid bestmove should pass validation");
 
-    let (best_str, _ponder) = result.unwrap();
+    let (best_str, _ponder, _ponder_source) = result.unwrap();
     assert_eq!(best_str, "7g7f", "Bestmove should be correctly converted to USI");
 }
 
@@ -383,7 +383,7 @@ fn test_ponder_behavior() {
     let result = adapter.validate_and_get_bestmove(&session, initial_position);
     assert!(result.is_ok(), "Validation should succeed");
 
-    let (best_str, ponder_str) = result.unwrap();
+    let (best_str, ponder_str, _ponder_source) = result.unwrap();
     assert_eq!(best_str, "7g7f", "Best move should be correctly formatted");
 
     // The ponder move validation is working correctly:

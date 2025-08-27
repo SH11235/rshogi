@@ -502,6 +502,7 @@ mod tests {
         // Set custom overhead values
         adapter.overhead_ms = 100;
         adapter.byoyomi_overhead_ms = 1500;
+        adapter.byoyomi_safety_ms = 500;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -512,18 +513,20 @@ mod tests {
 
         let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         // Verify that regular overhead was used (100ms)
-        // The time parameters should include the regular overhead
         assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
 
-        // Test 2: Byoyomi should use byoyomi overhead
+        // Test 2: Byoyomi should use regular overhead in TimeParameters
+        // The byoyomi_overhead_ms is now handled separately as hard margin
         let mut params = make_go_params();
         params.byoyomi = Some(5000);
         params.btime = Some(0);
         params.wtime = Some(0);
 
         let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
-        // Verify that byoyomi overhead was added (100 + 1500 = 1600ms)
-        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 1600);
+        // In new implementation, overhead_ms stays at base value
+        assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+        // byoyomi_safety_ms is mapped to byoyomi_hard_limit_reduction_ms
+        assert_eq!(limits.time_parameters.unwrap().byoyomi_hard_limit_reduction_ms, 500);
 
         // Test 3: Fischer disguised as byoyomi should use regular overhead
         let mut params = make_go_params();
@@ -547,6 +550,7 @@ mod tests {
         let (_pos, limits, _ponder) = adapter.prepare_search(&params, stop_flag.clone()).unwrap();
         // Ponder should use only regular overhead, even in byoyomi
         assert_eq!(limits.time_parameters.unwrap().overhead_ms, 100);
+        assert_eq!(limits.time_parameters.unwrap().byoyomi_hard_limit_reduction_ms, 500);
     }
 
     #[test]
