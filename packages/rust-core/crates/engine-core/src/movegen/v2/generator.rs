@@ -9,6 +9,22 @@ use super::tables;
 /// Number of squares on a shogi board (9x9)
 const SHOGI_BOARD_SIZE: usize = 81;
 
+/// Board dimensions
+#[allow(dead_code)]
+const BOARD_FILES: usize = 9;
+#[allow(dead_code)]
+const BOARD_RANKS: usize = 9;
+
+/// Rank mask constants for optimization
+const RANK_1_MASK: u128 = 0x1FF; // 1st rank (9 bits)
+#[allow(dead_code)]
+const RANK_2_MASK: u128 = 0x1FF << 9; // 2nd rank
+#[allow(dead_code)]
+const RANK_8_MASK: u128 = 0x1FF << 63; // 8th rank
+const RANK_9_MASK: u128 = 0x1FF << 72; // 9th rank
+const RANK_1_2_MASK: u128 = 0x3FFFF; // 1st and 2nd ranks (18 bits)
+const RANK_8_9_MASK: u128 = 0x3FFFF << 63; // 8th and 9th ranks
+
 /// Move generator for generating legal moves
 pub struct MoveGenerator;
 
@@ -285,26 +301,14 @@ impl<'a> MoveGenImpl<'a> {
                 let our_pawns = self.pos.board.piece_bb[us as usize][PieceType::Pawn as usize]
                     & !self.pos.board.promoted_bb;
 
-                // Remove files with our pawns using bitboard operations
-                for pawn_sq in our_pawns {
-                    let file = pawn_sq.file();
-                    valid &= !crate::shogi::attacks::file_mask(file);
-                }
+                // Calculate all occupied files at once using bitboard operations
+                let occupied_files = self.get_files_from_squares(our_pawns);
+                valid &= !occupied_files;
 
                 // Pawns cannot be dropped on the promotion rank
                 match us {
-                    Color::Black => {
-                        // Cannot drop on rank 1
-                        for file in 0..9 {
-                            valid.clear(Square::new(file, 0));
-                        }
-                    }
-                    Color::White => {
-                        // Cannot drop on rank 9
-                        for file in 0..9 {
-                            valid.clear(Square::new(file, 8));
-                        }
-                    }
+                    Color::Black => valid &= !Bitboard(RANK_1_MASK),
+                    Color::White => valid &= !Bitboard(RANK_9_MASK),
                 }
 
                 // Check for drop pawn mate (打ち歩詰め)
@@ -340,33 +344,15 @@ impl<'a> MoveGenImpl<'a> {
             PieceType::Lance => {
                 // Lances cannot be dropped on the promotion rank
                 match us {
-                    Color::Black => {
-                        for file in 0..9 {
-                            valid.clear(Square::new(file, 0));
-                        }
-                    }
-                    Color::White => {
-                        for file in 0..9 {
-                            valid.clear(Square::new(file, 8));
-                        }
-                    }
+                    Color::Black => valid &= !Bitboard(RANK_1_MASK),
+                    Color::White => valid &= !Bitboard(RANK_9_MASK),
                 }
             }
             PieceType::Knight => {
                 // Knights cannot be dropped on the last two ranks
                 match us {
-                    Color::Black => {
-                        for file in 0..9 {
-                            valid.clear(Square::new(file, 0));
-                            valid.clear(Square::new(file, 1));
-                        }
-                    }
-                    Color::White => {
-                        for file in 0..9 {
-                            valid.clear(Square::new(file, 7));
-                            valid.clear(Square::new(file, 8));
-                        }
-                    }
+                    Color::Black => valid &= !Bitboard(RANK_1_2_MASK),
+                    Color::White => valid &= !Bitboard(RANK_8_9_MASK),
                 }
             }
             _ => {
@@ -492,8 +478,121 @@ impl<'a> MoveGenImpl<'a> {
             }
         }
 
-        // Check other pieces similarly...
-        // For now, return false to avoid compilation errors
+        // 2. Lances
+        let lances = self.pos.board.piece_bb[us as usize][PieceType::Lance as usize]
+            & !self.pos.board.promoted_bb;
+        for from in lances {
+            let direction = if us == Color::Black { -9i8 } else { 9i8 };
+            let mut to_sq =
+                Square::new_safe(from.file(), (from.rank() as i8 + direction / 9) as u8);
+
+            while let Some(to) = to_sq {
+                if self.occupied.test(to) {
+                    break; // Blocked
+                }
+
+                // Check if this is a valid move
+                let target_bb = Bitboard::from_square(to);
+                if self.pinned.test(from) {
+                    // Must move along pin ray
+                    if !(target_bb & self.pin_rays[from.index()] & target_mask).is_empty() {
+                        return true;
+                    }
+                } else if !(target_bb & target_mask).is_empty() {
+                    return true;
+                }
+
+                // Next square
+                to_sq = Square::new_safe(to.file(), (to.rank() as i8 + direction / 9) as u8);
+            }
+        }
+
+        // 3. Knights
+        let knights = self.pos.board.piece_bb[us as usize][PieceType::Knight as usize]
+            & !self.pos.board.promoted_bb;
+        for from in knights {
+            // Knights cannot move if pinned (they move in L-shape)
+            if !self.pinned.test(from) {
+                let attacks = tables::knight_attacks(from, us);
+                if !(attacks & target_mask).is_empty() {
+                    return true;
+                }
+            }
+        }
+
+        // 4. Silvers
+        let silvers = self.pos.board.piece_bb[us as usize][PieceType::Silver as usize]
+            & !self.pos.board.promoted_bb;
+        for from in silvers {
+            let attacks = tables::silver_attacks(from, us);
+            let valid_moves = if self.pinned.test(from) {
+                attacks & self.pin_rays[from.index()]
+            } else {
+                attacks
+            };
+            if !(valid_moves & target_mask).is_empty() {
+                return true;
+            }
+        }
+
+        // 5. Golds (including promoted pieces)
+        let golds = self.get_gold_like_pieces(us);
+        for from in golds {
+            let attacks = tables::gold_attacks(from, us);
+            let valid_moves = if self.pinned.test(from) {
+                attacks & self.pin_rays[from.index()]
+            } else {
+                attacks
+            };
+            if !(valid_moves & target_mask).is_empty() {
+                return true;
+            }
+        }
+
+        // 6. Bishops
+        let bishops = self.pos.board.piece_bb[us as usize][PieceType::Bishop as usize];
+        for from in bishops {
+            let attacks = sliding_attacks(from, self.occupied, PieceType::Bishop);
+            let promoted = self.pos.board.promoted_bb.test(from);
+            let all_attacks = if promoted {
+                attacks | tables::king_attacks(from)
+            } else {
+                attacks
+            };
+
+            let valid_moves = if self.pinned.test(from) {
+                all_attacks & self.pin_rays[from.index()]
+            } else {
+                all_attacks
+            };
+
+            if !(valid_moves & target_mask).is_empty() {
+                return true;
+            }
+        }
+
+        // 7. Rooks
+        let rooks = self.pos.board.piece_bb[us as usize][PieceType::Rook as usize];
+        for from in rooks {
+            let attacks = sliding_attacks(from, self.occupied, PieceType::Rook);
+            let promoted = self.pos.board.promoted_bb.test(from);
+            let all_attacks = if promoted {
+                attacks | tables::king_attacks(from)
+            } else {
+                attacks
+            };
+
+            let valid_moves = if self.pinned.test(from) {
+                all_attacks & self.pin_rays[from.index()]
+            } else {
+                all_attacks
+            };
+
+            if !(valid_moves & target_mask).is_empty() {
+                return true;
+            }
+        }
+
         false
     }
 
@@ -1460,14 +1559,27 @@ impl<'a> MoveGenImpl<'a> {
         potential_attackers: Bitboard,
         occupancy: Bitboard,
     ) -> Bitboard {
-        // This is a helper to check sliding attacks that go through a square
         let mut attackers = Bitboard::EMPTY;
 
-        // Check rooks and queens (promoted rooks) on same rank/file
-        if target.rank() == through.rank() || target.file() == through.file() {
+        // Early exit if through is not on a line with target
+        let between = between_bb(target, through);
+        if !between.test(through) {
+            return Bitboard::EMPTY;
+        }
+
+        // Check alignment type
+        let same_file = target.file() == through.file();
+        let same_rank = target.rank() == through.rank();
+        let rank_diff = (target.rank() as i8 - through.rank() as i8).abs();
+        let file_diff = (target.file() as i8 - through.file() as i8).abs();
+        let same_diag = rank_diff == file_diff && rank_diff != 0;
+
+        // Rooks and promoted rooks (on ranks and files)
+        if same_rank || same_file {
             let rooks = self.pos.board.piece_bb[by as usize][PieceType::Rook as usize]
                 & potential_attackers;
             for rook_sq in rooks {
+                // Check if rook-target line passes through 'through'
                 if between_bb(rook_sq, target).test(through) {
                     let attacks = sliding_attacks(rook_sq, occupancy, PieceType::Rook);
                     if attacks.test(target) {
@@ -1475,12 +1587,30 @@ impl<'a> MoveGenImpl<'a> {
                     }
                 }
             }
+
+            // Lances (only on files, directional)
+            if same_file {
+                let lances = self.pos.board.piece_bb[by as usize][PieceType::Lance as usize]
+                    & !self.pos.board.promoted_bb
+                    & potential_attackers;
+                for lance_sq in lances {
+                    let can_attack = match by {
+                        Color::Black => lance_sq.rank() > target.rank(),
+                        Color::White => lance_sq.rank() < target.rank(),
+                    };
+                    if can_attack && between_bb(lance_sq, target).test(through) {
+                        // Re-use the already calculated between bitboard
+                        let lance_between = between_bb(lance_sq, target);
+                        if (lance_between & occupancy).is_empty() {
+                            attackers.set(lance_sq);
+                        }
+                    }
+                }
+            }
         }
 
-        // Check bishops and horses (promoted bishops) on diagonals
-        let rank_diff = (target.rank() as i8 - through.rank() as i8).abs();
-        let file_diff = (target.file() as i8 - through.file() as i8).abs();
-        if rank_diff == file_diff {
+        // Bishops and promoted bishops (on diagonals)
+        if same_diag {
             let bishops = self.pos.board.piece_bb[by as usize][PieceType::Bishop as usize]
                 & potential_attackers;
             for bishop_sq in bishops {
@@ -1493,26 +1623,28 @@ impl<'a> MoveGenImpl<'a> {
             }
         }
 
-        // Check lances on same file
-        if target.file() == through.file() {
-            let lances = self.pos.board.piece_bb[by as usize][PieceType::Lance as usize]
-                & !self.pos.board.promoted_bb
-                & potential_attackers;
-            for lance_sq in lances {
-                let can_attack = match by {
-                    Color::Black => lance_sq.rank() > target.rank(),
-                    Color::White => lance_sq.rank() < target.rank(),
-                };
-                if can_attack && between_bb(lance_sq, target).test(through) {
-                    let between = between_bb(lance_sq, target);
-                    if (between & occupancy).is_empty() {
-                        attackers.set(lance_sq);
-                    }
-                }
-            }
-        }
-
         attackers
+    }
+
+    /// Calculate file mask for all squares in the bitboard
+    fn get_files_from_squares(&self, squares: Bitboard) -> Bitboard {
+        let mut files = Bitboard::EMPTY;
+        for sq in squares {
+            files |= crate::shogi::attacks::file_mask(sq.file());
+        }
+        files
+    }
+
+    /// Get all pieces that move like gold (gold + promoted pieces)
+    fn get_gold_like_pieces(&self, us: Color) -> Bitboard {
+        let golds = self.pos.board.piece_bb[us as usize][PieceType::Gold as usize];
+        let promoted_pieces = self.pos.board.promoted_bb & self.our_pieces;
+        golds
+            | (promoted_pieces
+                & (self.pos.board.piece_bb[us as usize][PieceType::Silver as usize]
+                    | self.pos.board.piece_bb[us as usize][PieceType::Knight as usize]
+                    | self.pos.board.piece_bb[us as usize][PieceType::Lance as usize]
+                    | self.pos.board.piece_bb[us as usize][PieceType::Pawn as usize]))
     }
 }
 
