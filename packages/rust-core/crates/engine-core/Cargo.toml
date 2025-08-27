@@ -88,3 +88,7 @@ harness = false
 [[bench]]
 name = "time_management_bench"
 harness = false
+
+[[bench]]
+name = "movelist_bench"
+harness = false
