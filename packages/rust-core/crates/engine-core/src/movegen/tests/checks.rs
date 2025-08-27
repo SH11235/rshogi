@@ -1,8 +1,6 @@
 //! Check and evasion tests
 
-use crate::{
-    movegen::generator::MoveGenImpl, usi::parse_usi_square, Color, Piece, PieceType, Position,
-};
+use crate::{movegen::MoveGenerator, usi::parse_usi_square, Color, Piece, PieceType, Position};
 
 #[test]
 fn test_movegen_in_check() {
@@ -17,11 +15,11 @@ fn test_movegen_in_check() {
     pos.board
         .put_piece(parse_usi_square("6b").unwrap(), Piece::new(PieceType::Gold, Color::Black));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // In check, only king moves and blocking moves are legal
-    assert!(gen.checkers.count_ones() > 0); // Verify we detect check
+    assert!(pos.is_in_check()); // Verify we detect check
 
     // King should be able to move to escape
     let king_moves: Vec<_> = moves
@@ -54,8 +52,8 @@ fn test_check_evasion_king_moves() {
     pos.board
         .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 王手されているので、玉が移動するか、飛車の利きを遮るしかない
     // 玉は飛車の利きから逃げる必要がある
@@ -83,8 +81,8 @@ fn test_check_evasion_block() {
         .put_piece(parse_usi_square("5b").unwrap(), Piece::new(PieceType::Rook, Color::White));
     pos.hands[Color::Black as usize][PieceType::Gold.hand_index().unwrap()] = 1; // 金を持っている
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 5筋に金を打って飛車の利きを遮る手があるはず
     let block_drops: Vec<_> =
@@ -106,8 +104,8 @@ fn test_check_evasion_capture() {
     pos.board
         .put_piece(parse_usi_square("3g").unwrap(), Piece::new(PieceType::Silver, Color::Black));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 銀で金を取る手があるはず
     let capture_move = moves.as_slice().iter().find(|m| {
@@ -132,8 +130,8 @@ fn test_double_check_only_king_moves() {
     pos.board
         .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::Bishop, Color::White));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 全ての手が玉の移動であることを確認
     for m in moves.as_slice() {

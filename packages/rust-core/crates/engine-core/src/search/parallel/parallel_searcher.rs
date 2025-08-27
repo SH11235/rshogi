@@ -2,6 +2,7 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
+    movegen::MoveGenerator,
     search::{SearchLimits, SearchResult, SearchStats, ShardedTranspositionTable},
     shogi::{Move, Position},
     time_management::{GamePhase, TimeManager},
@@ -142,8 +143,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
         let root_move_limit = (max_depth as usize / 2).max(3);
         if iteration <= root_move_limit && self.num_threads > 1 {
             // Generate all legal moves at root
-            let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
-            let moves = move_gen.generate_all();
+            let move_gen = MoveGenerator::new();
+            let moves = match move_gen.generate_all(position) {
+                Ok(moves) => moves,
+                Err(_) => {
+                    // King not found - should not happen in valid position
+                    warn!("Failed to generate moves in parallel search");
+                    return;
+                }
+            };
 
             if !moves.is_empty() {
                 if log::log_enabled!(log::Level::Debug) {
@@ -176,7 +184,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         if i >= moves.len() {
                             break;
                         }
-                        batch_moves.push(moves[i]);
+                        batch_moves.push(moves.as_slice()[i]);
                         i += 1;
                     }
 
@@ -743,8 +751,20 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                     main_thread.search_iteration(position, &limits, main_depth)
                 } else {
                     // YBWC search with split points (for deeper iterations)
-                    let mut move_gen = crate::movegen::generator::MoveGenImpl::new(position);
-                    let legal_moves = move_gen.generate_all();
+                    let move_gen = MoveGenerator::new();
+                    let legal_moves = match move_gen.generate_all(position) {
+                        Ok(moves) => moves,
+                        Err(_) => {
+                            // King not found - should not happen in valid position
+                            return SearchResult {
+                                best_move: None,
+                                score: -SEARCH_INF,
+                                stats: SearchStats::default(),
+                                node_type: NodeType::Exact,
+                                stop_info: Some(StopInfo::default()),
+                            };
+                        }
+                    };
 
                     if legal_moves.is_empty() {
                         // No legal moves - game over
@@ -752,6 +772,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             score: -i32::MAX / 2,
                             stats: SearchStats::default(),
                             best_move: None,
+                            node_type: NodeType::Exact,
+                            stop_info: Some(StopInfo::default()),
                         }
                     } else {
                         // Convert MoveList to Vec<Move>
@@ -802,6 +824,8 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                                 score: final_score,
                                 stats: pv_result.stats,
                                 best_move: Some(final_move),
+                                node_type: NodeType::Exact,
+                                stop_info: Some(StopInfo::default()),
                             }
                         } else {
                             // Use PV result if no siblings or beta cutoff
@@ -936,14 +960,15 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 best_result.stats.nodes
             );
             // Generate legal moves and use the first one as fallback
-            let mut mg = crate::movegen::generator::MoveGenImpl::new(position);
-            let moves = mg.generate_all();
-            if !moves.is_empty() {
-                let fallback_move = moves[0];
-                best_result.best_move = Some(fallback_move);
-                best_result.stats.depth = best_result.stats.depth.max(1);
-                best_result.stats.pv = vec![fallback_move];
-                warn!("Fallback bestmove used: {fallback_move}");
+            let mg = MoveGenerator::new();
+            if let Ok(moves) = mg.generate_all(position) {
+                if !moves.is_empty() {
+                    let fallback_move = moves.as_slice()[0];
+                    best_result.best_move = Some(fallback_move);
+                    best_result.stats.depth = best_result.stats.depth.max(1);
+                    best_result.stats.pv = vec![fallback_move];
+                    warn!("Fallback bestmove used: {fallback_move}");
+                }
             }
         }
 

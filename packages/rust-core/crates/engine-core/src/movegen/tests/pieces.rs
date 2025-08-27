@@ -1,8 +1,6 @@
 //! Piece-specific move generation tests
 
-use crate::{
-    movegen::generator::MoveGenImpl, usi::parse_usi_square, Color, Piece, PieceType, Position,
-};
+use crate::{movegen::MoveGenerator, usi::parse_usi_square, Color, Piece, PieceType, Position};
 
 #[test]
 fn test_movegen_pawn_moves() {
@@ -15,8 +13,8 @@ fn test_movegen_pawn_moves() {
     pos.board
         .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Should include only one pawn move (not in promotion zone)
     let pawn_moves: Vec<_> = moves
@@ -39,8 +37,8 @@ fn test_movegen_pawn_promotion() {
     pos.board
         .put_piece(parse_usi_square("5c").unwrap(), Piece::new(PieceType::Pawn, Color::Black));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Should include pawn moves (both promoted and unpromoted since it's in promotion zone)
     let pawn_moves: Vec<_> = moves
@@ -70,8 +68,8 @@ fn test_forced_promotion_pawn() {
     pos.board
         .put_piece(parse_usi_square("1a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 歩が1段目に進む手は必ず成り (Black pawn moving to rank 0 must promote)
     let pawn_moves: Vec<_> = moves
@@ -101,8 +99,8 @@ fn test_forced_promotion_lance() {
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 香が1段目に進む手は必ず成り (Black lance moving to rank 0 must promote)
     // Find all lance moves and check they properly handle forced promotion
@@ -136,8 +134,8 @@ fn test_forced_promotion_knight() {
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::King, Color::White));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 桂が1段目に進む手は必ず成り (Black knight moving to rank 0)
     let knight_moves: Vec<_> = moves
@@ -167,8 +165,8 @@ fn test_movegen_pinned_piece() {
     pos.board
         .put_piece(parse_usi_square("5f").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Pinned gold can only move along the pin ray (file 4)
     let gold_moves: Vec<_> = moves
@@ -196,8 +194,8 @@ fn test_pin_restriction() {
     pos.board
         .put_piece(parse_usi_square("5a").unwrap(), Piece::new(PieceType::Rook, Color::White));
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 金の動きは5筋のみ（ピンの方向）
     let gold_moves: Vec<_> = moves

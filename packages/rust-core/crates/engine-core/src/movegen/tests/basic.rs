@@ -1,15 +1,13 @@
 //! Basic move generation tests
 
-use crate::{
-    movegen::generator::MoveGenImpl, usi::parse_usi_square, Color, Piece, PieceType, Position,
-};
+use crate::{movegen::MoveGenerator, usi::parse_usi_square, Color, Piece, PieceType, Position};
 
 #[test]
 fn test_movegen_startpos() {
     let pos = Position::startpos();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Verify moves are generated
     assert!(!moves.is_empty(), "Should generate some moves");
@@ -32,8 +30,8 @@ fn test_movegen_king_moves() {
     pos.side_to_move = Color::Black;
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // King in center has 8 moves
     assert_eq!(moves.len(), 8);
@@ -57,8 +55,8 @@ fn test_no_king_capture() {
     pos.board.rebuild_occupancy_bitboards();
 
     let white_king_square = parse_usi_square("6c").unwrap();
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 生成された全ての手をチェックし、玉を取る手が含まれていないことを確認
     for m in moves.as_slice() {
@@ -89,8 +87,8 @@ fn test_board_edge_knight_moves() {
         .put_piece(parse_usi_square("5i").unwrap(), Piece::new(PieceType::King, Color::Black));
     pos.board.rebuild_occupancy_bitboards();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // 1iの桂馬は2gにしか行けない (file 7, rank 6)
     let knight1_moves: Vec<_> = moves
@@ -122,9 +120,9 @@ fn test_all_pseudo_legal_moves_generated_completeness() {
 
     let pos = Position::startpos();
 
-    // Generate moves using MoveGenImpl
-    let mut gen = MoveGenImpl::new(&pos);
-    let all_moves = gen.generate_all();
+    // Generate moves using MoveGenerator
+    let gen = MoveGenerator::new();
+    let all_moves = gen.generate_all(&pos).expect("Failed to generate moves");
     let move_set: HashSet<_> = all_moves.as_slice().iter().cloned().collect();
 
     // Verify all generated moves are pseudo-legal

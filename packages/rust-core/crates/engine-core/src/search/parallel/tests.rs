@@ -218,8 +218,8 @@ fn test_fallback_bestmove() {
 
     // Verify that the move is legal
     if let Some(best_move) = result.best_move {
-        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
-        let legal_moves = move_gen.generate_all();
+        let move_gen = crate::movegen::MoveGenerator::new();
+        let legal_moves = move_gen.generate_all(&pos).expect("Failed to generate moves");
         let move_found = legal_moves.iter().any(|&m| m == best_move);
         assert!(move_found, "Fallback move must be legal");
     }
@@ -263,8 +263,8 @@ fn test_fallback_bestmove_extreme_limits() {
 
     // The move should be legal
     if let Some(best_move) = result.best_move {
-        let mut move_gen = crate::movegen::generator::MoveGenImpl::new(&pos);
-        let legal_moves = move_gen.generate_all();
+        let move_gen = crate::movegen::MoveGenerator::new();
+        let legal_moves = move_gen.generate_all(&pos).expect("Failed to generate moves");
         let move_found = legal_moves.iter().any(|&m| m == best_move);
         assert!(move_found, "Move should be legal: {best_move}");
     }

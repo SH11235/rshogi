@@ -2,6 +2,7 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
+    movegen::MoveGenerator,
     search::{
         constants::SEARCH_INF,
         unified::{tt_operations::TTOperations, UnifiedSearcher},
@@ -113,8 +114,14 @@ where
     }
 
     // Generate moves
-    let mut move_gen = crate::movegen::generator::MoveGenImpl::new(pos);
-    let moves = move_gen.generate_all();
+    let move_gen = MoveGenerator::new();
+    let moves = match move_gen.generate_all(pos) {
+        Ok(moves) => moves,
+        Err(_) => {
+            // King not found - should not happen in valid position
+            return -SEARCH_INF;
+        }
+    };
 
     if moves.is_empty() {
         // No legal moves
@@ -717,11 +724,9 @@ mod tests {
         let mut pos = Position::startpos();
 
         // Create a move generator to count moves
-        use crate::movegen::MoveGen;
-        use crate::shogi::MoveList;
-        let mut move_gen = MoveGen::new();
-        let mut moves = MoveList::new();
-        move_gen.generate_all(&pos, &mut moves);
+        use crate::movegen::MoveGenerator;
+        let move_gen = MoveGenerator::new();
+        let moves = move_gen.generate_all(&pos).unwrap();
         assert!(moves.len() > 16); // Ensure we have more than MAX_MOVES_TO_UPDATE
 
         // Search should complete efficiently even with many moves

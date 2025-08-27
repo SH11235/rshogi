@@ -4,6 +4,7 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
+    movegen::MoveGenerator,
     search::{
         common::mate_score,
         constants::{MAX_PLY, SEARCH_INF},
@@ -213,8 +214,14 @@ where
     if in_check {
         // In check: must search all legal moves (no stand pat)
         // Generate all legal moves
-        let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
-        let moves = move_gen_impl.generate_all();
+        let move_gen = MoveGenerator::new();
+        let moves = match move_gen.generate_all(pos) {
+            Ok(moves) => moves,
+            Err(_) => {
+                // King not found - should not happen in valid position
+                return -SEARCH_INF;
+            }
+        };
 
         // If no legal moves, it's checkmate
         if moves.is_empty() {
@@ -302,8 +309,14 @@ where
     };
 
     // Generate all moves for quiescence (we'll filter captures manually)
-    let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
-    let all_moves = move_gen_impl.generate_all();
+    let move_gen = MoveGenerator::new();
+    let all_moves = match move_gen.generate_all(pos) {
+        Ok(moves) => moves,
+        Err(_) => {
+            // King not found - should not happen in valid position
+            return stand_pat;
+        }
+    };
 
     // Filter to captures only - check board state directly instead of relying on metadata
     let us = pos.side_to_move;
@@ -324,14 +337,14 @@ where
     if USE_PRUNING {
         // Apply SEE filtering first to remove bad captures (Phase 1 implementation)
         // This reduces the number of moves to sort, improving performance
-        moves.as_mut_vec().retain(|&mv| {
+        moves.as_mut_vec().retain(|mv| {
             // Check if this move should skip SEE pruning (drops, checks, etc.)
-            if crate::search::unified::pruning::should_skip_see_pruning(pos, mv) {
+            if crate::search::unified::pruning::should_skip_see_pruning(pos, *mv) {
                 return true;
             }
 
             // Keep captures with SEE >= 0
-            pos.see_ge(mv, 0)
+            pos.see_ge(*mv, 0)
         });
 
         // Order remaining captures by MVV-LVA - sort in place to avoid allocation
