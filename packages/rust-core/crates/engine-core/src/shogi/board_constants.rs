@@ -40,14 +40,14 @@ pub const WHITE_PROMOTION_ZONE: u128 = 0x1ffffffc0000000000000; // Ranks 7-9 (27
 /// File 9 is leftmost in shogi notation (internal file 0)
 /// Each file contains 9 squares, spaced 9 bits apart
 pub const FILE_9_MASK: u128 = 0x00000000000001008040201008040201; // Internal file 0 = 9筋
-pub const FILE_8_MASK: u128 = FILE_9_MASK << 1;             // Internal file 1 = 8筋
-pub const FILE_7_MASK: u128 = FILE_9_MASK << 2;             // Internal file 2 = 7筋
-pub const FILE_6_MASK: u128 = FILE_9_MASK << 3;             // Internal file 3 = 6筋
-pub const FILE_5_MASK: u128 = FILE_9_MASK << 4;             // Internal file 4 = 5筋
-pub const FILE_4_MASK: u128 = FILE_9_MASK << 5;             // Internal file 5 = 4筋
-pub const FILE_3_MASK: u128 = FILE_9_MASK << 6;             // Internal file 6 = 3筋
-pub const FILE_2_MASK: u128 = FILE_9_MASK << 7;             // Internal file 7 = 2筋
-pub const FILE_1_MASK: u128 = FILE_9_MASK << 8;             // Internal file 8 = 1筋
+pub const FILE_8_MASK: u128 = FILE_9_MASK << 1; // Internal file 1 = 8筋
+pub const FILE_7_MASK: u128 = FILE_9_MASK << 2; // Internal file 2 = 7筋
+pub const FILE_6_MASK: u128 = FILE_9_MASK << 3; // Internal file 3 = 6筋
+pub const FILE_5_MASK: u128 = FILE_9_MASK << 4; // Internal file 4 = 5筋
+pub const FILE_4_MASK: u128 = FILE_9_MASK << 5; // Internal file 5 = 4筋
+pub const FILE_3_MASK: u128 = FILE_9_MASK << 6; // Internal file 6 = 3筋
+pub const FILE_2_MASK: u128 = FILE_9_MASK << 7; // Internal file 7 = 2筋
+pub const FILE_1_MASK: u128 = FILE_9_MASK << 8; // Internal file 8 = 1筋
 
 /// File masks as Bitboard constants for convenience
 pub const FILE_1_BB: Bitboard = Bitboard(FILE_1_MASK);
@@ -159,4 +159,3 @@ mod tests {
         }
     }
 }
-
