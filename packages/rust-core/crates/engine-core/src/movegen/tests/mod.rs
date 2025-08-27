@@ -7,6 +7,8 @@ mod check_evasion;
 #[cfg(test)]
 mod checks;
 #[cfg(test)]
+mod compatibility_test;
+#[cfg(test)]
 mod drops;
 #[cfg(test)]
 mod has_any_legal_move_test;
