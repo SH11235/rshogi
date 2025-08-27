@@ -112,6 +112,10 @@ impl<E, const USE_TT: bool, const USE_PRUNING: bool> UnifiedSearcher<E, USE_TT, 
 where
     E: Evaluator + Send + Sync + 'static,
 {
+    /// Expose TT handle for auxiliary queries (e.g., ponder extraction)
+    pub fn tt_handle(&self) -> Option<Arc<ShardedTranspositionTable>> {
+        self.tt.clone()
+    }
     /// Disable prefetching (for benchmarking TTOnly mode)
     pub fn set_disable_prefetch(&mut self, disable: bool) {
         self.disable_prefetch = disable;

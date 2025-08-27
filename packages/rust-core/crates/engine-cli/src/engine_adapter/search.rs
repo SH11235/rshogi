@@ -143,7 +143,7 @@ impl EngineAdapter {
         &self,
         session: &SearchSession,
         position: &Position,
-    ) -> Result<(String, Option<String>)> {
+    ) -> Result<(String, Option<String>, crate::engine_adapter::types::PonderSource)> {
         // Check position consistency
         if session.root_hash != position.zobrist_hash() {
             warn!("Position hash mismatch in validate_and_get_bestmove");
@@ -164,27 +164,44 @@ impl EngineAdapter {
         let best_move_str = move_to_usi(&best_move);
 
         // Get ponder move if available and ponder is enabled
-        let ponder_move_str = if self.ponder {
+        let (ponder_move_str, ponder_source) = if self.ponder {
             // Prefer PV[1]
             if let Some(&mv) = best_entry.pv.get(1) {
-                Some(move_to_usi(&mv))
-            } else {
+                (Some(move_to_usi(&mv)), crate::engine_adapter::types::PonderSource::Pv)
+            } else if let Some(cur) = &session.current_iteration_best {
                 // Fallback: try current iteration PV if it has a second move
-                if let Some(cur) = &session.current_iteration_best {
-                    cur.pv.get(1).map(|&mv| move_to_usi(&mv))
+                if let Some(&mv) = cur.pv.get(1) {
+                    (Some(move_to_usi(&mv)), crate::engine_adapter::types::PonderSource::CurrentIteration)
                 } else {
-                    None
+                    // As a last resort, query TT for the child position after bestmove
+                    if let Some(ref engine) = self.engine {
+                        if let Some(ponder_mv) = engine.get_ponder_from_tt(position, best_move) {
+                            (Some(move_to_usi(&ponder_mv)), crate::engine_adapter::types::PonderSource::TT)
+                        } else {
+                            (None, crate::engine_adapter::types::PonderSource::None)
+                        }
+                    } else {
+                        (None, crate::engine_adapter::types::PonderSource::None)
+                    }
                 }
+            } else if let Some(ref engine) = self.engine {
+                if let Some(ponder_mv) = engine.get_ponder_from_tt(position, best_move) {
+                    (Some(move_to_usi(&ponder_mv)), crate::engine_adapter::types::PonderSource::TT)
+                } else {
+                    (None, crate::engine_adapter::types::PonderSource::None)
+                }
+            } else {
+                (None, crate::engine_adapter::types::PonderSource::None)
             }
         } else {
-            None
+            (None, crate::engine_adapter::types::PonderSource::None)
         };
 
         // Log bestmove validation (source info now handled by BestmoveEmitter)
         let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
         log::debug!("Validated bestmove from session: depth={depth}, score={:?}", score);
 
-        Ok((best_move_str, ponder_move_str))
+        Ok((best_move_str, ponder_move_str, ponder_source))
     }
 
     /// Perform a quick shallow search (depth 3)

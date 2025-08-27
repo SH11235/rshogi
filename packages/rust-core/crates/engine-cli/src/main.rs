@@ -328,7 +328,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                             let adapter = lock_or_recover_adapter(ctx.engine);
                             if let Some(position) = adapter.get_position() {
                                 match adapter.validate_and_get_bestmove(session, position) {
-                                    Ok((best_move, ponder)) => {
+                                    Ok((best_move, ponder, _ponder_source)) => {
                                         // Prepare bestmove metadata
                                         let depth = session
                                             .committed_best
@@ -416,7 +416,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         if let Some(ref session) = ctx.current_session {
                             let adapter = lock_or_recover_adapter(ctx.engine);
                             if let Some(position) = adapter.get_position() {
-                                if let Ok((best_move, ponder)) =
+                                if let Ok((best_move, ponder, _ponder_source)) =
                                     adapter.validate_and_get_bestmove(session, position)
                                 {
                                     send_response(UsiResponse::BestMove { best_move, ponder })?;
