@@ -9,6 +9,12 @@ pub struct MoveList {
     len: usize,
 }
 
+impl Default for MoveList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MoveList {
     /// Create a new empty move list
     #[inline]
@@ -43,9 +49,7 @@ impl MoveList {
 
     /// Get a slice of all moves
     pub fn as_slice(&self) -> &[Move] {
-        unsafe {
-            std::slice::from_raw_parts(self.moves.as_ptr() as *const Move, self.len)
-        }
+        unsafe { std::slice::from_raw_parts(self.moves.as_ptr() as *const Move, self.len) }
     }
 
     /// Clear the list
@@ -141,7 +145,7 @@ mod tests {
     #[test]
     fn test_movelist_iterator() {
         let mut list = MoveList::new();
-        
+
         // Add multiple moves
         for i in 0..10 {
             let mv = Move::normal_with_piece(
@@ -172,7 +176,7 @@ mod tests {
     #[test]
     fn test_movelist_to_vec() {
         let mut list = MoveList::new();
-        
+
         let mv = Move::normal_with_piece(
             Square::new(2, 2), // 77 in shogi notation
             Square::new(2, 3), // 76 in shogi notation
@@ -180,10 +184,10 @@ mod tests {
             PieceType::Pawn,
             None, // No capture
         );
-        
+
         list.push(mv);
         list.push(mv);
-        
+
         let vec: Vec<Move> = list.into();
         assert_eq!(vec.len(), 2);
         assert_eq!(vec[0], mv);
