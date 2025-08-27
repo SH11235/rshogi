@@ -74,7 +74,7 @@ where
     /// Move ordering module
     ordering: ordering::MoveOrdering,
 
-    /// Principal variation table
+    /// Principal variation table (legacy; retained for tests). Not used by core PV assembly.
     pv_table: core::PVTable,
 
     /// Search statistics
@@ -255,6 +255,8 @@ where
                 best_score = score;
                 best_move = Some(pv[0]);
                 best_node_type = final_node_type;
+                // Legacy triangular PVTable is not used for core PV assembly.
+                // Keep update for backwards compatibility where tests may read it.
                 self.pv_table.update_from_line(&pv);
 
                 // Update statistics
@@ -324,15 +326,19 @@ where
             // Call info callback if not stopped
             if !self.context.should_stop() {
                 if let Some(callback) = self.context.info_callback() {
-                    // Create snapshot of PV before validation and callback
-                    let pv_snapshot = self.pv_table.get_pv_snapshot(0);
+                    // Create snapshot of PV from stack-based PV at root
+                    let pv_snapshot: Vec<Move> = if !self.search_stack.is_empty() {
+                        self.search_stack[0].pv_line.to_vec()
+                    } else {
+                        Vec::new()
+                    };
 
                     // Validate PV snapshot
                     if !pv_snapshot.is_empty() {
                         core::pv_local_sanity(pos, &pv_snapshot);
                     }
 
-                    // Use snapshot for callback (immune to concurrent updates)
+                    // Use snapshot for callback (immutable copy)
                     callback(
                         depth,
                         score,
@@ -382,7 +388,11 @@ where
 
     /// Get principal variation
     pub fn principal_variation(&self) -> &[Move] {
-        self.pv_table.get_line(0)
+        if !self.search_stack.is_empty() {
+            &self.search_stack[0].pv_line
+        } else {
+            &[]
+        }
     }
 
     /// Get current search depth

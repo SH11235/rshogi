@@ -1,6 +1,7 @@
 //! Common types for search algorithms
 
 use crate::shogi::Move;
+use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -271,6 +272,8 @@ pub struct SearchStack {
     pub quiet_moves: Vec<Move>,
     /// Consecutive check extensions count
     pub consecutive_checks: u8,
+    /// Principal variation suffix from this ply
+    pub pv_line: SmallVec<[Move; 16]>,
 }
 
 impl SearchStack {
@@ -311,6 +314,7 @@ impl SearchStack {
         self.move_count = 0;
         self.excluded_move = None;
         self.quiet_moves.clear();
+        self.pv_line.clear();
         // Note: We keep killers, static_eval, threat_move, counter_move, consecutive_checks as they may be useful
     }
 
