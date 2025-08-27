@@ -1,7 +1,7 @@
 //! Common PV reconstruction functionality for transposition tables
 
 use super::TTEntry;
-use crate::movegen::generator::MoveGenImpl;
+use crate::movegen::MoveGenerator;
 use crate::search::constants::MAX_PLY;
 use crate::search::NodeType;
 use crate::shogi::{Move, Position, UndoInfo};
@@ -94,8 +94,14 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
         // Validate move is legal
         // Since TT stores moves as 16-bit, we need to find the matching legal move
         // with full piece type information
-        let mut move_gen = MoveGenImpl::new(pos);
-        let legal_moves = move_gen.generate_all();
+        let move_gen = MoveGenerator::new();
+        let legal_moves = match move_gen.generate_all(pos) {
+            Ok(moves) => moves,
+            Err(_) => {
+                log::warn!("Failed to generate moves during PV reconstruction");
+                break;
+            }
+        };
         let legal_move =
             legal_moves.as_slice().iter().find(|m| m.equals_without_piece_type(&best_move));
 
@@ -125,8 +131,12 @@ pub fn reconstruct_pv_generic<T: TTProbe>(tt: &T, pos: &mut Position, max_depth:
         }
 
         // Check if we have no legal moves (mate)
-        let mut move_gen = MoveGenImpl::new(pos);
-        if move_gen.generate_all().is_empty() {
+        let move_gen = MoveGenerator::new();
+        let has_moves = match move_gen.generate_all(pos) {
+            Ok(moves) => !moves.is_empty(),
+            Err(_) => false,
+        };
+        if !has_moves {
             log::trace!("PV reconstruction: Mate position reached at depth {}", pv.len());
             break;
         }

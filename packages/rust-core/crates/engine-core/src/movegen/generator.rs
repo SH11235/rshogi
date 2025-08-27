@@ -2,11 +2,10 @@ use crate::shogi::attacks::{between_bb, sliding_attacks};
 use crate::shogi::board_constants::{
     FILE_MASKS, RANK_1_2_MASK, RANK_1_MASK, RANK_8_9_MASK, RANK_9_MASK, SHOGI_BOARD_SIZE,
 };
-use crate::shogi::moves::Move;
+use crate::shogi::moves::{Move, MoveList};
 use crate::shogi::{Bitboard, Color, PieceType, Position, Square};
 
 use super::error::MoveGenError;
-use super::movelist::MoveList;
 use super::tables;
 
 /// Move generator for generating legal moves

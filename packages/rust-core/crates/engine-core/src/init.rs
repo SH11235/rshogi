@@ -42,9 +42,8 @@ pub fn init_all_tables_once() {
             // The MONO_BASE table is initialized on first access, so we don't need
             // to explicitly initialize it here. It will be initialized when needed.
 
-            // 4. Initialize MoveGen related tables by creating an instance
-            use crate::MoveGen;
-            let _ = MoveGen::new();
+            // 4. MoveGenerator uses once_cell for lazy initialization,
+            // so explicit initialization is not needed
 
             // Note: OnceLock-based tables (SharedStopInfo, SIMD KIND, START_TIME)
             // don't need explicit initialization as they're initialized on first use

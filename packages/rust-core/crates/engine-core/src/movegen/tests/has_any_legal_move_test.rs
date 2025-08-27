@@ -1,9 +1,6 @@
 //! Tests for has_any_legal_move() optimization
 
-use crate::{
-    movegen::{generator::MoveGenImpl, MoveGen},
-    usi, Position,
-};
+use crate::{movegen::MoveGenerator, usi, Position};
 
 #[test]
 fn test_has_any_legal_move_matches_generate_all() {
@@ -35,23 +32,17 @@ fn test_has_any_legal_move_matches_generate_all() {
     for pos in test_positions {
         let sfen = usi::position_to_sfen(&pos);
 
-        // Test with MoveGenImpl
-        let mut gen1 = MoveGenImpl::new(&pos);
-        let has_any = gen1.has_any_legal_move();
+        // Test with MoveGenerator
+        let movegen = MoveGenerator::new();
+        let has_any = movegen.has_legal_moves(&pos).unwrap();
 
-        let mut gen2 = MoveGenImpl::new(&pos);
-        let all_moves = gen2.generate_all();
+        let all_moves = movegen.generate_all(&pos).unwrap();
         let has_moves = !all_moves.is_empty();
 
         assert_eq!(
             has_any, has_moves,
-            "has_any_legal_move() and generate_all() disagree for position: {sfen}"
+            "has_legal_moves() and generate_all() disagree for position: {sfen}"
         );
-
-        // Also test with MoveGen wrapper
-        let mut movegen = MoveGen::new();
-        let wrapper_has_any = movegen.has_any_legal_move(&pos);
-        assert_eq!(wrapper_has_any, has_any, "MoveGen wrapper result differs for position: {sfen}");
     }
 }
 
@@ -62,13 +53,13 @@ fn test_has_any_legal_move_block_check_with_drop() {
     // Position where check can only be blocked by dropping a piece
     let pos = Position::from_sfen("4k4/9/9/9/4r4/9/9/9/4K4 b G 1").unwrap();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    assert!(gen.checkers.count_ones() > 0, "King should be in check");
-    assert!(gen.has_any_legal_move(), "Should be able to block check with gold drop");
+    assert!(pos.is_in_check(), "King should be in check");
+    
+    let movegen = MoveGenerator::new();
+    assert!(movegen.has_legal_moves(&pos).unwrap(), "Should be able to block check with gold drop");
 
     // Verify at least one drop move exists
-    let mut gen2 = MoveGenImpl::new(&pos);
-    let all_moves = gen2.generate_all();
+    let all_moves = movegen.generate_all(&pos).unwrap();
     let has_drop = all_moves.as_slice().iter().any(|m| m.is_drop());
     assert!(has_drop, "Should have at least one drop move to block check");
 }
@@ -79,8 +70,8 @@ fn test_has_any_legal_move_king_moves_first() {
     // Position where king has many moves
     let pos = Position::from_sfen("9/9/9/9/4k4/9/9/9/4K4 b - 1").unwrap();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    assert!(gen.has_any_legal_move(), "King should have legal moves");
+    let movegen = MoveGenerator::new();
+    assert!(movegen.has_legal_moves(&pos).unwrap(), "King should have legal moves");
 
     // The implementation should return true quickly after checking king moves
     // This is more of a performance characteristic than a correctness test
@@ -91,11 +82,10 @@ fn test_has_any_legal_move_promoted_pieces() {
     // Test with promoted pieces to ensure they are handled correctly
     let pos = Position::from_sfen("9/9/9/4+R4/4k4/9/9/9/4K4 w - 1").unwrap();
 
-    let mut gen = MoveGenImpl::new(&pos);
-    let has_any = gen.has_any_legal_move();
+    let movegen = MoveGenerator::new();
+    let has_any = movegen.has_legal_moves(&pos).unwrap();
 
-    let mut gen2 = MoveGenImpl::new(&pos);
-    let all_moves = gen2.generate_all();
+    let all_moves = movegen.generate_all(&pos).unwrap();
     assert_eq!(has_any, !all_moves.is_empty(), "Results should match for promoted pieces");
 }
 
@@ -121,11 +111,10 @@ fn test_has_any_legal_move_various_piece_types() {
 
     for sfen in positions {
         let pos = Position::from_sfen(sfen).unwrap();
-        let mut gen = MoveGenImpl::new(&pos);
-        let has_any = gen.has_any_legal_move();
+        let movegen = MoveGenerator::new();
+        let has_any = movegen.has_legal_moves(&pos).unwrap();
 
-        let mut gen2 = MoveGenImpl::new(&pos);
-        let all_moves = gen2.generate_all();
+        let all_moves = movegen.generate_all(&pos).unwrap();
         assert_eq!(has_any, !all_moves.is_empty(), "Results should match for position: {sfen}");
     }
 }

@@ -1069,8 +1069,8 @@ mod tests {
     #[test]
     fn test_likely_could_give_check_no_false_negatives() {
         use crate::{
-            movegen::MoveGen,
-            shogi::{MoveList, Position},
+            movegen::MoveGenerator,
+            shogi::Position,
         };
 
         // Test that likely_could_give_check never returns false when gives_check is true
@@ -1094,9 +1094,8 @@ mod tests {
                 Err(_) => continue, // Skip invalid SFEN
             };
 
-            let mut move_gen = MoveGen::new();
-            let mut moves = MoveList::new();
-            move_gen.generate_all(&pos, &mut moves);
+            let move_gen = MoveGenerator::new();
+            let moves = move_gen.generate_all(&pos).unwrap();
 
             let mut false_negatives = 0;
             let mut total_checks = 0;
@@ -1135,8 +1134,8 @@ mod tests {
     #[test]
     fn test_likely_could_give_check_property_random_positions() {
         use crate::{
-            movegen::MoveGen,
-            shogi::{MoveList, Position},
+            movegen::MoveGenerator,
+            shogi::Position,
         };
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -1154,13 +1153,12 @@ mod tests {
 
         for (idx, mut pos) in base_positions.into_iter().enumerate() {
             // Apply some semi-random moves to create varied positions
-            let mut move_gen = MoveGen::new();
-            let mut moves = MoveList::new();
+            let move_gen = MoveGenerator::new();
 
             // Make 5-15 moves from starting position
             let num_moves = 5 + (idx % 11);
             for i in 0..num_moves {
-                move_gen.generate_all(&pos, &mut moves);
+                let moves = move_gen.generate_all(&pos).unwrap();
                 if moves.is_empty() {
                     break;
                 }
@@ -1174,11 +1172,10 @@ mod tests {
                 if pos.is_pseudo_legal(mv) {
                     pos.do_move(mv);
                 }
-                moves.clear();
             }
 
             // Now test all moves from this position
-            move_gen.generate_all(&pos, &mut moves);
+            let moves = move_gen.generate_all(&pos).unwrap();
 
             for &mv in moves.as_slice() {
                 if !pos.is_pseudo_legal(mv) {
@@ -1203,8 +1200,8 @@ mod tests {
     #[test]
     fn test_likely_could_give_check_discovered_checks() {
         use crate::{
-            movegen::MoveGen,
-            shogi::{MoveList, Position},
+            movegen::MoveGenerator,
+            shogi::Position,
         };
 
         // Specific test for discovered checks
@@ -1219,9 +1216,8 @@ mod tests {
         let from = parse_usi_square("5f").unwrap();
         let to = parse_usi_square("5e").unwrap();
 
-        let mut move_gen = MoveGen::new();
-        let mut moves = MoveList::new();
-        move_gen.generate_all(&pos, &mut moves);
+        let move_gen = MoveGenerator::new();
+        let moves = move_gen.generate_all(&pos).unwrap();
 
         let pawn_move = moves
             .as_slice()

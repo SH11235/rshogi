@@ -4,6 +4,7 @@
 
 use crate::{
     evaluation::evaluate::Evaluator,
+    movegen::MoveGenerator,
     search::{
         common::mate_score,
         constants::{MAX_PLY, SEARCH_INF},
@@ -213,8 +214,14 @@ where
     if in_check {
         // In check: must search all legal moves (no stand pat)
         // Generate all legal moves
-        let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
-        let moves = move_gen_impl.generate_all();
+        let move_gen = MoveGenerator::new();
+        let moves = match move_gen.generate_all(pos) {
+            Ok(moves) => moves,
+            Err(_) => {
+                // King not found - should not happen in valid position
+                return -SEARCH_INF;
+            }
+        };
 
         // If no legal moves, it's checkmate
         if moves.is_empty() {
@@ -302,8 +309,14 @@ where
     };
 
     // Generate all moves for quiescence (we'll filter captures manually)
-    let mut move_gen_impl = crate::movegen::generator::MoveGenImpl::new(pos);
-    let all_moves = move_gen_impl.generate_all();
+    let move_gen = MoveGenerator::new();
+    let all_moves = match move_gen.generate_all(pos) {
+        Ok(moves) => moves,
+        Err(_) => {
+            // King not found - should not happen in valid position
+            return stand_pat;
+        }
+    };
 
     // Filter to captures only - check board state directly instead of relying on metadata
     let us = pos.side_to_move;
