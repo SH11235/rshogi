@@ -211,17 +211,18 @@ impl EngineAdapter {
         position: &Position,
         best_move: &engine_core::shogi::Move,
     ) -> Option<engine_core::shogi::Move> {
-        use engine_core::movegen::MoveGen;
-        use engine_core::shogi::MoveList;
+        use engine_core::movegen::MoveGenerator;
 
         // Apply best move to get opponent's position
         let mut pos_after = position.clone();
         pos_after.do_move(*best_move);
 
         // Generate legal moves for opponent
-        let mut movegen = MoveGen::new();
-        let mut legal_moves = MoveList::new();
-        movegen.generate_all(&pos_after, &mut legal_moves);
+        let movegen = MoveGenerator::new();
+        let legal_moves = match movegen.generate_all(&pos_after) {
+            Ok(moves) => moves,
+            Err(_) => return None,
+        };
 
         // Return the first legal move as fallback
         if !legal_moves.is_empty() {

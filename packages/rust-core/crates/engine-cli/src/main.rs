@@ -694,6 +694,7 @@ mod tests {
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
         let mut position_state = None;
+        let mut legal_moves_check_logged = false;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -711,6 +712,7 @@ mod tests {
             allow_null_move: false,
             position_state: &mut position_state,
             program_start: Instant::now(),
+            legal_moves_check_logged: &mut legal_moves_check_logged,
         };
 
         // Send SearchFinished for current search while already Idle
@@ -748,6 +750,7 @@ mod tests {
         let mut current_bestmove_emitter = None;
         let mut current_stop_flag = None;
         let mut position_state = None;
+        let mut legal_moves_check_logged = false;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -765,6 +768,7 @@ mod tests {
             allow_null_move: false,
             position_state: &mut position_state,
             program_start: Instant::now(),
+            legal_moves_check_logged: &mut legal_moves_check_logged,
         };
 
         // Note: In a full test, we would mock send_response to capture sent Info messages

@@ -294,18 +294,33 @@ impl std::fmt::Display for Move {
 }
 
 /// List of moves with pre-allocated capacity
+/// Uses SmallVec to avoid heap allocation for typical positions
 #[derive(Clone, Debug, Default)]
 pub struct MoveList {
-    moves: Vec<Move>,
+    moves: SmallVec<[Move; 128]>,
 }
 
 impl MoveList {
     /// Create new move list with default capacity
     pub fn new() -> Self {
         // Average number of legal moves in shogi is around 80-100
+        // SmallVec will use stack allocation for up to 128 moves
         MoveList {
-            moves: Vec::with_capacity(128),
+            moves: SmallVec::new(),
         }
+    }
+
+    /// Create with specific capacity (for move generation)
+    pub fn with_capacity(capacity: usize) -> Self {
+        MoveList {
+            moves: SmallVec::with_capacity(capacity),
+        }
+    }
+
+    /// Reserve additional capacity if needed
+    #[inline]
+    pub fn reserve(&mut self, additional: usize) {
+        self.moves.reserve(additional);
     }
 
     /// Add a move to the list
@@ -338,11 +353,11 @@ impl MoveList {
         &self.moves
     }
 
-    /// Get mutable reference to the underlying Vec
+    /// Get mutable reference to the underlying SmallVec
     ///
-    /// Returns &mut Vec<Move> to allow using Vec-specific methods like retain()
+    /// Returns &mut SmallVec to allow using Vec-like methods such as retain()
     #[inline]
-    pub fn as_mut_vec(&mut self) -> &mut Vec<Move> {
+    pub fn as_mut_vec(&mut self) -> &mut SmallVec<[Move; 128]> {
         &mut self.moves
     }
 
@@ -355,7 +370,7 @@ impl MoveList {
     /// Convert to vector
     #[inline]
     pub fn into_vec(self) -> Vec<Move> {
-        self.moves
+        self.moves.into_vec()
     }
 }
 
@@ -370,7 +385,7 @@ impl std::ops::Index<usize> for MoveList {
 
 impl IntoIterator for MoveList {
     type Item = Move;
-    type IntoIter = std::vec::IntoIter<Move>;
+    type IntoIter = smallvec::IntoIter<[Move; 128]>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.moves.into_iter()
@@ -642,6 +657,51 @@ mod tests {
             assert_eq!(m.from(), Some(Square::new((i % 9) as u8, (i / 9 % 9) as u8)));
             assert_eq!(m.to(), Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8));
         }
+    }
+
+    #[test]
+    fn test_move_list_smallvec_overflow() {
+        // Test that MoveList correctly handles more than 128 moves
+        // (SmallVec should spill to heap when exceeding inline capacity)
+        let mut list = MoveList::new();
+
+        // Add exactly 128 moves (should stay on stack)
+        for i in 0..128 {
+            list.push(Move::normal(
+                Square::new((i % 9) as u8, (i / 9 % 9) as u8),
+                Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8),
+                false,
+            ));
+        }
+        assert_eq!(list.len(), 128);
+
+        // Add one more move (should trigger heap allocation)
+        list.push(Move::normal(Square::new(0, 0), Square::new(1, 1), false));
+        assert_eq!(list.len(), 129);
+
+        // Continue adding moves to verify heap allocation works correctly
+        for i in 129..200 {
+            list.push(Move::normal(
+                Square::new((i % 9) as u8, (i / 9 % 9) as u8),
+                Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8),
+                false,
+            ));
+        }
+        assert_eq!(list.len(), 200);
+
+        // Verify all moves are accessible
+        for i in 0..128 {
+            let m = list[i];
+            assert_eq!(m.from(), Some(Square::new((i % 9) as u8, (i / 9 % 9) as u8)));
+        }
+
+        // Verify the 129th move
+        assert_eq!(list[128].from(), Some(Square::new(0, 0)));
+        assert_eq!(list[128].to(), Square::new(1, 1));
+
+        // Test retain functionality with SmallVec
+        list.as_mut_vec().retain(|mv| mv.to().file() < 5);
+        assert!(list.len() < 200);
     }
 
     #[test]

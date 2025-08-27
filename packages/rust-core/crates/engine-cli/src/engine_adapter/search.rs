@@ -5,12 +5,8 @@
 
 use anyhow::{anyhow, Result};
 use engine_core::{
-    engine::controller::Engine,
-    movegen::MoveGen,
-    search::limits::SearchLimits,
-    shogi::{MoveList, Position},
-    time_management::TimeControl,
-    usi::move_to_usi,
+    engine::controller::Engine, movegen::MoveGenerator, search::limits::SearchLimits,
+    shogi::Position, time_management::TimeControl, usi::move_to_usi,
 };
 use log::{info, warn};
 use std::sync::atomic::AtomicBool;
@@ -215,9 +211,10 @@ impl EngineAdapter {
         let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
 
         // Generate legal moves
-        let mut movegen = MoveGen::new();
-        let mut legal_moves = MoveList::new();
-        movegen.generate_all(&position, &mut legal_moves);
+        let movegen = MoveGenerator::new();
+        let legal_moves = movegen
+            .generate_all(&position)
+            .map_err(|e| anyhow!("Failed to generate legal moves: {e}"))?;
 
         Ok(!legal_moves.is_empty())
     }
@@ -229,8 +226,10 @@ impl EngineAdapter {
         let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
 
         // Use optimized early-exit version
-        let mut movegen = MoveGen::new();
-        Ok(movegen.has_any_legal_move(&position))
+        let movegen = MoveGenerator::new();
+        movegen
+            .has_legal_moves(&position)
+            .map_err(|e| anyhow!("Failed to check legal moves: {e}"))
     }
 
     /// Check if the current position is in check
@@ -248,9 +247,10 @@ impl EngineAdapter {
             .ok_or(EngineError::EngineNotAvailable("Position not set".to_string()))?;
 
         // Generate legal moves
-        let mut movegen = MoveGen::new();
-        let mut legal_moves = MoveList::new();
-        movegen.generate_all(position, &mut legal_moves);
+        let movegen = MoveGenerator::new();
+        let legal_moves = movegen.generate_all(position).map_err(|e| {
+            EngineError::EngineNotAvailable(format!("Failed to generate moves: {e}"))
+        })?;
 
         if legal_moves.is_empty() {
             return Err(EngineError::NoLegalMoves);

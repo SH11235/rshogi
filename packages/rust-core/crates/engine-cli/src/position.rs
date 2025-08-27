@@ -4,7 +4,7 @@
 //! part of the EngineAdapter implementation, extracted for better modularity.
 
 use anyhow::Result;
-use engine_core::movegen::MoveGen;
+use engine_core::movegen::MoveGenerator;
 use engine_core::shogi::{Color, Move, MoveList, Position};
 use engine_core::usi;
 
@@ -77,9 +77,14 @@ impl EngineAdapter {
         };
 
         // Generate all legal moves
-        let mut generator = MoveGen::new();
-        let mut legal_moves = MoveList::new();
-        generator.generate_all(position, &mut legal_moves);
+        let generator = MoveGenerator::new();
+        let legal_moves = match generator.generate_all(position) {
+            Ok(moves) => moves,
+            Err(e) => {
+                log::warn!("Failed to generate legal moves: {e}");
+                return false;
+            }
+        };
 
         // Check if the move is in the legal move list
         // Note: We need to compare moves semantically, not just by equality,

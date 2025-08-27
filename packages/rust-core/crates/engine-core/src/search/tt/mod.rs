@@ -824,7 +824,7 @@ impl TTProbe for TranspositionTable {
 mod pv_reconstruction_tests {
     use super::*;
     use crate::{
-        movegen::generator::MoveGenImpl,
+        movegen::MoveGenerator,
         search::test_utils::test_helpers::legal_usi,
         shogi::{Move, Position},
         usi::{move_to_usi, parse_usi_square},
@@ -862,8 +862,8 @@ mod pv_reconstruction_tests {
         tt.new_search();
 
         // Generate legal moves and find the ones we want
-        let mut move_gen = MoveGenImpl::new(&pos);
-        let moves = move_gen.generate_all();
+        let move_gen = MoveGenerator::new();
+        let moves = move_gen.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move1 = moves
             .as_slice()
@@ -873,8 +873,9 @@ mod pv_reconstruction_tests {
             .expect("7g7f should be legal");
 
         let undo1 = pos.do_move(move1);
-        let mut move_gen2 = MoveGenImpl::new(&pos);
-        let moves2 = move_gen2.generate_all();
+        let move_gen2 = MoveGenerator::new();
+        let moves2 =
+            move_gen2.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move2 = moves2
             .as_slice()
@@ -884,8 +885,9 @@ mod pv_reconstruction_tests {
             .expect("3c3d should be legal after 7g7f");
 
         let undo2 = pos.do_move(move2);
-        let mut move_gen3 = MoveGenImpl::new(&pos);
-        let moves3 = move_gen3.generate_all();
+        let move_gen3 = MoveGenerator::new();
+        let moves3 =
+            move_gen3.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move3 = moves3
             .as_slice()
@@ -939,8 +941,8 @@ mod pv_reconstruction_tests {
         let mut pos = Position::startpos();
 
         // Generate legal moves and find the ones we want
-        let mut move_gen = MoveGenImpl::new(&pos);
-        let moves = move_gen.generate_all();
+        let move_gen = MoveGenerator::new();
+        let moves = move_gen.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move1 = moves
             .as_slice()
@@ -950,8 +952,9 @@ mod pv_reconstruction_tests {
             .expect("7g7f should be legal");
 
         let undo1_temp = pos.do_move(move1);
-        let mut move_gen2 = MoveGenImpl::new(&pos);
-        let moves2 = move_gen2.generate_all();
+        let move_gen2 = MoveGenerator::new();
+        let moves2 =
+            move_gen2.generate_all(&pos).expect("Should be able to generate moves in test");
 
         let move2 = moves2
             .as_slice()

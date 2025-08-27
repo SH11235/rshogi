@@ -402,6 +402,7 @@ dependencies = [
  "lazy_static",
  "log",
  "loom",
+ "once_cell",
  "parking_lot",
  "rand",
  "rand_xoshiro",

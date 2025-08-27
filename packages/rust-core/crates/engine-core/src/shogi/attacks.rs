@@ -4,6 +4,55 @@
 
 use super::board::{Bitboard, Color, PieceType, Square};
 use lazy_static::lazy_static;
+use rand::{Rng, SeedableRng};
+use rand_xoshiro::Xoroshiro128Plus;
+
+// Re-export HAND_ORDER for convenience
+pub use super::board::HAND_ORDER;
+
+/// Zobrist keys for hashing
+pub struct ZobristKeys {
+    /// Keys for pieces indexed by [piece_type][color][square]
+    pub pieces: [[[u64; 81]; 2]; 14],
+    /// Key for side to move
+    pub side_to_move: u64,
+    /// Keys for pieces in hand indexed by [piece_type][color][count]
+    pub hands: [[[u64; 19]; 2]; 7],
+}
+
+impl ZobristKeys {
+    /// Generate Zobrist keys using a deterministic random number generator
+    pub fn generate() -> Self {
+        // Use a fixed seed for reproducibility
+        let mut rng = Xoroshiro128Plus::seed_from_u64(0x1234567890abcdef);
+
+        let mut keys = Self {
+            pieces: [[[0; 81]; 2]; 14],
+            side_to_move: rng.random(),
+            hands: [[[0; 19]; 2]; 7],
+        };
+
+        // Generate piece keys
+        for piece_type in 0..14 {
+            for color in 0..2 {
+                for square in 0..81 {
+                    keys.pieces[piece_type][color][square] = rng.random();
+                }
+            }
+        }
+
+        // Generate hand keys
+        for piece_type in 0..7 {
+            for color in 0..2 {
+                for count in 0..19 {
+                    keys.hands[piece_type][color][count] = rng.random();
+                }
+            }
+        }
+
+        keys
+    }
+}
 
 /// Direction offsets for piece movements
 #[derive(Clone, Copy, Debug)]
@@ -550,6 +599,9 @@ lazy_static! {
         // Debug output removed to prevent I/O deadlock in subprocess context
         AttackTables::new()
     };
+
+    /// Global Zobrist keys instance
+    pub static ref ZOBRIST_KEYS: ZobristKeys = ZobristKeys::generate();
 }
 
 // ============================================================================

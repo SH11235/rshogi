@@ -1,7 +1,7 @@
 //! Test for promotion moves from pieces already in promotion zone
 
 use crate::{
-    movegen::generator::MoveGenImpl,
+    movegen::MoveGenerator,
     shogi::{Color, PieceType, Position},
     usi::parse_usi_square,
 };
@@ -21,8 +21,8 @@ fn test_bishop_promotion_from_promotion_zone() {
     assert!(!piece.promoted);
 
     // Generate all legal moves
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Find move 2b7g+ (a move that should exist)
     let to = parse_usi_square("7g").unwrap();
@@ -62,8 +62,8 @@ fn test_rook_promotion_from_promotion_zone() {
     assert!(!piece.promoted);
 
     // Generate all legal moves
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Find move 7b7a+ (moving to opponent's back rank)
     let to = parse_usi_square("7a").unwrap();
@@ -88,8 +88,8 @@ fn test_no_promotion_for_promoted_pieces() {
     assert!(piece.promoted);
 
     // Generate all legal moves
-    let mut gen = MoveGenImpl::new(&pos);
-    let moves = gen.generate_all();
+    let gen = MoveGenerator::new();
+    let moves = gen.generate_all(&pos).expect("Failed to generate moves");
 
     // Check that no promotion moves exist for the promoted bishop
     // Find any move from the promoted bishop
