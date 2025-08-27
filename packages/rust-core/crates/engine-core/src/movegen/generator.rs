@@ -1,4 +1,7 @@
-use crate::shogi::attacks::{between_bb, sliding_attacks};
+use crate::shogi::attacks::{
+    between_bb, gold_attacks, king_attacks, knight_attacks, lance_attacks, pawn_attacks,
+    silver_attacks, sliding_attacks, HAND_ORDER,
+};
 use crate::shogi::board_constants::{
     FILE_MASKS, RANK_1_2_MASK, RANK_1_MASK, RANK_8_9_MASK, RANK_9_MASK, SHOGI_BOARD_SIZE,
 };
@@ -6,7 +9,6 @@ use crate::shogi::moves::{Move, MoveList};
 use crate::shogi::{Bitboard, Color, PieceType, Position, Square};
 
 use super::error::MoveGenError;
-use super::tables;
 
 /// Move generator for generating legal moves
 pub struct MoveGenerator;
@@ -206,7 +208,7 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Generate king moves
     fn generate_king_moves(&mut self, moves: &mut MoveList) {
-        let attacks = tables::king_attacks(self.king_sq);
+        let attacks = king_attacks(self.king_sq);
         let valid_targets = attacks & !self.our_pieces;
 
         for to_sq in valid_targets {
@@ -258,7 +260,7 @@ impl<'a> MoveGenImpl<'a> {
         }
 
         // Check each piece type in hand (excluding King)
-        for (piece_idx, &piece_type) in tables::HAND_ORDER.iter().enumerate() {
+        for (piece_idx, &piece_type) in HAND_ORDER.iter().enumerate() {
             let count = self.pos.hands[us as usize][piece_idx];
             if count == 0 {
                 continue;
@@ -348,7 +350,7 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Generate only king captures
     fn generate_king_captures(&mut self, moves: &mut MoveList) {
-        let attacks = tables::king_attacks(self.king_sq);
+        let attacks = king_attacks(self.king_sq);
         let captures = attacks & self.their_pieces;
 
         for to_sq in captures {
@@ -369,7 +371,7 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Generate only king quiet moves
     fn generate_king_quiet(&mut self, moves: &mut MoveList) {
-        let attacks = tables::king_attacks(self.king_sq);
+        let attacks = king_attacks(self.king_sq);
         let quiet = attacks & !self.occupied;
 
         for to_sq in quiet {
@@ -430,7 +432,7 @@ impl<'a> MoveGenImpl<'a> {
 
     /// Check if king has any escape move
     fn has_king_escape(&self) -> bool {
-        let attacks = tables::king_attacks(self.king_sq);
+        let attacks = king_attacks(self.king_sq);
         let valid_targets = attacks & !self.our_pieces;
 
         for to_sq in valid_targets {
@@ -454,7 +456,7 @@ impl<'a> MoveGenImpl<'a> {
             & !self.pinned;
         if !pawns.is_empty() {
             for from in pawns {
-                let attacks = tables::pawn_attacks(from, us);
+                let attacks = pawn_attacks(from, us);
                 if !(attacks & target_mask).is_empty() {
                     return true;
                 }
@@ -494,7 +496,7 @@ impl<'a> MoveGenImpl<'a> {
             }
 
             // Get all potential lance moves (without considering blockers)
-            let attacks = tables::lance_attacks(from, us);
+            let attacks = lance_attacks(from, us);
 
             // For each potential move, check if it's actually reachable
             for to in attacks {
@@ -523,7 +525,7 @@ impl<'a> MoveGenImpl<'a> {
         for from in knights {
             // Knights cannot move if pinned (they move in L-shape)
             if !self.pinned.test(from) {
-                let attacks = tables::knight_attacks(from, us);
+                let attacks = knight_attacks(from, us);
                 if !(attacks & target_mask).is_empty() {
                     return true;
                 }
@@ -534,7 +536,7 @@ impl<'a> MoveGenImpl<'a> {
         let silvers = self.pos.board.piece_bb[us as usize][PieceType::Silver as usize]
             & !self.pos.board.promoted_bb;
         for from in silvers {
-            let attacks = tables::silver_attacks(from, us);
+            let attacks = silver_attacks(from, us);
             let valid_moves = if self.pinned.test(from) {
                 attacks & self.pin_rays[from.index()]
             } else {
@@ -548,7 +550,7 @@ impl<'a> MoveGenImpl<'a> {
         // 5. Golds (including promoted pieces)
         let golds = self.get_gold_like_pieces(us);
         for from in golds {
-            let attacks = tables::gold_attacks(from, us);
+            let attacks = gold_attacks(from, us);
             let valid_moves = if self.pinned.test(from) {
                 attacks & self.pin_rays[from.index()]
             } else {
@@ -565,7 +567,7 @@ impl<'a> MoveGenImpl<'a> {
             let attacks = sliding_attacks(from, self.occupied, PieceType::Bishop);
             let promoted = self.pos.board.promoted_bb.test(from);
             let all_attacks = if promoted {
-                attacks | tables::king_attacks(from)
+                attacks | king_attacks(from)
             } else {
                 attacks
             };
@@ -587,7 +589,7 @@ impl<'a> MoveGenImpl<'a> {
             let attacks = sliding_attacks(from, self.occupied, PieceType::Rook);
             let promoted = self.pos.board.promoted_bb.test(from);
             let all_attacks = if promoted {
-                attacks | tables::king_attacks(from)
+                attacks | king_attacks(from)
             } else {
                 attacks
             };
@@ -723,7 +725,7 @@ impl<'a> MoveGenImpl<'a> {
         let attackers_bb = self.pos.board.occupied_bb[by as usize];
 
         // Check pawn attacks
-        let pawn_attacks = tables::pawn_attacks(sq, by.opposite()); // Attack from perspective of defender
+        let pawn_attacks = pawn_attacks(sq, by.opposite()); // Attack from perspective of defender
         let enemy_pawns = self.pos.board.piece_bb[by as usize][PieceType::Pawn as usize]
             & !self.pos.board.promoted_bb;
         if !(pawn_attacks & enemy_pawns).is_empty() {
@@ -731,7 +733,7 @@ impl<'a> MoveGenImpl<'a> {
         }
 
         // Check knight attacks
-        let knight_attacks = tables::knight_attacks(sq, by.opposite());
+        let knight_attacks = knight_attacks(sq, by.opposite());
         let enemy_knights = self.pos.board.piece_bb[by as usize][PieceType::Knight as usize]
             & !self.pos.board.promoted_bb;
         if !(knight_attacks & enemy_knights).is_empty() {
@@ -739,14 +741,14 @@ impl<'a> MoveGenImpl<'a> {
         }
 
         // Check king attacks
-        let king_attacks = tables::king_attacks(sq);
+        let king_attacks = king_attacks(sq);
         let enemy_king = self.pos.board.piece_bb[by as usize][PieceType::King as usize];
         if !(king_attacks & enemy_king).is_empty() {
             return true;
         }
 
         // Check gold attacks (including promoted pieces)
-        let gold_attacks = tables::gold_attacks(sq, by);
+        let gold_attacks = gold_attacks(sq, by);
         let enemy_golds = self.pos.board.piece_bb[by as usize][PieceType::Gold as usize];
         let promoted_pieces = self.pos.board.promoted_bb & attackers_bb;
         let gold_movers = enemy_golds
@@ -760,7 +762,7 @@ impl<'a> MoveGenImpl<'a> {
         }
 
         // Check silver attacks
-        let silver_attacks = tables::silver_attacks(sq, by);
+        let silver_attacks = silver_attacks(sq, by);
         let enemy_silvers = self.pos.board.piece_bb[by as usize][PieceType::Silver as usize]
             & !self.pos.board.promoted_bb;
         if !(silver_attacks & enemy_silvers).is_empty() {
@@ -833,7 +835,7 @@ impl<'a> MoveGenImpl<'a> {
 
         // Handle unpromoted pawns
         for from in unpromoted_pawns {
-            let to_bb = tables::pawn_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            let to_bb = pawn_attacks(from, us) & !our_pieces & self.non_king_check_mask;
             for to in to_bb {
                 // Check if pawn is pinned
                 if self.pinned.test(from) {
@@ -905,7 +907,7 @@ impl<'a> MoveGenImpl<'a> {
         let us = self.pos.side_to_move;
         let our_pieces = self.pos.board.occupied_bb[us as usize];
 
-        let to_bb = tables::gold_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+        let to_bb = gold_attacks(from, us) & !our_pieces & self.non_king_check_mask;
         for to in to_bb {
             if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
                 continue;
@@ -927,7 +929,7 @@ impl<'a> MoveGenImpl<'a> {
         // Handle unpromoted lances
         for from in unpromoted_lances {
             // Lance moves forward until blocked
-            let attacks = tables::lance_attacks(from, us);
+            let attacks = lance_attacks(from, us);
             let blockers = attacks & self.pos.board.all_bb;
 
             // Find valid moves for lance
@@ -1036,7 +1038,7 @@ impl<'a> MoveGenImpl<'a> {
 
         // Handle unpromoted knights
         for from in unpromoted_knights {
-            let to_bb = tables::knight_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            let to_bb = knight_attacks(from, us) & !our_pieces & self.non_king_check_mask;
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
                     continue;
@@ -1104,7 +1106,7 @@ impl<'a> MoveGenImpl<'a> {
 
         // Handle unpromoted silvers
         for from in unpromoted_silvers {
-            let to_bb = tables::silver_attacks(from, us) & !our_pieces & self.non_king_check_mask;
+            let to_bb = silver_attacks(from, us) & !our_pieces & self.non_king_check_mask;
             for to in to_bb {
                 if self.pinned.test(from) && !self.pin_rays[from.index()].test(to) {
                     continue;
@@ -1233,7 +1235,7 @@ impl<'a> MoveGenImpl<'a> {
             }
 
             // King-like moves
-            let king_attacks = tables::king_attacks(from);
+            let king_attacks = king_attacks(from);
             let king_targets = king_attacks & !our_pieces & self.non_king_check_mask;
 
             for to in king_targets {
@@ -1327,7 +1329,7 @@ impl<'a> MoveGenImpl<'a> {
             }
 
             // King-like moves
-            let king_attacks = tables::king_attacks(from);
+            let king_attacks = king_attacks(from);
             let king_targets = king_attacks & !our_pieces & self.non_king_check_mask;
 
             for to in king_targets {
@@ -1360,26 +1362,26 @@ impl<'a> MoveGenImpl<'a> {
         let mut attackers = Bitboard::EMPTY;
 
         // Pawn attacks
-        let pawn_attacks = tables::pawn_attacks(sq, by.opposite()); // Attack from perspective of defender
+        let pawn_attacks = pawn_attacks(sq, by.opposite()); // Attack from perspective of defender
         let enemy_pawns = self.pos.board.piece_bb[by as usize][PieceType::Pawn as usize]
             & !self.pos.board.promoted_bb
             & pieces;
         attackers |= pawn_attacks & enemy_pawns;
 
         // Knight attacks
-        let knight_attacks = tables::knight_attacks(sq, by.opposite());
+        let knight_attacks = knight_attacks(sq, by.opposite());
         let enemy_knights = self.pos.board.piece_bb[by as usize][PieceType::Knight as usize]
             & !self.pos.board.promoted_bb
             & pieces;
         attackers |= knight_attacks & enemy_knights;
 
         // King attacks
-        let king_attacks = tables::king_attacks(sq);
+        let king_attacks = king_attacks(sq);
         let enemy_king = self.pos.board.piece_bb[by as usize][PieceType::King as usize] & pieces;
         attackers |= king_attacks & enemy_king;
 
         // Gold attacks (including promoted pieces)
-        let gold_attacks = tables::gold_attacks(sq, by);
+        let gold_attacks = gold_attacks(sq, by);
         let enemy_golds = self.pos.board.piece_bb[by as usize][PieceType::Gold as usize] & pieces;
         let promoted_pieces = self.pos.board.promoted_bb & pieces;
         let gold_movers = enemy_golds
@@ -1391,7 +1393,7 @@ impl<'a> MoveGenImpl<'a> {
         attackers |= gold_attacks & gold_movers;
 
         // Silver attacks
-        let silver_attacks = tables::silver_attacks(sq, by);
+        let silver_attacks = silver_attacks(sq, by);
         let enemy_silvers = self.pos.board.piece_bb[by as usize][PieceType::Silver as usize]
             & !self.pos.board.promoted_bb
             & pieces;
@@ -1454,7 +1456,7 @@ impl<'a> MoveGenImpl<'a> {
 
         // Check if the pawn drop gives check
         let us = them.opposite();
-        let pawn_attacks = tables::pawn_attacks(to, us);
+        let pawn_attacks = pawn_attacks(to, us);
         if !pawn_attacks.test(their_king_sq) {
             return false; // Not even a check
         }
@@ -1517,7 +1519,7 @@ impl<'a> MoveGenImpl<'a> {
         }
 
         // 3) Check if king has escape squares
-        let king_attacks = tables::king_attacks(their_king_sq);
+        let king_attacks = king_attacks(their_king_sq);
         let their_pieces = self.pos.board.occupied_bb[them as usize];
         let escape_squares = king_attacks & !their_pieces;
 
@@ -1667,17 +1669,17 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
     // Pawn checks
     let enemy_pawns =
         pos.board.piece_bb[them as usize][PieceType::Pawn as usize] & !pos.board.promoted_bb;
-    let pawn_attacks = tables::pawn_attacks(king_sq, us); // Where our pawns would attack from
+    let pawn_attacks = pawn_attacks(king_sq, us); // Where our pawns would attack from
     checkers |= enemy_pawns & pawn_attacks;
 
     // Knight checks
     let enemy_knights =
         pos.board.piece_bb[them as usize][PieceType::Knight as usize] & !pos.board.promoted_bb;
-    let knight_attacks = tables::knight_attacks(king_sq, us);
+    let knight_attacks = knight_attacks(king_sq, us);
     checkers |= enemy_knights & knight_attacks;
 
     // Gold checks (including promoted pieces that move like gold)
-    let gold_attacks = tables::gold_attacks(king_sq, them);
+    let gold_attacks = gold_attacks(king_sq, them);
     let enemy_golds = pos.board.piece_bb[them as usize][PieceType::Gold as usize];
     checkers |= enemy_golds & gold_attacks;
 
@@ -1696,7 +1698,7 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
     // Silver checks
     let enemy_silvers =
         pos.board.piece_bb[them as usize][PieceType::Silver as usize] & !pos.board.promoted_bb;
-    let silver_attacks = tables::silver_attacks(king_sq, them);
+    let silver_attacks = silver_attacks(king_sq, them);
     checkers |= enemy_silvers & silver_attacks;
 
     // Check sliding pieces for checks and pins
@@ -1724,7 +1726,7 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
 
         // Check promoted rook (Dragon) king-like attacks
         if pos.board.promoted_bb.test(rook_sq) {
-            let king_attacks = tables::king_attacks(rook_sq);
+            let king_attacks = king_attacks(rook_sq);
             if king_attacks.test(king_sq) {
                 checkers.set(rook_sq);
             }
@@ -1756,7 +1758,7 @@ fn calculate_pins_and_checkers(pos: &Position, king_sq: Square, us: Color) -> (B
 
         // Check promoted bishop (Horse) king-like attacks
         if pos.board.promoted_bb.test(bishop_sq) {
-            let king_attacks = tables::king_attacks(bishop_sq);
+            let king_attacks = king_attacks(bishop_sq);
             if king_attacks.test(king_sq) {
                 checkers.set(bishop_sq);
             }
