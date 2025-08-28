@@ -129,6 +129,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut last_partial_result: Option<(String, u8, i32)> = None; // Cache latest partial result
     let mut legal_moves_check_logged = false; // Track if we've logged the legal moves check status
     let mut pre_session_fallback: Option<String> = None; // Precomputed fallback move at go-time
+    let mut pre_session_fallback_hash: Option<u64> = None; // Hash when pre_session_fallback was computed
 
     // Main event loop - process USI commands and worker messages concurrently
     loop {
@@ -147,6 +148,11 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
                         // Check if it's quit command
                         if matches!(cmd, UsiCommand::Quit) {
+                            // Terminate emitter first to prevent any bestmove output
+                            if let Some(ref emitter) = current_bestmove_emitter {
+                                emitter.terminate();
+                                log::debug!("Terminated bestmove emitter for quit");
+                            }
                             // Handle quit
                             stop_flag.store(true, Ordering::Release);
                             // Also set per-search stop flag if available
@@ -176,6 +182,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             legal_moves_check_logged: &mut legal_moves_check_logged,
                             last_partial_result: &mut last_partial_result,
                             pre_session_fallback: &mut pre_session_fallback,
+                            pre_session_fallback_hash: &mut pre_session_fallback_hash,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -215,6 +222,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             legal_moves_check_logged: &mut legal_moves_check_logged,
                             last_partial_result: &mut last_partial_result,
                             pre_session_fallback: &mut pre_session_fallback,
+                            pre_session_fallback_hash: &mut pre_session_fallback_hash,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -300,6 +308,17 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
         WorkerMessage::IterationComplete { session, search_id } => {
             // Update current session if it's for current search
             if search_id == *ctx.current_search_id {
+                // Check if emitter is finalized or terminated
+                if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                    if emitter.is_finalized() || emitter.is_terminated() {
+                        log::debug!(
+                            "Ignoring IterationComplete: emitter finalized={} terminated={}",
+                            emitter.is_finalized(),
+                            emitter.is_terminated()
+                        );
+                        return Ok(());
+                    }
+                }
                 log::debug!(
                     "Iteration complete for search {}, depth: {:?}",
                     search_id,
@@ -324,6 +343,18 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             // Only process if we're still in Searching state (not StopRequested)
             if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Searching {
                 log::info!("Search {search_id} finished (session_id: {session_id}, root_hash: {root_hash:016x})");
+
+                // Check if emitter is finalized or terminated
+                if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                    if emitter.is_finalized() || emitter.is_terminated() {
+                        log::debug!(
+                            "Ignoring SearchFinished: emitter finalized={} terminated={}",
+                            emitter.is_finalized(),
+                            emitter.is_terminated()
+                        );
+                        return Ok(());
+                    }
+                }
 
                 // Send bestmove immediately if not ponder
                 if !*ctx.current_search_is_ponder {

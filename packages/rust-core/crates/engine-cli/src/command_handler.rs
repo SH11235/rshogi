@@ -65,6 +65,8 @@ pub struct CommandContext<'a> {
     pub last_partial_result: &'a mut Option<(String, u8, i32)>,
     /// Precomputed root fallback move captured at go-time for stop-time emergencies
     pub pre_session_fallback: &'a mut Option<String>,
+    /// Hash of the position when pre_session_fallback was computed
+    pub pre_session_fallback_hash: &'a mut Option<u64>,
 }
 
 /// Build BestmoveMeta from common parameters
@@ -432,6 +434,10 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             // Clean up any remaining search state
             ctx.finalize_search("Position");
 
+            // Clear pre-session fallback as position has changed
+            *ctx.pre_session_fallback = None;
+            *ctx.pre_session_fallback_hash = None;
+
             let mut engine = lock_or_recover_adapter(ctx.engine);
             match engine.set_position(startpos, sfen.as_deref(), &moves) {
                 Ok(()) => {
@@ -524,6 +530,12 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
         }
 
         UsiCommand::GameOver { result } => {
+            // Terminate emitter first to prevent any bestmove output
+            if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                emitter.terminate();
+                log::debug!("Terminated bestmove emitter for gameover");
+            }
+
             // Stop any ongoing search and ensure worker is properly cleaned up
             ctx.stop_flag.store(true, Ordering::Release);
 
@@ -646,6 +658,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     *ctx.current_session = None; // Clear any previous session to avoid reuse
     *ctx.pre_session_fallback = None; // Clear previous pre-session fallback
+    *ctx.pre_session_fallback_hash = None; // Clear previous hash
 
     // Verify we can start a new search (defensive check)
     if !ctx.search_state.can_start_search() {
@@ -910,7 +923,9 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     {
         let adapter = lock_or_recover_adapter(ctx.engine);
         if let Ok(move_str) = adapter.generate_emergency_move() {
+            // Store fallback move and current position hash
             *ctx.pre_session_fallback = Some(move_str.clone());
+            *ctx.pre_session_fallback_hash = adapter.get_position().map(|p| p.zobrist_hash());
             let _ = send_info_string(log_tsv(&[
                 ("kind", "go_received"),
                 ("ponder", if params.ponder { "1" } else { "0" }),
@@ -1056,13 +1071,31 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // 3) Pre-session fallback captured at go-time
-        if let Some(move_str) = ctx.pre_session_fallback.take() {
-            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-            let _ =
-                send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "pre_session")]));
-            ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
-            return Ok(());
+        // 3) Pre-session fallback captured at go-time (with hash verification)
+        if let Some(_move_str) = ctx.pre_session_fallback.as_ref() {
+            // Verify hash matches current position
+            let adapter = lock_or_recover_adapter(ctx.engine);
+            let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
+
+            if current_hash == *ctx.pre_session_fallback_hash {
+                let move_str = ctx.pre_session_fallback.take().unwrap();
+                let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "on_stop_source"),
+                    ("src", "pre_session"),
+                ]));
+                ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
+                return Ok(());
+            } else {
+                log::debug!(
+                    "Pre-session fallback hash mismatch: expected {:?}, got {:?}",
+                    ctx.pre_session_fallback_hash,
+                    current_hash
+                );
+                // Clear invalid fallback
+                *ctx.pre_session_fallback = None;
+                *ctx.pre_session_fallback_hash = None;
+            }
         }
 
         // 4) Emergency fallback
