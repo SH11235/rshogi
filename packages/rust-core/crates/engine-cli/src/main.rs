@@ -498,16 +498,91 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             search_id,
         } => {
             // Handle worker thread completion
-            if search_id == *ctx.current_search_id && *ctx.search_state != SearchState::Idle {
-                log::debug!(
-                    "Worker thread finished (from_guard: {from_guard}, search_id: {search_id})"
+            if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Searching {
+                log::warn!(
+                    "Worker Finished without SearchFinished (from_guard: {from_guard}), emitting fallback"
                 );
-                // Note: We don't finalize here as SearchFinished should have already done that
-                // This is just cleanup notification
+
+                // Try session-based bestmove first
+                if let Some(ref session) = ctx.current_session {
+                    if let Some(ref _emitter) = ctx.current_bestmove_emitter {
+                        let adapter = lock_or_recover_adapter(ctx.engine);
+                        if let Some(position) = adapter.get_position() {
+                            if let Ok((best_move, ponder, _)) =
+                                adapter.validate_and_get_bestmove(session, position)
+                            {
+                                let depth =
+                                    session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
+                                let seldepth =
+                                    session.committed_best.as_ref().and_then(|b| b.seldepth);
+                                let score_str =
+                                    session.committed_best.as_ref().map(|b| match &b.score {
+                                        search_session::Score::Cp(cp) => format!("cp {cp}"),
+                                        search_session::Score::Mate(mate) => format!("mate {mate}"),
+                                    });
+                                let meta = build_meta(
+                                    BestmoveSource::EmergencyFallbackOnFinish,
+                                    depth,
+                                    seldepth,
+                                    score_str,
+                                    None,
+                                );
+                                ctx.emit_and_finalize(
+                                    best_move,
+                                    ponder,
+                                    meta,
+                                    "FinishedSessionFallback",
+                                )?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: use cached partial result if available
+                if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
+                    match generate_fallback_move(ctx.engine, Some((mv, d, s)), false) {
+                        Ok((move_str, _)) => {
+                            let meta = build_meta(
+                                BestmoveSource::EmergencyFallbackOnFinish,
+                                d,
+                                None,
+                                Some(format!("cp {s}")),
+                                None,
+                            );
+                            ctx.emit_and_finalize(move_str, None, meta, "FinishedPartialFallback")?;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            log::warn!("Finished: partial fallback failed: {e}");
+                        }
+                    }
+                }
+
+                // Emergency last resort
+                match generate_fallback_move(ctx.engine, None, false) {
+                    Ok((move_str, _)) => {
+                        let meta = build_meta(
+                            BestmoveSource::EmergencyFallbackOnFinish,
+                            0,
+                            None,
+                            None,
+                            None,
+                        );
+                        ctx.emit_and_finalize(move_str, None, meta, "FinishedEmergencyFallback")?;
+                    }
+                    Err(e) => {
+                        log::error!("Finished: emergency fallback failed: {e}");
+                        let meta = build_meta(BestmoveSource::ResignOnFinish, 0, None, None, None);
+                        ctx.emit_and_finalize("resign".to_string(), None, meta, "FinishedResign")?;
+                    }
+                }
             } else {
                 log::trace!(
-                    "Ignoring Finished from old search: {search_id} (current: {})",
-                    *ctx.current_search_id
+                    "Ignoring Finished from search_id={} (current={}, state={:?})",
+                    search_id,
+                    *ctx.current_search_id,
+                    *ctx.search_state
                 );
             }
         }
