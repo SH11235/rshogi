@@ -164,6 +164,17 @@ where
         self.time_manager =
             time_management::create_time_manager(&limits, pos.side_to_move, pos.ply, pos);
 
+        // Shadow logging: expose core time budgets for observability
+        if let Some(ref tm) = self.time_manager {
+            let soft = tm.soft_limit_ms();
+            // There is no public hard_limit getter; derive via time difference heuristic
+            // Keep soft only for now and log active time control for context
+            let tc = tm.time_control();
+            log::debug!("[TimeBudget] soft_limit_ms={} time_control={:?}", soft, tc);
+        } else {
+            log::debug!("[TimeBudget] no TimeManager (infinite or depth-only without time)");
+        }
+
         // Get actual depth limit from limits (not from context which defaults to 127)
         let max_depth = limits.depth.unwrap_or(127);
 
@@ -365,12 +376,20 @@ where
 
         self.stats.elapsed = start_time.elapsed();
 
+        // Populate StopInfo from core TimeManager when時間停止が原因の場合
+        let mut final_stop_info = None;
+        if let Some(ref tm) = self.time_manager {
+            if self.context.was_time_stopped() {
+                final_stop_info = Some(tm.build_stop_info(self.stats.depth, self.stats.nodes));
+            }
+        }
+
         SearchResult {
             best_move,
             score: best_score,
             stats: self.stats.clone(),
             node_type: best_node_type,
-            stop_info: None, // TODO: Will be populated in Phase 2
+            stop_info: final_stop_info,
         }
     }
 

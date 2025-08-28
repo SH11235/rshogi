@@ -120,6 +120,7 @@ impl EngineAdapter {
     }
 
     /// Get the byoyomi safety milliseconds setting
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn byoyomi_safety_ms(&self) -> u64 {
         self.byoyomi_safety_ms
     }
@@ -137,6 +138,7 @@ impl EngineAdapter {
     }
 
     /// Get the last observed byoyomi period in milliseconds
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn last_byoyomi_time_ms(&self) -> Option<u64> {
         self.last_byoyomi_time_ms
     }

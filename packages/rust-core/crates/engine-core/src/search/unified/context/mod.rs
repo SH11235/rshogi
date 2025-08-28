@@ -189,6 +189,12 @@ impl SearchContext {
         false
     }
 
+    /// Whether this search stopped due to time limit (as decided by TimeManager)
+    #[inline]
+    pub fn was_time_stopped(&self) -> bool {
+        self.time_stop_logged
+    }
+
     /// Get appropriate time check mask based on time control
     pub fn get_time_check_mask(&self) -> u64 {
         use crate::search::constants::{TIME_CHECK_MASK_BYOYOMI, TIME_CHECK_MASK_NORMAL};

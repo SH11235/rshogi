@@ -295,6 +295,25 @@ impl TimeManager {
         self.inner.soft_limit_ms.load(Ordering::Relaxed)
     }
 
+    /// Get hard time limit in milliseconds
+    pub fn hard_limit_ms(&self) -> u64 {
+        self.inner.hard_limit_ms.load(Ordering::Relaxed)
+    }
+
+    /// Build StopInfo for TimeLimit termination using current state
+    pub fn build_stop_info(&self, depth_reached: u8, nodes: u64) -> crate::search::types::StopInfo {
+        use crate::search::types::{StopInfo, TerminationReason};
+        let elapsed_ms = self.elapsed_ms();
+        let hard = elapsed_ms >= self.hard_limit_ms();
+        StopInfo {
+            reason: TerminationReason::TimeLimit,
+            elapsed_ms,
+            nodes,
+            depth_reached,
+            hard_timeout: hard,
+        }
+    }
+
     /// Get current time control
     pub fn time_control(&self) -> TimeControl {
         self.inner.active_time_control.read().clone()
