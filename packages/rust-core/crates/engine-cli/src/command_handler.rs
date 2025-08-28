@@ -1,4 +1,4 @@
-use crate::engine_adapter::{EngineAdapter, EngineError};
+use crate::engine_adapter::EngineAdapter;
 use crate::helpers::{generate_fallback_move, wait_for_search_completion};
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
@@ -310,6 +310,7 @@ impl<'a> CommandContext<'a> {
 }
 
 /// Parse environment variable as positive f64, logging warning and returning default if invalid
+#[cfg(test)]
 fn parse_positive_or_default(key: &str, default: f64) -> f64 {
     match std::env::var(key) {
         Ok(s) => match s.parse::<f64>() {
@@ -900,38 +901,22 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 }
 
 fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
-    log::debug!("Received stop command, search_state = {:?}", *ctx.search_state);
-    log::debug!("Stop command received, entering stop handler");
-    log::debug!(
-        "StopRequested: search_id={}, state={:?}",
-        *ctx.current_search_id,
-        *ctx.search_state
-    );
-
-    // Early return if not searching
+    // If nothing to stop, return
     if !ctx.search_state.is_searching() {
-        log::debug!("Stop while idle -> ignore");
-        log::debug!("StopAck: ignored (not searching)");
         return Ok(());
     }
 
-    // Handle ponder searches - emit bestmove immediately on stop for GUI compatibility
+    // Signal stop to worker
+    ctx.search_state.request_stop();
+    if let Some(ref stop_flag) = *ctx.current_stop_flag {
+        stop_flag.store(true, Ordering::SeqCst);
+    }
+
+    // Ponder stop: emit immediately for GUI compatibility
     if *ctx.current_search_is_ponder {
-        log::info!(
-            "Stop during ponder (search_id: {}) - emitting bestmove for compatibility",
-            *ctx.current_search_id
-        );
-
-        // Signal stop to worker thread using per-search flag
-        ctx.search_state.request_stop();
-        if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::SeqCst);
-        }
-
-        // Clear ponder mode
         *ctx.current_search_is_ponder = false;
 
-        // 1) Try committed best from session
+        // 1) Committed session
         if let Some(session) = ctx.current_session.clone() {
             if ctx.emit_best_from_session(
                 &session,
@@ -943,593 +928,67 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // 2) Try cached partial result
+        // 2) Partial result
         if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
-            match generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move) {
-                Ok((move_str, _)) => {
-                    let meta = build_meta(
-                        BestmoveSource::SessionOnStop, // mark as user stop
-                        d,
-                        None,
-                        Some(format!("cp {s}")),
-                        None,
-                    );
-                    ctx.emit_and_finalize(move_str, None, meta, "PonderPartialOnStop")?;
-                    return Ok(());
-                }
-                Err(e) => log::warn!("Ponder stop: partial fallback failed: {e}"),
-            }
-        }
-
-        // 3) Emergency fallback (quick)
-        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-            Ok((move_str, _)) => {
+            if let Ok((move_str, _)) =
+                generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+            {
                 let meta = build_meta(
-                    BestmoveSource::SessionOnStop, // mark as user stop
-                    0,
+                    BestmoveSource::SessionOnStop,
+                    d,
                     None,
-                    None,
+                    Some(format!("cp {s}")),
                     None,
                 );
-                ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
-                return Ok(());
-            }
-            Err(e) => {
-                log::error!("Ponder stop: emergency fallback failed: {e}");
-                let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                ctx.emit_and_finalize("resign".to_string(), None, meta, "PonderResignOnStop")?;
+                ctx.emit_and_finalize(move_str, None, meta, "PonderPartialOnStop")?;
                 return Ok(());
             }
         }
+
+        // 3) Emergency fallback
+        let (move_str, from) = match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
+            Ok((m, _)) => (m, BestmoveSource::SessionOnStop),
+            Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
+        };
+        let meta = build_meta(from, 0, None, None, None);
+        ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
+        return Ok(());
     }
 
-    // Signal stop to worker thread for normal searches
-    if ctx.search_state.is_searching() {
-        ctx.search_state.request_stop();
-        if let Some(ref stop_flag) = *ctx.current_stop_flag {
-            stop_flag.store(true, Ordering::SeqCst);
-            log::debug!(
-                "Per-search stop flag set to true for search_id={}, search_state = StopRequested",
-                *ctx.current_search_id
+    // Normal stop: emit immediately (session → partial → emergency)
+    if let Some(session) = ctx.current_session.clone() {
+        if ctx.emit_best_from_session(
+            &session,
+            BestmoveSource::SessionOnStop,
+            None,
+            "SessionOnStop",
+        )? {
+            return Ok(());
+        }
+    }
+
+    if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
+        if let Ok((move_str, _)) =
+            generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+        {
+            let meta = build_meta(
+                BestmoveSource::PartialResultTimeout,
+                d,
+                None,
+                Some(format!("cp {s}")),
+                None,
             );
-
-            // Debug: Verify stop flag was actually set with memory barrier
-            std::sync::atomic::fence(Ordering::SeqCst);
-            let stop_value = stop_flag.load(Ordering::SeqCst);
-            log::debug!("Stop flag verification after fence (SeqCst read): {stop_value}");
-        } else {
-            log::warn!("No current stop flag available for search_id={}", *ctx.current_search_id);
-        }
-        log::debug!("StopAck: stop_flag set, search_id={}", *ctx.current_search_id);
-
-        // First try to use committed best from session immediately
-        if let Some(session) = ctx.current_session.clone() {
-            if ctx.emit_best_from_session(
-                &session,
-                BestmoveSource::SessionOnStop,
-                None, // Let build_meta create default StopInfo
-                "SessionOnStop",
-            )? {
-                return Ok(());
-            }
-        }
-
-        // If we have a cached partial result already, we can potentially emit early on stage1 transition.
-        // We defer emission to stage1 timeout to allow SearchFinished to arrive first.
-
-        // Check if the last search was using byoyomi time control and get parameters
-        let (is_byoyomi, safety_ms, byoyomi_time_ms_opt) = {
-            let adapter = lock_or_recover_adapter(ctx.engine);
-            (
-                adapter.last_search_is_byoyomi(),
-                adapter.byoyomi_safety_ms(),
-                adapter.last_byoyomi_time_ms(),
-            )
-        };
-
-        // Get safety factor from environment variable (default: 0.5 for stage1, 1.0 for total)
-        let stage1_factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
-        let total_factor = parse_positive_or_default("BYOYOMI_TOTAL_FACTOR", 1.0);
-
-        // Use adaptive timeouts based on byoyomi safety settings
-        #[cfg(test)]
-        let stage1_timeout = if is_byoyomi {
-            // Test mode: minimal clamp for faster tests
-            Duration::from_millis(((safety_ms as f64 * stage1_factor) as u64).max(1))
-        } else {
-            Duration::from_millis(10) // Test mode: very quick wait
-        };
-        #[cfg(not(test))]
-        let stage1_timeout = if is_byoyomi {
-            if let Some(byoyomi_ms) = byoyomi_time_ms_opt {
-                // Prefer byoyomi-period-based timeout
-                let percentage_timeout = (byoyomi_ms as f64 * 0.15) as u64; // 15%
-                let safety_based = (safety_ms as f64 * stage1_factor) as u64;
-                let timeout = percentage_timeout.max(safety_based);
-                let min_stage1 = (byoyomi_ms / 30).max(200);
-                let max_stage1 = (byoyomi_ms / 6).min(2000);
-                Duration::from_millis(timeout.clamp(min_stage1, max_stage1))
-            } else {
-                // Fallback to safety-based
-                let min_stage1 = if safety_ms < 800 { 200 } else { 400 };
-                let max_stage1 = if safety_ms < 800 { 1000 } else { 2000 };
-                Duration::from_millis(
-                    ((safety_ms as f64 * stage1_factor) as u64).clamp(min_stage1, max_stage1),
-                )
-            }
-        } else {
-            Duration::from_millis(50) // Normal mode: wait 50ms for SearchFinished
-        };
-
-        #[cfg(test)]
-        let total_timeout = if is_byoyomi {
-            // Test mode: minimal clamp for faster tests
-            Duration::from_millis(((safety_ms as f64 * total_factor) as u64).max(1))
-        } else {
-            Duration::from_millis(20) // Test mode: very quick fallback
-        };
-        #[cfg(not(test))]
-        let total_timeout = if is_byoyomi {
-            if let Some(byoyomi_ms) = byoyomi_time_ms_opt {
-                // Prefer byoyomi-period-based total timeout
-                let percentage_timeout = (byoyomi_ms as f64 * 0.25) as u64; // 25%
-                let safety_based = (safety_ms as f64 * total_factor) as u64;
-                let timeout = percentage_timeout.max(safety_based);
-                let min_total = (byoyomi_ms / 12).max(400);
-                let max_total = (byoyomi_ms / 2).min(4000);
-                Duration::from_millis(timeout.clamp(min_total, max_total))
-            } else {
-                // Fallback to safety-based
-                let min_total = if safety_ms < 1600 { 400 } else { 800 };
-                let max_total = if safety_ms < 1600 { 2000 } else { 4000 };
-                Duration::from_millis(
-                    ((safety_ms as f64 * total_factor) as u64).clamp(min_total, max_total),
-                )
-            }
-        } else {
-            Duration::from_millis(100) // Normal mode: 100ms total timeout
-        };
-
-        // Wait for bestmove with staged timeouts
-        let start = Instant::now();
-        let mut stage = 1;
-
-        loop {
-            let elapsed = start.elapsed();
-
-            // Stage transition logic
-            if stage == 1 && elapsed > stage1_timeout {
-                stage = 2;
-                log::debug!(
-                    "Stop handler stage 2: trying fallback after {}ms",
-                    elapsed.as_millis()
-                );
-
-                // Prefer partial result if available at stage transition
-                if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
-                    match generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
-                    {
-                        Ok((move_str, _used_partial)) => {
-                            let meta = build_meta(
-                                BestmoveSource::PartialResultTimeout,
-                                d,
-                                None,
-                                Some(format!("cp {s}")),
-                                None,
-                            );
-                            ctx.emit_and_finalize(move_str, None, meta, "Stage1PartialResult")?;
-                            break;
-                        }
-                        Err(e) => {
-                            log::warn!("PartialResult fallback failed at stage1: {e}");
-                        }
-                    }
-                }
-            }
-
-            if elapsed > total_timeout {
-                // Timeout - use fallback strategy
-                log::warn!(
-                    "Timeout waiting for bestmove after stop command (search_id={})",
-                    *ctx.current_search_id
-                );
-                // Log timeout error
-                log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
-
-                // Get partial result from session if available
-                // Prefer session partial result; if none, use cached partial result
-                let partial_result_tuple = ctx
-                    .current_session
-                    .as_ref()
-                    .and_then(|session| session.partial_result.as_ref())
-                    .map(|pr| (pr.move_str.clone(), pr.depth, pr.score))
-                    .or_else(|| ctx.last_partial_result.clone());
-
-                // Use emergency fallback (session already tried at the beginning)
-                match generate_fallback_move(
-                    ctx.engine,
-                    partial_result_tuple.clone(),
-                    ctx.allow_null_move,
-                ) {
-                    Ok((move_str, used_partial)) => {
-                        // Log fallback source (info now handled by BestmoveEmitter)
-                        if let Some((_, depth, score)) = partial_result_tuple.as_ref() {
-                            log::debug!("Using partial result: depth={depth}, score={score}");
-                        } else {
-                            log::debug!("Using emergency fallback after timeout");
-                        }
-                        log::debug!("Sending emergency fallback bestmove: {move_str}");
-
-                        // Use BestmoveEmitter for centralized emission
-                        if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                            // Determine the source based on what generate_fallback_move actually used
-                            let (from, depth, score_str) = if used_partial {
-                                if let Some((_, d, s)) = partial_result_tuple {
-                                    (
-                                        BestmoveSource::PartialResultTimeout,
-                                        d,
-                                        Some(format!("cp {s}")),
-                                    )
-                                } else {
-                                    // This shouldn't happen, but handle gracefully
-                                    (BestmoveSource::EmergencyFallbackTimeout, 0, None)
-                                }
-                            } else {
-                                (BestmoveSource::EmergencyFallbackTimeout, 0, None)
-                            };
-
-                            let meta = build_meta(
-                                from, depth, None, // seldepth
-                                score_str, None, // Let build_meta create appropriate StopInfo
-                            );
-
-                            ctx.emit_and_finalize(move_str, None, meta, "TimeoutFallback")?;
-                        } else {
-                            log::warn!("BestmoveEmitter not available for timeout fallback; sending bestmove directly");
-                            send_response(UsiResponse::BestMove {
-                                best_move: move_str,
-                                ponder: None,
-                            })?;
-                            ctx.finalize_search("DirectSend");
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Emergency fallback move generation failed: {e}");
-
-                        // Use BestmoveEmitter for centralized emission
-                        if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                            let meta = build_meta(
-                                BestmoveSource::ResignTimeout,
-                                0,    // depth
-                                None, // seldepth
-                                None, // score
-                                None, // Let build_meta create appropriate StopInfo
-                            );
-
-                            ctx.emit_and_finalize(
-                                "resign".to_string(),
-                                None,
-                                meta,
-                                "ResignTimeout",
-                            )?;
-                        } else {
-                            log::warn!("BestmoveEmitter not available for resign; sending bestmove directly");
-                            send_response(UsiResponse::BestMove {
-                                best_move: "resign".to_string(),
-                                ponder: None,
-                            })?;
-                            ctx.finalize_search("DirectSend");
-                        }
-                    }
-                }
-                break;
-            }
-
-            // Calculate remaining time for adaptive polling
-            let remaining = total_timeout.saturating_sub(elapsed);
-            #[cfg(test)]
-            let poll_timeout = std::cmp::min(remaining, Duration::from_millis(1));
-            #[cfg(not(test))]
-            let poll_timeout = std::cmp::min(remaining, Duration::from_millis(10)); // Increased from 3ms to 10ms
-
-            // Check for bestmove message with timeout
-            match ctx.worker_rx.recv_timeout(poll_timeout) {
-                // WorkerMessage::BestMove has been completely removed.
-                // All bestmove emissions now go through the session-based approach
-                Ok(WorkerMessage::Info { info, search_id }) => {
-                    // Forward info messages during active search (including StopRequested state)
-                    // Only forward messages from current search to prevent old search info from appearing
-                    // Note: is_searching() returns true for both Searching and StopRequested states,
-                    // allowing GUIs to receive final info messages during stop processing
-                    if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
-                        let _ = send_response(UsiResponse::Info(info));
-                    } else {
-                        log::trace!(
-                            "Suppressed Info message - old search_id: {} (current: {})",
-                            search_id,
-                            *ctx.current_search_id
-                        );
-                    }
-                }
-                Ok(WorkerMessage::PartialResult {
-                    current_best,
-                    depth,
-                    score,
-                    search_id,
-                }) => {
-                    // Cache latest partial result for current search
-                    if search_id == *ctx.current_search_id {
-                        *ctx.last_partial_result = Some((current_best, depth, score));
-                    }
-                }
-                Ok(WorkerMessage::IterationComplete { session, search_id }) => {
-                    // Update current session
-                    if search_id == *ctx.current_search_id {
-                        *ctx.current_session = Some(*session);
-                    }
-                }
-                Ok(WorkerMessage::SearchFinished {
-                    session_id: _,
-                    root_hash: _,
-                    search_id,
-                    stop_info,
-                }) => {
-                    // Handle SearchFinished in stop command context - prioritize this message
-                    if search_id == *ctx.current_search_id {
-                        log::debug!("SearchFinished received in stop handler, sending bestmove");
-                        // Try to use session-based bestmove
-                        if let Some(session) = ctx.current_session.clone() {
-                            if ctx.emit_best_from_session(
-                                &session,
-                                BestmoveSource::SessionInSearchFinished,
-                                stop_info.clone(), // Pass the provided stop_info if any
-                                "BestmoveEmitter",
-                            )? {
-                                break;
-                            } else {
-                                // Session validation failed, but we have SearchFinished
-                                // Try fallback immediately rather than continuing to wait
-                                log::debug!(
-                                    "Session validation failed in SearchFinished handler, using fallback"
-                                );
-
-                                // Get partial result from session
-                                let partial_result_tuple = session
-                                    .partial_result
-                                    .as_ref()
-                                    .map(|pr| (pr.move_str.clone(), pr.depth, pr.score));
-
-                                match generate_fallback_move(
-                                    ctx.engine,
-                                    partial_result_tuple.clone(),
-                                    ctx.allow_null_move,
-                                ) {
-                                    Ok((move_str, used_partial)) => {
-                                        let (from, depth, score_str) = if used_partial {
-                                            if let Some((_, d, s)) = partial_result_tuple {
-                                                (
-                                                    BestmoveSource::PartialResultOnFinish,
-                                                    d,
-                                                    Some(format!("cp {s}")),
-                                                )
-                                            } else {
-                                                (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
-                                            }
-                                        } else {
-                                            (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
-                                        };
-
-                                        let meta = build_meta(
-                                            from,
-                                            depth,
-                                            None,
-                                            score_str,
-                                            stop_info.clone(),
-                                        );
-                                        ctx.emit_and_finalize(
-                                            move_str,
-                                            None,
-                                            meta,
-                                            "SearchFinished fallback",
-                                        )?;
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        log::error!(
-                                            "Fallback failed in SearchFinished handler: {e}"
-                                        );
-                                        let meta = build_meta(
-                                            BestmoveSource::ResignOnFinish,
-                                            0,
-                                            None,
-                                            None,
-                                            stop_info.clone(),
-                                        );
-                                        ctx.emit_and_finalize(
-                                            "resign".to_string(),
-                                            None,
-                                            meta,
-                                            "SearchFinished resign",
-                                        )?;
-                                        break;
-                                    }
-                                }
-                            }
-                        } else {
-                            // If no session, still use fallback
-                            log::warn!("SearchFinished but no session available, using fallback");
-                            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-                                Ok((move_str, _)) => {
-                                    let meta = build_meta(
-                                        BestmoveSource::EmergencyFallbackOnFinish,
-                                        0,
-                                        None,
-                                        None,
-                                        stop_info.clone(),
-                                    );
-                                    ctx.emit_and_finalize(
-                                        move_str,
-                                        None,
-                                        meta,
-                                        "SearchFinished no session",
-                                    )?;
-                                }
-                                Err(e) => {
-                                    log::error!("Fallback failed with no session: {e}");
-                                    let meta = build_meta(
-                                        BestmoveSource::ResignOnFinish,
-                                        0,
-                                        None,
-                                        None,
-                                        stop_info,
-                                    );
-                                    ctx.emit_and_finalize(
-                                        "resign".to_string(),
-                                        None,
-                                        meta,
-                                        "SearchFinished no session resign",
-                                    )?;
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-                Ok(WorkerMessage::Finished {
-                    from_guard,
-                    search_id,
-                }) => {
-                    // Only process if it's for current search and we're in stage 2
-                    if search_id == *ctx.current_search_id && stage >= 2 {
-                        log::warn!("Worker finished without bestmove (from_guard: {from_guard})");
-
-                        // Get partial result from session
-                        let partial_result_tuple = ctx
-                            .current_session
-                            .as_ref()
-                            .and_then(|session| session.partial_result.as_ref())
-                            .map(|pr| (pr.move_str.clone(), pr.depth, pr.score));
-
-                        // Use fallback strategy
-                        match generate_fallback_move(
-                            ctx.engine,
-                            partial_result_tuple.clone(),
-                            ctx.allow_null_move,
-                        ) {
-                            Ok((move_str, used_partial)) => {
-                                // Log fallback source (info now handled by BestmoveEmitter)
-                                if let Some((_, depth, score)) = partial_result_tuple.as_ref() {
-                                    log::debug!("Using partial result on finish: depth={depth}, score={score}");
-                                } else {
-                                    log::debug!("Using emergency fallback on finish");
-                                }
-
-                                if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                                    let (from, depth, score_str) = if used_partial {
-                                        if let Some((_, d, s)) = partial_result_tuple {
-                                            (
-                                                BestmoveSource::PartialResultOnFinish,
-                                                d,
-                                                Some(format!("cp {s}")),
-                                            )
-                                        } else {
-                                            // This shouldn't happen, but handle gracefully
-                                            (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
-                                        }
-                                    } else {
-                                        (BestmoveSource::EmergencyFallbackOnFinish, 0, None)
-                                    };
-
-                                    let meta = build_meta(
-                                        from, depth, None, // seldepth
-                                        score_str,
-                                        None, // Let build_meta create appropriate StopInfo
-                                    );
-
-                                    ctx.emit_and_finalize(move_str, None, meta, "BestmoveEmitter")?;
-                                } else {
-                                    log::warn!("BestmoveEmitter not available for finish handler; sending bestmove directly");
-                                    send_response(UsiResponse::BestMove {
-                                        best_move: move_str,
-                                        ponder: None,
-                                    })?;
-                                    ctx.finalize_search("DirectSend");
-                                }
-                            }
-                            Err(e) => {
-                                let position_info = {
-                                    let engine = lock_or_recover_adapter(ctx.engine);
-                                    engine
-                                        .get_position()
-                                        .map(position_to_sfen)
-                                        .unwrap_or_else(|| "<no position>".to_string())
-                                };
-                                log::error!(
-                                    "Fallback move generation failed in position {}: {e}",
-                                    position_info
-                                );
-
-                                if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                                    let meta = build_meta(
-                                        BestmoveSource::ResignOnFinish,
-                                        0,    // depth
-                                        None, // seldepth
-                                        None, // score
-                                        None, // Let build_meta create appropriate StopInfo
-                                    );
-
-                                    ctx.emit_and_finalize(
-                                        "resign".to_string(),
-                                        None,
-                                        meta,
-                                        "BestmoveEmitter",
-                                    )?;
-                                } else {
-                                    log::error!(
-                                        "BestmoveEmitter not available for resign on finish; sending bestmove directly"
-                                    );
-                                    send_response(UsiResponse::BestMove {
-                                        best_move: "resign".to_string(),
-                                        ponder: None,
-                                    })?;
-                                    ctx.finalize_search("DirectSend");
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-                Ok(WorkerMessage::SearchStarted {
-                    search_id,
-                    start_time,
-                }) => {
-                    // Update BestmoveEmitter with accurate start time if it's for current search
-                    if search_id == *ctx.current_search_id {
-                        if let Some(ref mut emitter) = ctx.current_bestmove_emitter {
-                            emitter.set_start_time(start_time);
-                            log::debug!("Updated BestmoveEmitter with worker start time in stop handler for search {search_id}");
-                        }
-                    } else {
-                        log::trace!("Ignoring SearchStarted from old search in stop handler: {search_id} (current: {})", *ctx.current_search_id);
-                    }
-                }
-                Ok(WorkerMessage::Error { message, search_id }) => {
-                    if search_id == *ctx.current_search_id {
-                        log::error!("Worker error in stop handler: {message}");
-                    }
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    // Timeout is expected - just continue to next iteration
-                }
-                Err(e) => {
-                    // Channel disconnected
-                    log::error!("Worker channel error in stop handler: {e:?}");
-                    break;
-                }
-            }
+            ctx.emit_and_finalize(move_str, None, meta, "ImmediatePartialOnStop")?;
+            return Ok(());
         }
     }
 
+    let (move_str, source) = match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
+        Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
+        Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
+    };
+    let meta = build_meta(source, 0, None, None, None);
+    ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;
     Ok(())
 }
 

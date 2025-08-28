@@ -381,6 +381,7 @@ impl EngineAdapter {
     }
 
     /// Check if the last search was using byoyomi time control
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn last_search_is_byoyomi(&self) -> bool {
         self.last_search_is_byoyomi
     }
