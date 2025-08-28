@@ -915,10 +915,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         return Ok(());
     }
 
-    // Handle ponder searches - for normal ponder stop, do not emit bestmove
+    // Handle ponder searches - emit bestmove immediately on stop for GUI compatibility
     if *ctx.current_search_is_ponder {
         log::info!(
-            "Stop during ponder (search_id: {}) - will NOT send bestmove (USI ponder stop)",
+            "Stop during ponder (search_id: {}) - emitting bestmove for compatibility",
             *ctx.current_search_id
         );
 
@@ -928,12 +928,59 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             stop_flag.store(true, Ordering::SeqCst);
         }
 
-        // Clear ponder mode; bestmove is not required on ponder stop
+        // Clear ponder mode
         *ctx.current_search_is_ponder = false;
 
-        // Do not wait for bestmove or fallback; next 'go' will call wait_for_search_completion
-        log::debug!("Ponder stop handled without bestmove emission");
-        return Ok(());
+        // 1) Try committed best from session
+        if let Some(session) = ctx.current_session.clone() {
+            if ctx.emit_best_from_session(
+                &session,
+                BestmoveSource::SessionOnStop,
+                None,
+                "PonderSessionOnStop",
+            )? {
+                return Ok(());
+            }
+        }
+
+        // 2) Try cached partial result
+        if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
+            match generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move) {
+                Ok((move_str, _)) => {
+                    let meta = build_meta(
+                        BestmoveSource::SessionOnStop, // mark as user stop
+                        d,
+                        None,
+                        Some(format!("cp {s}")),
+                        None,
+                    );
+                    ctx.emit_and_finalize(move_str, None, meta, "PonderPartialOnStop")?;
+                    return Ok(());
+                }
+                Err(e) => log::warn!("Ponder stop: partial fallback failed: {e}"),
+            }
+        }
+
+        // 3) Emergency fallback (quick)
+        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
+            Ok((move_str, _)) => {
+                let meta = build_meta(
+                    BestmoveSource::SessionOnStop, // mark as user stop
+                    0,
+                    None,
+                    None,
+                    None,
+                );
+                ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
+                return Ok(());
+            }
+            Err(e) => {
+                log::error!("Ponder stop: emergency fallback failed: {e}");
+                let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                ctx.emit_and_finalize("resign".to_string(), None, meta, "PonderResignOnStop")?;
+                return Ok(());
+            }
+        }
     }
 
     // Signal stop to worker thread for normal searches
