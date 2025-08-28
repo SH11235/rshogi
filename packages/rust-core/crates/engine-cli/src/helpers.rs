@@ -10,7 +10,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 // Constants for timeout and channel management
+// Long timeout used only for shutdown paths
 pub const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+// Short timeout for normal go-path interruption to avoid wasting byoyomi
+pub const GO_JOIN_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Perform fallback move generation with graduated strategy
 ///
@@ -156,10 +159,10 @@ pub fn wait_for_search_completion(
             log::debug!("wait_for_search_completion: set per-search stop flag to true");
         }
 
-        // Wait for worker with timeout
-        log::debug!("Waiting up to {:?} for worker to finish", MIN_JOIN_TIMEOUT);
+        // Wait for worker with short timeout to preserve move time
+        log::debug!("Waiting up to {:?} for worker to finish (go-path)", GO_JOIN_TIMEOUT);
         let wait_result =
-            wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, MIN_JOIN_TIMEOUT);
+            wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, GO_JOIN_TIMEOUT);
 
         let stop_duration = stop_start.elapsed();
         log::info!("wait_for_search_completion: completed in {stop_duration:?}");
