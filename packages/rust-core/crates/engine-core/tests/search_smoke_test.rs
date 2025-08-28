@@ -57,13 +57,13 @@ fn test_search_produces_output() {
 
     // Fixed time search should complete within time limit
     let start = Instant::now();
-    let nodes = tester.search_with_time(&mut pos, 100);
+    let nodes = tester.search_with_time(&mut pos, 500);
     let elapsed = start.elapsed();
 
     assert!(nodes > 0, "Search should visit nodes");
     assert!(
-        elapsed < Duration::from_millis(150),
-        "100ms search exceeded time limit: {elapsed:?}"
+        elapsed < Duration::from_millis(500),
+        "500ms search exceeded time limit: {elapsed:?}"
     );
 }
 
