@@ -61,6 +61,8 @@ pub struct CommandContext<'a> {
     pub position_state: &'a mut Option<PositionState>, // Store position state for recovery
     pub program_start: Instant, // Program start time for elapsed calculations
     pub legal_moves_check_logged: &'a mut bool, // Track if we've logged the legal moves check status
+    /// Last received partial result (move, depth, score) for current search
+    pub last_partial_result: &'a mut Option<(String, u8, i32)>,
 }
 
 /// Build BestmoveMeta from common parameters
@@ -913,10 +915,10 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         return Ok(());
     }
 
-    // Handle ponder searches - according to USI spec, stop command should return bestmove
+    // Handle ponder searches - for normal ponder stop, do not emit bestmove
     if *ctx.current_search_is_ponder {
         log::info!(
-            "Stop during ponder (search_id: {}) - will send bestmove per USI spec",
+            "Stop during ponder (search_id: {}) - will NOT send bestmove (USI ponder stop)",
             *ctx.current_search_id
         );
 
@@ -926,10 +928,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             stop_flag.store(true, Ordering::SeqCst);
         }
 
-        // Mark that we're no longer in ponder mode since stop was received
+        // Clear ponder mode; bestmove is not required on ponder stop
         *ctx.current_search_is_ponder = false;
 
-        // Continue to send bestmove below
+        // Do not wait for bestmove or fallback; next 'go' will call wait_for_search_completion
+        log::debug!("Ponder stop handled without bestmove emission");
+        return Ok(());
     }
 
     // Signal stop to worker thread for normal searches
@@ -963,10 +967,17 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // Check if the last search was using byoyomi time control and get safety ms
-        let (is_byoyomi, safety_ms) = {
+        // If we have a cached partial result already, we can potentially emit early on stage1 transition.
+        // We defer emission to stage1 timeout to allow SearchFinished to arrive first.
+
+        // Check if the last search was using byoyomi time control and get parameters
+        let (is_byoyomi, safety_ms, byoyomi_time_ms_opt) = {
             let adapter = lock_or_recover_adapter(ctx.engine);
-            (adapter.last_search_is_byoyomi(), adapter.byoyomi_safety_ms())
+            (
+                adapter.last_search_is_byoyomi(),
+                adapter.byoyomi_safety_ms(),
+                adapter.last_byoyomi_time_ms(),
+            )
         };
 
         // Get safety factor from environment variable (default: 0.5 for stage1, 1.0 for total)
@@ -983,13 +994,22 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         };
         #[cfg(not(test))]
         let stage1_timeout = if is_byoyomi {
-            // Use configured fraction of safety margin for stage 1
-            // Increase max limits to handle longer byoyomi periods properly
-            let min_stage1 = if safety_ms < 800 { 200 } else { 400 };
-            let max_stage1 = if safety_ms < 800 { 1000 } else { 2000 }; // Increased from 1000 to 2000
-            Duration::from_millis(
-                ((safety_ms as f64 * stage1_factor) as u64).clamp(min_stage1, max_stage1),
-            )
+            if let Some(byoyomi_ms) = byoyomi_time_ms_opt {
+                // Prefer byoyomi-period-based timeout
+                let percentage_timeout = (byoyomi_ms as f64 * 0.15) as u64; // 15%
+                let safety_based = (safety_ms as f64 * stage1_factor) as u64;
+                let timeout = percentage_timeout.max(safety_based);
+                let min_stage1 = (byoyomi_ms / 30).max(200);
+                let max_stage1 = (byoyomi_ms / 6).min(2000);
+                Duration::from_millis(timeout.clamp(min_stage1, max_stage1))
+            } else {
+                // Fallback to safety-based
+                let min_stage1 = if safety_ms < 800 { 200 } else { 400 };
+                let max_stage1 = if safety_ms < 800 { 1000 } else { 2000 };
+                Duration::from_millis(
+                    ((safety_ms as f64 * stage1_factor) as u64).clamp(min_stage1, max_stage1),
+                )
+            }
         } else {
             Duration::from_millis(50) // Normal mode: wait 50ms for SearchFinished
         };
@@ -1003,13 +1023,22 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         };
         #[cfg(not(test))]
         let total_timeout = if is_byoyomi {
-            // Use configured fraction of safety margin for total timeout
-            // Increase max limits to prevent premature timeouts
-            let min_total = if safety_ms < 1600 { 400 } else { 800 };
-            let max_total = if safety_ms < 1600 { 2000 } else { 4000 }; // Increased from 2000 to 4000
-            Duration::from_millis(
-                ((safety_ms as f64 * total_factor) as u64).clamp(min_total, max_total),
-            )
+            if let Some(byoyomi_ms) = byoyomi_time_ms_opt {
+                // Prefer byoyomi-period-based total timeout
+                let percentage_timeout = (byoyomi_ms as f64 * 0.25) as u64; // 25%
+                let safety_based = (safety_ms as f64 * total_factor) as u64;
+                let timeout = percentage_timeout.max(safety_based);
+                let min_total = (byoyomi_ms / 12).max(400);
+                let max_total = (byoyomi_ms / 2).min(4000);
+                Duration::from_millis(timeout.clamp(min_total, max_total))
+            } else {
+                // Fallback to safety-based
+                let min_total = if safety_ms < 1600 { 400 } else { 800 };
+                let max_total = if safety_ms < 1600 { 2000 } else { 4000 };
+                Duration::from_millis(
+                    ((safety_ms as f64 * total_factor) as u64).clamp(min_total, max_total),
+                )
+            }
         } else {
             Duration::from_millis(100) // Normal mode: 100ms total timeout
         };
@@ -1028,6 +1057,27 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     "Stop handler stage 2: trying fallback after {}ms",
                     elapsed.as_millis()
                 );
+
+                // Prefer partial result if available at stage transition
+                if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
+                    match generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+                    {
+                        Ok((move_str, _used_partial)) => {
+                            let meta = build_meta(
+                                BestmoveSource::PartialResultTimeout,
+                                d,
+                                None,
+                                Some(format!("cp {s}")),
+                                None,
+                            );
+                            ctx.emit_and_finalize(move_str, None, meta, "Stage1PartialResult")?;
+                            break;
+                        }
+                        Err(e) => {
+                            log::warn!("PartialResult fallback failed at stage1: {e}");
+                        }
+                    }
+                }
             }
 
             if elapsed > total_timeout {
@@ -1040,11 +1090,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 log::debug!("Stop command timeout: {:?}", EngineError::Timeout);
 
                 // Get partial result from session if available
+                // Prefer session partial result; if none, use cached partial result
                 let partial_result_tuple = ctx
                     .current_session
                     .as_ref()
                     .and_then(|session| session.partial_result.as_ref())
-                    .map(|pr| (pr.move_str.clone(), pr.depth, pr.score));
+                    .map(|pr| (pr.move_str.clone(), pr.depth, pr.score))
+                    .or_else(|| ctx.last_partial_result.clone());
 
                 // Use emergency fallback (session already tried at the beginning)
                 match generate_fallback_move(
@@ -1153,19 +1205,14 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     }
                 }
                 Ok(WorkerMessage::PartialResult {
-                    current_best: _,
-                    depth: _,
-                    score: _,
+                    current_best,
+                    depth,
+                    score,
                     search_id,
                 }) => {
-                    // Partial results are now stored in the session itself
-                    // Just validate search ID
-                    if search_id != *ctx.current_search_id {
-                        log::trace!(
-                            "Ignoring PartialResult from old search_id: {} (current: {})",
-                            search_id,
-                            *ctx.current_search_id
-                        );
+                    // Cache latest partial result for current search
+                    if search_id == *ctx.current_search_id {
+                        *ctx.last_partial_result = Some((current_best, depth, score));
                     }
                 }
                 Ok(WorkerMessage::IterationComplete { session, search_id }) => {
@@ -1464,6 +1511,7 @@ mod tests {
         Option<PositionState>,
         Option<JoinHandle<()>>,
         bool,
+        Option<(String, u8, i32)>,
     ) {
         let engine = Arc::new(Mutex::new(EngineAdapter::new()));
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -1493,6 +1541,7 @@ mod tests {
             position_state,
             worker_handle,
             false, // legal_moves_check_logged
+            None,  // last_partial_result
         )
     }
 
@@ -1546,6 +1595,7 @@ mod tests {
             mut position_state,
             mut worker_handle,
             mut legal_moves_check_logged,
+            mut last_partial_result,
         ) = create_test_context();
 
         let mut ctx = CommandContext {
@@ -1565,6 +1615,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Test successful position command
@@ -1622,6 +1673,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set a valid previous position state (mock)
@@ -1685,6 +1737,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set a position state
@@ -1739,6 +1792,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set a position state
@@ -1802,6 +1856,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Store a position state with correct hash for startpos
@@ -1901,6 +1956,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Store an invalid position state
@@ -1961,6 +2017,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Ensure we're in idle state
@@ -2011,6 +2068,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set up search state
@@ -2085,6 +2143,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set up search state
@@ -2165,6 +2224,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set up search state
@@ -2256,6 +2316,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set up search state
@@ -2395,6 +2456,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set up search state
@@ -2477,6 +2539,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set up search state
@@ -2566,6 +2629,7 @@ mod tests {
             position_state: &mut position_state,
             legal_moves_check_logged: &mut legal_moves_check_logged,
             program_start: Instant::now(),
+            last_partial_result: &mut last_partial_result,
         };
 
         // Set up search state

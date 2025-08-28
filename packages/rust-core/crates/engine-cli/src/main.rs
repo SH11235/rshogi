@@ -126,6 +126,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
     let mut position_state: Option<PositionState> = None; // Position state for recovery
+    let mut last_partial_result: Option<(String, u8, i32)> = None; // Cache latest partial result
     let mut legal_moves_check_logged = false; // Track if we've logged the legal moves check status
 
     // Main event loop - process USI commands and worker messages concurrently
@@ -172,6 +173,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             position_state: &mut position_state,
                             program_start,
                             legal_moves_check_logged: &mut legal_moves_check_logged,
+                            last_partial_result: &mut last_partial_result,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -209,6 +211,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             position_state: &mut position_state,
                             program_start,
                             legal_moves_check_logged: &mut legal_moves_check_logged,
+                            last_partial_result: &mut last_partial_result,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -476,10 +479,17 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             score,
             search_id,
         } => {
-            // Partial results are primarily used in stop command processing
-            // but we can log them for debugging
-            if search_id == *ctx.current_search_id {
+            // Partial results are used by stop handler; cache the latest for current search
+            if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
                 log::trace!("PartialResult: move={current_best}, depth={depth}, score={score}");
+                *ctx.last_partial_result = Some((current_best, depth, score));
+            } else {
+                log::trace!(
+                    "Ignored PartialResult from search_id={}, current={}, state={:?}",
+                    search_id,
+                    *ctx.current_search_id,
+                    *ctx.search_state
+                );
             }
         }
 
