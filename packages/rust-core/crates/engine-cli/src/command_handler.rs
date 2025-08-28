@@ -316,7 +316,11 @@ mod tests {
         use crate::types::BestmoveSource as S;
 
         // Timeout sources map to TimeLimit and hard_timeout true only for explicit timeout variants
-        let timeout_sources = [S::ResignTimeout, S::EmergencyFallbackTimeout, S::PartialResultTimeout];
+        let timeout_sources = [
+            S::ResignTimeout,
+            S::EmergencyFallbackTimeout,
+            S::PartialResultTimeout,
+        ];
         for &src in &timeout_sources {
             let m = build_meta(src, 7, Some(9), Some("cp 10".into()), None);
             assert_eq!(m.stop_info.reason, TerminationReason::TimeLimit);
@@ -325,7 +329,11 @@ mod tests {
         }
 
         // Normal completion
-        for &src in &[S::EmergencyFallback, S::EmergencyFallbackOnFinish, S::SessionInSearchFinished] {
+        for &src in &[
+            S::EmergencyFallback,
+            S::EmergencyFallbackOnFinish,
+            S::SessionInSearchFinished,
+        ] {
             let m = build_meta(src, 12, None, None, None);
             assert_eq!(m.stop_info.reason, TerminationReason::Completed);
             assert!(!m.stop_info.hard_timeout);
@@ -358,7 +366,8 @@ mod tests {
             soft_limit_ms: 111,
             hard_limit_ms: 222,
         };
-        let m = build_meta(S::SessionInSearchFinished, 1, None, Some("cp 0".into()), Some(si.clone()));
+        let m =
+            build_meta(S::SessionInSearchFinished, 1, None, Some("cp 0".into()), Some(si.clone()));
         assert_eq!(m.stop_info.elapsed_ms, 123);
         assert_eq!(m.stop_info.nodes, 456);
         assert_eq!(m.stop_info.soft_limit_ms, 111);
