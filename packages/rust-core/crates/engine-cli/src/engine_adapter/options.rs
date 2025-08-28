@@ -305,8 +305,8 @@ mod tests {
         adapter.set_option("EngineType", Some("Material")).unwrap();
         adapter.initialize().unwrap();
 
-        // Check initial hash size
-        assert_eq!(adapter.hash_size, 1024); // default
+        // Check initial adapter default (queued for engine on next search)
+        assert_eq!(adapter.hash_size, 1024);
 
         // Set new hash size via USI option
         adapter.set_option("USI_Hash", Some("64")).unwrap();
@@ -316,15 +316,15 @@ mod tests {
 
         // Take and return engine to verify it applies
         if let Ok(engine) = adapter.take_engine() {
-            // Engine should have pending hash size
-            assert_eq!(engine.get_hash_size(), 1024); // Still old size until applied
+            // Engine's current TT size remains core default until applied on search
+            assert_eq!(engine.get_hash_size(), 1024);
             adapter.return_engine(engine);
         }
 
         // After return, engine should have new hash size set as pending
         if let Some(ref engine) = adapter.engine {
-            // Next search will apply the pending size
-            assert_eq!(engine.get_hash_size(), 1024); // Still 1024 until next search
+            // Next search will apply the pending size; current size is still core default
+            assert_eq!(engine.get_hash_size(), 1024);
         }
     }
 
@@ -354,10 +354,10 @@ mod tests {
         adapter.set_option("EngineType", Some("Enhanced")).unwrap();
         adapter.initialize().unwrap();
 
-        // Engine should be created with the queued hash size
+        // Engine should be created; pending hash applies on next search
         if let Some(ref engine) = adapter.engine {
-            // Hash size should be set as pending in the engine
-            assert_eq!(engine.get_hash_size(), 1024); // Default until applied
+            // Current TT size is core default until applied on search
+            assert_eq!(engine.get_hash_size(), 1024);
         }
     }
 
@@ -405,7 +405,7 @@ mod tests {
 
         // Take engine and run a short search
         if let Ok(mut engine) = adapter.take_engine() {
-            // Verify initial size
+            // Verify initial size (core default before applying pending change)
             assert_eq!(engine.get_hash_size(), 1024);
 
             // Run a search (which should apply pending TT size)

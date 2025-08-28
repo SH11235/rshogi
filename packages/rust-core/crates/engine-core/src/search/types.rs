@@ -149,6 +149,8 @@ impl SearchResult {
                 nodes,
                 depth_reached: depth,
                 hard_timeout: false,
+                soft_limit_ms: 0,
+                hard_limit_ms: 0,
             }),
         }
     }
@@ -213,6 +215,10 @@ pub struct StopInfo {
     pub depth_reached: u8,
     /// Whether this was a hard timeout (no time for move recovery)
     pub hard_timeout: bool,
+    /// Soft time limit in ms (0 if not applicable)
+    pub soft_limit_ms: u64,
+    /// Hard time limit in ms (0 if not applicable)
+    pub hard_limit_ms: u64,
 }
 
 impl Default for StopInfo {
@@ -223,6 +229,8 @@ impl Default for StopInfo {
             nodes: 0,
             depth_reached: 0,
             hard_timeout: false,
+            soft_limit_ms: 0,
+            hard_limit_ms: 0,
         }
     }
 }

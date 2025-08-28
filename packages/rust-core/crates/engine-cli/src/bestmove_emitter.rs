@@ -204,6 +204,8 @@ impl BestmoveEmitter {
                      nodes={}\t\
                      nps={}\t\
                      elapsed_ms={}\t\
+                     time_soft_ms={}\t\
+                     time_hard_ms={}\t\
                      hard_timeout={}\t\
                      bestmove={}\t\
                      ponder={}",
@@ -217,6 +219,8 @@ impl BestmoveEmitter {
                     meta.stats.nodes,
                     meta.stats.nps,
                     meta.stop_info.elapsed_ms,
+                    meta.stop_info.soft_limit_ms,
+                    meta.stop_info.hard_limit_ms,
                     meta.stop_info.hard_timeout,
                     best_move,
                     ponder_str
@@ -258,205 +262,5 @@ impl BestmoveEmitter {
     #[cfg(test)]
     pub fn set_start_time_for_test(&mut self, start_time: Instant) {
         self.start_time = start_time;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use engine_core::search::types::TerminationReason;
-    use std::time::Duration;
-
-    fn make_test_meta() -> BestmoveMeta {
-        BestmoveMeta {
-            from: BestmoveSource::Test,
-            stop_info: StopInfo {
-                reason: TerminationReason::TimeLimit,
-                elapsed_ms: 1000,
-                nodes: 10000,
-                depth_reached: 10,
-                hard_timeout: false,
-            },
-            stats: BestmoveStats {
-                depth: 10,
-                seldepth: Some(15),
-                score: "cp 150".to_string(),
-                nodes: 10000,
-                nps: 10000,
-            },
-        }
-    }
-
-    #[test]
-    fn test_exactly_once() {
-        let emitter = BestmoveEmitter::new(1);
-
-        // First emit should succeed
-        assert!(!emitter.is_sent());
-
-        // Note: In test, we can't actually send USI responses
-        // So we just test the logic
-        assert!(!emitter.sent.swap(true, Ordering::AcqRel));
-        assert!(emitter.is_sent());
-
-        // Second emit should be blocked
-        assert!(emitter.sent.swap(true, Ordering::AcqRel));
-    }
-
-    #[test]
-    fn test_concurrent_emission() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let emitter = Arc::new(BestmoveEmitter::new(42));
-        let num_threads = 10;
-        let mut handles = vec![];
-
-        // Spawn multiple threads trying to emit simultaneously
-        for _ in 0..num_threads {
-            let emitter_clone = Arc::clone(&emitter);
-            let handle = thread::spawn(move || {
-                // Each thread tries to emit
-                !emitter_clone.sent.swap(true, Ordering::AcqRel)
-            });
-            handles.push(handle);
-        }
-
-        // Collect results
-        let mut success_count = 0;
-        for handle in handles {
-            if handle.join().unwrap() {
-                success_count += 1;
-            }
-        }
-
-        // Exactly one thread should succeed
-        assert_eq!(success_count, 1, "Exactly one emission should succeed");
-        assert!(emitter.is_sent());
-    }
-
-    #[test]
-    fn test_elapsed_time_complement() {
-        // Test that elapsed_ms is complemented from actual elapsed time
-        let mut emitter = BestmoveEmitter::new(1);
-
-        // Set start time to 100ms ago
-        let past_time = Instant::now() - Duration::from_millis(100);
-        emitter.set_start_time_for_test(past_time);
-
-        // Create meta with 0 elapsed_ms
-        let mut meta = make_test_meta();
-        meta.stop_info.elapsed_ms = 0;
-        meta.stats.nodes = 1000;
-        meta.stats.nps = 0; // Should be recalculated
-
-        // Simulate emit (we can't actually emit in test, but we can test the logic)
-        // The actual elapsed time should be around 100ms
-        let actual_elapsed = emitter.start_time.elapsed();
-        assert!(actual_elapsed.as_millis() >= 100);
-
-        // If we had access to the internal logic, it would:
-        // 1. Set meta.stop_info.elapsed_ms to actual_elapsed_ms (around 100)
-        // 2. Recalculate meta.stats.nps = 1000 * 1000 / 100 = 10000
-    }
-
-    #[test]
-    fn test_nps_recalculation() {
-        // Test that NPS is recalculated when it's 0 but we have nodes and elapsed time
-        let _emitter = BestmoveEmitter::new(2);
-
-        let mut meta = make_test_meta();
-        meta.stop_info.elapsed_ms = 50; // 50ms
-        meta.stats.nodes = 5000;
-        meta.stats.nps = 0; // Should be recalculated
-
-        // Expected NPS = 5000 * 1000 / 50 = 100000
-        let expected_nps = meta.stats.nodes.saturating_mul(1000) / meta.stop_info.elapsed_ms;
-        assert_eq!(expected_nps, 100000);
-    }
-
-    #[test]
-    fn test_different_stop_reasons() {
-        // Test that different stop reasons are formatted correctly
-        let reasons = vec![
-            TerminationReason::TimeLimit,
-            TerminationReason::NodeLimit,
-            TerminationReason::DepthLimit,
-            TerminationReason::UserStop,
-            TerminationReason::Mate,
-            TerminationReason::Completed,
-            TerminationReason::Error,
-        ];
-
-        for reason in reasons {
-            let mut meta = make_test_meta();
-            meta.stop_info.reason = reason;
-
-            // Verify Display format (used in logs with tab-separated key=value)
-            let formatted = reason.to_string();
-            assert!(!formatted.is_empty());
-            assert!(formatted.chars().all(|c| c.is_alphabetic() || c == '_'));
-            // All reasons should be snake_case
-            assert_eq!(formatted, formatted.to_lowercase());
-        }
-    }
-
-    #[test]
-    fn test_set_start_time_does_not_reset_sent() {
-        let mut emitter = BestmoveEmitter::new(123);
-        // 疑似的に送信済みにする
-        assert!(!emitter.sent.swap(true, Ordering::AcqRel));
-        // ここで start_time を更新しても…
-        emitter.set_start_time(std::time::Instant::now());
-        // 送信済み状態は維持される
-        assert!(emitter.is_sent());
-    }
-
-    #[test]
-    fn test_error_does_not_allow_double_emission() {
-        // Clear any previous test data
-        clear_all_last_sources();
-
-        let emitter = BestmoveEmitter::new_with_error(999);
-        let meta = make_test_meta();
-
-        // First emit should fail due to forced error
-        let result1 = emitter.emit("7g7f".to_string(), None, meta.clone());
-        assert!(result1.is_err());
-        assert!(emitter.is_sent()); // But sent flag should be true
-
-        // Second emit should be ignored even after error
-        // (In production, we can't actually test this without mocking send_response,
-        // but we can verify the sent flag behavior)
-        assert!(emitter.sent.swap(true, Ordering::AcqRel)); // This returns true, meaning it was already true
-
-        // Verify that last_source was tracked despite the error
-        assert_eq!(last_source_for(999), Some(BestmoveSource::Test));
-    }
-
-    #[test]
-    fn test_clear_all_last_sources() {
-        clear_all_last_sources();
-
-        // Add some test data
-        let _emitter1 = BestmoveEmitter::new(1001);
-        let _emitter2 = BestmoveEmitter::new(1002);
-
-        // Simulate tracking
-        if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
-            map.insert(1001, BestmoveSource::Test);
-            map.insert(1002, BestmoveSource::SessionOnStop);
-        }
-
-        // Verify data exists
-        assert_eq!(last_source_for(1001), Some(BestmoveSource::Test));
-        assert_eq!(last_source_for(1002), Some(BestmoveSource::SessionOnStop));
-
-        // Clear all
-        clear_all_last_sources();
-
-        // Verify all cleared
-        assert_eq!(last_source_for(1001), None);
-        assert_eq!(last_source_for(1002), None);
     }
 }

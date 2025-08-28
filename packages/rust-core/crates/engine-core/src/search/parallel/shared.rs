@@ -638,6 +638,8 @@ impl SharedSearchState {
             nodes,
             depth_reached: depth,
             hard_timeout,
+            soft_limit_ms: 0,
+            hard_limit_ms: 0,
         });
 
         // Then set the stop flag

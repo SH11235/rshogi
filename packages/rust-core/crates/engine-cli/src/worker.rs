@@ -15,6 +15,55 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// Derive approximate budget (soft/hard limits in ms) from SearchLimits
+///
+/// This is used to enrich StopInfo in fallback/error paths where the core
+/// engine doesn't provide detailed time limits. Values are best-effort and
+/// may be conservative. For Byoyomi, we use TimeParameters to estimate
+/// soft/hard limits; for FixedTime, both are the fixed time; other modes
+/// default to 0 when not reliably derivable here.
+fn budget_from_limits(limits: &SearchLimits) -> (u64, u64) {
+    use engine_core::time_management::TimeControl as TC;
+
+    // Helper to clamp to non-negative and ensure hard >= soft where applicable
+    let clamp_pair = |soft: u64, hard: u64| -> (u64, u64) {
+        if hard < soft {
+            (soft, soft)
+        } else {
+            (soft, hard)
+        }
+    };
+
+    match &limits.time_control {
+        TC::FixedTime { ms_per_move } => (*ms_per_move, *ms_per_move),
+        TC::Byoyomi { byoyomi_ms, .. } => {
+            if let Some(params) = limits.time_parameters {
+                let soft = ((*byoyomi_ms as f64) * params.byoyomi_soft_ratio).floor() as u64;
+                let hard = byoyomi_ms.saturating_sub(params.byoyomi_hard_limit_reduction_ms);
+                clamp_pair(soft, hard)
+            } else {
+                (*byoyomi_ms, *byoyomi_ms)
+            }
+        }
+        TC::Ponder(inner) => match &**inner {
+            TC::Byoyomi { byoyomi_ms, .. } => {
+                if let Some(params) = limits.time_parameters {
+                    let soft = ((*byoyomi_ms as f64) * params.byoyomi_soft_ratio).floor() as u64;
+                    let hard = byoyomi_ms.saturating_sub(params.byoyomi_hard_limit_reduction_ms);
+                    clamp_pair(soft, hard)
+                } else {
+                    (*byoyomi_ms, *byoyomi_ms)
+                }
+            }
+            TC::FixedTime { ms_per_move } => (*ms_per_move, *ms_per_move),
+            // Other inner modes are not reliably derivable here
+            _ => (0, 0),
+        },
+        // FixedNodes/Infinite/Fischer: budgets depend on broader state; omit here
+        _ => (0, 0),
+    }
+}
+
 /// Messages from worker thread to main thread
 pub enum WorkerMessage {
     Info {
@@ -334,12 +383,18 @@ pub fn search_worker(
                                         session_id: emergency_session.id,
                                         root_hash: emergency_session.root_hash,
                                         search_id,
-                                        stop_info: Some(StopInfo {
-                                            reason: TerminationReason::Error,
-                                            elapsed_ms: 0,
-                                            nodes: 0,
-                                            depth_reached: 1,
-                                            hard_timeout: false,
+                                        stop_info: Some({
+                                            // No limits available (prepare_search failed); budgets unknown
+                                            let (soft_ms, hard_ms) = (0, 0);
+                                            StopInfo {
+                                                reason: TerminationReason::Error,
+                                                elapsed_ms: 0,
+                                                nodes: 0,
+                                                depth_reached: 1,
+                                                hard_timeout: false,
+                                                soft_limit_ms: soft_ms,
+                                                hard_limit_ms: hard_ms,
+                                            }
                                         }),
                                     }) {
                                         log::error!("Failed to send search finished: {e}");
@@ -367,12 +422,18 @@ pub fn search_worker(
                                         session_id: resign_session.id,
                                         root_hash: resign_session.root_hash,
                                         search_id,
-                                        stop_info: Some(StopInfo {
-                                            reason: TerminationReason::Error,
-                                            elapsed_ms: 0,
-                                            nodes: 0,
-                                            depth_reached: 0,
-                                            hard_timeout: false,
+                                        stop_info: Some({
+                                            // No limits available (prepare_search failed); budgets unknown
+                                            let (soft_ms, hard_ms) = (0, 0);
+                                            StopInfo {
+                                                reason: TerminationReason::Error,
+                                                elapsed_ms: 0,
+                                                nodes: 0,
+                                                depth_reached: 0,
+                                                hard_timeout: false,
+                                                soft_limit_ms: soft_ms,
+                                                hard_limit_ms: hard_ms,
+                                            }
                                         }),
                                     }) {
                                         log::error!(
@@ -436,12 +497,18 @@ pub fn search_worker(
                                 session_id: emergency_session.id,
                                 root_hash: emergency_session.root_hash,
                                 search_id,
-                                stop_info: Some(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 1,
-                                    hard_timeout: false,
+                                stop_info: Some({
+                                    // No limits available (engine take failed); budgets unknown
+                                    let (soft_ms, hard_ms) = (0, 0);
+                                    StopInfo {
+                                        reason: TerminationReason::Error,
+                                        elapsed_ms: 0,
+                                        nodes: 0,
+                                        depth_reached: 1,
+                                        hard_timeout: false,
+                                        soft_limit_ms: soft_ms,
+                                        hard_limit_ms: hard_ms,
+                                    }
                                 }),
                             }) {
                                 log::error!("Failed to send search finished: {e}");
@@ -469,12 +536,18 @@ pub fn search_worker(
                                 session_id: resign_session.id,
                                 root_hash: resign_session.root_hash,
                                 search_id,
-                                stop_info: Some(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
+                                stop_info: Some({
+                                    // No limits available (engine take failed); budgets unknown
+                                    let (soft_ms, hard_ms) = (0, 0);
+                                    StopInfo {
+                                        reason: TerminationReason::Error,
+                                        elapsed_ms: 0,
+                                        nodes: 0,
+                                        depth_reached: 0,
+                                        hard_timeout: false,
+                                        soft_limit_ms: soft_ms,
+                                        hard_limit_ms: hard_ms,
+                                    }
                                 }),
                             }) {
                                 log::error!("Failed to send search finished after resign: {e}");
@@ -509,6 +582,9 @@ pub fn search_worker(
 
     // Explicitly drop ponder_hit_flag (it's used internally by the engine)
     drop(ponder_hit_flag);
+
+    // Pre-compute budget hint from limits before moving it into the engine
+    let (budget_soft_ms, budget_hard_ms) = budget_from_limits(&limits);
 
     // Create search session
     let mut session = SearchSession::new(search_id, position.zobrist_hash());
@@ -768,16 +844,20 @@ pub fn search_worker(
                             session_id: session.id,
                             root_hash: session.root_hash,
                             search_id,
-                            stop_info: Some(StopInfo {
-                                reason: TerminationReason::UserStop,
-                                elapsed_ms: 0,
-                                nodes: 0,
-                                depth_reached: session
-                                    .committed_best
-                                    .as_ref()
-                                    .map(|b| b.depth)
-                                    .unwrap_or(0),
-                                hard_timeout: false,
+                            stop_info: Some({
+                                StopInfo {
+                                    reason: TerminationReason::UserStop,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: session
+                                        .committed_best
+                                        .as_ref()
+                                        .map(|b| b.depth)
+                                        .unwrap_or(0),
+                                    hard_timeout: false,
+                                    soft_limit_ms: budget_soft_ms,
+                                    hard_limit_ms: budget_hard_ms,
+                                }
                             }),
                         }) {
                             log::error!("Failed to send SearchFinished with committed best: {e}");
@@ -812,12 +892,16 @@ pub fn search_worker(
                                 session_id: emergency_session.id,
                                 root_hash: emergency_session.root_hash,
                                 search_id,
-                                stop_info: Some(StopInfo {
-                                    reason: TerminationReason::UserStop,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 1,
-                                    hard_timeout: false,
+                                stop_info: Some({
+                                    StopInfo {
+                                        reason: TerminationReason::UserStop,
+                                        elapsed_ms: 0,
+                                        nodes: 0,
+                                        depth_reached: 1,
+                                        hard_timeout: false,
+                                        soft_limit_ms: budget_soft_ms,
+                                        hard_limit_ms: budget_hard_ms,
+                                    }
                                 }),
                             }) {
                                 log::error!("Failed to send search finished: {e}");
@@ -845,12 +929,16 @@ pub fn search_worker(
                                 session_id: resign_session.id,
                                 root_hash: resign_session.root_hash,
                                 search_id,
-                                stop_info: Some(StopInfo {
-                                    reason: TerminationReason::UserStop,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
+                                stop_info: Some({
+                                    StopInfo {
+                                        reason: TerminationReason::UserStop,
+                                        elapsed_ms: 0,
+                                        nodes: 0,
+                                        depth_reached: 0,
+                                        hard_timeout: false,
+                                        soft_limit_ms: budget_soft_ms,
+                                        hard_limit_ms: budget_hard_ms,
+                                    }
                                 }),
                             }) {
                                 log::error!("Failed to send search finished after resign: {e}");
@@ -907,12 +995,16 @@ pub fn search_worker(
                                 session_id: emergency_session.id,
                                 root_hash: emergency_session.root_hash,
                                 search_id,
-                                stop_info: Some(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 1,
-                                    hard_timeout: false,
+                                stop_info: Some({
+                                    StopInfo {
+                                        reason: TerminationReason::Error,
+                                        elapsed_ms: 0,
+                                        nodes: 0,
+                                        depth_reached: 1,
+                                        hard_timeout: false,
+                                        soft_limit_ms: budget_soft_ms,
+                                        hard_limit_ms: budget_hard_ms,
+                                    }
                                 }),
                             }) {
                                 log::error!("Failed to send search finished: {e}");
@@ -940,12 +1032,16 @@ pub fn search_worker(
                                 session_id: resign_session.id,
                                 root_hash: resign_session.root_hash,
                                 search_id,
-                                stop_info: Some(StopInfo {
-                                    reason: TerminationReason::Error,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
+                                stop_info: Some({
+                                    StopInfo {
+                                        reason: TerminationReason::Error,
+                                        elapsed_ms: 0,
+                                        nodes: 0,
+                                        depth_reached: 0,
+                                        hard_timeout: false,
+                                        soft_limit_ms: budget_soft_ms,
+                                        hard_limit_ms: budget_hard_ms,
+                                    }
                                 }),
                             }) {
                                 log::error!("Failed to send search finished after resign: {e}");
