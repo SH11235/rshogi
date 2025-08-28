@@ -30,14 +30,6 @@ pub fn last_source_for(search_id: u64) -> Option<BestmoveSource> {
 }
 
 #[cfg(test)]
-/// Clear the last BestmoveSource for a specific search_id
-pub fn clear_last_source_for(search_id: u64) {
-    if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
-        map.remove(&search_id);
-    }
-}
-
-#[cfg(test)]
 /// Clear all tracked BestmoveSources (for test isolation)
 pub fn clear_all_last_sources() {
     if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
@@ -88,17 +80,6 @@ impl BestmoveEmitter {
             start_time: Instant::now(),
             #[cfg(test)]
             force_error: false,
-        }
-    }
-
-    /// Create a new bestmove emitter that will force an error on emit()
-    #[cfg(test)]
-    pub fn new_with_error(search_id: u64) -> Self {
-        Self {
-            sent: AtomicBool::new(false),
-            search_id,
-            start_time: Instant::now(),
-            force_error: true,
         }
     }
 
@@ -251,16 +232,47 @@ impl BestmoveEmitter {
     pub fn set_start_time(&mut self, start_time: Instant) {
         self.start_time = start_time;
     }
+}
 
-    /// Check if bestmove has been sent
-    #[cfg(test)]
-    pub fn is_sent(&self) -> bool {
-        self.sent.load(Ordering::Acquire)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::BestmoveSource;
+
+    fn default_meta() -> BestmoveMeta {
+        BestmoveMeta {
+            from: BestmoveSource::SessionInSearchFinished,
+            stop_info: StopInfo {
+                reason: engine_core::search::types::TerminationReason::Completed,
+                elapsed_ms: 0,
+                nodes: 10_000,
+                depth_reached: 8,
+                hard_timeout: false,
+                soft_limit_ms: 500,
+                hard_limit_ms: 1000,
+            },
+            stats: BestmoveStats {
+                depth: 8,
+                seldepth: Some(10),
+                score: "cp 12".into(),
+                nodes: 10_000,
+                nps: 0, // let emitter complement if elapsed_ms becomes non-zero
+            },
+        }
     }
 
-    /// Set start time for testing
-    #[cfg(test)]
-    pub fn set_start_time_for_test(&mut self, start_time: Instant) {
-        self.start_time = start_time;
+    #[test]
+    fn test_emit_exactly_once_and_source_tracking() {
+        clear_all_last_sources();
+        let emitter = BestmoveEmitter::new(42);
+        let meta = default_meta();
+        // First emit
+        let r1 = emitter.emit("7g7f".into(), Some("3c3d".into()), meta.clone());
+        assert!(r1.is_ok());
+        assert_eq!(last_source_for(42), Some(BestmoveSource::SessionInSearchFinished));
+        // Second emit should be no-op
+        let r2 = emitter.emit("7g7f".into(), None, meta);
+        assert!(r2.is_ok());
+        assert_eq!(last_source_for(42), Some(BestmoveSource::SessionInSearchFinished));
     }
 }

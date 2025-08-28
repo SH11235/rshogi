@@ -89,9 +89,6 @@ pub fn build_meta(
             BestmoveSource::SessionOnStop => TerminationReason::UserStop,
             // Error cases -> Error
             BestmoveSource::Resign | BestmoveSource::ResignOnFinish => TerminationReason::Error,
-            // Test variant
-            #[cfg(test)]
-            BestmoveSource::Test => TerminationReason::UserStop,
         },
         elapsed_ms: 0, // BestmoveEmitter will complement this
         nodes: 0,      // BestmoveEmitter will complement this
@@ -307,6 +304,67 @@ impl<'a> CommandContext<'a> {
         if let Err(e) = send_info_string(info_string) {
             log::warn!("Failed to send fallback TSV log: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_meta_reason_mapping() {
+        use crate::types::BestmoveSource as S;
+
+        // Timeout sources map to TimeLimit and hard_timeout true only for explicit timeout variants
+        let timeout_sources = [S::ResignTimeout, S::EmergencyFallbackTimeout, S::PartialResultTimeout];
+        for &src in &timeout_sources {
+            let m = build_meta(src, 7, Some(9), Some("cp 10".into()), None);
+            assert_eq!(m.stop_info.reason, TerminationReason::TimeLimit);
+            assert!(m.stop_info.hard_timeout);
+            assert_eq!(m.stop_info.depth_reached, 7);
+        }
+
+        // Normal completion
+        for &src in &[S::EmergencyFallback, S::EmergencyFallbackOnFinish, S::SessionInSearchFinished] {
+            let m = build_meta(src, 12, None, None, None);
+            assert_eq!(m.stop_info.reason, TerminationReason::Completed);
+            assert!(!m.stop_info.hard_timeout);
+            assert_eq!(m.stop_info.depth_reached, 12);
+        }
+
+        // User stop
+        let m = build_meta(S::SessionOnStop, 5, None, None, None);
+        assert_eq!(m.stop_info.reason, TerminationReason::UserStop);
+        assert!(!m.stop_info.hard_timeout);
+
+        // Error
+        for &src in &[S::Resign, S::ResignOnFinish] {
+            let m = build_meta(src, 3, Some(4), None, None);
+            assert_eq!(m.stop_info.reason, TerminationReason::Error);
+            assert!(!m.stop_info.hard_timeout);
+            assert_eq!(m.stats.depth, 3);
+        }
+    }
+
+    #[test]
+    fn test_build_meta_keeps_stopinfo_when_provided() {
+        use crate::types::BestmoveSource as S;
+        let si = StopInfo {
+            reason: TerminationReason::Completed,
+            elapsed_ms: 123,
+            nodes: 456,
+            depth_reached: 8,
+            hard_timeout: false,
+            soft_limit_ms: 111,
+            hard_limit_ms: 222,
+        };
+        let m = build_meta(S::SessionInSearchFinished, 1, None, Some("cp 0".into()), Some(si.clone()));
+        assert_eq!(m.stop_info.elapsed_ms, 123);
+        assert_eq!(m.stop_info.nodes, 456);
+        assert_eq!(m.stop_info.soft_limit_ms, 111);
+        assert_eq!(m.stop_info.hard_limit_ms, 222);
+        assert_eq!(m.stats.depth, 1);
+        assert_eq!(m.stats.score, "cp 0");
     }
 }
 
