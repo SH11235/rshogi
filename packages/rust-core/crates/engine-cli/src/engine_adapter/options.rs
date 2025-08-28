@@ -97,14 +97,14 @@ impl EngineAdapter {
         match name {
             "USI_Hash" => {
                 if let Some(val) = value {
-                    let hash_size = Self::parse_u64_in_range("USI_Hash", val, 1, 1024)? as usize;
+                    let hash_size = Self::parse_u64_in_range("USI_Hash", val, 1, 32768)? as usize;
                     self.hash_size = hash_size;
 
                     // Inform about non-power-of-2 sizes
                     if !hash_size.is_power_of_two() && hash_size > 1 {
                         info!(
                             "USI_Hash set to {}MB (non-power-of-2). \
-                            For optimal memory usage, consider power-of-2 sizes: 16, 32, 64, 128, 256, 512, 1024 MB",
+                            For optimal memory usage, consider power-of-2 sizes: 256, 512, 1024, 2048, 4096, 8192, 16384 MB",
                             hash_size
                         );
                     }
@@ -306,7 +306,7 @@ mod tests {
         adapter.initialize().unwrap();
 
         // Check initial hash size
-        assert_eq!(adapter.hash_size, 16); // default
+        assert_eq!(adapter.hash_size, 1024); // default
 
         // Set new hash size via USI option
         adapter.set_option("USI_Hash", Some("64")).unwrap();
@@ -317,14 +317,14 @@ mod tests {
         // Take and return engine to verify it applies
         if let Ok(engine) = adapter.take_engine() {
             // Engine should have pending hash size
-            assert_eq!(engine.get_hash_size(), 16); // Still old size until applied
+            assert_eq!(engine.get_hash_size(), 1024); // Still old size until applied
             adapter.return_engine(engine);
         }
 
         // After return, engine should have new hash size set as pending
         if let Some(ref engine) = adapter.engine {
             // Next search will apply the pending size
-            assert_eq!(engine.get_hash_size(), 16); // Still 16 until next search
+            assert_eq!(engine.get_hash_size(), 1024); // Still 1024 until next search
         }
     }
 
@@ -357,7 +357,7 @@ mod tests {
         // Engine should be created with the queued hash size
         if let Some(ref engine) = adapter.engine {
             // Hash size should be set as pending in the engine
-            assert_eq!(engine.get_hash_size(), 16); // Default until applied
+            assert_eq!(engine.get_hash_size(), 1024); // Default until applied
         }
     }
 
@@ -369,19 +369,19 @@ mod tests {
         assert!(adapter.set_option("USI_Hash", Some("1")).is_ok());
         assert_eq!(adapter.hash_size, 1);
 
-        // Test maximum value (1024)
-        assert!(adapter.set_option("USI_Hash", Some("1024")).is_ok());
-        assert_eq!(adapter.hash_size, 1024);
+        // Test maximum value (32768)
+        assert!(adapter.set_option("USI_Hash", Some("32768")).is_ok());
+        assert_eq!(adapter.hash_size, 32768);
 
         // Test below minimum (0)
         let result = adapter.set_option("USI_Hash", Some("0"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be between 1 and 1024"));
+        assert!(result.unwrap_err().to_string().contains("must be between 1 and 32768"));
 
-        // Test above maximum (2048)
-        let result = adapter.set_option("USI_Hash", Some("2048"));
+        // Test above maximum (32769)
+        let result = adapter.set_option("USI_Hash", Some("32769"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be between 1 and 1024"));
+        assert!(result.unwrap_err().to_string().contains("must be between 1 and 32768"));
 
         // Test negative value (-1)
         let result = adapter.set_option("USI_Hash", Some("-1"));
@@ -406,7 +406,7 @@ mod tests {
         // Take engine and run a short search
         if let Ok(mut engine) = adapter.take_engine() {
             // Verify initial size
-            assert_eq!(engine.get_hash_size(), 16);
+            assert_eq!(engine.get_hash_size(), 1024);
 
             // Run a search (which should apply pending TT size)
             let mut pos = engine_core::Position::startpos();
