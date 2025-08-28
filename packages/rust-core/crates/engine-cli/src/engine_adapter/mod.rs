@@ -91,7 +91,7 @@ impl EngineAdapter {
             engine: Some(Engine::new(EngineType::Material)), // Default to Material for stability
             position: None,
             options: Vec::new(),
-            hash_size: 16,
+            hash_size: 1024,
             threads: 1,
             ponder: true,
             byoyomi_periods: None,
