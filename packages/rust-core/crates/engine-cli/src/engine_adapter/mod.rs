@@ -73,8 +73,6 @@ pub struct EngineAdapter {
     byoyomi_safety_ms: u64,
     /// Whether the last search was using byoyomi time control
     last_search_is_byoyomi: bool,
-    /// Last byoyomi period (ms) observed when starting a (non-ponder) byoyomi search
-    last_byoyomi_time_ms: Option<u64>,
 }
 
 impl Default for EngineAdapter {
@@ -111,18 +109,11 @@ impl EngineAdapter {
             byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
             last_search_is_byoyomi: false,
-            last_byoyomi_time_ms: None,
         };
 
         // Initialize options
         adapter.init_options();
         adapter
-    }
-
-    /// Get the byoyomi safety milliseconds setting
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn byoyomi_safety_ms(&self) -> u64 {
-        self.byoyomi_safety_ms
     }
 
     /// Set byoyomi safety ms for testing
@@ -135,17 +126,5 @@ impl EngineAdapter {
     #[cfg(test)]
     pub fn set_last_search_is_byoyomi(&mut self, is_byoyomi: bool) {
         self.last_search_is_byoyomi = is_byoyomi;
-    }
-
-    /// Get the last observed byoyomi period in milliseconds
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn last_byoyomi_time_ms(&self) -> Option<u64> {
-        self.last_byoyomi_time_ms
-    }
-
-    /// Test-only: set last byoyomi time ms
-    #[cfg(test)]
-    pub fn set_last_byoyomi_time_ms_for_test(&mut self, ms: u64) {
-        self.last_byoyomi_time_ms = Some(ms);
     }
 }

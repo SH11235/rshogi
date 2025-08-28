@@ -139,10 +139,7 @@ impl EngineAdapter {
         match &limits.time_control {
             TimeControl::Byoyomi { byoyomi_ms, .. } => {
                 self.last_search_is_byoyomi = true;
-                // Only store the period for non-ponder searches
-                if !params.ponder {
-                    self.last_byoyomi_time_ms = Some(*byoyomi_ms);
-                }
+                let _ = byoyomi_ms; // period not tracked at adapter level anymore
             }
             TimeControl::Ponder(inner) => {
                 self.last_search_is_byoyomi = matches!(**inner, TimeControl::Byoyomi { .. });
@@ -150,7 +147,6 @@ impl EngineAdapter {
             }
             _ => {
                 self.last_search_is_byoyomi = false;
-                self.last_byoyomi_time_ms = None;
             }
         }
 

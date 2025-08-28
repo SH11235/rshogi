@@ -23,7 +23,7 @@ impl EngineAdapter {
     /// Initialize engine options
     pub(super) fn init_options(&mut self) {
         self.options = vec![
-            EngineOption::spin("USI_Hash", 16, 1, 1024),
+            EngineOption::spin("USI_Hash", 1024, 1, 32768),
             EngineOption::spin("Threads", 1, 1, 256),
             EngineOption::check("USI_Ponder", true),
             EngineOption::combo(

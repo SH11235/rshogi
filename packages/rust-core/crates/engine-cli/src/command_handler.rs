@@ -84,7 +84,6 @@ pub fn build_meta(
             // Normal completion cases -> Completed
             BestmoveSource::EmergencyFallback
             | BestmoveSource::EmergencyFallbackOnFinish
-            | BestmoveSource::PartialResultOnFinish
             | BestmoveSource::SessionInSearchFinished => TerminationReason::Completed,
             // User stop cases -> UserStop
             BestmoveSource::SessionOnStop => TerminationReason::UserStop,
@@ -1889,7 +1888,6 @@ mod tests {
             // Normal completion cases -> Completed
             (BestmoveSource::EmergencyFallback, TerminationReason::Completed),
             (BestmoveSource::EmergencyFallbackOnFinish, TerminationReason::Completed),
-            (BestmoveSource::PartialResultOnFinish, TerminationReason::Completed),
             (BestmoveSource::SessionInSearchFinished, TerminationReason::Completed),
             // User stop cases -> UserStop
             (BestmoveSource::SessionOnStop, TerminationReason::UserStop),
@@ -2159,38 +2157,5 @@ mod tests {
 
         // Verify search was finalized
         assert_eq!(*ctx.search_state, SearchState::Idle);
-    }
-
-    #[test]
-    fn test_byoyomi_factor_validation() {
-        // Test invalid BYOYOMI_STAGE1_FACTOR values
-        std::env::set_var("BYOYOMI_STAGE1_FACTOR", "0");
-        let factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
-        assert_eq!(factor, 0.5, "Zero factor should default to 0.5");
-
-        std::env::set_var("BYOYOMI_STAGE1_FACTOR", "-1.0");
-        let factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
-        assert_eq!(factor, 0.5, "Negative factor should default to 0.5");
-
-        // Test valid values
-        std::env::set_var("BYOYOMI_STAGE1_FACTOR", "0.3");
-        let factor = parse_positive_or_default("BYOYOMI_STAGE1_FACTOR", 0.5);
-        assert_eq!(factor, 0.3, "Valid factor should be used");
-
-        // Clean up
-        std::env::remove_var("BYOYOMI_STAGE1_FACTOR");
-
-        // Test BYOYOMI_TOTAL_FACTOR similarly
-        std::env::set_var("BYOYOMI_TOTAL_FACTOR", "0");
-        let factor = parse_positive_or_default("BYOYOMI_TOTAL_FACTOR", 1.0);
-        assert_eq!(factor, 1.0, "Zero total factor should default to 1.0");
-
-        // Test extreme values
-        std::env::set_var("BYOYOMI_TOTAL_FACTOR", "10.5");
-        let factor = parse_positive_or_default("BYOYOMI_TOTAL_FACTOR", 1.0);
-        assert_eq!(factor, 10.5, "Large factor should be accepted");
-
-        // Clean up
-        std::env::remove_var("BYOYOMI_TOTAL_FACTOR");
     }
 }

@@ -584,15 +584,6 @@ pub fn search_worker(
 
                     // Update session
                     if let Ok(mut session_guard) = session_for_callback.lock() {
-                        // Update partial result with the first move
-                        if let Some(first_move) = info.pv.first() {
-                            session_guard.update_partial_result(
-                                first_move.clone(),
-                                info.depth.unwrap_or(0) as u8,
-                                raw_score,
-                            );
-                        }
-
                         // Note: During iterative deepening, we don't have NodeType information
                         // from the info callback, so we default to Exact. The actual NodeType
                         // will be set when the final search result is available.
