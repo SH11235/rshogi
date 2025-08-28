@@ -3,7 +3,6 @@
 #[cfg(test)]
 pub mod test_utils {
     use crate::types::ResignReason;
-    use crate::usi::output::SearchInfo;
     use engine_core::shogi::Position;
 
     /// Check if ResignReason matches expected checkmate/no-legal-moves conditions
@@ -20,17 +19,6 @@ pub mod test_utils {
             }
         } else {
             panic!("Position has legal moves, should not resign");
-        }
-    }
-
-    /// Create a test SearchInfo with minimal fields
-    pub fn make_test_search_info(depth: u8) -> SearchInfo {
-        SearchInfo {
-            depth: Some(depth as u32),
-            time: Some(0),
-            nodes: Some(0),
-            string: Some("test".to_string()),
-            ..Default::default()
         }
     }
 }

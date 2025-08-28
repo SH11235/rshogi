@@ -70,9 +70,9 @@ pub enum EngineType {
 
     /// Enhanced search with material evaluation
     /// - Advanced pruning: Null Move, LMR, Futility Pruning
-    /// - Transposition Table (16MB) for caching
+    /// - Uses a transposition table for caching (size configurable)
     /// - Good for learning search techniques
-    /// - Memory usage: ~20MB
+    /// - Memory usage depends on TT size
     Enhanced,
 
     /// Enhanced search with NNUE evaluation (Strongest)
@@ -114,7 +114,7 @@ impl Engine {
     /// Create new engine with specified type
     pub fn new(engine_type: EngineType) -> Self {
         let material_evaluator = Arc::new(MaterialEvaluator);
-        let default_tt_size = 16; // Default TT size in MB
+        let default_tt_size = 1024; // Default TT size in MB
 
         let nnue_evaluator = if matches!(engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
             // Initialize with zero weights for NNUE engine
@@ -1184,13 +1184,13 @@ mod tests {
         let mut engine = Engine::new(EngineType::Material);
 
         // Initial hash size should be default
-        assert_eq!(engine.get_hash_size(), 16);
+        assert_eq!(engine.get_hash_size(), 1024);
 
         // Set new hash size
         engine.set_hash_size(32);
 
-        // Should still be 16 until next search
-        assert_eq!(engine.get_hash_size(), 16);
+        // Should still be 1024 until next search
+        assert_eq!(engine.get_hash_size(), 1024);
 
         // After applying pending changes
         engine.apply_pending_tt_size();

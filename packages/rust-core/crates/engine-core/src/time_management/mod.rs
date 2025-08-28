@@ -311,6 +311,8 @@ impl TimeManager {
             nodes,
             depth_reached,
             hard_timeout: hard,
+            soft_limit_ms: self.soft_limit_ms(),
+            hard_limit_ms: self.hard_limit_ms(),
         }
     }
 
