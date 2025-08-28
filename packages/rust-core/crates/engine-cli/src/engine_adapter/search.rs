@@ -136,11 +136,23 @@ impl EngineAdapter {
         log::info!("prepare_search: stop_flag value after apply_go_params = {stop_value_after}");
 
         // Detect if this is actually byoyomi time control by looking at the real TimeControl
-        self.last_search_is_byoyomi = match &limits.time_control {
-            TimeControl::Byoyomi { .. } => true,
-            TimeControl::Ponder(inner) => matches!(**inner, TimeControl::Byoyomi { .. }),
-            _ => false,
-        };
+        match &limits.time_control {
+            TimeControl::Byoyomi { byoyomi_ms, .. } => {
+                self.last_search_is_byoyomi = true;
+                // Only store the period for non-ponder searches
+                if !params.ponder {
+                    self.last_byoyomi_time_ms = Some(*byoyomi_ms);
+                }
+            }
+            TimeControl::Ponder(inner) => {
+                self.last_search_is_byoyomi = matches!(**inner, TimeControl::Byoyomi { .. });
+                // Do not store period on ponder (stop handler ignores bestmove on ponder stop)
+            }
+            _ => {
+                self.last_search_is_byoyomi = false;
+                self.last_byoyomi_time_ms = None;
+            }
+        }
 
         // Setup ponder state if applicable
         let ponder_hit_flag = if params.ponder {
