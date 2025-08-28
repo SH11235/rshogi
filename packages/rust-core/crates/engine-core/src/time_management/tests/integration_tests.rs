@@ -3,7 +3,7 @@
 use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager, TimeState};
 use crate::Color;
 
-use super::{mock_set_time};
+use super::mock_set_time;
 
 fn create_test_limits() -> TimeLimits {
     TimeLimits {

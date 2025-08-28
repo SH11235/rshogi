@@ -257,12 +257,41 @@ where
 
                 aspiration_retries += 1;
 
+                // Under time pressure, avoid spending the remaining budget on repeated re-searches.
+                if let Some(ref tm) = self.time_manager {
+                    let soft = tm.soft_limit_ms();
+                    if soft > 0 {
+                        let elapsed_ms = self.context.elapsed().as_millis() as u64;
+                        // If we've already retried once and are past 90% of soft budget, bail out.
+                        if aspiration_retries >= 1 && elapsed_ms >= soft.saturating_mul(9) / 10 {
+                            log::debug!(
+                                "Aspiration: exiting early near soft limit at depth {} (retries={})",
+                                depth, aspiration_retries
+                            );
+                            break;
+                        }
+                    }
+                }
+
                 // Check for timeout during re-search
                 if self.context.should_stop() {
                     // Note: final_node_type is already set based on the last search result
                     // This ensures we use the evaluation from the interrupted search
                     break;
                 }
+            }
+
+            // If we stopped during aspiration and have no PV for this depth, salvage previous PV.
+            if pv.is_empty() && self.context.should_stop() && !self.previous_pv.is_empty() {
+                log::debug!(
+                    "Salvaging previous PV at depth {} due to early stop (len: {})",
+                    depth,
+                    self.previous_pv.len()
+                );
+                pv = self.previous_pv.clone();
+                // Preserve previous iteration's evaluation and node type for stability
+                score = best_score;
+                final_node_type = best_node_type;
             }
 
             // Always update results if we have a valid pv, even if stopping
@@ -384,11 +413,56 @@ where
             }
         }
 
+        // Guarded fallback: ensure we always have a legal move when possible.
+        // This addresses cases where an early stop occurs before PV is assembled
+        // (e.g., aspiration retry/timeout before first root move completes).
+        let mut final_best_move = best_move;
+        let mut final_score = best_score;
+        let mut final_node_type = best_node_type;
+
+        if final_best_move.is_none() {
+            // 1) Try to salvage from the assembled PV in stats (if present)
+            if let Some(&head) = self.stats.pv.first() {
+                log::warn!(
+                    "Best move missing, using PV[0] fallback: {}",
+                    crate::usi::move_to_usi(&head)
+                );
+                final_best_move = Some(head);
+            } else {
+                // 2) As a last resort, generate a legal move from the root position
+                //    to avoid emitting no-bestmove at the protocol boundary.
+                use crate::movegen::MoveGenerator;
+                let gen = MoveGenerator::new();
+                if let Ok(moves) = gen.generate_all(pos) {
+                    if let Some(&mv) = moves.as_slice().first() {
+                        log::warn!(
+                            "Best move missing and PV empty, using first legal move fallback: {}",
+                            crate::usi::move_to_usi(&mv)
+                        );
+                        final_best_move = Some(mv);
+
+                        // Provide a conservative score and node type for observability.
+                        // Use static evaluation to avoid misleading bounds.
+                        final_score = self.evaluator.evaluate(pos);
+                        final_node_type = NodeType::UpperBound;
+
+                        // Populate minimal PV for downstream consumers.
+                        self.stats.pv.clear();
+                        self.stats.pv.push(mv);
+                    } else {
+                        log::error!("No legal moves available for fallback at root");
+                    }
+                } else {
+                    log::error!("Failed to generate legal moves for fallback at root");
+                }
+            }
+        }
+
         SearchResult {
-            best_move,
-            score: best_score,
+            best_move: final_best_move,
+            score: final_score,
             stats: self.stats.clone(),
-            node_type: best_node_type,
+            node_type: final_node_type,
             stop_info: final_stop_info,
         }
     }

@@ -326,7 +326,7 @@ pub fn search_worker(
     let was_ponder = params.ponder;
     log::debug!("Attempting to take engine from adapter");
     let engine_take_start = Instant::now();
-    let (engine, position, limits, ponder_hit_flag) = {
+    let (mut engine_guard, position, limits, ponder_hit_flag) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::debug!("Adapter lock acquired, calling take_engine");
         let engine_available = adapter.is_engine_available();
@@ -336,14 +336,16 @@ pub fn search_worker(
                 log::debug!("Engine taken successfully, preparing search");
                 let take_duration = engine_take_start.elapsed();
                 log::info!("Worker: engine taken successfully after {take_duration:?}");
+                // Create guard immediately so any panic/early return still returns engine
+                let guard =
+                    EngineReturnGuard::new(engine, engine_adapter.clone(), tx.clone(), search_id);
                 match adapter.prepare_search(&params, stop_flag.clone()) {
                     Ok((pos, lim, flag)) => {
                         log::debug!("Search prepared successfully");
-                        (engine, pos, lim, flag)
+                        (guard, pos, lim, flag)
                     }
                     Err(e) => {
-                        // Return engine and send error
-                        adapter.return_engine(engine);
+                        // Engine will be returned by guard's Drop here
                         log::error!("Search preparation error: {e}");
                         let _ = tx.send(WorkerMessage::Error {
                             message: e.to_string(),
@@ -681,9 +683,7 @@ pub fn search_worker(
         }
     };
 
-    // Wrap engine in guard for panic safety
-    let mut engine_guard =
-        EngineReturnGuard::new(engine, engine_adapter.clone(), tx.clone(), search_id);
+    // Guard was already created immediately after take_engine()
 
     // Execute search without holding the lock
     log::info!("Calling execute_search_static");
@@ -1289,9 +1289,7 @@ mod tests {
 
     #[test]
     fn test_budget_from_limits_other_zero() {
-        let limits = engine_core::search::SearchLimits::builder()
-            .fixed_nodes(100_000)
-            .build();
+        let limits = engine_core::search::SearchLimits::builder().fixed_nodes(100_000).build();
         let (soft, hard) = budget_from_limits(&limits);
         assert_eq!((soft, hard), (0, 0));
     }
