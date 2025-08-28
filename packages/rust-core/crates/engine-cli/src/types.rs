@@ -60,8 +60,6 @@ pub enum BestmoveSource {
     PartialResultTimeout,
     /// Emergency fallback on timeout
     EmergencyFallbackTimeout,
-    /// Partial result on finish
-    PartialResultOnFinish,
     /// Emergency fallback on finish
     EmergencyFallbackOnFinish,
     /// Test source
@@ -84,7 +82,6 @@ impl fmt::Display for BestmoveSource {
             Self::ResignOnFinish => "resign_on_finish",
             Self::PartialResultTimeout => "partial_result_timeout",
             Self::EmergencyFallbackTimeout => "emergency_fallback_timeout",
-            Self::PartialResultOnFinish => "partial_result_on_finish",
             Self::EmergencyFallbackOnFinish => "emergency_fallback_on_finish",
             #[cfg(test)]
             Self::Test => "test",

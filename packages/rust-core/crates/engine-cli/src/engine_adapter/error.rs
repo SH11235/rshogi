@@ -15,9 +15,6 @@ pub enum EngineError {
     /// Engine is not available or in invalid state
     EngineNotAvailable(String),
 
-    /// Operation timed out
-    Timeout,
-
     /// Position was corrupted during search
     PositionCorrupted,
 
@@ -30,7 +27,6 @@ impl fmt::Display for EngineError {
         match self {
             EngineError::NoLegalMoves => write!(f, "No legal moves available"),
             EngineError::EngineNotAvailable(msg) => write!(f, "Engine not available: {msg}"),
-            EngineError::Timeout => write!(f, "Operation timed out"),
             EngineError::PositionCorrupted => write!(f, "Position was corrupted during search"),
             EngineError::Other(e) => write!(f, "Other error: {e}"),
         }
