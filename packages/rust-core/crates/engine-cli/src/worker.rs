@@ -1231,6 +1231,7 @@ pub fn wait_for_worker_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::time_management::{TimeControl, TimeParameters};
 
     #[test]
     fn test_mate_moves_to_pseudo_cp() {
@@ -1250,5 +1251,48 @@ mod tests {
         // Test edge cases
         assert_eq!(mate_moves_to_pseudo_cp(300), Some(MATE_SCORE - 30000));
         assert_eq!(mate_moves_to_pseudo_cp(-300), Some(-MATE_SCORE + 30000));
+    }
+
+    #[test]
+    fn test_budget_from_limits_fixed_time() {
+        let limits = engine_core::search::SearchLimits::builder()
+            .time_control(TimeControl::FixedTime { ms_per_move: 1500 })
+            .build();
+        let (soft, hard) = budget_from_limits(&limits);
+        assert_eq!((soft, hard), (1500, 1500));
+    }
+
+    #[test]
+    fn test_budget_from_limits_byoyomi_with_params() {
+        let params = TimeParameters::default(); // soft_ratio=0.8, hard_reduction=500
+        let limits = engine_core::search::SearchLimits::builder()
+            .byoyomi(0, 10_000, 1)
+            .time_parameters(params)
+            .build();
+        let (soft, hard) = budget_from_limits(&limits);
+        assert_eq!(soft, 8000);
+        assert_eq!(hard, 9500);
+    }
+
+    #[test]
+    fn test_budget_from_limits_ponder_byoyomi() {
+        let params = TimeParameters::default();
+        let limits = engine_core::search::SearchLimits::builder()
+            .byoyomi(0, 6_000, 1)
+            .time_parameters(params)
+            .ponder_with_inner()
+            .build();
+        let (soft, hard) = budget_from_limits(&limits);
+        assert_eq!(soft, 4800); // 6000 * 0.8
+        assert_eq!(hard, 5500); // 6000 - 500
+    }
+
+    #[test]
+    fn test_budget_from_limits_other_zero() {
+        let limits = engine_core::search::SearchLimits::builder()
+            .fixed_nodes(100_000)
+            .build();
+        let (soft, hard) = budget_from_limits(&limits);
+        assert_eq!((soft, hard), (0, 0));
     }
 }
