@@ -193,6 +193,10 @@ pub fn search_worker(
     // Early return if stop was already requested
     if initial_stop_value && !params.ponder {
         log::warn!("Worker: stop flag already set at start, aborting search");
+        let _ = tx.send(WorkerMessage::Error {
+            message: "initial_stop_flag_true_at_worker_start".to_string(),
+            search_id,
+        });
         let _ = tx.send(WorkerMessage::Finished {
             from_guard: false,
             search_id,

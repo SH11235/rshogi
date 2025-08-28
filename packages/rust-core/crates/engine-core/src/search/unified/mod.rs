@@ -313,10 +313,13 @@ where
                                 if valid {
                                     self.stats.pv = tt_pv;
                                 } else {
-                                    log::warn!("TT PV validation failed, keeping triangular PV");
+                                    log::debug!("TT PV validation failed, keeping triangular PV");
                                 }
                             } else {
-                                log::warn!(
+                                // This can happen when TT root entry reflects a different principal line
+                                // than the current triangular PV. It's not a correctness issue.
+                                // Lower severity to debug to avoid log spam.
+                                log::debug!(
                                     "TT PV starts with different move: {} vs {}",
                                     crate::usi::move_to_usi(&tt_pv[0]),
                                     crate::usi::move_to_usi(&self.stats.pv[0])
