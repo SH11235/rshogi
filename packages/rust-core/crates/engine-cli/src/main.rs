@@ -128,6 +128,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut position_state: Option<PositionState> = None; // Position state for recovery
     let mut last_partial_result: Option<(String, u8, i32)> = None; // Cache latest partial result
     let mut legal_moves_check_logged = false; // Track if we've logged the legal moves check status
+    let mut pre_session_fallback: Option<String> = None; // Precomputed fallback move at go-time
 
     // Main event loop - process USI commands and worker messages concurrently
     loop {
@@ -174,6 +175,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             program_start,
                             legal_moves_check_logged: &mut legal_moves_check_logged,
                             last_partial_result: &mut last_partial_result,
+                            pre_session_fallback: &mut pre_session_fallback,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -212,6 +214,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             program_start,
                             legal_moves_check_logged: &mut legal_moves_check_logged,
                             last_partial_result: &mut last_partial_result,
+                            pre_session_fallback: &mut pre_session_fallback,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }

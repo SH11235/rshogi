@@ -63,6 +63,8 @@ pub struct CommandContext<'a> {
     pub legal_moves_check_logged: &'a mut bool, // Track if we've logged the legal moves check status
     /// Last received partial result (move, depth, score) for current search
     pub last_partial_result: &'a mut Option<(String, u8, i32)>,
+    /// Precomputed root fallback move captured at go-time for stop-time emergencies
+    pub pre_session_fallback: &'a mut Option<String>,
 }
 
 /// Build BestmoveMeta from common parameters
@@ -643,6 +645,7 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     // No delay needed - state transitions are atomic
 
     *ctx.current_session = None; // Clear any previous session to avoid reuse
+    *ctx.pre_session_fallback = None; // Clear previous pre-session fallback
 
     // Verify we can start a new search (defensive check)
     if !ctx.search_state.can_start_search() {
@@ -902,6 +905,22 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     // Track if this is a ponder search
     *ctx.current_search_is_ponder = params.ponder;
 
+    // Precompute a root fallback move for immediate stop-after-go scenarios (race hardening)
+    // This mirrors YaneuraOu's RootMove default PV safety at the USI layer
+    {
+        let adapter = lock_or_recover_adapter(ctx.engine);
+        if let Ok(move_str) = adapter.generate_emergency_move() {
+            *ctx.pre_session_fallback = Some(move_str.clone());
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "go_received"),
+                ("ponder", if params.ponder { "1" } else { "0" }),
+                ("pre_session_fallback", &move_str),
+            ]));
+        } else {
+            // Silent if no legal moves; stop path will handle resign
+        }
+    }
+
     // Clone necessary data for worker thread
     let engine_clone = Arc::clone(ctx.engine);
     let stop_clone = search_stop_flag.clone();
@@ -965,6 +984,45 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         stop_flag.store(true, Ordering::SeqCst);
     }
 
+    // Emit diagnostic snapshot for race analysis
+    let diag = log_tsv(&[
+        ("kind", "on_stop"),
+        ("state", &format!("{:?}", *ctx.search_state)),
+        (
+            "ponder",
+            if *ctx.current_search_is_ponder {
+                "1"
+            } else {
+                "0"
+            },
+        ),
+        (
+            "session",
+            if ctx.current_session.is_some() {
+                "1"
+            } else {
+                "0"
+            },
+        ),
+        (
+            "partial",
+            if ctx.last_partial_result.is_some() {
+                "1"
+            } else {
+                "0"
+            },
+        ),
+        (
+            "pre_session_fallback",
+            if ctx.pre_session_fallback.is_some() {
+                "1"
+            } else {
+                "0"
+            },
+        ),
+    ]);
+    let _ = send_info_string(diag);
+
     // Ponder stop: emit immediately for GUI compatibility
     if *ctx.current_search_is_ponder {
         *ctx.current_search_is_ponder = false;
@@ -998,7 +1056,16 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // 3) Emergency fallback
+        // 3) Pre-session fallback captured at go-time
+        if let Some(move_str) = ctx.pre_session_fallback.take() {
+            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+            let _ =
+                send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "pre_session")]));
+            ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
+            return Ok(());
+        }
+
+        // 4) Emergency fallback
         let (move_str, from) = match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
             Ok((m, _)) => (m, BestmoveSource::SessionOnStop),
             Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
