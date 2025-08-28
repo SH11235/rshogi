@@ -62,6 +62,10 @@ pub struct BestmoveMeta {
 pub struct BestmoveEmitter {
     /// Flag to ensure exactly-once emission
     sent: AtomicBool,
+    /// Flag to mark emitter as finalized (no further emissions or logs)
+    finalized: AtomicBool,
+    /// Flag to mark emitter as terminated (gameover/quit detected, no output allowed)
+    terminated: AtomicBool,
     /// Search ID for this emitter
     search_id: u64,
     /// Search start time for elapsed calculation
@@ -76,6 +80,8 @@ impl BestmoveEmitter {
     pub fn new(search_id: u64) -> Self {
         Self {
             sent: AtomicBool::new(false),
+            finalized: AtomicBool::new(false),
+            terminated: AtomicBool::new(false),
             search_id,
             start_time: Instant::now(),
             #[cfg(test)]
@@ -90,6 +96,14 @@ impl BestmoveEmitter {
         ponder: Option<String>,
         mut meta: BestmoveMeta,
     ) -> anyhow::Result<()> {
+        // Suppress if already finalized or terminated
+        if self.finalized.load(Ordering::Acquire) || self.terminated.load(Ordering::Acquire) {
+            log::debug!(
+                "Emitter finalized or terminated for search {}, suppressing emit",
+                self.search_id
+            );
+            return Ok(());
+        }
         // Ensure exactly-once emission
         if self.sent.swap(true, Ordering::AcqRel) {
             log::debug!(
@@ -98,15 +112,6 @@ impl BestmoveEmitter {
                 best_move
             );
             return Ok(());
-        }
-
-        // Test-only: track the BestmoveSource by search_id
-        // This is done AFTER the sent flag check to ensure we only track actually sent moves
-        #[cfg(test)]
-        {
-            if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
-                map.insert(self.search_id, meta.from);
-            }
         }
 
         // Test-only: force error if requested
@@ -154,6 +159,18 @@ impl BestmoveEmitter {
                     meta.stats.depth,
                     meta.stats.nps
                 );
+
+                // Test-only: track the BestmoveSource by search_id
+                // This is done BEFORE finalize to ensure we track successfully sent moves
+                #[cfg(test)]
+                {
+                    if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
+                        map.insert(self.search_id, meta.from);
+                    }
+                }
+
+                // Finalize to prevent further emissions or logs
+                self.finalize();
 
                 // Debug-only observability info
                 #[cfg(debug_assertions)]
@@ -232,6 +249,35 @@ impl BestmoveEmitter {
     pub fn set_start_time(&mut self, start_time: Instant) {
         self.start_time = start_time;
     }
+
+    /// Finalize this emitter: prevent further emissions or delayed logs
+    pub fn finalize(&self) {
+        self.finalized.store(true, Ordering::Release);
+    }
+
+    /// Check if finalized
+    pub fn is_finalized(&self) -> bool {
+        self.finalized.load(Ordering::Acquire)
+    }
+
+    /// Terminate this emitter: mark as gameover/quit, prevent all emissions
+    pub fn terminate(&self) {
+        self.terminated.store(true, Ordering::Release);
+    }
+
+    /// Check if terminated
+    pub fn is_terminated(&self) -> bool {
+        self.terminated.load(Ordering::Acquire)
+    }
+
+    /// Reset emitter state for new search
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.sent.store(false, Ordering::Release);
+        self.finalized.store(false, Ordering::Release);
+        self.terminated.store(false, Ordering::Release);
+        self.start_time = Instant::now();
+    }
 }
 
 #[cfg(test)]
@@ -274,5 +320,33 @@ mod tests {
         let r2 = emitter.emit("7g7f".into(), None, meta);
         assert!(r2.is_ok());
         assert_eq!(last_source_for(42), Some(BestmoveSource::SessionInSearchFinished));
+    }
+
+    #[test]
+    fn test_terminate_prevents_emit() {
+        clear_all_last_sources();
+        let emitter = BestmoveEmitter::new(43);
+        emitter.terminate();
+        let meta = default_meta();
+        // Emit should be suppressed after terminate
+        let r = emitter.emit("7g7f".into(), None, meta);
+        assert!(r.is_ok());
+        // No source should be tracked
+        assert_eq!(last_source_for(43), None);
+    }
+
+    #[test]
+    fn test_finalize_prevents_emit() {
+        clear_all_last_sources();
+        let emitter = BestmoveEmitter::new(44);
+        // First emit and finalize
+        let meta = default_meta();
+        let r1 = emitter.emit("7g7f".into(), None, meta.clone());
+        assert!(r1.is_ok());
+        assert!(emitter.is_finalized()); // Should be auto-finalized after emit
+        // Second emit should be suppressed
+        let r2 = emitter.emit("8h7g".into(), None, meta);
+        assert!(r2.is_ok());
+        assert_eq!(last_source_for(44), Some(BestmoveSource::SessionInSearchFinished));
     }
 }
