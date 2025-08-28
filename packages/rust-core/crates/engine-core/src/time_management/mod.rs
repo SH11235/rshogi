@@ -56,7 +56,7 @@ pub struct TimeManager {
 }
 
 #[cfg(test)]
-pub use test_utils::{mock_advance_time, mock_current_ms, mock_now, mock_set_time};
+pub use test_utils::{mock_advance_time, mock_now, mock_set_time};
 
 /// Internal state shared between threads
 struct TimeManagerInner {
@@ -112,16 +112,12 @@ lazy_static! {
 /// Get current monotonic time in milliseconds since process start
 #[inline]
 pub(crate) fn monotonic_ms() -> u64 {
-    #[cfg(test)]
-    {
-        // In test mode, use mock time
-        mock_current_ms()
-    }
-    #[cfg(not(test))]
-    {
-        MONO_BASE.elapsed().as_millis() as u64
-    }
+    MONO_BASE.elapsed().as_millis() as u64
 }
+
+// Test-only: flag to enable mock time usage
+#[cfg(test)]
+pub(crate) static USE_MOCK_TIME: AtomicBool = AtomicBool::new(false);
 
 impl TimeManager {
     /// Create a new time manager for a search

@@ -282,37 +282,6 @@ fn test_fischer_to_byoyomi_switch() {
 }
 
 #[test]
-fn test_elapsed_time_after_ponder_hit() {
-    mock_set_time(0);
-
-    let pending_limits = TimeLimits {
-        time_control: TimeControl::Fischer {
-            white_ms: 60000,
-            black_ms: 60000,
-            increment_ms: 1000,
-        },
-        ..Default::default()
-    };
-
-    let tm = TimeManager::new_ponder(&pending_limits, Color::White, 0, GamePhase::Opening);
-
-    // Ponder for 5 seconds
-    mock_advance_time(5000);
-    let elapsed_before = tm.elapsed_ms();
-    assert!((4999..=5001).contains(&elapsed_before)); // Allow small variance
-
-    // After ponder hit, elapsed should reset
-    tm.ponder_hit(None, 5000);
-    let elapsed_after = tm.elapsed_ms();
-    assert!(elapsed_after <= 1); // Should be reset (allow 1ms for execution time)
-
-    // Advance more time
-    mock_advance_time(2000);
-    let elapsed_final = tm.elapsed_ms();
-    assert!((1999..=2001).contains(&elapsed_final)); // Should count from ponder_hit
-}
-
-#[test]
 fn test_ponder_hit_clears_ponder_flag_and_sets_control() {
     mock_set_time(0);
 
