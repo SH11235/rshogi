@@ -70,24 +70,28 @@ thread_local! {
 /// Set the global mock time
 #[cfg(test)]
 pub fn mock_set_time(ms: u64) {
+    super::USE_MOCK_TIME.store(true, std::sync::atomic::Ordering::Relaxed);
     MOCK_CLOCK.with(|clock| clock.set_time(ms));
 }
 
 /// Advance the global mock time
 #[cfg(test)]
 pub fn mock_advance_time(ms: u64) {
+    super::USE_MOCK_TIME.store(true, std::sync::atomic::Ordering::Relaxed);
     MOCK_CLOCK.with(|clock| clock.advance(ms));
 }
 
 /// Get the current global mock time as Instant
 #[cfg(test)]
 pub fn mock_now() -> Instant {
+    super::USE_MOCK_TIME.store(true, std::sync::atomic::Ordering::Relaxed);
     MOCK_CLOCK.with(|clock| clock.now())
 }
 
 /// Get the current global mock time in milliseconds
 #[cfg(test)]
 pub fn mock_current_ms() -> u64 {
+    super::USE_MOCK_TIME.store(true, std::sync::atomic::Ordering::Relaxed);
     MOCK_CLOCK.with(|clock| clock.current_ms())
 }
 
