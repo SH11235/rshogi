@@ -497,7 +497,14 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
                 // Mark that we're no longer in pure ponder mode
                 *ctx.current_search_is_ponder = false;
                 match engine.ponder_hit() {
-                    Ok(()) => log::debug!("Ponder hit successfully processed"),
+                    Ok(()) => {
+                        log::debug!("Ponder hit successfully processed");
+                        // Emit USI-visible info for diagnostics (core also logs to stderr)
+                        let _ = crate::usi::send_info_string(
+                            "ponder_hit: converted to normal search (time budgets updated)"
+                                .to_string(),
+                        );
+                    }
                     Err(e) => log::debug!("Ponder hit ignored: {e}"),
                 }
             } else {

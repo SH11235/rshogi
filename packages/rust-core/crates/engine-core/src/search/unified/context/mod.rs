@@ -170,6 +170,32 @@ impl SearchContext {
         time_manager: &Option<Arc<crate::time_management::TimeManager>>,
     ) -> bool {
         if let Some(ref tm) = time_manager {
+            // Proactive early stop near hard limit to allow unwind/commit time
+            let elapsed = self.elapsed();
+            let hard_limit_ms = tm.hard_limit_ms();
+            if hard_limit_ms > 0 {
+                let elapsed_ms = elapsed.as_millis() as u64;
+                // Safety window before hard limit to exit gracefully
+                // Choose the larger of 80ms or 2% of hard limit (capped at 300ms)
+                let two_percent = hard_limit_ms / 50; // 2%
+                let safety_ms = two_percent.clamp(80, 300);
+                if elapsed_ms + safety_ms >= hard_limit_ms {
+                    if !self.time_stop_logged {
+                        log::info!(
+                            "Near hard limit: depth={} nodes={} elapsed={}ms hard={}ms safety={}ms",
+                            self.current_depth,
+                            nodes,
+                            elapsed_ms,
+                            hard_limit_ms,
+                            safety_ms
+                        );
+                        self.time_stop_logged = true;
+                    }
+                    self.stop();
+                    return true;
+                }
+            }
+
             if tm.should_stop(nodes) {
                 // Log once per search (engine-core internal logging)
                 if !self.time_stop_logged {
