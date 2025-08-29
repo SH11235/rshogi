@@ -5,7 +5,7 @@
 
 use engine_core::{
     engine::controller::{Engine, EngineType},
-    shogi::Position,
+    shogi::{Color, Position},
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -114,5 +114,42 @@ impl EngineAdapter {
         // Initialize options
         adapter.init_options();
         adapter
+    }
+
+    /// Get overheads and tuning parameters needed for time control
+    pub fn get_overheads_and_tuning(&self) -> (u32, u32, u32, u8, u64, u64) {
+        (
+            self.overhead_ms as u32,
+            self.byoyomi_overhead_ms as u32,
+            self.byoyomi_safety_ms as u32,
+            self.byoyomi_early_finish_ratio,
+            self.pv_stability_base,
+            self.pv_stability_slope,
+        )
+    }
+
+    /// Set snapshot of search start state (for diagnostics/consistency)
+    pub fn set_search_start_snapshot(&mut self, hash: u64, side: Color) {
+        self.search_start_position_hash = Some(hash);
+        self.search_start_side_to_move = Some(side);
+    }
+
+    /// Set flag indicating whether the last search used byoyomi time control
+    pub fn set_last_search_is_byoyomi(&mut self, value: bool) {
+        self.last_search_is_byoyomi = value;
+    }
+
+    /// Set the current stop flag for the ongoing search
+    pub fn set_current_stop_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.current_stop_flag = Some(flag);
+    }
+
+    /// Begin ponder state and return a new ponder-hit flag
+    pub fn begin_ponder(&mut self) -> Arc<AtomicBool> {
+        self.ponder_state.is_pondering = true;
+        self.ponder_state.ponder_start = Some(std::time::Instant::now());
+        let flag = Arc::new(AtomicBool::new(false));
+        self.active_ponder_hit_flag = Some(flag.clone());
+        flag
     }
 }

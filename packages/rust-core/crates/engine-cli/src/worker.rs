@@ -383,47 +383,20 @@ pub fn search_worker(
                 // Create guard immediately so any panic/early return still returns engine
                 let guard =
                     EngineReturnGuard::new(engine, engine_adapter.clone(), tx.clone(), search_id);
-                let prep_begin = Instant::now();
-                let _ = tx.send(WorkerMessage::Info {
-                    info: SearchInfo {
-                        string: Some(log_tsv(&[
-                            ("kind", "prepare_search_begin"),
-                            ("search_id", &search_id.to_string()),
-                        ])),
-                        ..Default::default()
-                    },
-                    search_id,
-                });
-                match adapter.prepare_search(&params, stop_flag.clone()) {
-                    Ok((pos, lim, flag)) => {
-                        log::debug!("Search prepared successfully");
-                        let prep_el = prep_begin.elapsed();
-                        let _ = tx.send(WorkerMessage::Info {
-                            info: SearchInfo {
-                                string: Some(log_tsv(&[
-                                    ("kind", "prepare_search_end"),
-                                    ("search_id", &search_id.to_string()),
-                                    ("elapsed_ms", &prep_el.as_millis().to_string()),
-                                ])),
-                                ..Default::default()
-                            },
-                            search_id,
-                        });
-                        (guard, pos, lim, flag)
-                    }
-                    Err(e) => {
-                        // Engine will be returned by guard's Drop here
-                        log::error!("Search preparation error: {e}");
-                        let _ = tx.send(WorkerMessage::Error {
-                            message: e.to_string(),
-                            search_id,
-                        });
 
+                // Snapshot minimal adapter state needed for limit computation, then drop lock
+                let pos_snapshot = match adapter.get_position() {
+                    Some(p) => p.clone(),
+                    None => {
+                        log::error!("Position not set at prepare time");
+                        // Engine will be returned by guard's Drop here
+                        let _ = tx.send(WorkerMessage::Error {
+                            message: "Position not set".to_string(),
+                            search_id,
+                        });
                         if !params.ponder {
-                            let root =
-                                adapter.get_position().map(|p| p.zobrist_hash()).unwrap_or(0);
                             let _ = tx.send(WorkerMessage::SearchFinished {
-                                root_hash: root,
+                                root_hash: 0,
                                 search_id,
                                 stop_info: Some(StopInfo {
                                     reason: TerminationReason::Error,
@@ -435,19 +408,146 @@ pub fn search_worker(
                                     hard_limit_ms: 0,
                                 }),
                             });
-                        } else {
-                            log::info!(
-                                "Ponder preparation error, not sending bestmove (USI protocol)"
-                            );
                         }
-
                         let _ = tx.send(WorkerMessage::Finished {
                             from_guard: false,
                             search_id,
                         });
                         return;
                     }
+                };
+                // Copy overhead and tuning params
+                let (
+                    overhead_ms,
+                    byoyomi_overhead_ms,
+                    byoyomi_safety_ms,
+                    byoyomi_early_finish_ratio,
+                    pv_base,
+                    pv_slope,
+                ) = adapter.get_overheads_and_tuning();
+                // Log prep begin and drop lock before heavy work
+                let prep_begin = Instant::now();
+                let _ = tx.send(WorkerMessage::Info {
+                    info: SearchInfo {
+                        string: Some(log_tsv(&[
+                            ("kind", "prepare_search_begin"),
+                            ("search_id", &search_id.to_string()),
+                        ])),
+                        ..Default::default()
+                    },
+                    search_id,
+                });
+                drop(adapter); // release adapter lock early
+
+                // Compute effective byoyomi status without holding adapter lock
+                let is_byoyomi_active = match params.byoyomi {
+                    Some(byo) if byo > 0 && !params.ponder => {
+                        !crate::engine_adapter::time_control::is_fischer_disguised_as_byoyomi(
+                            byo,
+                            params.binc,
+                            params.winc,
+                        )
+                    }
+                    _ => false,
+                };
+                let network_delay2_ms = if is_byoyomi_active {
+                    byoyomi_overhead_ms
+                } else {
+                    0
+                };
+
+                // Early cancel check
+                if stop_flag.load(Ordering::Acquire) {
+                    log::info!("Stop requested during prepare; skipping limit computation");
                 }
+
+                // Apply go params to build limits (lock-free)
+                let limits_res = crate::engine_adapter::time_control::apply_go_params(
+                    &params,
+                    &pos_snapshot,
+                    overhead_ms,
+                    Some(stop_flag.clone()),
+                    byoyomi_safety_ms,
+                    network_delay2_ms,
+                    byoyomi_early_finish_ratio,
+                    pv_base,
+                    pv_slope,
+                );
+                let limits = match limits_res {
+                    Ok(l) => l,
+                    Err(e) => {
+                        // Engine will be returned by guard's Drop here
+                        log::error!("Search preparation (limits) error: {e}");
+                        let _ = tx.send(WorkerMessage::Error {
+                            message: e.to_string(),
+                            search_id,
+                        });
+                        if !params.ponder {
+                            let _ = tx.send(WorkerMessage::SearchFinished {
+                                root_hash: pos_snapshot.zobrist_hash(),
+                                search_id,
+                                stop_info: Some(StopInfo {
+                                    reason: TerminationReason::Error,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 0,
+                                    hard_timeout: false,
+                                    soft_limit_ms: 0,
+                                    hard_limit_ms: 0,
+                                }),
+                            });
+                        }
+                        let _ = tx.send(WorkerMessage::Finished {
+                            from_guard: false,
+                            search_id,
+                        });
+                        return;
+                    }
+                };
+
+                // Re-acquire adapter lock shortly to store flags/state and ponder flag
+                let mut adapter = lock_or_recover_adapter(&engine_adapter);
+                adapter.set_search_start_snapshot(
+                    pos_snapshot.zobrist_hash(),
+                    pos_snapshot.side_to_move,
+                );
+                // Detect if final limits indicate byoyomi
+                match &limits.time_control {
+                    engine_core::time_management::TimeControl::Byoyomi { .. } => {
+                        adapter.set_last_search_is_byoyomi(true);
+                    }
+                    engine_core::time_management::TimeControl::Ponder(inner) => {
+                        let val = matches!(
+                            **inner,
+                            engine_core::time_management::TimeControl::Byoyomi { .. }
+                        );
+                        adapter.set_last_search_is_byoyomi(val);
+                    }
+                    _ => adapter.set_last_search_is_byoyomi(false),
+                }
+                adapter.set_current_stop_flag(stop_flag.clone());
+
+                // Set up ponder hit flag if pondering
+                let ponder_flag_opt = if params.ponder {
+                    Some(adapter.begin_ponder())
+                } else {
+                    None
+                };
+
+                // Done with adapter mutations
+                let prep_el = prep_begin.elapsed();
+                let _ = tx.send(WorkerMessage::Info {
+                    info: SearchInfo {
+                        string: Some(log_tsv(&[
+                            ("kind", "prepare_search_end"),
+                            ("search_id", &search_id.to_string()),
+                            ("elapsed_ms", &prep_el.as_millis().to_string()),
+                        ])),
+                        ..Default::default()
+                    },
+                    search_id,
+                });
+                (guard, pos_snapshot, limits, ponder_flag_opt)
             }
             Err(e) => {
                 log::error!("Failed to take engine: {e}");
@@ -872,7 +972,9 @@ pub fn wait_for_worker_with_timeout(
     let wait_start = Instant::now();
     log::info!("wait_for_worker_with_timeout: started with timeout={timeout:?}");
 
-    let deadline = Instant::now() + timeout.max(MIN_JOIN_TIMEOUT);
+    // Respect the caller-provided timeout; do not clamp to MIN_JOIN_TIMEOUT here.
+    // Shutdown paths should pass MIN_JOIN_TIMEOUT explicitly.
+    let deadline = Instant::now() + timeout;
     let mut finished = false;
     let mut finished_count = 0u32;
 
@@ -1046,7 +1148,7 @@ mod tests {
             .build();
         let (soft, hard) = budget_from_limits(&limits);
         assert_eq!(soft, 4800); // 6000 * 0.8
-        // Hard would be 6000 - 500 - 1000 = 4500, but we clamp to at least soft when hard < soft
+                                // Hard would be 6000 - 500 - 1000 = 4500, but we clamp to at least soft when hard < soft
         assert_eq!(hard, 4800);
     }
 
