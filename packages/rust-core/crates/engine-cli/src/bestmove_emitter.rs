@@ -283,7 +283,7 @@ impl BestmoveEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::BestmoveSource;
+    use crate::usi::output::{test_clear_info_strings, test_take_info_strings};
 
     fn default_meta() -> BestmoveMeta {
         BestmoveMeta {
@@ -309,44 +309,74 @@ mod tests {
 
     #[test]
     fn test_emit_exactly_once_and_source_tracking() {
-        clear_all_last_sources();
+        // Avoid actual stdout writes and clear captured infos
+        std::env::set_var("USI_DRY_RUN", "1");
+        let start_idx0 = crate::usi::output::test_info_len();
+
         let emitter = BestmoveEmitter::new(42);
         let meta = default_meta();
         // First emit
         let r1 = emitter.emit("7g7f".into(), Some("3c3d".into()), meta.clone());
         assert!(r1.is_ok());
-        assert_eq!(last_source_for(42), Some(BestmoveSource::SessionInSearchFinished));
+        assert!(emitter.is_finalized());
+        // Verify bestmove_sent logged once for search_id=42
+        let infos = crate::usi::output::test_info_from(start_idx0);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42"))
+            .count();
+        assert_eq!(sent_count, 1, "bestmove_sent count mismatch: {:?}", infos);
         // Second emit should be no-op
+        let start_idx1 = crate::usi::output::test_info_len();
         let r2 = emitter.emit("7g7f".into(), None, meta);
         assert!(r2.is_ok());
-        assert_eq!(last_source_for(42), Some(BestmoveSource::SessionInSearchFinished));
+        // No additional bestmove_sent logs for search_id=42 (after second emit)
+        let infos = crate::usi::output::test_info_from(start_idx1);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42"))
+            .count();
+        assert_eq!(sent_count, 0, "unexpected extra bestmove_sent: {:?}", infos);
     }
 
     #[test]
     fn test_terminate_prevents_emit() {
-        clear_all_last_sources();
+        std::env::set_var("USI_DRY_RUN", "1");
+        let start_idx = crate::usi::output::test_info_len();
         let emitter = BestmoveEmitter::new(43);
         emitter.terminate();
         let meta = default_meta();
         // Emit should be suppressed after terminate
         let r = emitter.emit("7g7f".into(), None, meta);
         assert!(r.is_ok());
-        // No source should be tracked
-        assert_eq!(last_source_for(43), None);
+        // No bestmove_sent should be logged for search_id=43
+        let infos = crate::usi::output::test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=43"))
+            .count();
+        assert_eq!(sent_count, 0, "bestmove_sent should be suppressed: {:?}", infos);
     }
 
     #[test]
     fn test_finalize_prevents_emit() {
-        clear_all_last_sources();
+        std::env::set_var("USI_DRY_RUN", "1");
+        let start_idx = crate::usi::output::test_info_len();
         let emitter = BestmoveEmitter::new(44);
         // First emit and finalize
         let meta = default_meta();
         let r1 = emitter.emit("7g7f".into(), None, meta.clone());
         assert!(r1.is_ok());
         assert!(emitter.is_finalized()); // Should be auto-finalized after emit
-        // Second emit should be suppressed
+                                         // Second emit should be suppressed
         let r2 = emitter.emit("8h7g".into(), None, meta);
         assert!(r2.is_ok());
-        assert_eq!(last_source_for(44), Some(BestmoveSource::SessionInSearchFinished));
+        // Exactly one bestmove_sent for search_id=44
+        let infos = crate::usi::output::test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=44"))
+            .count();
+        assert_eq!(sent_count, 1, "expected exactly one bestmove_sent: {:?}", infos);
     }
 }
