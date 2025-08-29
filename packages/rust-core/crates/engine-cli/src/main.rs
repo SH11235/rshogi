@@ -26,7 +26,9 @@ use engine_adapter::EngineAdapter;
 use engine_core::search::CommittedIteration;
 use helpers::generate_fallback_move;
 // use search_session::SearchSession;
+use crate::emit_utils::log_tsv;
 use state::SearchState;
+use std::backtrace::Backtrace;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -136,6 +138,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut pre_session_fallback: Option<String> = None; // Precomputed fallback move at go-time
     let mut pre_session_fallback_hash: Option<u64> = None; // Hash when pre_session_fallback was computed
 
+    // Diagnostics: timestamps for cross-event deltas
+    let mut last_bestmove_sent_at: Option<Instant> = None;
+    let mut last_go_begin_at: Option<Instant> = None;
+
     // Main event loop - process USI commands and worker messages concurrently
     loop {
         select! {
@@ -144,6 +150,24 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 match cmd {
                     Ok(cmd) => {
                         log::debug!("USI command received: {cmd:?}");
+                        // Diagnostic: mark command receipt in main loop
+                        let cmd_name = match &cmd {
+                            UsiCommand::Usi => "usi",
+                            UsiCommand::IsReady => "isready",
+                            UsiCommand::Quit => "quit",
+                            UsiCommand::Stop => "stop",
+                            UsiCommand::Position { .. } => "position",
+                            UsiCommand::Go(_) => "go",
+                            UsiCommand::SetOption { .. } => "setoption",
+                            UsiCommand::GameOver { .. } => "gameover",
+                            UsiCommand::PonderHit => "ponderhit",
+                            UsiCommand::UsiNewGame => "usinewgame",
+                        };
+                        let _ = send_info_string(log_tsv(&[("kind", "cmd_rx"), ("cmd", cmd_name)]));
+                        if let Some(t) = last_bestmove_sent_at {
+                            let delta = t.elapsed().as_millis();
+                            let _ = send_info_string(log_tsv(&[("kind", "post_bestmove_to_cmd_rx"), ("elapsed_ms", &delta.to_string()), ("cmd", cmd_name)]));
+                        }
                         match &cmd {
                             UsiCommand::Go(params) => log::info!("[MAIN] Go command received: depth={:?}", params.depth),
                             UsiCommand::Stop => log::info!("[MAIN] Stop command received"),
@@ -189,6 +213,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,
                             current_committed: &mut current_committed,
+                            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                            last_go_begin_at: &mut last_go_begin_at,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -197,6 +223,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 return Err(e);
                             }
                         }
+                        // Diagnostic: mark command handled in main loop
+                        let _ = send_info_string(log_tsv(&[("kind", "cmd_handled"), ("cmd", cmd_name)]));
                     }
                     Err(_) => {
                         log::debug!("Command channel closed");
@@ -230,6 +258,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,
                             current_committed: &mut current_committed,
+                            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                            last_go_begin_at: &mut last_go_begin_at,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -303,6 +333,40 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     log::debug!(
                         "Updated BestmoveEmitter with worker start time for search {search_id}"
                     );
+                }
+                // USI-visible diagnostic: SearchStarted event and delta from go_begin
+                if let Some(t) = *ctx.last_go_begin_at {
+                    let delta = t.elapsed().as_millis() as u64;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "search_started"),
+                        ("search_id", &search_id.to_string()),
+                        ("delta_ms", &delta.to_string()),
+                    ]));
+                    // Threshold for slow path warning (env var SLOW_GO_THRESHOLD_MS, default 500)
+                    let thr_ms = std::env::var("SLOW_GO_THRESHOLD_MS")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(500);
+                    if delta > thr_ms {
+                        let bt = Backtrace::force_capture();
+                        log::warn!(
+                            "Slow go->SearchStarted: {} ms (> {} ms). Backtrace:\n{}",
+                            delta,
+                            thr_ms,
+                            bt
+                        );
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "slow_go_start"),
+                            ("delta_ms", &delta.to_string()),
+                            ("threshold_ms", &thr_ms.to_string()),
+                        ]));
+                    }
+                } else {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "search_started"),
+                        ("search_id", &search_id.to_string()),
+                        ("delta_ms", "-1"),
+                    ]));
                 }
             } else {
                 log::trace!(

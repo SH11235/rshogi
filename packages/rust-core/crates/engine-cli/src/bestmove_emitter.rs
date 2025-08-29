@@ -82,6 +82,11 @@ impl BestmoveEmitter {
         ponder: Option<String>,
         mut meta: BestmoveMeta,
     ) -> anyhow::Result<()> {
+        // Diagnostic: mark emit entry (before stdout write)
+        let _ = send_info_string(crate::emit_utils::log_tsv(&[
+            ("kind", "bestmove_emit_begin"),
+            ("search_id", &self.search_id.to_string()),
+        ]));
         // Suppress if already finalized or terminated
         if self.finalized.load(Ordering::Acquire) || self.terminated.load(Ordering::Acquire) {
             log::debug!(
@@ -136,6 +141,10 @@ impl BestmoveEmitter {
         // Handle send result
         match result {
             Ok(()) => {
+                let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                    ("kind", "bestmove_emit_done"),
+                    ("search_id", &self.search_id.to_string()),
+                ]));
                 // Log after successful sending
                 log::info!(
                     "[BESTMOVE] sent: {} ponder={:?} (search_id={}, depth={}, nps={}, flush=immediate)",

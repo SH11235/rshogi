@@ -1,5 +1,7 @@
+use crate::emit_utils::log_tsv;
 use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::state::SearchState;
+use crate::usi::send_info_string;
 use crate::worker::{lock_or_recover_adapter, wait_for_worker_with_timeout, WorkerMessage};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
@@ -147,6 +149,11 @@ pub fn wait_for_search_completion(
     worker_rx: &Receiver<WorkerMessage>,
     _engine: &Arc<Mutex<EngineAdapter>>,
 ) -> Result<()> {
+    // USI-visible diagnostic begin
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "wait_for_search_begin"),
+        ("state", &format!("{:?}", *search_state)),
+    ]));
     if search_state.is_searching() {
         log::info!("wait_for_search_completion: stopping ongoing search, state={:?}", search_state);
         let stop_start = std::time::Instant::now();
@@ -166,6 +173,10 @@ pub fn wait_for_search_completion(
 
         let stop_duration = stop_start.elapsed();
         log::info!("wait_for_search_completion: completed in {stop_duration:?}");
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "wait_for_search_done"),
+            ("elapsed_ms", &stop_duration.as_millis().to_string()),
+        ]));
 
         // Even if wait failed, ensure we're in a clean state
         if let Err(e) = wait_result {
@@ -180,7 +191,14 @@ pub fn wait_for_search_completion(
             log::error!("wait_for_worker_with_timeout failed at position {position_info}: {e}, forcing clean state");
             *search_state = SearchState::Idle;
             // Drain any remaining messages
-            while worker_rx.try_recv().is_ok() {}
+            let mut drained = 0usize;
+            while worker_rx.try_recv().is_ok() {
+                drained += 1;
+            }
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "wait_for_search_drained"),
+                ("count", &drained.to_string()),
+            ]));
         }
 
         // Always reset stop flag after completion
