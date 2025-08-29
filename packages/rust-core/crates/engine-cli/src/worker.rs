@@ -2,7 +2,7 @@ use crate::emit_utils::log_tsv;
 use crate::engine_adapter::EngineAdapter;
 use crate::state::SearchState;
 use crate::usi::output::{Score, SearchInfo};
-use crate::usi::{send_info_string, GoParams};
+use crate::usi::GoParams;
 use crate::utils::lock_or_recover_generic;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
@@ -79,6 +79,13 @@ pub enum WorkerMessage {
     Info {
         info: SearchInfo,
         search_id: u64,
+    },
+    /// Watchdog fired (time budget elapsed). Main must emit immediately.
+    WatchdogFired {
+        search_id: u64,
+        soft_ms: u64,
+        hard_ms: u64,
+        wait_ms: u64,
     },
 
     /// Search has started
@@ -223,8 +230,8 @@ pub fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<'_, E
             // Force reset engine state to safe defaults
             guard.force_reset_state();
 
-            // Try to notify GUI about the reset
-            let _ = send_info_string("Engine state reset due to error recovery.");
+            // Notify main to emit info about the reset
+            // Note: This function doesn't have tx in scope; skip USI output here.
 
             guard
         }
@@ -524,6 +531,14 @@ pub fn search_worker(
             }
             // If not already stopped, set stop and notify main loop
             if !stop_for_watchdog.load(std::sync::atomic::Ordering::Acquire) {
+                // New explicit watchdog event（メインはこれで即emit）
+                let _ = tx_deadline.send(WorkerMessage::WatchdogFired {
+                    search_id: search_id_for_watchdog,
+                    soft_ms: budget_soft_ms,
+                    hard_ms: budget_hard_ms,
+                    wait_ms,
+                });
+                // 互換: 情報ログ（Writer一元化でメイン経由）
                 let _ = tx_deadline.send(WorkerMessage::Info {
                     info: SearchInfo {
                         string: Some(log_tsv(&[
@@ -535,7 +550,9 @@ pub fn search_worker(
                     },
                     search_id: search_id_for_watchdog,
                 });
+                // 停止フラグ
                 stop_for_watchdog.store(true, std::sync::atomic::Ordering::Release);
+                // 補助: SearchFinished も投げておく
                 let _ = tx_deadline.send(WorkerMessage::SearchFinished {
                     root_hash: root_hash_for_watchdog,
                     search_id: search_id_for_watchdog,
@@ -548,6 +565,15 @@ pub fn search_worker(
                         soft_limit_ms: budget_soft_ms,
                         hard_limit_ms: budget_hard_ms,
                     }),
+                });
+                // 冗長: 少し遅延して Finished も送る
+                let tx_finished = tx_deadline.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    let _ = tx_finished.send(WorkerMessage::Finished {
+                        from_guard: false,
+                        search_id: search_id_for_watchdog,
+                    });
                 });
             }
         });
@@ -857,6 +883,10 @@ pub fn wait_for_worker_with_timeout(
                     Ok(WorkerMessage::SearchStarted { .. }) => {
                         // Search started during shutdown can be ignored
                         log::trace!("SearchStarted during shutdown - ignoring");
+                    }
+                    Ok(WorkerMessage::WatchdogFired { .. }) => {
+                        // Watchdog events during shutdown can be ignored
+                        log::trace!("WatchdogFired during shutdown - ignoring");
                     }
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");
