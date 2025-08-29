@@ -16,22 +16,6 @@ use std::time::Instant;
 static INFO_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 #[cfg(test)]
-/// Take and clear all captured info string messages (test-only)
-pub fn test_take_info_strings() -> Vec<String> {
-    let mut guard = lock_or_recover_generic(&INFO_MESSAGES);
-    let out = guard.clone();
-    guard.clear();
-    out
-}
-
-#[cfg(test)]
-/// Clear captured info string messages (test-only)
-pub fn test_clear_info_strings() {
-    let mut guard = lock_or_recover_generic(&INFO_MESSAGES);
-    guard.clear();
-}
-
-#[cfg(test)]
 /// Get current number of captured info strings (test-only)
 pub fn test_info_len() -> usize {
     let guard = lock_or_recover_generic(&INFO_MESSAGES);

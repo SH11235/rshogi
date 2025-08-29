@@ -454,7 +454,7 @@ mod tests {
         let infos = test_info_from(start_idx);
         let sent_count = infos
             .iter()
-            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=1"))
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=1\t"))
             .count();
         assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
         let found = infos
@@ -531,13 +531,363 @@ mod tests {
         let infos = test_info_from(start_idx);
         let sent_count = infos
             .iter()
-            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=2"))
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=2\t"))
             .count();
         assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
         let found = infos
             .iter()
             .any(|s| s.contains("kind=on_stop_source") && s.contains("src=emergency"));
         assert!(found, "on_stop_source=emergency not found in infos: {:?}", infos);
+    }
+
+    /// Verify stop prefers session when committed best exists
+    #[test]
+    fn test_on_stop_source_session_committed() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        // Engine and position
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+        let root_hash = { engine.lock().unwrap().get_position().unwrap().zobrist_hash() };
+
+        // Build a session with committed best
+        let mut session = SearchSession::new(10, root_hash);
+        let mv = engine_core::usi::parse_usi_move("7g7f").unwrap();
+        session.update_current_best_with_seldepth(12, Some(14), 32, vec![mv]);
+        session.commit_iteration();
+
+        // Channels and stop flag
+        let (tx, rx) = unbounded();
+        let search_stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Context
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 10u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<SearchSession> = Some(session);
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(current_search_id));
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
+        let mut position_state: Option<PositionState> = None;
+        let program_start = Instant::now();
+        let mut legal_moves_check_logged = false;
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+
+        let start_idx = test_info_len();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &Arc::new(AtomicBool::new(false)),
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
+            last_partial_result: &mut last_partial_result,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+        };
+
+        handle_stop_command(&mut ctx).unwrap();
+
+        let infos = test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=10\t"))
+            .count();
+        assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
+        let found = infos
+            .iter()
+            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=session"));
+        assert!(found, "on_stop_source=session not found in infos: {:?}", infos);
+    }
+
+    /// Verify stop uses partial result when available and no committed session exists
+    #[test]
+    fn test_on_stop_source_partial_with_last_result() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        // Engine and position
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Channels and stop flag
+        let (tx, rx) = unbounded();
+        let search_stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Context
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 11u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(current_search_id));
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
+        let mut position_state: Option<PositionState> = None;
+        let program_start = Instant::now();
+        let mut legal_moves_check_logged = false;
+        let mut last_partial_result: Option<(String, u8, i32)> = Some(("7g7f".to_string(), 12, 100));
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+
+        let start_idx = test_info_len();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &Arc::new(AtomicBool::new(false)),
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
+            last_partial_result: &mut last_partial_result,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+        };
+
+        handle_stop_command(&mut ctx).unwrap();
+
+        let infos = test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=11\t"))
+            .count();
+        assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
+        let found = infos
+            .iter()
+            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=partial"));
+        assert!(found, "on_stop_source=partial not found in infos: {:?}", infos);
+    }
+
+    /// Ponder stop should use pre_session if available (hash match)
+    #[test]
+    fn test_ponder_stop_uses_pre_session() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+        let root_hash = { engine.lock().unwrap().get_position().unwrap().zobrist_hash() };
+
+        let (tx, rx) = unbounded();
+        let flag = Arc::new(AtomicBool::new(false));
+
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 20u64;
+        let mut current_search_is_ponder = true;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(current_search_id));
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
+        let mut position_state: Option<PositionState> = None;
+        let program_start = Instant::now();
+        let mut legal_moves_check_logged = false;
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
+        let mut pre_session_fallback_hash: Option<u64> = Some(root_hash);
+
+        let start_idx = test_info_len();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &Arc::new(AtomicBool::new(false)),
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
+            last_partial_result: &mut last_partial_result,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+        };
+
+        handle_stop_command(&mut ctx).unwrap();
+
+        let infos = test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=20\t"))
+            .count();
+        assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
+        let found = infos
+            .iter()
+            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=pre_session"));
+        assert!(found, "ponder on_stop_source=pre_session not found in infos: {:?}", infos);
+    }
+
+    /// Ponder stop with no session/partial/pre_session should use emergency
+    #[test]
+    fn test_ponder_stop_emergency() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let (tx, rx) = unbounded();
+        let flag = Arc::new(AtomicBool::new(false));
+
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 21u64;
+        let mut current_search_is_ponder = true;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(current_search_id));
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
+        let mut position_state: Option<PositionState> = None;
+        let program_start = Instant::now();
+        let mut legal_moves_check_logged = false;
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+
+        let start_idx = test_info_len();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &Arc::new(AtomicBool::new(false)),
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
+            last_partial_result: &mut last_partial_result,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+        };
+
+        handle_stop_command(&mut ctx).unwrap();
+
+        let infos = test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=21\t"))
+            .count();
+        assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
+        let found = infos
+            .iter()
+            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=emergency"));
+        assert!(found, "ponder on_stop_source=emergency not found in infos: {:?}", infos);
+    }
+
+    /// GameOver should finalize without emitting bestmove
+    #[test]
+    fn test_gameover_finalizes_without_bestmove() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let (tx, rx) = unbounded();
+        let flag = Arc::new(AtomicBool::new(false));
+
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 30u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(current_search_id));
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
+        let mut position_state: Option<PositionState> = None;
+        let program_start = Instant::now();
+        let mut legal_moves_check_logged = false;
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+
+        let start_idx = test_info_len();
+
+        // Invoke GameOver
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &Arc::new(AtomicBool::new(false)),
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
+            last_partial_result: &mut last_partial_result,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+        };
+
+        handle_command(UsiCommand::GameOver { result: crate::usi::commands::GameResult::Win }, &mut ctx).unwrap();
+
+        let infos = test_info_from(start_idx);
+        // No bestmove_sent for search_id=30
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=30\t"))
+            .count();
+        assert_eq!(sent_count, 0, "bestmove_sent should NOT be emitted on gameover: {:?}", infos);
+        // Ensure search finalized to idle
+        assert_eq!(*ctx.search_state, SearchState::Idle);
+        assert!(ctx.current_bestmove_emitter.is_none());
     }
 }
 
