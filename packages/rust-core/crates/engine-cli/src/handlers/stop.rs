@@ -1,9 +1,7 @@
 use crate::command_handler::CommandContext;
-use crate::emit_utils::log_tsv;
-use crate::emit_utils::{build_meta, log_on_stop_source};
+use crate::emit_utils::{build_meta, log_on_stop_snapshot, log_on_stop_source};
 use crate::helpers::generate_fallback_move;
 use crate::types::BestmoveSource;
-use crate::usi::send_info_string;
 use crate::worker::lock_or_recover_adapter;
 use anyhow::Result;
 
@@ -19,58 +17,28 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    // Emit diagnostic snapshot for race analysis
-    let diag = log_tsv(&[
-        ("kind", "on_stop"),
-        ("state", &format!("{:?}", *ctx.search_state)),
-        (
-            "ponder",
-            if *ctx.current_search_is_ponder {
-                "1"
-            } else {
-                "0"
-            },
-        ),
-        (
-            "session",
-            if ctx.current_session.is_some() {
-                "1"
-            } else {
-                "0"
-            },
-        ),
-        (
-            "partial",
-            if ctx.last_partial_result.is_some() {
-                "1"
-            } else {
-                "0"
-            },
-        ),
-        (
-            "pre_session_fallback",
-            if ctx.pre_session_fallback.is_some() {
-                "1"
-            } else {
-                "0"
-            },
-        ),
-    ]);
-    let _ = send_info_string(diag);
+    // Emit diagnostic snapshot for race analysis (standardized)
+    log_on_stop_snapshot(
+        &format!("{:?}", *ctx.search_state),
+        *ctx.current_search_is_ponder,
+        ctx.current_committed.is_some(),
+        ctx.last_partial_result.is_some(),
+        ctx.pre_session_fallback.is_some(),
+    );
 
     // Ponder stop: emit immediately for GUI compatibility
     if *ctx.current_search_is_ponder {
         *ctx.current_search_is_ponder = false;
 
-        // 1) Committed session
-        if let Some(session) = ctx.current_session.clone() {
-            if ctx.emit_best_from_session(
-                &session,
+        // 1) Committed iteration
+        if let Some(committed) = ctx.current_committed.clone() {
+            if ctx.emit_best_from_committed(
+                &committed,
                 BestmoveSource::SessionOnStop,
                 None,
-                "PonderSessionOnStop",
+                "PonderCommittedOnStop",
             )? {
-                log_on_stop_source("session");
+                log_on_stop_source("committed");
                 return Ok(());
             }
         }
@@ -101,18 +69,24 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
             if current_hash == *ctx.pre_session_fallback_hash {
                 let move_str = ctx.pre_session_fallback.clone().unwrap();
-                // Validate legality of the pre-session move in current position
+                // Validate and normalize the pre-session move in current position
                 if let Some(pos) = adapter.get_position() {
-                    if engine_core::util::usi_helpers::resolve_usi_move(pos, &move_str).is_none() {
-                        log::debug!("Pre-session fallback move is illegal now; dropping it");
+                    if let Some(norm) =
+                        engine_core::util::usi_helpers::normalize_usi_move_str_logged(
+                            pos, &move_str,
+                        )
+                    {
+                        let move_str = norm;
                         *ctx.pre_session_fallback = None;
                         *ctx.pre_session_fallback_hash = None;
-                    } else {
-                        let move_str = ctx.pre_session_fallback.take().unwrap();
                         let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
                         log_on_stop_source("pre_session");
                         ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
                         return Ok(());
+                    } else {
+                        log::debug!("Pre-session fallback move is illegal now; dropping it");
+                        *ctx.pre_session_fallback = None;
+                        *ctx.pre_session_fallback_hash = None;
                     }
                 }
             } else {
@@ -138,15 +112,15 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         return Ok(());
     }
 
-    // Normal stop: emit immediately (session → partial → pre_session → emergency)
-    if let Some(session) = ctx.current_session.clone() {
-        if ctx.emit_best_from_session(
-            &session,
+    // Normal stop: emit immediately (committed → partial → pre_session → emergency)
+    if let Some(committed) = ctx.current_committed.clone() {
+        if ctx.emit_best_from_committed(
+            &committed,
             BestmoveSource::SessionOnStop,
             None,
-            "SessionOnStop",
+            "CommittedOnStop",
         )? {
-            log_on_stop_source("session");
+            log_on_stop_source("committed");
             return Ok(());
         }
     }
@@ -177,16 +151,20 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         if current_hash == *ctx.pre_session_fallback_hash {
             let move_str = ctx.pre_session_fallback.clone().unwrap();
             if let Some(pos) = adapter.get_position() {
-                if engine_core::util::usi_helpers::resolve_usi_move(pos, &move_str).is_none() {
-                    log::debug!("Pre-session fallback move is illegal (normal stop); dropping it");
+                if let Some(norm) =
+                    engine_core::util::usi_helpers::normalize_usi_move_str_logged(pos, &move_str)
+                {
+                    let move_str = norm;
                     *ctx.pre_session_fallback = None;
                     *ctx.pre_session_fallback_hash = None;
-                } else {
-                    let move_str = ctx.pre_session_fallback.take().unwrap();
                     let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
                     log_on_stop_source("pre_session");
                     ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStop")?;
                     return Ok(());
+                } else {
+                    log::debug!("Pre-session fallback move is illegal (normal stop); dropping it");
+                    *ctx.pre_session_fallback = None;
+                    *ctx.pre_session_fallback_hash = None;
                 }
             }
         } else {

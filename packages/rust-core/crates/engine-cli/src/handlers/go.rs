@@ -1,12 +1,12 @@
 use crate::bestmove_emitter::BestmoveEmitter;
 use crate::command_handler::CommandContext;
 use crate::emit_utils::{
-    log_position_restore_fallback, log_position_restore_resign, log_position_restore_success,
-    log_position_restore_try, log_tsv,
+    log_go_received, log_position_restore_fallback, log_position_restore_resign,
+    log_position_restore_success, log_position_restore_try,
 };
 use crate::handlers::common::resign_on_position_restore_fail;
 use crate::helpers::wait_for_search_completion;
-use crate::usi::{send_info_string, send_response, GoParams, UsiResponse};
+use crate::usi::{send_response, GoParams, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
@@ -67,7 +67,8 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         }
     }
 
-    *ctx.current_session = None; // Clear any previous session to avoid reuse
+    // legacy session removed
+    *ctx.current_committed = None; // Clear any previous committed iteration
     *ctx.pre_session_fallback = None; // Clear previous pre-session fallback
     *ctx.pre_session_fallback_hash = None; // Clear previous hash
 
@@ -245,18 +246,46 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     // Track if this is a ponder search
     *ctx.current_search_is_ponder = params.ponder;
 
-    // Precompute a root fallback move
+    // Precompute a root fallback move (normalized and verified)
     {
-        let adapter = lock_or_recover_adapter(ctx.engine);
-        if let Ok(move_str) = adapter.generate_emergency_move() {
-            // Store fallback move and current position hash
-            *ctx.pre_session_fallback = Some(move_str.clone());
-            *ctx.pre_session_fallback_hash = adapter.get_position().map(|p| p.zobrist_hash());
-            let _ = send_info_string(log_tsv(&[
-                ("kind", "go_received"),
-                ("ponder", if params.ponder { "1" } else { "0" }),
-                ("pre_session_fallback", &move_str),
-            ]));
+        let mut adapter = lock_or_recover_adapter(ctx.engine);
+        let pos_opt = adapter.get_position().cloned();
+        if let Some(pos_clone) = pos_opt {
+            let mut fallback_usi: Option<String> = None;
+            // Optional fast shallow search for a better fallback (USI options driven)
+            if adapter.quick_fallback_enabled {
+                if let Ok(mut eng) = adapter.take_engine() {
+                    if let Some(mv) = engine_core::util::search_helpers::quick_search_move(
+                        &mut eng,
+                        &pos_clone,
+                        adapter.quick_fallback_depth,
+                        adapter.quick_fallback_time_ms,
+                    ) {
+                        fallback_usi = Some(engine_core::usi::move_to_usi(&mv));
+                    }
+                    adapter.return_engine(eng);
+                }
+            }
+            if fallback_usi.is_none() {
+                if let Ok(m) = adapter.generate_emergency_move() {
+                    fallback_usi = Some(m);
+                }
+            }
+            if let Some(mstr) = fallback_usi {
+                if let Some(norm) =
+                    engine_core::util::usi_helpers::normalize_usi_move_str_logged(&pos_clone, &mstr)
+                {
+                    *ctx.pre_session_fallback = Some(norm.clone());
+                    *ctx.pre_session_fallback_hash = Some(pos_clone.zobrist_hash());
+                    log_go_received(params.ponder, Some(&norm));
+                } else {
+                    log_go_received(params.ponder, None);
+                }
+            } else {
+                log_go_received(params.ponder, None);
+            }
+        } else {
+            log_go_received(params.ponder, None);
         }
     }
 

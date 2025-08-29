@@ -143,6 +143,7 @@ fn test_qnodes_token_return_on_stop() {
         time_parameters: None,
         stop_flag: Some(stop_flag),
         info_callback: None,
+        iteration_callback: None,
         ponder_hit_flag: None,
     });
 
@@ -195,6 +196,7 @@ fn test_qnodes_token_return_on_limit_exceeded() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        iteration_callback: None,
         ponder_hit_flag: None,
     });
 

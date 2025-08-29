@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::constants::DEFAULT_SEARCH_DEPTH;
-use super::types::InfoCallback;
+use super::types::{InfoCallback, IterationCallback};
 
 /// Unified search limits combining time control with other constraints
 pub struct SearchLimits {
@@ -20,6 +20,8 @@ pub struct SearchLimits {
     pub stop_flag: Option<Arc<AtomicBool>>,
     /// Info callback for search progress (temporarily kept for compatibility)
     pub info_callback: Option<InfoCallback>,
+    /// Iteration callback for committed iteration results
+    pub iteration_callback: Option<IterationCallback>,
     /// Ponder hit flag for converting ponder search to normal search
     pub ponder_hit_flag: Option<Arc<AtomicBool>>,
     /// Internal: Shared qnodes counter for parallel search
@@ -39,6 +41,7 @@ impl Default for SearchLimits {
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
+            iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
         }
@@ -104,6 +107,7 @@ pub struct SearchLimitsBuilder {
     time_parameters: Option<TimeParameters>,
     stop_flag: Option<Arc<AtomicBool>>,
     info_callback: Option<InfoCallback>,
+    iteration_callback: Option<IterationCallback>,
     ponder_hit_flag: Option<Arc<AtomicBool>>,
 }
 
@@ -118,6 +122,7 @@ impl Default for SearchLimitsBuilder {
             time_parameters: None,
             stop_flag: None,
             info_callback: None,
+            iteration_callback: None,
             ponder_hit_flag: None,
         }
     }
@@ -244,6 +249,12 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set iteration callback
+    pub fn iteration_callback(mut self, callback: IterationCallback) -> Self {
+        self.iteration_callback = Some(callback);
+        self
+    }
+
     /// Set ponder hit flag
     pub fn ponder_hit_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.ponder_hit_flag = Some(flag);
@@ -280,6 +291,7 @@ impl SearchLimitsBuilder {
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag,
             info_callback: self.info_callback,
+            iteration_callback: self.iteration_callback,
             ponder_hit_flag: self.ponder_hit_flag,
             qnodes_counter: None,
         }
@@ -305,6 +317,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             time_parameters: tm.time_parameters,
             stop_flag: None,
             info_callback: None,
+            iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
         }
@@ -349,6 +362,7 @@ impl Clone for SearchLimits {
             time_parameters: self.time_parameters,
             stop_flag: self.stop_flag.clone(),
             info_callback: self.info_callback.clone(), // Arc can be cloned
+            iteration_callback: self.iteration_callback.clone(),
             ponder_hit_flag: self.ponder_hit_flag.clone(),
             qnodes_counter: self.qnodes_counter.clone(),
         }
@@ -370,6 +384,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("time_parameters", &self.time_parameters)
             .field("stop_flag", &self.stop_flag.is_some())
             .field("info_callback", &self.info_callback.is_some())
+            .field("iteration_callback", &self.iteration_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
             .field("qnodes_counter", &self.qnodes_counter.is_some())
             .finish()

@@ -8,6 +8,9 @@ use std::time::Duration;
 /// Info callback type for search progress reporting
 pub type InfoCallback = Arc<dyn Fn(u8, i32, u64, Duration, &[Move], NodeType) + Send + Sync>;
 
+/// Iteration callback type for committed iteration results
+pub type IterationCallback = Arc<dyn Fn(&CommittedIteration) + Send + Sync>;
+
 /// Search statistics
 #[derive(Clone, Debug, Default)]
 pub struct SearchStats {
@@ -154,6 +157,25 @@ impl SearchResult {
             }),
         }
     }
+}
+
+/// A committed iteration result emitted by the searcher
+#[derive(Clone, Debug)]
+pub struct CommittedIteration {
+    /// Depth reached at this iteration
+    pub depth: u8,
+    /// Selective depth (optional)
+    pub seldepth: Option<u8>,
+    /// Evaluation score (engine internal scale)
+    pub score: i32,
+    /// Principal variation (non-empty)
+    pub pv: Vec<Move>,
+    /// Node type (Exact/UpperBound/LowerBound)
+    pub node_type: NodeType,
+    /// Total nodes searched so far (across threads)
+    pub nodes: u64,
+    /// Elapsed time since search start
+    pub elapsed: Duration,
 }
 
 /// Node type in alpha-beta search

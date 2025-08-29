@@ -7,7 +7,7 @@ mod engine_adapter;
 mod flushing_logger;
 mod handlers;
 mod helpers;
-mod search_session;
+// mod search_session; // removed after migrating to core committed iterations
 mod state;
 mod stdin_reader;
 mod types;
@@ -16,14 +16,16 @@ mod utils;
 mod worker;
 
 use crate::emit_utils::build_meta;
+// use crate::usi::output::Score; // not needed after session removal
 use anyhow::Result;
 use bestmove_emitter::BestmoveEmitter;
 use clap::Parser;
 use command_handler::{handle_command, CommandContext};
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
+use engine_core::search::CommittedIteration;
 use helpers::generate_fallback_move;
-use search_session::SearchSession;
+// use search_session::SearchSession;
 use state::SearchState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -125,7 +127,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut search_id_counter = 0u64;
     let mut current_search_id = 0u64;
     let mut current_search_is_ponder = false; // Track if current search is ponder
-    let mut current_session: Option<SearchSession> = None; // Current search session
+                                              // let mut current_session: Option<SearchSession> = None; // legacy session (removed)
+    let mut current_committed: Option<CommittedIteration> = None; // Latest committed iteration
     let mut current_bestmove_emitter: Option<BestmoveEmitter> = None; // Current search's emitter
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
     let mut position_state: Option<PositionState> = None; // Position state for recovery
@@ -165,6 +168,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         }
 
                         // Handle other commands
+                        let mut _legacy_session: Option<()> = None;
                         let mut ctx = CommandContext {
                             engine: &engine,
                             stop_flag: &stop_flag,
@@ -175,7 +179,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             search_id_counter: &mut search_id_counter,
                             current_search_id: &mut current_search_id,
                             current_search_is_ponder: &mut current_search_is_ponder,
-                            current_session: &mut current_session,
+                            current_session: &mut _legacy_session,
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
@@ -184,6 +188,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             last_partial_result: &mut last_partial_result,
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                            current_committed: &mut current_committed,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -204,6 +209,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
             recv(worker_rx) -> msg => {
                 match msg {
                     Ok(msg) => {
+                        let mut _legacy_session2: Option<()> = None;
                         let mut ctx = CommandContext {
                             engine: &engine,
                             stop_flag: &stop_flag,
@@ -214,7 +220,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             search_id_counter: &mut search_id_counter,
                             current_search_id: &mut current_search_id,
                             current_search_is_ponder: &mut current_search_is_ponder,
-                            current_session: &mut current_session,
+                            current_session: &mut _legacy_session2,
                             current_bestmove_emitter: &mut current_bestmove_emitter,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
@@ -223,6 +229,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             last_partial_result: &mut last_partial_result,
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                            current_committed: &mut current_committed,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -305,14 +312,16 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             }
         }
 
-        WorkerMessage::IterationComplete { session, search_id } => {
-            // Update current session if it's for current search
+        // IterationComplete removed
+        WorkerMessage::IterationCommitted {
+            committed,
+            search_id,
+        } => {
             if search_id == *ctx.current_search_id {
-                // Check if emitter is finalized or terminated
                 if let Some(ref emitter) = ctx.current_bestmove_emitter {
                     if emitter.is_finalized() || emitter.is_terminated() {
                         log::debug!(
-                            "Ignoring IterationComplete: emitter finalized={} terminated={}",
+                            "Ignoring IterationCommitted: emitter finalized={} terminated={}",
                             emitter.is_finalized(),
                             emitter.is_terminated()
                         );
@@ -320,21 +329,20 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     }
                 }
                 log::debug!(
-                    "Iteration complete for search {}, depth: {:?}",
+                    "IterationCommitted for search {}, depth: {}",
                     search_id,
-                    session.committed_best.as_ref().map(|b| b.depth)
+                    committed.depth
                 );
-                *ctx.current_session = Some(*session);
+                *ctx.current_committed = Some(committed);
             } else {
                 log::trace!(
-                    "Ignoring iteration from old search: {search_id} (current: {})",
+                    "Ignoring IterationCommitted from old search: {search_id} (current: {})",
                     *ctx.current_search_id
                 );
             }
         }
 
         WorkerMessage::SearchFinished {
-            session_id,
             root_hash,
             search_id,
             stop_info,
@@ -342,7 +350,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             // Handle search completion for current search
             // Only process if we're still in Searching state (not StopRequested)
             if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Searching {
-                log::info!("Search {search_id} finished (session_id: {session_id}, root_hash: {root_hash:016x})");
+                log::info!("Search {search_id} finished (root_hash: {root_hash:016x})");
 
                 // Check if emitter is finalized or terminated
                 if let Some(ref emitter) = ctx.current_bestmove_emitter {
@@ -359,53 +367,28 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 // Send bestmove immediately if not ponder
                 if !*ctx.current_search_is_ponder {
                     if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                        // Try to use session-based bestmove
-                        if let Some(ref session) = ctx.current_session {
-                            log::debug!("Using session for bestmove generation");
-                            let adapter = lock_or_recover_adapter(ctx.engine);
-                            if let Some(position) = adapter.get_position() {
-                                match adapter.validate_and_get_bestmove(session, position) {
-                                    Ok((best_move, ponder, _ponder_source)) => {
-                                        // Prepare bestmove metadata
-                                        let depth = session
-                                            .committed_best
-                                            .as_ref()
-                                            .map(|b| b.depth)
-                                            .unwrap_or(0);
-                                        let seldepth = session
-                                            .committed_best
-                                            .as_ref()
-                                            .and_then(|b| b.seldepth);
-                                        let score_str = session.committed_best.as_ref().map(|b| {
-                                            match &b.score {
-                                                search_session::Score::Cp(cp) => format!("cp {cp}"),
-                                                search_session::Score::Mate(mate) => {
-                                                    format!("mate {mate}")
-                                                }
-                                            }
-                                        });
+                        // Prefer committed iteration
+                        if let Some(committed) = ctx.current_committed.clone() {
+                            log::debug!("Using committed iteration for bestmove generation");
+                            if ctx.emit_best_from_committed(
+                                &committed,
+                                BestmoveSource::SessionInSearchFinished,
+                                stop_info.clone(),
+                                "SearchFinishedCommitted",
+                            )? {
+                                return Ok(());
+                            }
+                        }
 
-                                        let meta = build_meta(
-                                            BestmoveSource::SessionInSearchFinished,
-                                            depth,
-                                            seldepth,
-                                            score_str,
-                                            stop_info,
-                                        );
-
-                                        return ctx.emit_and_finalize(
-                                            best_move,
-                                            ponder,
-                                            meta,
-                                            "SearchFinished with bestmove",
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "Session validation failed in SearchFinished: {e}"
-                                        );
-                                    }
-                                }
+                        // Try committed-based bestmove
+                        if let Some(committed) = ctx.current_committed.clone() {
+                            if ctx.emit_best_from_committed(
+                                &committed,
+                                BestmoveSource::SessionInSearchFinished,
+                                stop_info.clone(),
+                                "SearchFinishedCommitted",
+                            )? {
+                                return Ok(());
                             }
                         }
 
@@ -449,19 +432,21 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         // No emitter available - send bestmove directly
                         log::error!("No BestmoveEmitter available for search {search_id}");
 
-                        // Try session first
-                        if let Some(ref session) = ctx.current_session {
+                        // Try committed first
+                        if let Some(ref committed) = ctx.current_committed {
                             let adapter = lock_or_recover_adapter(ctx.engine);
                             if let Some(position) = adapter.get_position() {
-                                if let Ok((best_move, ponder, _ponder_source)) =
-                                    adapter.validate_and_get_bestmove(session, position)
+                                if let Ok((best_move, ponder, _)) = adapter
+                                    .validate_and_get_bestmove_from_committed(committed, position)
                                 {
                                     send_response(UsiResponse::BestMove { best_move, ponder })?;
-                                    ctx.finalize_search("SearchFinished direct send");
+                                    ctx.finalize_search("SearchFinished direct send committed");
                                     return Ok(());
                                 }
                             }
                         }
+
+                        // No committed, fall back to emergency
 
                         // Fallback
                         match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
@@ -537,41 +522,21 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     "Worker Finished without SearchFinished (from_guard: {from_guard}), emitting fallback"
                 );
 
-                // Try session-based bestmove first
-                if let Some(ref session) = ctx.current_session {
+                // Try committed-based bestmove first
+                if let Some(committed) = ctx.current_committed.clone() {
                     if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                        let adapter = lock_or_recover_adapter(ctx.engine);
-                        if let Some(position) = adapter.get_position() {
-                            if let Ok((best_move, ponder, _)) =
-                                adapter.validate_and_get_bestmove(session, position)
-                            {
-                                let depth =
-                                    session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-                                let seldepth =
-                                    session.committed_best.as_ref().and_then(|b| b.seldepth);
-                                let score_str =
-                                    session.committed_best.as_ref().map(|b| match &b.score {
-                                        search_session::Score::Cp(cp) => format!("cp {cp}"),
-                                        search_session::Score::Mate(mate) => format!("mate {mate}"),
-                                    });
-                                let meta = build_meta(
-                                    BestmoveSource::EmergencyFallbackOnFinish,
-                                    depth,
-                                    seldepth,
-                                    score_str,
-                                    None,
-                                );
-                                ctx.emit_and_finalize(
-                                    best_move,
-                                    ponder,
-                                    meta,
-                                    "FinishedSessionFallback",
-                                )?;
-                                return Ok(());
-                            }
+                        if ctx.emit_best_from_committed(
+                            &committed,
+                            BestmoveSource::EmergencyFallbackOnFinish,
+                            None,
+                            "FinishedCommittedFallback",
+                        )? {
+                            return Ok(());
                         }
                     }
                 }
+
+                // Session path removed
 
                 // Fallback: use cached partial result if available
                 if let Some((mv, d, s)) = ctx.last_partial_result.clone() {

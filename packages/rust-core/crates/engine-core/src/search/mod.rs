@@ -19,5 +19,8 @@ pub use common::{is_mate_score, mate_distance_pruning, mate_score, LimitChecker}
 pub use constants::*;
 pub use limits::{SearchLimits, SearchLimitsBuilder};
 pub use tt::TranspositionTable;
-pub use types::{InfoCallback, NodeType, SearchResult, SearchStack, SearchState, SearchStats};
+pub use types::{
+    CommittedIteration, InfoCallback, IterationCallback, NodeType, SearchResult, SearchStack,
+    SearchState, SearchStats,
+};
 pub use unified::context::SearchContext;

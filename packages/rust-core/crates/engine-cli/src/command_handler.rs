@@ -1,6 +1,5 @@
 use crate::engine_adapter::EngineAdapter;
 // use crate::helpers::{generate_fallback_move, wait_for_search_completion};
-use crate::search_session::SearchSession;
 use crate::state::SearchState;
 use crate::types::{BestmoveSource, PositionState};
 use crate::usi::{send_info_string, send_response, UsiCommand, UsiResponse};
@@ -14,7 +13,7 @@ use std::time::Instant;
 
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta};
 use crate::emit_utils::{build_meta, log_tsv};
-use engine_core::search::types::StopInfo;
+use engine_core::search::{types::StopInfo, CommittedIteration};
 
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
@@ -27,7 +26,10 @@ pub struct CommandContext<'a> {
     pub search_id_counter: &'a mut u64,
     pub current_search_id: &'a mut u64,
     pub current_search_is_ponder: &'a mut bool,
-    pub current_session: &'a mut Option<SearchSession>,
+    // legacy session removed
+    pub current_session: &'a mut Option<()>,
+    /// Latest committed iteration from core (preferred over session)
+    pub current_committed: &'a mut Option<CommittedIteration>,
     pub current_bestmove_emitter: &'a mut Option<BestmoveEmitter>,
     pub current_stop_flag: &'a mut Option<Arc<AtomicBool>>, // Per-search stop flag
     pub allow_null_move: bool,
@@ -42,11 +44,10 @@ pub struct CommandContext<'a> {
 }
 
 impl<'a> CommandContext<'a> {
-    /// Try to emit bestmove from session
-    /// Returns Ok(true) if bestmove was successfully emitted
-    pub(crate) fn emit_best_from_session(
+    /// Try to emit bestmove from a committed iteration
+    pub(crate) fn emit_best_from_committed(
         &mut self,
-        session: &SearchSession,
+        committed: &CommittedIteration,
         from: BestmoveSource,
         stop_info: Option<StopInfo>,
         finalize_label: &str,
@@ -54,24 +55,17 @@ impl<'a> CommandContext<'a> {
         let adapter = lock_or_recover_adapter(self.engine);
         if let Some(position) = adapter.get_position() {
             if let Ok((best_move, ponder, ponder_source)) =
-                adapter.validate_and_get_bestmove(session, position)
+                adapter.validate_and_get_bestmove_from_committed(committed, position)
             {
-                // Extract common score formatting and metadata
-                let depth = session.committed_best.as_ref().map(|b| b.depth).unwrap_or(0);
-                let seldepth = session.committed_best.as_ref().and_then(|b| b.seldepth);
-                let score_str = session.committed_best.as_ref().map(|b| match &b.score {
-                    crate::search_session::Score::Cp(cp) => format!("cp {cp}"),
-                    crate::search_session::Score::Mate(mate) => format!("mate {mate}"),
+                // Build score string from engine-internal score
+                let score_enum = crate::utils::to_usi_score(committed.score);
+                let score_str = Some(match score_enum {
+                    crate::usi::output::Score::Cp(cp) => format!("cp {cp}"),
+                    crate::usi::output::Score::Mate(m) => format!("mate {m}"),
                 });
 
-                log::debug!("Validated bestmove from session: depth={depth}");
-
-                // Metrics: PV長・Ponderソース
-                let pv_len_str = session
-                    .committed_best
-                    .as_ref()
-                    .map(|b| b.pv.len().to_string())
-                    .unwrap_or_else(|| "0".to_string());
+                // Metrics
+                let pv_len_str = committed.pv.len().to_string();
                 let ponder_src_str = ponder_source.to_string();
                 let metrics = log_tsv(&[
                     ("kind", "bestmove_metrics"),
@@ -82,7 +76,8 @@ impl<'a> CommandContext<'a> {
                 ]);
                 let _ = send_info_string(metrics);
 
-                let meta = build_meta(from, depth, seldepth, score_str, stop_info);
+                let meta =
+                    build_meta(from, committed.depth, committed.seldepth, score_str, stop_info);
                 self.emit_and_finalize(best_move, ponder, meta, finalize_label)?;
                 return Ok(true);
             }
@@ -305,7 +300,8 @@ mod tests {
     use crate::engine_adapter::EngineAdapter;
     use crate::usi::output::{test_info_from, test_info_len};
     use crossbeam_channel::unbounded;
-    use engine_core::search::types::TerminationReason;
+    use engine_core::search::{types::TerminationReason, CommittedIteration, NodeType};
+    use engine_core::usi::parse_usi_move;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
@@ -400,7 +396,7 @@ mod tests {
         let mut search_id_counter = 0u64;
         let mut current_search_id = 1u64;
         let mut current_search_is_ponder = false;
-        let mut current_session: Option<SearchSession> = None;
+        let mut current_session: Option<()> = None;
         let mut current_bestmove_emitter: Option<BestmoveEmitter> =
             Some(BestmoveEmitter::new(current_search_id));
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
@@ -432,6 +428,7 @@ mod tests {
             last_partial_result: &mut last_partial_result,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut None,
         };
 
         // Execute stop
@@ -475,7 +472,7 @@ mod tests {
         let mut search_id_counter = 0u64;
         let mut current_search_id = 2u64;
         let mut current_search_is_ponder = false;
-        let mut current_session: Option<SearchSession> = None;
+        let mut current_session: Option<()> = None;
         let mut current_bestmove_emitter: Option<BestmoveEmitter> =
             Some(BestmoveEmitter::new(current_search_id));
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
@@ -484,6 +481,7 @@ mod tests {
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
         let mut pre_session_fallback_hash: Option<u64> = Some(0); // Intentional mismatch
+        let mut current_committed: Option<CommittedIteration> = None;
 
         // Clear test hooks
         let start_idx = test_info_len();
@@ -507,6 +505,7 @@ mod tests {
             last_partial_result: &mut last_partial_result,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut current_committed,
         };
 
         // Execute stop
@@ -525,7 +524,7 @@ mod tests {
         assert!(found, "on_stop_source=emergency not found in infos: {:?}", infos);
     }
 
-    /// Verify stop prefers session when committed best exists
+    /// Verify stop prefers committed when committed best exists
     #[test]
     fn test_on_stop_source_session_committed() {
         std::env::set_var("USI_DRY_RUN", "1");
@@ -536,13 +535,18 @@ mod tests {
             let mut adapter = engine.lock().unwrap();
             adapter.set_position(true, None, &[]).unwrap();
         }
-        let root_hash = { engine.lock().unwrap().get_position().unwrap().zobrist_hash() };
 
-        // Build a session with committed best
-        let mut session = SearchSession::new(10, root_hash);
-        let mv = engine_core::usi::parse_usi_move("7g7f").unwrap();
-        session.update_current_best_with_seldepth(12, Some(14), 32, vec![mv]);
-        session.commit_iteration();
+        // Build a committed iteration best
+        let mv = parse_usi_move("7g7f").unwrap();
+        let committed_iter = CommittedIteration {
+            depth: 12,
+            seldepth: Some(14),
+            score: 32,
+            pv: vec![mv],
+            node_type: NodeType::Exact,
+            nodes: 0,
+            elapsed: std::time::Duration::from_millis(0),
+        };
 
         // Channels and stop flag
         let (tx, rx) = unbounded();
@@ -554,7 +558,7 @@ mod tests {
         let mut search_id_counter = 0u64;
         let mut current_search_id = 10u64;
         let mut current_search_is_ponder = false;
-        let mut current_session: Option<SearchSession> = Some(session);
+        let mut current_session: Option<()> = None;
         let mut current_bestmove_emitter: Option<BestmoveEmitter> =
             Some(BestmoveEmitter::new(current_search_id));
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
@@ -563,6 +567,7 @@ mod tests {
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = None;
         let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut current_committed: Option<CommittedIteration> = Some(committed_iter);
 
         let start_idx = test_info_len();
 
@@ -585,6 +590,7 @@ mod tests {
             last_partial_result: &mut last_partial_result,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut current_committed,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -597,8 +603,8 @@ mod tests {
         assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
         let found = infos
             .iter()
-            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=session"));
-        assert!(found, "on_stop_source=session not found in infos: {:?}", infos);
+            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=committed"));
+        assert!(found, "on_stop_source=committed not found in infos: {:?}", infos);
     }
 
     /// Verify stop uses partial result when available and no committed session exists
@@ -623,7 +629,7 @@ mod tests {
         let mut search_id_counter = 0u64;
         let mut current_search_id = 11u64;
         let mut current_search_is_ponder = false;
-        let mut current_session: Option<SearchSession> = None;
+        let mut current_session: Option<()> = None;
         let mut current_bestmove_emitter: Option<BestmoveEmitter> =
             Some(BestmoveEmitter::new(current_search_id));
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
@@ -633,6 +639,7 @@ mod tests {
             Some(("7g7f".to_string(), 12, 100));
         let mut pre_session_fallback: Option<String> = None;
         let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut current_committed: Option<CommittedIteration> = None;
 
         let start_idx = test_info_len();
 
@@ -655,6 +662,7 @@ mod tests {
             last_partial_result: &mut last_partial_result,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut current_committed,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -691,7 +699,7 @@ mod tests {
         let mut search_id_counter = 0u64;
         let mut current_search_id = 20u64;
         let mut current_search_is_ponder = true;
-        let mut current_session: Option<SearchSession> = None;
+        let mut current_session: Option<()> = None;
         let mut current_bestmove_emitter: Option<BestmoveEmitter> =
             Some(BestmoveEmitter::new(current_search_id));
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
@@ -722,6 +730,7 @@ mod tests {
             last_partial_result: &mut last_partial_result,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut None,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -757,7 +766,7 @@ mod tests {
         let mut search_id_counter = 0u64;
         let mut current_search_id = 21u64;
         let mut current_search_is_ponder = true;
-        let mut current_session: Option<SearchSession> = None;
+        let mut current_session: Option<()> = None;
         let mut current_bestmove_emitter: Option<BestmoveEmitter> =
             Some(BestmoveEmitter::new(current_search_id));
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
@@ -788,6 +797,7 @@ mod tests {
             last_partial_result: &mut last_partial_result,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut None,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -823,7 +833,7 @@ mod tests {
         let mut search_id_counter = 0u64;
         let mut current_search_id = 30u64;
         let mut current_search_is_ponder = false;
-        let mut current_session: Option<SearchSession> = None;
+        let mut current_session: Option<()> = None;
         let mut current_bestmove_emitter: Option<BestmoveEmitter> =
             Some(BestmoveEmitter::new(current_search_id));
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
@@ -855,6 +865,7 @@ mod tests {
             last_partial_result: &mut last_partial_result,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut None,
         };
 
         handle_command(
