@@ -361,12 +361,6 @@ static WRITER_THREAD: Lazy<JoinHandle<()>> = Lazy::new(|| {
 /// Error types for stdout operations
 #[derive(Debug, thiserror::Error)]
 pub enum StdoutError {
-    #[error("Broken pipe detected, GUI disconnected")]
-    BrokenPipe,
-
-    #[error("Too many stdout errors ({0})")]
-    TooManyErrors(u32),
-
     #[error("Failed to send critical response: {0}")]
     CriticalMessageFailed(#[from] std::io::Error),
 }

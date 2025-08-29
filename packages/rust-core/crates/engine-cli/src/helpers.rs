@@ -32,6 +32,7 @@ pub fn generate_fallback_move(
     engine: &Arc<Mutex<EngineAdapter>>,
     partial_result: Option<(String, u8, i32)>,
     allow_null_move: bool,
+    fast: bool,
 ) -> Result<(String, bool)> {
     // Stage 1: Use partial result if available (instant)
     if let Some((best_move, depth, score)) = partial_result {
@@ -58,29 +59,31 @@ pub fn generate_fallback_move(
         }
     }
 
-    // Stage 2: Try quick shallow search (depth 3, typically 10-50ms, max 100ms)
-    log::info!("Attempting quick shallow search");
-    let shallow_result = {
-        let mut adapter = lock_or_recover_adapter(engine);
-        match adapter.quick_search() {
-            Ok(move_str) => {
-                log::info!("Quick search successful: {move_str}");
-                Some(move_str)
-            }
-            Err(e) => {
-                // Log specific reason for failure
-                if e.to_string().contains("Engine not available") {
-                    log::info!("Quick search skipped: engine not available (likely held by timed-out worker)");
-                } else {
-                    log::warn!("Quick search failed: {e}");
+    if !fast {
+        // Stage 2: Try quick shallow search (depth 3, typically 10-50ms, max 100ms)
+        log::info!("Attempting quick shallow search");
+        let shallow_result = {
+            let mut adapter = lock_or_recover_adapter(engine);
+            match adapter.quick_search() {
+                Ok(move_str) => {
+                    log::info!("Quick search successful: {move_str}");
+                    Some(move_str)
                 }
-                None
+                Err(e) => {
+                    // Log specific reason for failure
+                    if e.to_string().contains("Engine not available") {
+                        log::info!("Quick search skipped: engine not available (likely held by timed-out worker)");
+                    } else {
+                        log::warn!("Quick search failed: {e}");
+                    }
+                    None
+                }
             }
-        }
-    };
+        };
 
-    if let Some(move_str) = shallow_result {
-        return Ok((move_str, false));
+        if let Some(move_str) = shallow_result {
+            return Ok((move_str, false));
+        }
     }
 
     // Stage 3: Try emergency move generation (heuristic only, ~1ms)
@@ -237,7 +240,7 @@ mod tests {
         let partial_result = Some(("invalid-move-format".to_string(), 5, 100));
 
         // Generate fallback move - should skip Stage 1 and use Stage 2 or 3
-        let result = generate_fallback_move(&engine, partial_result, false);
+        let result = generate_fallback_move(&engine, partial_result, false, false);
 
         // Should not fail, but return a valid move from Stage 2 or 3
         assert!(result.is_ok());
@@ -268,7 +271,7 @@ mod tests {
         let partial_result = Some(("1a1b".to_string(), 5, 100)); // Valid format but illegal move
 
         // Generate fallback move
-        let result = generate_fallback_move(&engine, partial_result, false);
+        let result = generate_fallback_move(&engine, partial_result, false, false);
 
         // Should not fail
         assert!(result.is_ok());

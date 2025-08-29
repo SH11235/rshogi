@@ -4,9 +4,7 @@ use crate::emit_utils::{build_meta, log_on_stop_snapshot, log_on_stop_source};
 use crate::helpers::generate_fallback_move;
 use crate::types::BestmoveSource;
 use crate::usi::send_info_string;
-use crate::worker::lock_or_recover_adapter;
 use anyhow::Result;
-use std::time::Instant;
 
 pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     let _ = send_info_string(log_tsv(&[("kind", "stop_begin")]));
@@ -51,7 +49,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         // 2) Partial result
         if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
             if let Ok((move_str, _)) =
-                generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+                generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
             {
                 let meta = build_meta(
                     BestmoveSource::SessionOnStop,
@@ -66,56 +64,23 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // 3) Pre-session fallback captured at go-time (with hash verification)
-        if let Some(_move_str) = ctx.pre_session_fallback.as_ref() {
-            // Verify hash matches current position
-            let lock_start = Instant::now();
-            let adapter = lock_or_recover_adapter(ctx.engine);
-            let _ = send_info_string(log_tsv(&[
-                ("kind", "stop_lock_adapter_ms"),
-                ("elapsed_ms", &lock_start.elapsed().as_millis().to_string()),
-            ]));
-            let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
-
-            if current_hash == *ctx.pre_session_fallback_hash {
-                let move_str = ctx.pre_session_fallback.clone().unwrap();
-                // Validate and normalize the pre-session move in current position
-                if let Some(pos) = adapter.get_position() {
-                    if let Some(norm) =
-                        engine_core::util::usi_helpers::normalize_usi_move_str_logged(
-                            pos, &move_str,
-                        )
-                    {
-                        let move_str = norm;
-                        *ctx.pre_session_fallback = None;
-                        *ctx.pre_session_fallback_hash = None;
-                        let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                        log_on_stop_source("pre_session");
-                        ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
-                        return Ok(());
-                    } else {
-                        log::debug!("Pre-session fallback move is illegal now; dropping it");
-                        *ctx.pre_session_fallback = None;
-                        *ctx.pre_session_fallback_hash = None;
-                    }
-                }
-            } else {
-                log::debug!(
-                    "Pre-session fallback hash mismatch: expected {:?}, got {:?}",
-                    ctx.pre_session_fallback_hash,
-                    current_hash
-                );
-                // Clear invalid fallback
-                *ctx.pre_session_fallback = None;
-                *ctx.pre_session_fallback_hash = None;
-            }
+        // 3) Pre-session fallback captured at go-time（時間優先: 追加のロック/検証を行わず即使用）
+        if let Some(move_str) = ctx.pre_session_fallback.clone() {
+            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+            log_on_stop_source("pre_session_fast");
+            // Clear to avoid reuse
+            *ctx.pre_session_fallback = None;
+            *ctx.pre_session_fallback_hash = None;
+            ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStopFast")?;
+            return Ok(());
         }
 
         // 4) Emergency fallback
-        let (move_str, from) = match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-            Ok((m, _)) => (m, BestmoveSource::SessionOnStop),
-            Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
-        };
+        let (move_str, from) =
+            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
+                Ok((m, _)) => (m, BestmoveSource::SessionOnStop),
+                Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
+            };
         let meta = build_meta(from, 0, None, None, None);
         log_on_stop_source("emergency");
         ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
@@ -137,7 +102,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
     if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
         if let Ok((move_str, _)) =
-            generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+            generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
         {
             let meta = build_meta(
                 BestmoveSource::PartialResultTimeout,
@@ -153,51 +118,20 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     }
 
     // Pre-session fallback captured at go-time (with hash verification)
-    if let Some(_move_str) = ctx.pre_session_fallback.as_ref() {
-        // Verify hash matches current position
-        let lock_start = Instant::now();
-        let adapter = lock_or_recover_adapter(ctx.engine);
-        let _ = send_info_string(log_tsv(&[
-            ("kind", "stop_lock_adapter_ms"),
-            ("elapsed_ms", &lock_start.elapsed().as_millis().to_string()),
-        ]));
-        let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
-
-        if current_hash == *ctx.pre_session_fallback_hash {
-            let move_str = ctx.pre_session_fallback.clone().unwrap();
-            if let Some(pos) = adapter.get_position() {
-                if let Some(norm) =
-                    engine_core::util::usi_helpers::normalize_usi_move_str_logged(pos, &move_str)
-                {
-                    let move_str = norm;
-                    *ctx.pre_session_fallback = None;
-                    *ctx.pre_session_fallback_hash = None;
-                    let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                    log_on_stop_source("pre_session");
-                    ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStop")?;
-                    return Ok(());
-                } else {
-                    log::debug!("Pre-session fallback move is illegal (normal stop); dropping it");
-                    *ctx.pre_session_fallback = None;
-                    *ctx.pre_session_fallback_hash = None;
-                }
-            }
-        } else {
-            log::debug!(
-                "Pre-session fallback hash mismatch (normal stop): expected {:?}, got {:?}",
-                ctx.pre_session_fallback_hash,
-                current_hash
-            );
-            // Clear invalid fallback
-            *ctx.pre_session_fallback = None;
-            *ctx.pre_session_fallback_hash = None;
-        }
+    if let Some(move_str) = ctx.pre_session_fallback.clone() {
+        let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+        log_on_stop_source("pre_session_fast");
+        *ctx.pre_session_fallback = None;
+        *ctx.pre_session_fallback_hash = None;
+        ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStopFast")?;
+        return Ok(());
     }
 
-    let (move_str, source) = match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-        Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
-        Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
-    };
+    let (move_str, source) =
+        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
+            Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
+            Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
+        };
     log_on_stop_source("emergency");
     let meta = build_meta(source, 0, None, None, None);
     ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;

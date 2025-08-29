@@ -254,8 +254,10 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     let search_id = *ctx.current_search_id;
     log::info!("Starting new search with ID: {search_id}, ponder: {}", params.ponder);
 
-    // Create new BestmoveEmitter for this search
+    // Create new BestmoveEmitter and finalized flag for this search
     *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(search_id));
+    *ctx.current_finalized_flag =
+        Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
 
     // Track if this is a ponder search
     *ctx.current_search_is_ponder = params.ponder;
@@ -292,6 +294,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     let engine_clone = Arc::clone(ctx.engine);
     let stop_clone = search_stop_flag.clone();
     let tx_clone: Sender<WorkerMessage> = ctx.worker_tx.clone();
+    let finalized_flag = ctx.current_finalized_flag.as_ref().cloned();
     log::debug!("Using per-search stop flag for search_id={search_id}");
     log::debug!("About to spawn worker thread for search_id={search_id}");
     let _ = send_info_string(log_tsv(&[
@@ -305,7 +308,14 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     let handle = thread::spawn(move || {
         log::debug!("Worker thread spawned");
         let result = std::panic::catch_unwind(|| {
-            search_worker(engine_clone, params, stop_clone, tx_clone.clone(), search_id);
+            search_worker(
+                engine_clone,
+                params,
+                stop_clone,
+                tx_clone.clone(),
+                search_id,
+                finalized_flag,
+            );
         });
 
         if let Err(e) = result {
