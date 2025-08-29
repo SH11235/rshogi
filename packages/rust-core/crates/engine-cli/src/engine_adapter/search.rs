@@ -245,24 +245,15 @@ impl EngineAdapter {
         // Take engine temporarily
         let mut engine = self.take_engine()?;
 
-        // Create simple search limits
-        let limits = SearchLimits::builder()
-            .depth(3)
-            .fixed_time_ms(100) // Max 100ms
-            .build();
-
-        // Run search
-        let mut position_mut = position.clone();
-        let result = engine.search(&mut position_mut, limits);
+        // Use core helper for a shallow, time-bounded search
+        let mv_opt = engine_core::util::search_helpers::quick_search_move(&mut engine, &position, 3, 100);
 
         // Return engine
         self.return_engine(engine);
 
-        // Extract best move
-        if let Some(best_move) = result.best_move {
-            Ok(move_to_usi(&best_move))
-        } else {
-            Err(anyhow!("No move found in quick search"))
+        match mv_opt {
+            Some(mv) => Ok(move_to_usi(&mv)),
+            None => Err(anyhow!("No move found in quick search")),
         }
     }
 
@@ -301,52 +292,15 @@ impl EngineAdapter {
         Ok(position.is_in_check())
     }
 
-    /// Generate an emergency move using simple heuristics
+    /// Generate an emergency move using core heuristics
     pub fn generate_emergency_move(&self) -> Result<String, EngineError> {
         let position = self
             .get_position()
             .ok_or(EngineError::EngineNotAvailable("Position not set".to_string()))?;
-
-        // Generate legal moves
-        let movegen = MoveGenerator::new();
-        let legal_moves = movegen.generate_all(position).map_err(|e| {
-            EngineError::EngineNotAvailable(format!("Failed to generate moves: {e}"))
-        })?;
-
-        if legal_moves.is_empty() {
-            return Err(EngineError::NoLegalMoves);
+        match engine_core::util::emergency::emergency_move_usi(position) {
+            Some(s) => Ok(s),
+            None => Err(EngineError::NoLegalMoves),
         }
-
-        // Simple heuristic: prefer captures, then common opening moves
-        let slice = legal_moves.as_slice();
-
-        // Common opening moves that are generally good
-        // For black (sente): pawn advances, king safety moves
-        // For white (gote): similar defensive/developing moves
-        let common_opening_moves = [
-            // Black (sente) common moves
-            "7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h",
-            // White (gote) common moves
-            "3c3d", "7c7d", "6a7b", "5a6b", "2b7b", "8c8d",
-        ];
-
-        let best_move = slice
-            .iter()
-            .copied()
-            .max_by_key(|m| {
-                let move_str = move_to_usi(m);
-                // Priority: captures > common opening moves > other moves
-                if m.is_capture_hint() {
-                    100
-                } else if common_opening_moves.contains(&move_str.as_str()) {
-                    10
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(slice[0]);
-
-        Ok(move_to_usi(&best_move))
     }
 
     /// Force reset engine state

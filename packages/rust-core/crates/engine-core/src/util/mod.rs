@@ -1,4 +1,7 @@
 pub mod sync_compat;
+pub mod usi_helpers;
+pub mod emergency;
+pub mod search_helpers;
 
 /// Check if running in CI environment
 ///
