@@ -12,6 +12,42 @@ use std::time::Duration;
 #[cfg(feature = "buffered-io")]
 use std::time::Instant;
 
+#[cfg(test)]
+static INFO_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[cfg(test)]
+/// Take and clear all captured info string messages (test-only)
+pub fn test_take_info_strings() -> Vec<String> {
+    let mut guard = lock_or_recover_generic(&INFO_MESSAGES);
+    let out = guard.clone();
+    guard.clear();
+    out
+}
+
+#[cfg(test)]
+/// Clear captured info string messages (test-only)
+pub fn test_clear_info_strings() {
+    let mut guard = lock_or_recover_generic(&INFO_MESSAGES);
+    guard.clear();
+}
+
+#[cfg(test)]
+/// Get current number of captured info strings (test-only)
+pub fn test_info_len() -> usize {
+    let guard = lock_or_recover_generic(&INFO_MESSAGES);
+    guard.len()
+}
+
+#[cfg(test)]
+/// Get a snapshot of info strings from the given index (test-only)
+pub fn test_info_from(start: usize) -> Vec<String> {
+    let guard = lock_or_recover_generic(&INFO_MESSAGES);
+    if start >= guard.len() {
+        return Vec::new();
+    }
+    guard[start..].to_vec()
+}
+
 /// USI protocol responses
 #[derive(Debug, Clone)]
 pub enum UsiResponse {
@@ -501,7 +537,13 @@ pub fn send_response(response: UsiResponse) -> Result<(), StdoutError> {
 /// Use this in main thread and contexts where errors can be propagated up the call stack.
 /// For worker threads and fire-and-forget contexts, wrap this with appropriate error handling.
 pub fn send_info_string(message: impl Into<String>) -> Result<(), StdoutError> {
-    send_response(UsiResponse::String(message.into()))
+    let msg: String = message.into();
+    #[cfg(test)]
+    {
+        let mut guard = lock_or_recover_generic(&INFO_MESSAGES);
+        guard.push(msg.clone());
+    }
+    send_response(UsiResponse::String(msg))
 }
 
 /// Ensure stdout is flushed on exit

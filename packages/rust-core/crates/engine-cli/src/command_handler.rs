@@ -314,6 +314,11 @@ impl<'a> CommandContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine_adapter::EngineAdapter;
+    use crate::usi::output::{test_info_from, test_info_len};
+    use crossbeam_channel::unbounded;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_build_meta_reason_mapping() {
@@ -378,6 +383,161 @@ mod tests {
         assert_eq!(m.stop_info.hard_limit_ms, 222);
         assert_eq!(m.stats.depth, 1);
         assert_eq!(m.stats.score, "cp 0");
+    }
+
+    /// Verify that normal stop uses pre_session fallback when available and hashes match
+    #[test]
+    fn test_on_stop_source_pre_session_normal() {
+        // Avoid actual stdout writes
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        // Engine and position
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+        let root_hash = { engine.lock().unwrap().get_position().unwrap().zobrist_hash() };
+
+        // Channels (not used by stop path, but required by types)
+        let (tx, rx) = unbounded();
+
+        // Per-search stop flag
+        let search_stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Context fields
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 1u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> =
+            Some(BestmoveEmitter::new(current_search_id));
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
+        let mut position_state: Option<PositionState> = None;
+        let program_start = Instant::now();
+        let mut legal_moves_check_logged = false;
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
+        let mut pre_session_fallback_hash: Option<u64> = Some(root_hash);
+
+        // Clear test hooks
+        let start_idx = test_info_len();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &Arc::new(AtomicBool::new(false)),
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
+            last_partial_result: &mut last_partial_result,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+        };
+
+        // Execute stop
+        handle_stop_command(&mut ctx).unwrap();
+
+        // Verify bestmove_sent for this search_id exactly once and on_stop_source=pre_session
+        let infos = test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=1"))
+            .count();
+        assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
+        let found = infos
+            .iter()
+            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=pre_session"));
+        assert!(found, "on_stop_source=pre_session not found in infos: {:?}", infos);
+    }
+
+    /// Verify that when pre_session hash mismatches, normal stop skips it and logs emergency
+    #[test]
+    fn test_on_stop_source_emergency_when_hash_mismatch() {
+        // Avoid actual stdout writes
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        // Engine and position
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Channels (not used by stop path, but required by types)
+        let (tx, rx) = unbounded();
+
+        // Per-search stop flag
+        let search_stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Context fields
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 2u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<SearchSession> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> =
+            Some(BestmoveEmitter::new(current_search_id));
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
+        let mut position_state: Option<PositionState> = None;
+        let program_start = Instant::now();
+        let mut legal_moves_check_logged = false;
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
+        let mut pre_session_fallback_hash: Option<u64> = Some(0); // Intentional mismatch
+
+        // Clear test hooks
+        let start_idx = test_info_len();
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &Arc::new(AtomicBool::new(false)),
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: true, // permit null move emergency if needed
+            position_state: &mut position_state,
+            program_start,
+            legal_moves_check_logged: &mut legal_moves_check_logged,
+            last_partial_result: &mut last_partial_result,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+        };
+
+        // Execute stop
+        handle_stop_command(&mut ctx).unwrap();
+
+        // Verify bestmove_sent for this search_id exactly once and on_stop_source=emergency
+        let infos = test_info_from(start_idx);
+        let sent_count = infos
+            .iter()
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=2"))
+            .count();
+        assert_eq!(sent_count, 1, "expected 1 bestmove_sent: {:?}", infos);
+        let found = infos
+            .iter()
+            .any(|s| s.contains("kind=on_stop_source") && s.contains("src=emergency"));
+        assert!(found, "on_stop_source=emergency not found in infos: {:?}", infos);
     }
 }
 
@@ -1050,6 +1210,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 None,
                 "PonderSessionOnStop",
             )? {
+                let _ =
+                    send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "session")]));
                 return Ok(());
             }
         }
@@ -1066,6 +1228,8 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     Some(format!("cp {s}")),
                     None,
                 );
+                let _ =
+                    send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "partial")]));
                 ctx.emit_and_finalize(move_str, None, meta, "PonderPartialOnStop")?;
                 return Ok(());
             }
@@ -1104,11 +1268,12 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
         };
         let meta = build_meta(from, 0, None, None, None);
+        let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "emergency")]));
         ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
         return Ok(());
     }
 
-    // Normal stop: emit immediately (session → partial → emergency)
+    // Normal stop: emit immediately (session → partial → pre_session → emergency)
     if let Some(session) = ctx.current_session.clone() {
         if ctx.emit_best_from_session(
             &session,
@@ -1116,6 +1281,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             None,
             "SessionOnStop",
         )? {
+            let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "session")]));
             return Ok(());
         }
     }
@@ -1131,8 +1297,34 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 Some(format!("cp {s}")),
                 None,
             );
+            let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "partial")]));
             ctx.emit_and_finalize(move_str, None, meta, "ImmediatePartialOnStop")?;
             return Ok(());
+        }
+    }
+
+    // Pre-session fallback captured at go-time (with hash verification)
+    if let Some(_move_str) = ctx.pre_session_fallback.as_ref() {
+        // Verify hash matches current position
+        let adapter = lock_or_recover_adapter(ctx.engine);
+        let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
+
+        if current_hash == *ctx.pre_session_fallback_hash {
+            let move_str = ctx.pre_session_fallback.take().unwrap();
+            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+            let _ =
+                send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "pre_session")]));
+            ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStop")?;
+            return Ok(());
+        } else {
+            log::debug!(
+                "Pre-session fallback hash mismatch (normal stop): expected {:?}, got {:?}",
+                ctx.pre_session_fallback_hash,
+                current_hash
+            );
+            // Clear invalid fallback
+            *ctx.pre_session_fallback = None;
+            *ctx.pre_session_fallback_hash = None;
         }
     }
 
@@ -1140,6 +1332,7 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
         Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
     };
+    let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "emergency")]));
     let meta = build_meta(source, 0, None, None, None);
     ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;
     Ok(())
