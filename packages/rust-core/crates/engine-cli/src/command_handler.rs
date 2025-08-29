@@ -47,6 +47,8 @@ pub struct CommandContext<'a> {
     pub last_bestmove_sent_at: &'a mut Option<std::time::Instant>,
     /// Timestamp when the latest go handler started
     pub last_go_begin_at: &'a mut Option<std::time::Instant>,
+    /// Threshold armed by worker watchdog (None when not armed)
+    pub current_worker_watchdog_threshold: &'a mut Option<u64>,
 }
 
 impl<'a> CommandContext<'a> {

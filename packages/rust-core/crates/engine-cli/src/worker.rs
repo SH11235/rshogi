@@ -10,6 +10,7 @@ use engine_core::engine::controller::Engine;
 use engine_core::search::constants::MATE_SCORE;
 use engine_core::search::types::{StopInfo, TerminationReason};
 use engine_core::search::SearchLimits;
+use engine_core::time_management::{self as core_tm, TimeManager};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -22,56 +23,26 @@ use std::time::{Duration, Instant};
 /// may be conservative. For Byoyomi, we use TimeParameters to estimate
 /// soft/hard limits; for FixedTime, both are the fixed time; other modes
 /// default to 0 when not reliably derivable here.
-fn budget_from_limits(limits: &SearchLimits) -> (u64, u64) {
-    use engine_core::time_management::TimeControl as TC;
+fn derive_budgets_via_core(
+    position: &engine_core::shogi::Position,
+    limits: &SearchLimits,
+) -> Option<(u64, u64)> {
+    // Convert SearchLimits to core TimeLimits and instantiate a TimeManager to get soft/hard
+    let time_limits: core_tm::TimeLimits = limits.clone().into();
+    // Determine game phase consistently with core
+    let phase = core_tm::detect_game_phase_for_time(position, position.ply as u32);
+    // Create a temporary TimeManager (no thread) to extract budgets
+    let tm = TimeManager::new(&time_limits, position.side_to_move, position.ply as u32, phase);
+    let soft = tm.soft_limit_ms();
+    let hard = tm.hard_limit_ms();
 
-    // Helper to clamp to non-negative and ensure hard >= soft where applicable
-    let clamp_pair = |soft: u64, hard: u64| -> (u64, u64) {
-        if hard < soft {
-            (soft, soft)
-        } else {
-            (soft, hard)
-        }
-    };
-
-    match &limits.time_control {
-        TC::FixedTime { ms_per_move } => (*ms_per_move, *ms_per_move),
-        TC::Byoyomi { byoyomi_ms, .. } => {
-            if let Some(params) = limits.time_parameters {
-                // Soft: ratio of period (GUI/log用の近似値) - コア側ではoverhead等が別途考慮される
-                let soft = ((*byoyomi_ms as f64) * params.byoyomi_soft_ratio).floor() as u64;
-                // Hard: byoyomiの安全側マージンを最大限反映
-                // - 追加のbyoyomiセーフティ(byoyomi_hard_limit_reduction_ms)
-                // - GUI/IPC等の最悪遅延(network_delay2_ms) も減算
-                // これによりウォッチドッグがGUIの秒読みに確実に先行し、
-                // 稀な初手bestmove未送出（タイムフォーフィット）を防ぐ
-                let hard = byoyomi_ms
-                    .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
-                    .saturating_sub(params.network_delay2_ms);
-                clamp_pair(soft, hard)
-            } else {
-                (*byoyomi_ms, *byoyomi_ms)
-            }
-        }
-        TC::Ponder(inner) => match &**inner {
-            TC::Byoyomi { byoyomi_ms, .. } => {
-                if let Some(params) = limits.time_parameters {
-                    let soft = ((*byoyomi_ms as f64) * params.byoyomi_soft_ratio).floor() as u64;
-                    let hard = byoyomi_ms
-                        .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
-                        .saturating_sub(params.network_delay2_ms);
-                    clamp_pair(soft, hard)
-                } else {
-                    (*byoyomi_ms, *byoyomi_ms)
-                }
-            }
-            TC::FixedTime { ms_per_move } => (*ms_per_move, *ms_per_move),
-            // Other inner modes are not reliably derivable here
-            _ => (0, 0),
-        },
-        // FixedNodes/Infinite/Fischer: budgets depend on broader state; omit here
-        _ => (0, 0),
+    // Discard non-finite or zero budgets
+    if soft == u64::MAX || hard == u64::MAX || soft == 0 || hard == 0 {
+        return None;
     }
+    // Clamp to ensure hard >= soft
+    let hard = hard.max(soft);
+    Some((soft, hard))
 }
 
 /// Messages from worker thread to main thread
@@ -245,6 +216,7 @@ pub fn search_worker(
     tx: Sender<WorkerMessage>,
     search_id: u64,
     finalized_flag: Option<Arc<AtomicBool>>,
+    go_begin_at: Instant,
 ) {
     log::debug!("Search worker thread started with params: {params:?}");
     let initial_stop_value = stop_flag.load(Ordering::SeqCst);
@@ -349,7 +321,7 @@ pub fn search_worker(
     let was_ponder = params.ponder;
     log::debug!("Attempting to take engine from adapter");
     let engine_take_start = Instant::now();
-    let (mut engine_guard, position, limits, ponder_hit_flag) = {
+    let (mut engine_guard, position, limits, ponder_hit_flag, threads_for_log) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::debug!("Adapter lock acquired, calling take_engine");
         let _ = tx.send(WorkerMessage::Info {
@@ -437,6 +409,8 @@ pub fn search_worker(
                     },
                     search_id,
                 });
+                // Capture threads for logging before dropping adapter
+                let threads_for_log = adapter.threads();
                 drop(adapter); // release adapter lock early
 
                 // Compute effective byoyomi status without holding adapter lock
@@ -547,7 +521,20 @@ pub fn search_worker(
                     },
                     search_id,
                 });
-                (guard, pos_snapshot, limits, ponder_flag_opt)
+                if prep_el.as_millis() as u64 > 100 {
+                    let _ = tx.send(WorkerMessage::Info {
+                        info: SearchInfo {
+                            string: Some(log_tsv(&[
+                                ("kind", "prepare_timeout"),
+                                ("search_id", &search_id.to_string()),
+                                ("elapsed_ms", &prep_el.as_millis().to_string()),
+                            ])),
+                            ..Default::default()
+                        },
+                        search_id,
+                    });
+                }
+                (guard, pos_snapshot, limits, ponder_flag_opt, threads_for_log)
             }
             Err(e) => {
                 log::error!("Failed to take engine: {e}");
@@ -602,10 +589,41 @@ pub fn search_worker(
     // Explicitly drop ponder_hit_flag (it's used internally by the engine)
     drop(ponder_hit_flag);
 
-    // Pre-compute budget hint from limits before moving it into the engine
-    let (budget_soft_ms, budget_hard_ms) = budget_from_limits(&limits);
-
-    // Phase: Add a conservative watchdog to avoid time loss on edge cases
+    // Pre-compute budgets via core before moving into the engine
+    let budgets = derive_budgets_via_core(&position, &limits);
+    // Emit go_received_detail with budgets and time control summary
+    {
+        let (soft_log, hard_log, note) = match budgets {
+            Some((s, h)) => (s, h, "ok".to_string()),
+            None => (0, 0, "no_budget".to_string()),
+        };
+        let tc_label = match &limits.time_control {
+            engine_core::time_management::TimeControl::Byoyomi { .. } => "byoyomi",
+            engine_core::time_management::TimeControl::Fischer { .. } => "fischer",
+            engine_core::time_management::TimeControl::FixedTime { .. } => "fixed_time",
+            engine_core::time_management::TimeControl::FixedNodes { .. } => "fixed_nodes",
+            engine_core::time_management::TimeControl::Infinite => "infinite",
+            engine_core::time_management::TimeControl::Ponder(_) => "ponder",
+        };
+        let mtg = limits.moves_to_go.unwrap_or(0);
+        let _ = tx.send(WorkerMessage::Info {
+            info: SearchInfo {
+                string: Some(log_tsv(&[
+                    ("kind", "go_received_detail"),
+                    ("search_id", &search_id.to_string()),
+                    ("tc", tc_label),
+                    ("soft_ms", &soft_log.to_string()),
+                    ("hard_ms", &hard_log.to_string()),
+                    ("mtg", &mtg.to_string()),
+                    ("threads", &threads_for_log.to_string()),
+                    ("budget_status", &note),
+                ])),
+                ..Default::default()
+            },
+            search_id,
+        });
+    }
+    // Phase: Add a conservative watchdog (single insurance) only when budgets are valid
     if !params.ponder {
         let tx_deadline = tx.clone();
         let stop_for_watchdog = stop_flag.clone();
@@ -619,30 +637,65 @@ pub fn search_worker(
                     return;
                 }
             }
-            let _ = tx_deadline.send(WorkerMessage::Info {
-                info: SearchInfo {
-                    string: Some(log_tsv(&[
-                        ("kind", "watchdog_start"),
-                        ("search_id", &search_id_for_watchdog.to_string()),
-                        ("soft_ms", &budget_soft_ms.to_string()),
-                        ("hard_ms", &budget_hard_ms.to_string()),
-                    ])),
-                    ..Default::default()
-                },
-                search_id: search_id_for_watchdog,
-            });
-            // Compute adaptive safety similar to core
-            let safety_ms = if budget_hard_ms >= 500 {
-                let three_percent = budget_hard_ms.saturating_mul(3) / 100;
-                three_percent.clamp(120, 400)
-            } else if budget_hard_ms >= 200 {
-                40
+            if let Some((soft_ms, hard_ms)) = budgets {
+                // threshold = min(soft + δ, hard) with δ=+50ms (micro margin).
+                // Do NOT subtract NetworkDelay2 here to avoid double subtraction.
+                let threshold_ms = soft_ms.saturating_add(50).min(hard_ms);
+
+                // Suppress arming when threshold is too short (search not yet warmed up)
+                if threshold_ms <= 200 {
+                    let _ = tx_deadline.send(WorkerMessage::Info {
+                        info: SearchInfo {
+                            string: Some(log_tsv(&[
+                                ("kind", "watchdog_suppress"),
+                                ("search_id", &search_id_for_watchdog.to_string()),
+                                ("reason", "too_short"),
+                                ("threshold_ms", &threshold_ms.to_string()),
+                            ])),
+                            ..Default::default()
+                        },
+                        search_id: search_id_for_watchdog,
+                    });
+                    return;
+                }
+
+                // Log watchdog arm with threshold and baseline
+                let _ = tx_deadline.send(WorkerMessage::Info {
+                    info: SearchInfo {
+                        string: Some(log_tsv(&[
+                            ("kind", "watchdog_start"),
+                            ("search_id", &search_id_for_watchdog.to_string()),
+                            ("soft_ms", &soft_ms.to_string()),
+                            ("hard_ms", &hard_ms.to_string()),
+                            ("threshold_ms", &threshold_ms.to_string()),
+                            ("baseline", "go_begin"),
+                            ("threads", &threads_for_log.to_string()),
+                        ])),
+                        ..Default::default()
+                    },
+                    search_id: search_id_for_watchdog,
+                });
+
+                // Sleep relative to go_begin baseline
+                let now_since_go = go_begin_at.elapsed().as_millis() as u64;
+                let wait_ms = threshold_ms.saturating_sub(now_since_go);
+                if wait_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                }
             } else {
-                0
-            };
-            let wait_ms = budget_hard_ms.saturating_sub(safety_ms);
-            if wait_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                // Budgets not available: do not arm watchdog, record reason
+                let _ = tx_deadline.send(WorkerMessage::Info {
+                    info: SearchInfo {
+                        string: Some(log_tsv(&[
+                            ("kind", "watchdog_suppress"),
+                            ("search_id", &search_id_for_watchdog.to_string()),
+                            ("reason", "no_budget"),
+                        ])),
+                        ..Default::default()
+                    },
+                    search_id: search_id_for_watchdog,
+                });
+                return;
             }
             // If not already stopped, set stop and notify main loop
             if !stop_for_watchdog.load(std::sync::atomic::Ordering::Acquire) {
@@ -653,18 +706,19 @@ pub fn search_worker(
                     }
                 }
                 // New explicit watchdog event（メインはこれで即emit）
-                let _ = tx_deadline.send(WorkerMessage::WatchdogFired {
-                    search_id: search_id_for_watchdog,
-                    soft_ms: budget_soft_ms,
-                    hard_ms: budget_hard_ms,
-                });
+                if let Some((soft_ms, hard_ms)) = budgets {
+                    let _ = tx_deadline.send(WorkerMessage::WatchdogFired {
+                        search_id: search_id_for_watchdog,
+                        soft_ms,
+                        hard_ms,
+                    });
+                }
                 // 互換: 情報ログ（Writer一元化でメイン経由）
                 let _ = tx_deadline.send(WorkerMessage::Info {
                     info: SearchInfo {
                         string: Some(log_tsv(&[
                             ("kind", "watchdog_fire"),
                             ("search_id", &search_id_for_watchdog.to_string()),
-                            ("wait_ms", &wait_ms.to_string()),
                         ])),
                         ..Default::default()
                     },
@@ -673,6 +727,7 @@ pub fn search_worker(
                 // 停止フラグ
                 stop_for_watchdog.store(true, std::sync::atomic::Ordering::Release);
                 // 補助: SearchFinished も投げておく
+                let (s, h) = budgets.unwrap_or((0, 0));
                 let _ = tx_deadline.send(WorkerMessage::SearchFinished {
                     root_hash: root_hash_for_watchdog,
                     search_id: search_id_for_watchdog,
@@ -682,8 +737,8 @@ pub fn search_worker(
                         nodes: 0,
                         depth_reached: 0,
                         hard_timeout: false,
-                        soft_limit_ms: budget_soft_ms,
-                        hard_limit_ms: budget_hard_ms,
+                        soft_limit_ms: s,
+                        hard_limit_ms: h,
                     }),
                 });
                 // 冗長: 少し遅延して Finished も送る
@@ -882,8 +937,8 @@ pub fn search_worker(
                             nodes: 0,
                             depth_reached: 0,
                             hard_timeout: false,
-                            soft_limit_ms: budget_soft_ms,
-                            hard_limit_ms: budget_hard_ms,
+                            soft_limit_ms: budgets.map(|b| b.0).unwrap_or(0),
+                            hard_limit_ms: budgets.map(|b| b.1).unwrap_or(0),
                         }),
                     }) {
                         log::error!("Failed to send search finished: {e}");
@@ -927,8 +982,8 @@ pub fn search_worker(
                             nodes: 0,
                             depth_reached: 0,
                             hard_timeout: false,
-                            soft_limit_ms: budget_soft_ms,
-                            hard_limit_ms: budget_hard_ms,
+                            soft_limit_ms: budgets.map(|b| b.0).unwrap_or(0),
+                            hard_limit_ms: budgets.map(|b| b.1).unwrap_or(0),
                         }),
                     }) {
                         log::error!("Failed to send search finished after error: {e}");
@@ -1117,45 +1172,44 @@ mod tests {
     }
 
     #[test]
-    fn test_budget_from_limits_fixed_time() {
+    fn test_derive_budgets_fixed_time() {
         let limits = engine_core::search::SearchLimits::builder()
-            .time_control(TimeControl::FixedTime { ms_per_move: 1500 })
+            .time_control(TimeControl::FixedTime { ms_per_move: 1000 })
             .build();
-        let (soft, hard) = budget_from_limits(&limits);
-        assert_eq!((soft, hard), (1500, 1500));
+        let pos = engine_core::shogi::Position::startpos();
+        let budgets = derive_budgets_via_core(&pos, &limits).expect("budgets for fixed_time");
+        assert!(budgets.0 > 0 && budgets.1 >= budgets.0);
     }
 
     #[test]
-    fn test_budget_from_limits_byoyomi_with_params() {
-        let params = TimeParameters::default(); // soft_ratio=0.8, hard_reduction=500
+    fn test_derive_budgets_byoyomi_with_params() {
+        let params = TimeParameters::default(); // overhead=50, soft_ratio=0.8, byoyomi_safety=500
         let limits = engine_core::search::SearchLimits::builder()
             .byoyomi(0, 10_000, 1)
             .time_parameters(params)
             .build();
-        let (soft, hard) = budget_from_limits(&limits);
-        assert_eq!(soft, 8000);
-        // Hard now subtracts byoyomi_safety(500) and network_delay2(1000): 10000 - 500 - 1000 = 8500
-        assert_eq!(hard, 8500);
+        let pos = engine_core::shogi::Position::startpos();
+        let (soft, hard) = derive_budgets_via_core(&pos, &limits).expect("budgets for byoyomi");
+        assert_eq!(soft, 8000 - params.overhead_ms);
+        assert_eq!(hard, 10_000 - (params.overhead_ms + params.byoyomi_hard_limit_reduction_ms));
     }
 
     #[test]
-    fn test_budget_from_limits_ponder_byoyomi() {
+    fn test_derive_budgets_ponder_byoyomi_none() {
         let params = TimeParameters::default();
         let limits = engine_core::search::SearchLimits::builder()
             .byoyomi(0, 6_000, 1)
             .time_parameters(params)
             .ponder_with_inner()
             .build();
-        let (soft, hard) = budget_from_limits(&limits);
-        assert_eq!(soft, 4800); // 6000 * 0.8
-                                // Hard would be 6000 - 500 - 1000 = 4500, but we clamp to at least soft when hard < soft
-        assert_eq!(hard, 4800);
+        let pos = engine_core::shogi::Position::startpos();
+        assert!(derive_budgets_via_core(&pos, &limits).is_none());
     }
 
     #[test]
-    fn test_budget_from_limits_other_zero() {
+    fn test_derive_budgets_fixed_nodes_none() {
         let limits = engine_core::search::SearchLimits::builder().fixed_nodes(100_000).build();
-        let (soft, hard) = budget_from_limits(&limits);
-        assert_eq!((soft, hard), (0, 0));
+        let pos = engine_core::shogi::Position::startpos();
+        assert!(derive_budgets_via_core(&pos, &limits).is_none());
     }
 }
