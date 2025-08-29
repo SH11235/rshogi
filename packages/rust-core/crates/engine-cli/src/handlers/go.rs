@@ -10,6 +10,7 @@ use crate::usi::{send_response, GoParams, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
+use engine_core::usi::parse_usi_move;
 use engine_core::usi::position_to_sfen;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -295,6 +296,36 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     let tx_clone: Sender<WorkerMessage> = ctx.worker_tx.clone();
     log::debug!("Using per-search stop flag for search_id={search_id}");
     log::debug!("About to spawn worker thread for search_id={search_id}");
+
+    // Phase 1: Pre-commit a tiny iteration result to ensure a sane fallback from normal search
+    // This avoids relying on emergency_fallback at the tail end when time is tight.
+    {
+        let mut adapter = lock_or_recover_adapter(ctx.engine);
+        // Run a tiny shallow search (depth from options, time budget small)
+        if let Ok(qm) = adapter.quick_search() {
+            if let Ok(parsed) = parse_usi_move(&qm) {
+                let committed = engine_core::search::CommittedIteration {
+                    depth: adapter.quick_fallback_depth.max(1),
+                    seldepth: None,
+                    score: 0, // score not available from quick_search; use neutral
+                    pv: vec![parsed],
+                    node_type: engine_core::search::types::NodeType::Exact,
+                    nodes: 0,
+                    elapsed: std::time::Duration::from_millis(0),
+                };
+                // Send as if from worker to unify the path
+                let _ = ctx.worker_tx.send(WorkerMessage::IterationCommitted {
+                    committed,
+                    search_id,
+                });
+                log::debug!(
+                    "Pre-committed tiny iteration for search_id={} with move {}",
+                    search_id,
+                    qm
+                );
+            }
+        }
+    }
 
     // Spawn worker thread for search with panic safety
     let handle = thread::spawn(move || {
