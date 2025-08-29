@@ -14,21 +14,29 @@ use std::time::Instant;
 #[cfg(test)]
 static INFO_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+// Thread-local capture to avoid cross-test interference when tests run in parallel.
+// Tests in this crate typically emit and then immediately read back logs on the same thread.
+#[cfg(test)]
+thread_local! {
+    static TL_INFO_MESSAGES: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+}
+
 #[cfg(test)]
 /// Get current number of captured info strings (test-only)
 pub fn test_info_len() -> usize {
-    let guard = lock_or_recover_generic(&INFO_MESSAGES);
-    guard.len()
+    TL_INFO_MESSAGES.with(|v| v.borrow().len())
 }
 
 #[cfg(test)]
 /// Get a snapshot of info strings from the given index (test-only)
 pub fn test_info_from(start: usize) -> Vec<String> {
-    let guard = lock_or_recover_generic(&INFO_MESSAGES);
-    if start >= guard.len() {
-        return Vec::new();
-    }
-    guard[start..].to_vec()
+    TL_INFO_MESSAGES.with(|v| {
+        let v = v.borrow();
+        if start >= v.len() {
+            return Vec::new();
+        }
+        v[start..].to_vec()
+    })
 }
 
 /// USI protocol responses
@@ -392,8 +400,10 @@ pub fn send_info_string(message: impl Into<String>) -> Result<(), StdoutError> {
     let msg: String = message.into();
     #[cfg(test)]
     {
+        // Keep a global copy for potential debugging, and a thread-local copy for isolation.
         let mut guard = lock_or_recover_generic(&INFO_MESSAGES);
         guard.push(msg.clone());
+        TL_INFO_MESSAGES.with(|v| v.borrow_mut().push(msg.clone()));
     }
     if usi_disabled() {
         return Ok(());
