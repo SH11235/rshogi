@@ -2,7 +2,9 @@
 
 mod bestmove_emitter;
 mod command_handler;
+mod emit_utils;
 mod engine_adapter;
+mod handlers;
 mod flushing_logger;
 mod helpers;
 mod search_session;
@@ -16,7 +18,8 @@ mod worker;
 use anyhow::Result;
 use bestmove_emitter::BestmoveEmitter;
 use clap::Parser;
-use command_handler::{build_meta, handle_command, CommandContext};
+use command_handler::{handle_command, CommandContext};
+use crate::emit_utils::build_meta;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
 use helpers::generate_fallback_move;

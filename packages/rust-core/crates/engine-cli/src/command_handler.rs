@@ -3,9 +3,7 @@ use crate::helpers::{generate_fallback_move, wait_for_search_completion};
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
 use crate::types::{BestmoveSource, PositionState, ResignReason};
-use crate::usi::{
-    canonicalize_position_cmd, send_info_string, send_response, GoParams, UsiCommand, UsiResponse,
-};
+use crate::usi::{send_info_string, send_response, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender};
@@ -15,25 +13,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta, BestmoveStats};
-use engine_core::search::types::{StopInfo, TerminationReason};
+use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta};
+use crate::emit_utils::{build_meta, log_tsv};
+use engine_core::search::types::StopInfo;
 
-/// Create a TSV-formatted log string from key-value pairs
-/// Values are sanitized to prevent TSV format corruption
-fn log_tsv(pairs: &[(&str, &str)]) -> String {
-    pairs
-        .iter()
-        .map(|(k, v)| {
-            // Sanitize value by replacing tabs and newlines with spaces
-            let sanitized = v.replace(['\t', '\n', '\r'], " ");
-            format!("{k}={sanitized}")
-        })
-        .collect::<Vec<_>>()
-        .join("\t")
-}
 
 /// Handle position restoration failure by logging and sending resign
-fn fail_position_restore(reason: ResignReason, log_reason: &str) -> Result<()> {
+pub(crate) fn fail_position_restore(reason: ResignReason, log_reason: &str) -> Result<()> {
     send_info_string(log_tsv(&[("kind", "position_restore_fail"), ("reason", log_reason)]))?;
     send_info_string(log_tsv(&[("kind", "resign"), ("resign_reason", &reason.to_string())]))?;
     send_response(UsiResponse::BestMove {
@@ -69,68 +55,11 @@ pub struct CommandContext<'a> {
     pub pre_session_fallback_hash: &'a mut Option<u64>,
 }
 
-/// Build BestmoveMeta from common parameters
-/// This reduces duplication of BestmoveMeta construction across the codebase
-pub fn build_meta(
-    from: BestmoveSource,
-    depth: u8,
-    seldepth: Option<u8>,
-    score: Option<String>,
-    stop_info: Option<StopInfo>,
-) -> BestmoveMeta {
-    // Use provided stop_info or create default one
-    let si = stop_info.unwrap_or(StopInfo {
-        reason: match from {
-            // Timeout cases -> TimeLimit
-            BestmoveSource::ResignTimeout
-            | BestmoveSource::EmergencyFallbackTimeout
-            | BestmoveSource::PartialResultTimeout => TerminationReason::TimeLimit,
-            // Normal completion cases -> Completed
-            BestmoveSource::EmergencyFallback
-            | BestmoveSource::EmergencyFallbackOnFinish
-            | BestmoveSource::SessionInSearchFinished => TerminationReason::Completed,
-            // User stop cases -> UserStop
-            BestmoveSource::SessionOnStop => TerminationReason::UserStop,
-            // Error cases -> Error
-            BestmoveSource::Resign | BestmoveSource::ResignOnFinish => TerminationReason::Error,
-        },
-        elapsed_ms: 0, // BestmoveEmitter will complement this
-        nodes: 0,      // BestmoveEmitter will complement this
-        depth_reached: depth,
-        hard_timeout: matches!(
-            from,
-            BestmoveSource::EmergencyFallbackTimeout
-                | BestmoveSource::PartialResultTimeout
-                | BestmoveSource::ResignTimeout
-        ),
-        soft_limit_ms: 0,
-        hard_limit_ms: 0,
-    });
-
-    let nodes = si.nodes;
-    let elapsed_ms = si.elapsed_ms;
-
-    BestmoveMeta {
-        from,
-        stop_info: si,
-        stats: BestmoveStats {
-            depth,
-            seldepth,
-            score: score.unwrap_or_else(|| "none".to_string()),
-            nodes,
-            nps: if elapsed_ms > 0 {
-                nodes.saturating_mul(1000) / elapsed_ms
-            } else {
-                0
-            },
-        },
-    }
-}
 
 impl<'a> CommandContext<'a> {
     /// Try to emit bestmove from session
     /// Returns Ok(true) if bestmove was successfully emitted
-    fn emit_best_from_session(
+    pub(crate) fn emit_best_from_session(
         &mut self,
         session: &SearchSession,
         from: BestmoveSource,
@@ -311,6 +240,15 @@ impl<'a> CommandContext<'a> {
     }
 }
 
+use crate::handlers::{
+    game::handle_gameover,
+    go::handle_go_command,
+    options::handle_set_option,
+    ponder::handle_ponder_hit,
+    position::handle_position_command,
+    stop::handle_stop_command,
+};
+
 pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<()> {
     match command {
         UsiCommand::Usi => {
@@ -339,85 +277,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
             send_response(UsiResponse::ReadyOk)?;
         }
 
-        UsiCommand::Position {
-            startpos,
-            sfen,
-            moves,
-        } => {
-            log::debug!(
-                "Handling position command - startpos: {startpos}, sfen: {sfen:?}, moves: {moves:?}"
-            );
-
-            // Build the canonical position command string
-            let cmd_canonical = canonicalize_position_cmd(startpos, sfen.as_deref(), &moves);
-
-            // Wait for any ongoing search to complete before updating position
-            wait_for_search_completion(
-                ctx.search_state,
-                ctx.stop_flag,
-                ctx.current_stop_flag.as_ref(),
-                ctx.worker_handle,
-                ctx.worker_rx,
-                ctx.engine,
-            )?;
-
-            // Clean up any remaining search state
-            ctx.finalize_search("Position");
-
-            // Clear pre-session fallback as position has changed
-            *ctx.pre_session_fallback = None;
-            *ctx.pre_session_fallback_hash = None;
-
-            let mut engine = lock_or_recover_adapter(ctx.engine);
-            match engine.set_position(startpos, sfen.as_deref(), &moves) {
-                Ok(()) => {
-                    // Get position info and create PositionState
-                    if let Some(pos) = engine.get_position() {
-                        let sfen_snapshot = position_to_sfen(pos);
-                        let root_hash = pos.zobrist_hash();
-                        let move_len = moves.len();
-
-                        // Store the position state
-                        let position_state = PositionState::new(
-                            cmd_canonical.clone(),
-                            root_hash,
-                            move_len,
-                            sfen_snapshot.clone(),
-                        );
-
-                        *ctx.position_state = Some(position_state);
-
-                        log::debug!(
-                            "Stored position state: cmd={}, hash={:#016x}",
-                            cmd_canonical,
-                            root_hash
-                        );
-                        log::info!(
-                            "Position command completed - SFEN: {}, root_hash: {:#016x}, side_to_move: {:?}, move_count: {}",
-                            sfen_snapshot, root_hash, pos.side_to_move, move_len
-                        );
-
-                        // Send structured log for position store
-                        let stored_ms = ctx.program_start.elapsed().as_millis();
-                        send_info_string(log_tsv(&[
-                            ("kind", "position_store"),
-                            ("root_hash", &format!("{:#016x}", root_hash)),
-                            ("move_len", &move_len.to_string()),
-                            ("sfen_first_20", &sfen_snapshot.chars().take(20).collect::<String>()),
-                            ("stored_ms_since_start", &stored_ms.to_string()),
-                        ]))?;
-                    } else {
-                        log::error!("Position set but unable to retrieve for state storage");
-                    }
-                }
-                Err(e) => {
-                    // Log error but don't crash - USI engines should be robust
-                    log::error!("Failed to set position: {e}");
-                    send_info_string(format!("Error: Failed to set position - {e}"))?;
-                    // Don't update position_state on failure - keep the previous valid one
-                    log::debug!("Keeping previous position state due to error");
-                }
-            }
+        UsiCommand::Position { startpos, sfen, moves } => {
+            handle_position_command(startpos, sfen, moves, ctx)?;
         }
 
         UsiCommand::Go(params) => {
@@ -429,99 +290,19 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
         }
 
         UsiCommand::PonderHit => {
-            // Handle ponder hit only if we're actively pondering
-            if *ctx.current_search_is_ponder && *ctx.search_state == SearchState::Searching {
-                let mut engine = lock_or_recover_adapter(ctx.engine);
-                // Mark that we're no longer in pure ponder mode
-                *ctx.current_search_is_ponder = false;
-                match engine.ponder_hit() {
-                    Ok(()) => {
-                        log::debug!("Ponder hit successfully processed");
-                        // Emit USI-visible info for diagnostics (core also logs to stderr)
-                        let _ = crate::usi::send_info_string(
-                            "ponder_hit: converted to normal search (time budgets updated)"
-                                .to_string(),
-                        );
-                    }
-                    Err(e) => log::debug!("Ponder hit ignored: {e}"),
-                }
-            } else {
-                log::debug!(
-                    "Ponder hit ignored (state={:?}, is_ponder={})",
-                    *ctx.search_state,
-                    *ctx.current_search_is_ponder
-                );
-            }
+            handle_ponder_hit(ctx)?;
         }
 
         UsiCommand::SetOption { name, value } => {
-            let mut engine = lock_or_recover_adapter(ctx.engine);
-            engine.set_option(&name, value.as_deref())?;
+            handle_set_option(name, value, ctx)?;
         }
 
         UsiCommand::GameOver { result } => {
-            // Terminate emitter first to prevent any bestmove output
-            if let Some(ref emitter) = ctx.current_bestmove_emitter {
-                emitter.terminate();
-                log::debug!("Terminated bestmove emitter for gameover");
-            }
-
-            // Stop any ongoing search and ensure worker is properly cleaned up
-            ctx.stop_flag.store(true, Ordering::Release);
-
-            // Wait for any ongoing search to complete before notifying game over
-            wait_for_search_completion(
-                ctx.search_state,
-                ctx.stop_flag,
-                ctx.current_stop_flag.as_ref(),
-                ctx.worker_handle,
-                ctx.worker_rx,
-                ctx.engine,
-            )?;
-
-            // Log the previous search ID for debugging
-            log::debug!("Reset state after gameover: prev_search_id={}", *ctx.current_search_id);
-
-            // Clear all search-related state for clean baseline
-            ctx.finalize_search("GameOver");
-            // Reset to 0 so any late worker messages (old search_id) will be ignored
-            *ctx.current_search_id = 0;
-
-            // Clear position state to avoid carrying over to next game
-            *ctx.position_state = None;
-            log::debug!("Cleared position_state for new game");
-
-            // Notify engine of game result
-            let mut engine = lock_or_recover_adapter(ctx.engine);
-            engine.game_over(result);
-
-            // Note: stop_flag is already reset to false by wait_for_search_completion
-            log::debug!("Game over processed, worker cleaned up, state reset to Idle");
+            handle_gameover(result, ctx)?;
         }
 
         UsiCommand::UsiNewGame => {
-            // ShogiGUI extension - new game notification
-            // Stop any ongoing search
-            wait_for_search_completion(
-                ctx.search_state,
-                ctx.stop_flag,
-                ctx.current_stop_flag.as_ref(),
-                ctx.worker_handle,
-                ctx.worker_rx,
-                ctx.engine,
-            )?;
-
-            // Clean up any remaining search state
-            ctx.finalize_search("UsiNewGame");
-
-            // Clear position state for fresh start
-            *ctx.position_state = None;
-            log::debug!("Cleared position_state for new game");
-
-            // Reset engine state for new game
-            let mut engine = lock_or_recover_adapter(ctx.engine);
-            engine.new_game();
-            log::debug!("New game started");
+            crate::handlers::game::handle_usi_new_game(ctx)?;
         }
 
         UsiCommand::Quit => {
@@ -533,7 +314,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
     Ok(())
 }
 
-fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
+/* moved to handlers::go */
+/* fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     log::debug!("Received go command with params: {params:?}");
     let go_received_time = Instant::now();
     log::debug!("NewSearchStart: go received at {go_received_time:?}");
@@ -915,9 +697,10 @@ fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
 
     // Don't block - return immediately
     Ok(())
-}
+} */
 
-fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
+/* moved to handlers::stop */
+/* fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     // If nothing to stop, return
     if !ctx.search_state.is_searching() {
         return Ok(());
@@ -1106,12 +889,13 @@ fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     let meta = build_meta(source, 0, None, None, None);
     ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;
     Ok(())
-}
+} */
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::search::types::TerminationReason;
     use crate::engine_adapter::EngineAdapter;
     use crate::usi::output::{test_info_from, test_info_len};
     use crossbeam_channel::unbounded;
