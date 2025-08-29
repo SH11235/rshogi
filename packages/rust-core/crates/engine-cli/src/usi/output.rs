@@ -6,11 +6,8 @@ use engine_core::search::NodeType;
 use once_cell::sync::Lazy;
 use std::fmt;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
 #[cfg(feature = "buffered-io")]
 use std::time::Instant;
 
@@ -241,9 +238,7 @@ impl fmt::Display for SearchInfo {
 
 // Error tracking for stdout failures
 // Note: AtomicU32 is used for future thread-safety, though currently only main thread calls this
-static STDOUT_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
-const MAX_STDOUT_ERRORS: u32 = 5;
-const MAX_RETRY_ATTEMPTS: u32 = 8; // Increased for buffered writes
+// Deprecated error counters/retry constants removed in single-writer model
 
 // Buffering configuration
 #[cfg(feature = "buffered-io")]
@@ -281,15 +276,7 @@ fn get_flush_message_count() -> u32 {
         .unwrap_or(DEFAULT_FLUSH_MESSAGE_COUNT)
 }
 
-/// Flush strategy for messages
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum FlushKind {
-    /// Immediate flush for critical messages (usiok, readyok, bestmove)
-    Immediate,
-    /// Buffered flush for non-critical messages (info)
-    #[cfg(any(feature = "buffered-io", test))]
-    Buffered,
-}
+// Flush strategy for messages (deprecated in single-writer model)
 
 /// USI output writer with buffering capabilities
 ///
@@ -315,63 +302,7 @@ impl UsiWriter {
         }
     }
 
-    fn write_line(&self, response: &UsiResponse, flush_kind: FlushKind) -> std::io::Result<()> {
-        // Handle poisoned mutex gracefully - important for stdout reliability
-        let mut writer = lock_or_recover_generic(&self.inner);
-
-        // Write the response
-        writeln!(writer, "{response}")?;
-
-        // Phase 1: Always flush immediately (behavior compatible)
-        // Phase 2: Will implement conditional flushing based on flush_kind
-        #[cfg(not(feature = "buffered-io"))]
-        {
-            let _ = flush_kind; // Suppress unused warning
-            writer.flush()?;
-        }
-
-        #[cfg(feature = "buffered-io")]
-        {
-            match flush_kind {
-                FlushKind::Immediate => {
-                    writer.flush()?;
-                    // Note: Using lock_or_recover_generic for consistency, though panic is unlikely here
-                    *lock_or_recover_generic(&self.last_flush) = Instant::now();
-                    self.message_count.store(0, Ordering::Relaxed);
-                }
-                FlushKind::Buffered => {
-                    // Increment message count
-                    let count = self.message_count.fetch_add(1, Ordering::Relaxed) + 1;
-
-                    // Check if we should flush
-                    let should_flush = {
-                        // Note: Using lock_or_recover_generic for consistency, though panic is unlikely here
-                        let last_flush = *lock_or_recover_generic(&self.last_flush);
-                        let elapsed = last_flush.elapsed();
-
-                        // Flush based on configurable thresholds
-                        count >= get_flush_message_count()
-                            || elapsed >= Duration::from_millis(get_flush_interval_ms())
-                    };
-
-                    if should_flush {
-                        writer.flush()?;
-                        // Note: Using lock_or_recover_generic for consistency, though panic is unlikely here
-                        *lock_or_recover_generic(&self.last_flush) = Instant::now();
-                        self.message_count.store(0, Ordering::Relaxed);
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn flush_all(&self) -> std::io::Result<()> {
-        // Handle poisoned mutex gracefully - ensures final messages are sent even after panic
-        let mut writer = lock_or_recover_generic(&self.inner);
-        writer.flush()
-    }
+    // Deprecated write_line/flush_all removed in single-writer model
 
     /// Try to flush without blocking (for panic handler)
     fn try_flush_all(&self) -> std::io::Result<()> {
@@ -426,74 +357,7 @@ static WRITER_THREAD: Lazy<JoinHandle<()>> = Lazy::new(|| {
 });
 
 /// Send USI response with error handling and retry logic
-fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
-    use std::io;
-
-    // Determine flush strategy based on response type
-    let flush_kind = match response {
-        UsiResponse::IdName(_)
-        | UsiResponse::IdAuthor(_)
-        | UsiResponse::UsiOk
-        | UsiResponse::ReadyOk
-        | UsiResponse::BestMove { .. } => FlushKind::Immediate,
-        UsiResponse::String(_) => FlushKind::Immediate, // Error messages should flush immediately
-        _ => {
-            #[cfg(any(feature = "buffered-io", test))]
-            {
-                FlushKind::Buffered
-            }
-            #[cfg(not(any(feature = "buffered-io", test)))]
-            {
-                FlushKind::Immediate
-            }
-        }
-    };
-
-    // Try to write with retries
-    for attempt in 0..MAX_RETRY_ATTEMPTS {
-        match USI_WRITER.write_line(response, flush_kind) {
-            Ok(()) => {
-                // Reset error count on success
-                STDOUT_ERROR_COUNT.store(0, Ordering::Relaxed);
-                return Ok(());
-            }
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
-                // BrokenPipe - no point in retrying
-                log::debug!("stdout-write: broken pipe detected");
-                return Err(e);
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                // EINTR - retry immediately without sleep
-                log::debug!("stdout-write: interrupted, retrying immediately");
-                continue;
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock && attempt < MAX_RETRY_ATTEMPTS - 1 => {
-                // WouldBlock - exponential backoff
-                let delay_ms = 1u64 << attempt.min(4); // 1, 2, 4, 8, 16ms max
-                log::debug!("stdout-write: would block, retry after {delay_ms}ms");
-                thread::sleep(Duration::from_millis(delay_ms));
-                continue;
-            }
-            Err(e) if attempt < MAX_RETRY_ATTEMPTS - 1 => {
-                // Other errors - exponential backoff to avoid blocking time-critical responses
-                let delay_ms = 1u64 << attempt.min(4); // 1, 2, 4, 8, 16ms max
-                let retry_num = attempt + 1;
-                log::warn!(
-                    "stdout-write: failed with {e}, retry {retry_num}/{MAX_RETRY_ATTEMPTS} after {delay_ms}ms"
-                );
-                thread::sleep(Duration::from_millis(delay_ms));
-            }
-            Err(e) => {
-                // Final attempt failed
-                return Err(e);
-            }
-        }
-    }
-
-    // Should not reach here, but return error if we do
-    Err(io::Error::other("Max retry attempts exceeded"))
-}
-
+/// Deprecated retry path removed in single-writer model
 /// Error types for stdout operations
 #[derive(Debug, thiserror::Error)]
 pub enum StdoutError {

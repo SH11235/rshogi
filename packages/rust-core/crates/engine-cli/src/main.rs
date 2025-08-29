@@ -392,7 +392,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             search_id,
             soft_ms,
             hard_ms,
-            wait_ms,
+            wait_ms: _,
         } => {
             // Emit immediately on watchdog fire (state非依存、emitter未finalizeで一度だけ)
             if search_id != *ctx.current_search_id {
@@ -716,43 +716,10 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                             }
                         }
                     } else {
-                        // No emitter available - send bestmove directly
-                        log::error!("No BestmoveEmitter available for search {search_id}");
-
-                        // Try committed first
-                        if let Some(ref committed) = ctx.current_committed {
-                            let adapter = lock_or_recover_adapter(ctx.engine);
-                            if let Some(position) = adapter.get_position() {
-                                if let Ok((best_move, ponder, _)) = adapter
-                                    .validate_and_get_bestmove_from_committed(committed, position)
-                                {
-                                    send_response(UsiResponse::BestMove { best_move, ponder })?;
-                                    ctx.finalize_search("SearchFinished direct send committed");
-                                    return Ok(());
-                                }
-                            }
-                        }
-
-                        // No committed, fall back to emergency
-
-                        // Fallback
-                        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
-                            Ok((fallback_move, _used_partial)) => {
-                                send_response(UsiResponse::BestMove {
-                                    best_move: fallback_move,
-                                    ponder: None,
-                                })?;
-                            }
-                            Err(e) => {
-                                log::error!("Fallback move generation failed: {e}");
-                                send_response(UsiResponse::BestMove {
-                                    best_move: "resign".to_string(),
-                                    ponder: None,
-                                })?;
-                            }
-                        }
-
-                        ctx.finalize_search("SearchFinished direct fallback");
+                        // No emitter available => 既に他経路（stop/watchdog等）でemit済みの可能性が高い。
+                        // 二重送出を避けるため、直接送出は行わずに無視する。
+                        log::debug!("SearchFinished: emitter not available; ignoring direct send (likely already emitted)");
+                        return Ok(());
                     }
                 } else {
                     log::debug!("Ponder search finished, not sending bestmove");
