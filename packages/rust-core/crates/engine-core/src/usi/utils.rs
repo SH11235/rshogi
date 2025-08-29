@@ -38,6 +38,126 @@ pub fn canonicalize_position_cmd(startpos: bool, sfen: Option<&str>, moves: &[St
     cmd
 }
 
+use anyhow::{anyhow, Result};
+use crate::movegen::MoveGenerator;
+use crate::usi::{parse_sfen, parse_usi_move, position_to_sfen};
+use crate::shogi::{Move, Position};
+use log::debug;
+
+/// Create a Position from USI position command arguments.
+///
+/// This mirrors the CLI-side implementation but lives in core for reuse.
+pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> Result<Position> {
+    // Create initial position
+    let mut pos = if startpos {
+        Position::startpos()
+    } else if let Some(sfen_str) = sfen {
+        parse_sfen(sfen_str).map_err(|e| anyhow!(e))?
+    } else {
+        return Err(anyhow!(
+            "Position command must specify either 'startpos' or 'sfen <fen_string>'"
+        ));
+    };
+
+    // Apply moves with validation
+    let move_gen = MoveGenerator::new();
+
+    for (i, move_str) in moves.iter().enumerate() {
+        let mv = parse_usi_move(move_str).map_err(|e| anyhow!(e))?;
+
+        // Generate all legal moves for current position
+        let legal_moves = move_gen
+            .generate_all(&pos)
+            .map_err(|e| anyhow!("Failed to generate legal moves: {}", e))?;
+
+        // Find matching legal move with promotion priority
+        let mut fallback: Option<Move> = None;
+        let mut exact: Option<Move> = None;
+
+        for &lm in legal_moves.as_slice() {
+            let matched = if mv.is_drop() || lm.is_drop() {
+                // Drop moves: match to square and drop piece type
+                mv.is_drop() == lm.is_drop()
+                    && mv.drop_piece_type() == lm.drop_piece_type()
+                    && mv.to() == lm.to()
+            } else {
+                // Normal moves: match from and to squares
+                mv.from() == lm.from() && mv.to() == lm.to()
+            };
+
+            if matched {
+                if lm.is_promote() == mv.is_promote() {
+                    // Found exact promotion match
+                    exact = Some(lm);
+                    break;
+                }
+                if fallback.is_none() {
+                    // Store first match as fallback
+                    fallback = Some(lm);
+                }
+            }
+        }
+
+        let legal_move = exact.or(fallback);
+
+        if let Some(legal_mv) = legal_move {
+            // Log if USI specified promotion but it's not possible
+            if mv.is_promote() && !legal_mv.is_promote() {
+                debug!(
+                    "Move {} specified promotion (+) but piece cannot promote at this position",
+                    move_str
+                );
+            }
+            // Use the actual legal move which has correct piece type and capture info
+            pos.do_move(legal_mv);
+        } else {
+            debug!(
+                "Parsed move details: from={:?}, to={:?}, drop={}, promote={}",
+                mv.from(),
+                mv.to(),
+                mv.is_drop(),
+                mv.is_promote()
+            );
+
+            // Additional diagnostics for nearby legal moves
+            let mut found_from_square = false;
+            for &legal_mv in legal_moves.as_slice() {
+                if legal_mv.from() == mv.from() {
+                    found_from_square = true;
+                    if legal_mv.to() == mv.to() {
+                        debug!(
+                            "Found similar legal move: from={:?}, to={:?}, drop={}, promote={}",
+                            legal_mv.from(),
+                            legal_mv.to(),
+                            legal_mv.is_drop(),
+                            legal_mv.is_promote()
+                        );
+                    }
+                }
+            }
+            if !found_from_square {
+                debug!("No legal moves found from square {:?}", mv.from());
+                debug!("First 10 legal moves:");
+                for (i, &legal_mv) in legal_moves.as_slice().iter().take(10).enumerate() {
+                    debug!("  {}: from={:?}, to={:?}", i, legal_mv.from(), legal_mv.to());
+                }
+            }
+
+            return Err(anyhow!(
+                "Illegal move '{}' at move {} in position after: {} (parsed: {:?}, side_to_move: {:?}, legal_moves_count: {}, sfen: {})",
+                move_str,
+                i + 1,
+                if i == 0 { "initial position".to_string() } else { format!("{i} moves") },
+                mv,
+                pos.side_to_move,
+                legal_moves.len(),
+                position_to_sfen(&pos)
+            ));
+        }
+    }
+
+    Ok(pos)
+}
 #[cfg(test)]
 mod tests {
     use super::canonicalize_position_cmd;
@@ -77,4 +197,3 @@ mod tests {
         assert_eq!(cmd, "position startpos moves 7g7f 3c3d");
     }
 }
-
