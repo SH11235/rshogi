@@ -167,10 +167,16 @@ where
         // Shadow logging: expose core time budgets for observability
         if let Some(ref tm) = self.time_manager {
             let soft = tm.soft_limit_ms();
-            // There is no public hard_limit getter; derive via time difference heuristic
-            // Keep soft only for now and log active time control for context
+            let hard = tm.hard_limit_ms();
+            let elapsed_ms = self.context.elapsed().as_millis() as u64;
             let tc = tm.time_control();
-            log::debug!("[TimeBudget] soft_limit_ms={} time_control={:?}", soft, tc);
+            log::debug!(
+                "[TimeBudget] elapsed={}ms soft={}ms hard={}ms tc={:?}",
+                elapsed_ms,
+                soft,
+                hard,
+                tc
+            );
         } else {
             log::debug!("[TimeBudget] no TimeManager (infinite or depth-only without time)");
         }

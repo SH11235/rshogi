@@ -176,9 +176,9 @@ impl SearchContext {
             if hard_limit_ms > 0 {
                 let elapsed_ms = elapsed.as_millis() as u64;
                 // Safety window before hard limit to exit gracefully
-                // Choose the larger of 80ms or 2% of hard limit (capped at 300ms)
-                let two_percent = hard_limit_ms / 50; // 2%
-                let safety_ms = two_percent.clamp(80, 300);
+                // Choose the larger of 120ms or 3% of hard limit (capped at 400ms)
+                let three_percent = (hard_limit_ms.saturating_mul(3)) / 100; // 3%
+                let safety_ms = three_percent.clamp(120, 400);
                 if elapsed_ms + safety_ms >= hard_limit_ms {
                     if !self.time_stop_logged {
                         log::info!(
