@@ -74,8 +74,9 @@ pub(crate) fn handle_position_command(
         }
         Err(e) => {
             // Log error but don't crash - USI engines should be robust
-            log::error!("Failed to set position: {e}");
-            send_info_string(format!("Error: Failed to set position - {e}"))?;
+            // Use debug formatting to include error chain for better diagnostics
+            log::error!("Failed to set position: {e:?}");
+            send_info_string(format!("Error: Failed to set position - {e:?}"))?;
             // Don't update position_state on failure - keep the previous valid one
             log::debug!("Keeping previous position state due to error");
         }
