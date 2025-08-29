@@ -64,6 +64,25 @@ impl EngineAdapter {
         let best_move =
             *committed.pv.first().ok_or_else(|| anyhow!("Empty PV in committed iteration"))?;
 
+        // Validate legality in the current position
+        if !position.is_legal_move(best_move) {
+            log::error!(
+                "Committed PV best move is illegal in current position; falling back (mv={})",
+                move_to_usi(&best_move)
+            );
+            // Emergency fallback ensures we never emit an illegal move
+            match self.generate_emergency_move() {
+                Ok(fallback) => {
+                    return Ok((fallback, None, crate::engine_adapter::types::PonderSource::None))
+                }
+                Err(e) => {
+                    return Err(anyhow!(
+                        "Failed to generate emergency fallback after illegal PV: {e}"
+                    ))
+                }
+            }
+        }
+
         let best_move_str = move_to_usi(&best_move);
 
         // Determine ponder move if enabled
