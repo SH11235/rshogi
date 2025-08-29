@@ -76,9 +76,48 @@ pub fn build_meta(
     }
 }
 
+/// Log helpers for position restore flow
+pub fn log_position_restore_try(move_len: usize, age_ms: u128) {
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "position_restore_try"),
+        ("move_len", &move_len.to_string()),
+        ("age_ms", &age_ms.to_string()),
+    ]));
+}
+
+pub fn log_position_restore_success(source: &str) {
+    let _ = send_info_string(log_tsv(&[("kind", "position_restore_success"), ("source", source)]));
+}
+
+pub fn log_position_restore_fallback(reason: &str) {
+    let _ = send_info_string(log_tsv(&[("kind", "position_restore_fallback"), ("reason", reason)]));
+}
+
+pub fn log_position_restore_resign(reason: &str, expected: Option<&str>, actual: Option<&str>) {
+    let mut pairs = vec![("kind", "position_restore_resign"), ("reason", reason)];
+    if let Some(exp) = expected {
+        pairs.push(("expected", exp));
+    }
+    if let Some(act) = actual {
+        pairs.push(("actual", act));
+    }
+    let _ = send_info_string(log_tsv(&pairs));
+}
+
 /// Log a unified on_stop_source entry
 pub fn log_on_stop_source(src: &str) {
     let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", src)]));
+}
+
+/// Log position store snapshot
+pub fn log_position_store(root_hash: u64, move_len: usize, sfen_snapshot: &str, stored_ms: u128) {
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "position_store"),
+        ("root_hash", &format!("{:#016x}", root_hash)),
+        ("move_len", &move_len.to_string()),
+        ("sfen_first_20", &sfen_snapshot.chars().take(20).collect::<String>()),
+        ("stored_ms_since_start", &stored_ms.to_string()),
+    ]));
 }
 
 #[cfg(test)]

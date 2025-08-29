@@ -1,5 +1,5 @@
 use crate::command_handler::CommandContext;
-use crate::emit_utils::log_tsv;
+use crate::emit_utils::log_position_store;
 use crate::helpers::wait_for_search_completion;
 use crate::usi::send_info_string;
 use crate::worker::lock_or_recover_adapter;
@@ -65,15 +65,9 @@ pub(crate) fn handle_position_command(
                     sfen_snapshot, root_hash, pos.side_to_move, move_len
                 );
 
-                // Send structured log for position store
+                // Send structured log for position store via helper
                 let stored_ms = ctx.program_start.elapsed().as_millis();
-                send_info_string(log_tsv(&[
-                    ("kind", "position_store"),
-                    ("root_hash", &format!("{:#016x}", root_hash)),
-                    ("move_len", &move_len.to_string()),
-                    ("sfen_first_20", &sfen_snapshot.chars().take(20).collect::<String>()),
-                    ("stored_ms_since_start", &stored_ms.to_string()),
-                ]))?;
+                log_position_store(root_hash, move_len, &sfen_snapshot, stored_ms);
             } else {
                 log::error!("Position set but unable to retrieve for state storage");
             }

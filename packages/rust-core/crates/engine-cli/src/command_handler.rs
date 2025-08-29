@@ -2,7 +2,7 @@ use crate::engine_adapter::EngineAdapter;
 // use crate::helpers::{generate_fallback_move, wait_for_search_completion};
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
-use crate::types::{BestmoveSource, PositionState, ResignReason};
+use crate::types::{BestmoveSource, PositionState};
 use crate::usi::{send_info_string, send_response, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, WorkerMessage};
 use anyhow::Result;
@@ -15,17 +15,6 @@ use std::time::Instant;
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta};
 use crate::emit_utils::{build_meta, log_tsv};
 use engine_core::search::types::StopInfo;
-
-/// Handle position restoration failure by logging and sending resign
-pub(crate) fn fail_position_restore(reason: ResignReason, log_reason: &str) -> Result<()> {
-    send_info_string(log_tsv(&[("kind", "position_restore_fail"), ("reason", log_reason)]))?;
-    send_info_string(log_tsv(&[("kind", "resign"), ("resign_reason", &reason.to_string())]))?;
-    send_response(UsiResponse::BestMove {
-        best_move: "resign".to_string(),
-        ponder: None,
-    })?;
-    Ok(())
-}
 
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
@@ -640,7 +629,6 @@ mod tests {
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(search_stop_flag);
         let mut position_state: Option<PositionState> = None;
         let program_start = Instant::now();
-        let mut legal_moves_check_logged = false;
         let mut last_partial_result: Option<(String, u8, i32)> =
             Some(("7g7f".to_string(), 12, 100));
         let mut pre_session_fallback: Option<String> = None;
@@ -709,7 +697,6 @@ mod tests {
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
         let mut position_state: Option<PositionState> = None;
         let program_start = Instant::now();
-        let mut legal_moves_check_logged = false;
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
         let mut pre_session_fallback_hash: Option<u64> = Some(root_hash);
@@ -776,7 +763,6 @@ mod tests {
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
         let mut position_state: Option<PositionState> = None;
         let program_start = Instant::now();
-        let mut legal_moves_check_logged = false;
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = None;
         let mut pre_session_fallback_hash: Option<u64> = None;
@@ -843,7 +829,6 @@ mod tests {
         let mut current_stop_flag: Option<Arc<AtomicBool>> = Some(flag);
         let mut position_state: Option<PositionState> = None;
         let program_start = Instant::now();
-        let mut legal_moves_check_logged = false;
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = None;
         let mut pre_session_fallback_hash: Option<u64> = None;

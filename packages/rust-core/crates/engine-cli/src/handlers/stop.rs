@@ -100,11 +100,21 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
 
             if current_hash == *ctx.pre_session_fallback_hash {
-                let move_str = ctx.pre_session_fallback.take().unwrap();
-                let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                log_on_stop_source("pre_session");
-                ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
-                return Ok(());
+                let move_str = ctx.pre_session_fallback.clone().unwrap();
+                // Validate legality of the pre-session move in current position
+                if let Some(pos) = adapter.get_position() {
+                    if engine_core::util::usi_helpers::resolve_usi_move(pos, &move_str).is_none() {
+                        log::debug!("Pre-session fallback move is illegal now; dropping it");
+                        *ctx.pre_session_fallback = None;
+                        *ctx.pre_session_fallback_hash = None;
+                    } else {
+                        let move_str = ctx.pre_session_fallback.take().unwrap();
+                        let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                        log_on_stop_source("pre_session");
+                        ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
+                        return Ok(());
+                    }
+                }
             } else {
                 log::debug!(
                     "Pre-session fallback hash mismatch: expected {:?}, got {:?}",
@@ -165,11 +175,20 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
 
         if current_hash == *ctx.pre_session_fallback_hash {
-            let move_str = ctx.pre_session_fallback.take().unwrap();
-            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-            log_on_stop_source("pre_session");
-            ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStop")?;
-            return Ok(());
+            let move_str = ctx.pre_session_fallback.clone().unwrap();
+            if let Some(pos) = adapter.get_position() {
+                if engine_core::util::usi_helpers::resolve_usi_move(pos, &move_str).is_none() {
+                    log::debug!("Pre-session fallback move is illegal (normal stop); dropping it");
+                    *ctx.pre_session_fallback = None;
+                    *ctx.pre_session_fallback_hash = None;
+                } else {
+                    let move_str = ctx.pre_session_fallback.take().unwrap();
+                    let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                    log_on_stop_source("pre_session");
+                    ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStop")?;
+                    return Ok(());
+                }
+            }
         } else {
             log::debug!(
                 "Pre-session fallback hash mismatch (normal stop): expected {:?}, got {:?}",

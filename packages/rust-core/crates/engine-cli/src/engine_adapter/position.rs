@@ -11,6 +11,12 @@ use crate::engine_adapter::{EngineAdapter, PonderState};
 use engine_core::usi::create_position;
 
 impl EngineAdapter {
+    /// Set position directly from a Position value (core-constructed)
+    pub fn set_raw_position(&mut self, position: Position) {
+        self.clear_ponder_state();
+        self.position = Some(position);
+        info!("Position set from raw core Position");
+    }
     /// Check if a position is currently set
     pub fn has_position(&self) -> bool {
         self.position.is_some()

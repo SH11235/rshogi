@@ -43,6 +43,11 @@ use crate::shogi::{Move, Position};
 use crate::usi::{parse_sfen, parse_usi_move, position_to_sfen};
 use anyhow::{anyhow, Result};
 use log::debug;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreSource {
+    Command,
+    Snapshot,
+}
 
 /// Create a Position from USI position command arguments.
 ///
@@ -157,6 +162,58 @@ pub fn create_position(startpos: bool, sfen: Option<&str>, moves: &[String]) -> 
     }
 
     Ok(pos)
+}
+
+/// Rebuild a position from USI position args and verify its root hash.
+pub fn rebuild_and_verify(
+    startpos: bool,
+    sfen: Option<&str>,
+    moves: &[String],
+    expected_hash: u64,
+) -> Result<Position> {
+    let pos = create_position(startpos, sfen, moves)?;
+    if pos.zobrist_hash() == expected_hash {
+        Ok(pos)
+    } else {
+        Err(anyhow!(
+            "hash mismatch after rebuild: expected={:#016x} actual={:#016x}",
+            expected_hash,
+            pos.zobrist_hash()
+        ))
+    }
+}
+
+/// Restore a position from SFEN snapshot and verify its root hash.
+pub fn restore_snapshot_and_verify(sfen_snapshot: &str, expected_hash: u64) -> Result<Position> {
+    let pos = parse_sfen(sfen_snapshot).map_err(|e| anyhow!(e))?;
+    if pos.zobrist_hash() == expected_hash {
+        Ok(pos)
+    } else {
+        Err(anyhow!(
+            "hash mismatch after snapshot restore: expected={:#016x} actual={:#016x}",
+            expected_hash,
+            pos.zobrist_hash()
+        ))
+    }
+}
+
+/// Try to rebuild from command; if that fails, try snapshot; verify hash in either case.
+pub fn rebuild_then_snapshot_fallback(
+    startpos: bool,
+    sfen: Option<&str>,
+    moves: &[String],
+    sfen_snapshot: Option<&str>,
+    expected_hash: u64,
+) -> Result<(Position, RestoreSource)> {
+    if let Ok(pos) = rebuild_and_verify(startpos, sfen, moves, expected_hash) {
+        return Ok((pos, RestoreSource::Command));
+    }
+    if let Some(snapshot) = sfen_snapshot {
+        if let Ok(pos) = restore_snapshot_and_verify(snapshot, expected_hash) {
+            return Ok((pos, RestoreSource::Snapshot));
+        }
+    }
+    Err(anyhow!("rebuild_then_snapshot_fallback: both rebuild and snapshot failed"))
 }
 #[cfg(test)]
 mod tests {
