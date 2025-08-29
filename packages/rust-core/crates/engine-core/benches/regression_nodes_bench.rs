@@ -50,7 +50,8 @@ fn bench_regression_nodes(c: &mut Criterion) {
         group.bench_function(id, |b| {
             b.iter(|| {
                 let mut pos: Position = parse_sfen(p.sfen).expect("valid sfen");
-                let mut searcher = UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
+                let mut searcher =
+                    UnifiedSearcher::<MaterialEvaluator, true, true>::new(MaterialEvaluator);
                 let limits = SearchLimits::builder().depth(p.depth).build();
                 let result = searcher.search(&mut pos, limits);
                 // Return nodes so the optimizer can't eliminate work

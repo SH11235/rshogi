@@ -23,7 +23,6 @@ use std::sync::Mutex;
 static LAST_EMIT_SOURCE_BY_ID: Lazy<Mutex<HashMap<u64, BestmoveSource>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-
 /// Statistics for bestmove emission
 #[derive(Debug, Clone)]
 pub struct BestmoveStats {
