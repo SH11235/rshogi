@@ -1,6 +1,10 @@
 use crate::bestmove_emitter::BestmoveEmitter;
 use crate::command_handler::CommandContext;
-use crate::emit_utils::log_tsv;
+use crate::emit_utils::{
+    log_position_restore_fallback, log_position_restore_resign, log_position_restore_success,
+    log_position_restore_try, log_tsv,
+};
+use crate::handlers::common::resign_on_position_restore_fail;
 use crate::helpers::wait_for_search_completion;
 use crate::usi::{send_info_string, send_response, GoParams, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
@@ -99,11 +103,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                     pos_state.move_len,
                     elapsed_ms
                 );
-                send_info_string(log_tsv(&[
-                    ("kind", "position_restore_try"),
-                    ("move_len", &pos_state.move_len.to_string()),
-                    ("age_ms", &elapsed_ms.to_string()),
-                ]))?;
+                log_position_restore_try(pos_state.move_len, elapsed_ms);
 
                 // Parse and apply the canonical position command
                 let mut need_fallback = false;
@@ -120,50 +120,31 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                                 pos_state.move_len,
                                 moves.len()
                             );
-                            send_info_string(log_tsv(&[
-                                ("kind", "position_restore_fallback"),
-                                ("reason", "move_len_mismatch"),
-                                ("expected", &pos_state.move_len.to_string()),
-                                ("actual", &moves.len().to_string()),
-                            ]))?;
+                            log_position_restore_fallback("move_len_mismatch");
                             need_fallback = true;
                         } else {
-                            // Try to apply the canonical command
-                            match engine.set_position(startpos, sfen.as_deref(), &moves) {
-                                Ok(()) => {
-                                    // Verify hash matches
-                                    if let Some(pos) = engine.get_position() {
-                                        let current_hash = pos.zobrist_hash();
-                                        if current_hash == pos_state.root_hash {
-                                            log::info!(
-                                                "Successfully rebuilt position with matching hash"
-                                            );
-                                            send_info_string(log_tsv(&[
-                                                ("kind", "position_restore_success"),
-                                                ("source", "command"),
-                                            ]))?;
-                                        } else {
-                                            log::warn!(
-                                                "Position rebuilt but hash mismatch: expected {:#016x}, got {:#016x}, move_len={}",
-                                                pos_state.root_hash, current_hash, pos_state.move_len
-                                            );
-                                            send_info_string(log_tsv(&[
-                                                ("kind", "position_restore_fallback"),
-                                                ("reason", "hash_mismatch"),
-                                            ]))?;
-                                            need_fallback = true;
+                            // Use core helper to attempt rebuild with snapshot fallback
+                            match engine_core::usi::rebuild_then_snapshot_fallback(
+                                startpos,
+                                sfen.as_deref(),
+                                &moves,
+                                Some(&pos_state.sfen_snapshot),
+                                pos_state.root_hash,
+                            ) {
+                                Ok((pos_verified, source)) => {
+                                    engine.set_raw_position(pos_verified);
+                                    match source {
+                                        engine_core::usi::RestoreSource::Command => {
+                                            log_position_restore_success("command")
                                         }
-                                    } else {
-                                        log::error!("Position set but unable to verify hash");
-                                        need_fallback = true;
+                                        engine_core::usi::RestoreSource::Snapshot => {
+                                            log_position_restore_success("sfen_snapshot")
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to rebuild position: {}", e);
-                                    send_info_string(log_tsv(&[
-                                        ("kind", "position_restore_fallback"),
-                                        ("reason", "rebuild_failed"),
-                                    ]))?;
+                                    log::warn!("Rebuild/snapshot failed: {e}");
+                                    log_position_restore_fallback("rebuild_and_snapshot_failed");
                                     need_fallback = true;
                                 }
                             }
@@ -177,55 +158,26 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                             );
 
                             // Directly use sfen_snapshot without parsing
-                            match engine.set_position(false, Some(&pos_state.sfen_snapshot), &[]) {
-                                Ok(()) => {
-                                    // Verify hash after fallback
-                                    if let Some(pos) = engine.get_position() {
-                                        let current_hash = pos.zobrist_hash();
-                                        if current_hash == pos_state.root_hash {
-                                            log::info!("Successfully restored position from sfen_snapshot with matching hash");
-                                            send_info_string(log_tsv(&[
-                                                ("kind", "position_restore_success"),
-                                                ("source", "sfen_snapshot"),
-                                            ]))?;
-                                        } else {
-                                            log::error!(
-                                                "SFEN fallback hash mismatch: expected {:#016x}, got {:#016x}",
-                                                pos_state.root_hash, current_hash
-                                            );
-                                            send_info_string(log_tsv(&[
-                                                ("kind", "position_restore_fail"),
-                                                ("reason", "sfen_hash_mismatch"),
-                                                (
-                                                    "expected",
-                                                    &format!("{:#016x}", pos_state.root_hash),
-                                                ),
-                                                ("actual", &format!("{:#016x}", current_hash)),
-                                            ]))?;
-                                            return super::super::command_handler::fail_position_restore(
-                                                crate::types::ResignReason::PositionRebuildFailed {
-                                                    error: "hash verification failed after fallback",
-                                                },
-                                                "sfen_hash_mismatch",
-                                            );
-                                        }
-                                    } else {
-                                        log::error!("Failed to get position after sfen_snapshot restoration");
-                                        return super::super::command_handler::fail_position_restore(
-                                            crate::types::ResignReason::PositionRebuildFailed {
-                                                error: "no position after sfen restoration",
-                                            },
-                                            "no_position_after_sfen",
-                                        );
-                                    }
+                            match engine_core::usi::restore_snapshot_and_verify(
+                                &pos_state.sfen_snapshot,
+                                pos_state.root_hash,
+                            ) {
+                                Ok(pos_verified) => {
+                                    engine.set_raw_position(pos_verified);
+                                    log_position_restore_success("sfen_snapshot");
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to set position from sfen_snapshot: {}", e);
-                                    return super::super::command_handler::fail_position_restore(
+                                    log::error!("SFEN fallback verify failed: {e}");
+                                    log_position_restore_resign(
+                                        "sfen_hash_mismatch",
+                                        Some(&format!("{:#016x}", pos_state.root_hash)),
+                                        Some("unknown"),
+                                    );
+                                    return resign_on_position_restore_fail(
                                         crate::types::ResignReason::PositionRebuildFailed {
-                                            error: "sfen_snapshot failed",
+                                            error: "hash verification failed after fallback",
                                         },
-                                        "sfen_snapshot_failed",
+                                        "sfen_hash_mismatch",
                                     );
                                 }
                             }
@@ -233,7 +185,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                     }
                     _ => {
                         log::error!("Invalid stored position command: {}", pos_state.cmd_canonical);
-                        return super::super::command_handler::fail_position_restore(
+                        return resign_on_position_restore_fail(
                             crate::types::ResignReason::InvalidStoredPositionCmd,
                             "invalid_cmd",
                         );
@@ -241,7 +193,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                 }
             } else {
                 log::error!("No position set and no recovery state available");
-                return super::super::command_handler::fail_position_restore(
+                return resign_on_position_restore_fail(
                     crate::types::ResignReason::NoPositionSet,
                     "no_position_set",
                 );
@@ -263,7 +215,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                 log::warn!("Legal moves check took {:?}", check_duration);
             }
             if !has_legal_moves {
-                return super::super::command_handler::fail_position_restore(
+                return resign_on_position_restore_fail(
                     crate::types::ResignReason::Checkmate,
                     "no_legal_moves",
                 );
