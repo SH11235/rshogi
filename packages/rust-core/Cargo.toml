@@ -5,7 +5,6 @@ members = [
     "crates/tools",
     "crates/engine-core",
     "crates/engine-cli",
-    "crates/engine-wasm",
 ]
 
 [workspace.dependencies]

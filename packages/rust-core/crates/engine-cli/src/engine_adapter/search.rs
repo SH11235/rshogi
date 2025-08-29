@@ -95,42 +95,44 @@ impl EngineAdapter {
         // 「常に period*ratio - (overhead+byoyomi_overhead)」に固定されるのを防ぐ。
         let is_byoyomi_active = is_byoyomi && !params.ponder;
         let overhead_ms: u32 = self.overhead_ms as u32;
-        let extra_hard_margin_ms: u32 = if is_byoyomi_active {
-            self.byoyomi_overhead_ms as u32
-        } else {
-            0
-        };
 
         // Check stop flag before applying go params
         let stop_value_before = stop_flag.load(std::sync::atomic::Ordering::Acquire);
         log::info!("prepare_search: stop_flag value before apply_go_params = {stop_value_before}");
 
-        // Apply go parameters to get search limits
+        // Compose effective byoyomi hard safety: base safety + GUI-side byoyomi overhead
+        // This makes the core's hard limit reflect real wall-clock constraints (go→bestmove),
+        // avoiding time losses due to pre-start latency not visible to the core timer.
+        let effective_byoyomi_safety_ms: u32 = (
+            self.byoyomi_safety_ms
+                + if is_byoyomi_active {
+                    self.byoyomi_overhead_ms
+                } else {
+                    0
+                }
+        ) as u32;
+
+        // Apply go parameters to get search limits with the effective safety
         let limits = crate::engine_adapter::time_control::apply_go_params(
             params,
             &position,
             overhead_ms,
             Some(stop_flag.clone()),
-            self.byoyomi_safety_ms as u32,
+            effective_byoyomi_safety_ms,
             self.byoyomi_early_finish_ratio,
             self.pv_stability_base,
             self.pv_stability_slope,
         )?;
 
-        // Byoyomi時は追加オーバーヘッドをhard側のリダクションへ加算する
+        // 監視用ログ（デバッグレベル）: byoyomi時の安全マージン適用結果
         if is_byoyomi_active {
             if let engine_core::time_management::TimeControl::Byoyomi { .. } = limits.time_control {
-                // 既存のbyoyomi_safety_msはTimeParameters.byoyomi_hard_limit_reduction_msへ写されている。
-                // 追加分だけ加算するため、TimeParametersは不可変なのでSearchLimitsを再構築。
-                // 現状SearchLimitsBuilderに直接設定手段がないため、この段階での加算はログで明示のみ行い、
-                // 次回のパラメータビルドに反映できるようTODOを残す。
-                log::info!(
-                    "apply extra hard margin for byoyomi: +{}ms (soft unchanged)",
-                    extra_hard_margin_ms
+                log::debug!(
+                    "byoyomi hard safety applied: base={}ms + overhead={}ms => effective={}ms",
+                    self.byoyomi_safety_ms,
+                    self.byoyomi_overhead_ms,
+                    effective_byoyomi_safety_ms
                 );
-                // NOTE: 現在のTimeParametersはCopy値で内部に入り込むため、
-                // ここからの安全な加算は大掛かりなAPI変更が必要。
-                // 代替として、core側のbyoyomi_hard_limit_reduction_msを拡張するパッチを別途提案します。
             }
         }
 

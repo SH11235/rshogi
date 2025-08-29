@@ -29,7 +29,6 @@ crates/
 │   ├── evaluation/         # Evaluation functions (material & NNUE)
 │   └── time_management/    # Time control
 ├── engine-cli/              # USI protocol command-line interface
-├── engine-wasm/            # WebAssembly bindings
 └── webrtc-p2p/             # WebRTC communication
 
 src/                         # Legacy WASM modules
