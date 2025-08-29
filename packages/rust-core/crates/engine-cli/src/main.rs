@@ -723,29 +723,40 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 }
             }
 
-            // Pre-session fallback captured at go-time
-            if let Some(mv) = ctx.pre_session_fallback.clone() {
-                let meta = build_meta(
-                    BestmoveSource::EmergencyFallbackTimeout,
-                    0,
-                    None,
-                    None,
-                    Some(engine_core::search::types::StopInfo {
-                        reason: engine_core::search::types::TerminationReason::TimeLimit,
-                        elapsed_ms: 0,
-                        nodes: 0,
-                        depth_reached: 0,
-                        hard_timeout: false,
-                        soft_limit_ms: soft_ms,
-                        hard_limit_ms: hard_ms,
-                    }),
-                );
-                ctx.emit_and_finalize(mv, None, meta, "WatchdogPreSessionFast")?;
-                let _ = send_info_string(log_tsv(&[
-                    ("kind", "watchdog_emit_latency"),
-                    ("ms", &emit_start.elapsed().as_millis().to_string()),
-                ]));
-                return Ok(());
+            // Pre-session fallback captured at go-time（軽量ガード: try_lockで一致時のみ使用）
+            if let Some(saved_mv) = ctx.pre_session_fallback.clone() {
+                if let Ok(adapter) = ctx.engine.try_lock() {
+                    if adapter.get_position().map(|p| p.zobrist_hash())
+                        == *ctx.pre_session_fallback_hash
+                    {
+                        let meta = build_meta(
+                            BestmoveSource::EmergencyFallbackTimeout,
+                            0,
+                            None,
+                            None,
+                            Some(engine_core::search::types::StopInfo {
+                                reason: engine_core::search::types::TerminationReason::TimeLimit,
+                                elapsed_ms: 0,
+                                nodes: 0,
+                                depth_reached: 0,
+                                hard_timeout: false,
+                                soft_limit_ms: soft_ms,
+                                hard_limit_ms: hard_ms,
+                            }),
+                        );
+                        ctx.emit_and_finalize(saved_mv, None, meta, "WatchdogPreSession")?;
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "watchdog_emit_latency"),
+                            ("ms", &emit_start.elapsed().as_millis().to_string()),
+                        ]));
+                        return Ok(());
+                    }
+                } else {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "watchdog_pre_session_skip"),
+                        ("reason", "adapter_lock_busy"),
+                    ]));
+                }
             }
 
             // Emergency
