@@ -67,6 +67,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         // 3) Pre-session fallback（ハッシュ一致時のみ使用。try_lockで非ブロッキング検査）
         if let Some(saved_move) = ctx.pre_session_fallback.clone() {
             if let Ok(adapter) = ctx.engine.try_lock() {
+                let t0 = std::time::Instant::now();
                 let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
                 if current_hash == *ctx.pre_session_fallback_hash {
                     if let Some(pos) = adapter.get_position() {
@@ -76,15 +77,35 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 &saved_move,
                             )
                         {
-                            *ctx.pre_session_fallback = None;
-                            *ctx.pre_session_fallback_hash = None;
-                            let meta =
-                                build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                            log_on_stop_source("pre_session");
-                            ctx.emit_and_finalize(norm, None, meta, "PonderPreSessionOnStop")?;
-                            return Ok(());
+                            let ms = t0.elapsed().as_micros();
+                            if ms <= 1000 {
+                                // ≈1ms 以内なら採用
+                                *ctx.pre_session_fallback = None;
+                                *ctx.pre_session_fallback_hash = None;
+                                let meta =
+                                    build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                                log_on_stop_source("pre_session");
+                                ctx.emit_and_finalize(norm, None, meta, "PonderPreSessionOnStop")?;
+                                return Ok(());
+                            } else {
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "stop_pre_session_skip"),
+                                    ("reason", "recheck_slow"),
+                                    ("us", &ms.to_string()),
+                                ]));
+                            }
+                        } else {
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "stop_pre_session_skip"),
+                                ("reason", "normalize_failed"),
+                            ]));
                         }
                     }
+                } else {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "stop_pre_session_skip"),
+                        ("reason", "hash_mismatch"),
+                    ]));
                 }
                 // 不一致・不正なら削除
                 *ctx.pre_session_fallback = None;
@@ -98,12 +119,22 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // 4) Emergency fallback
-        let (move_str, from) =
+        // 4) Emergency fallback（PositionState優先でロック不要の生成を試す）
+        let (move_str, from) = if let Some(state) = ctx.position_state.as_ref() {
+            if let Some(m) = crate::helpers::emergency_move_from_state(state) {
+                (m, BestmoveSource::SessionOnStop)
+            } else {
+                match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
+                    Ok((m, _)) => (m, BestmoveSource::SessionOnStop),
+                    Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
+                }
+            }
+        } else {
             match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
                 Ok((m, _)) => (m, BestmoveSource::SessionOnStop),
                 Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
-            };
+            }
+        };
         let meta = build_meta(from, 0, None, None, None);
         log_on_stop_source("emergency");
         ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
@@ -143,6 +174,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     // Pre-session fallback（通常 stop でもハッシュ一致時のみ使用。try_lock で検査）
     if let Some(saved_move) = ctx.pre_session_fallback.clone() {
         if let Ok(adapter) = ctx.engine.try_lock() {
+            let t0 = std::time::Instant::now();
             let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
             if current_hash == *ctx.pre_session_fallback_hash {
                 if let Some(pos) = adapter.get_position() {
@@ -152,14 +184,34 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                             &saved_move,
                         )
                     {
-                        *ctx.pre_session_fallback = None;
-                        *ctx.pre_session_fallback_hash = None;
-                        let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                        log_on_stop_source("pre_session");
-                        ctx.emit_and_finalize(norm, None, meta, "ImmediatePreSessionOnStop")?;
-                        return Ok(());
+                        let us = t0.elapsed().as_micros();
+                        if us <= 1000 {
+                            *ctx.pre_session_fallback = None;
+                            *ctx.pre_session_fallback_hash = None;
+                            let meta =
+                                build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                            log_on_stop_source("pre_session");
+                            ctx.emit_and_finalize(norm, None, meta, "ImmediatePreSessionOnStop")?;
+                            return Ok(());
+                        } else {
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "stop_pre_session_skip"),
+                                ("reason", "recheck_slow"),
+                                ("us", &us.to_string()),
+                            ]));
+                        }
+                    } else {
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "stop_pre_session_skip"),
+                            ("reason", "normalize_failed"),
+                        ]));
                     }
                 }
+            } else {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "stop_pre_session_skip"),
+                    ("reason", "hash_mismatch"),
+                ]));
             }
             // 不一致・不正なら削除
             *ctx.pre_session_fallback = None;
@@ -172,11 +224,21 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         }
     }
 
-    let (move_str, source) =
-        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
+    let (move_str, source) = if let Some(state) = ctx.position_state.as_ref() {
+        if let Some(m) = crate::helpers::emergency_move_from_state(state) {
+            (m, BestmoveSource::EmergencyFallbackTimeout)
+        } else {
+            match generate_fallback_move(ctx.engine, None, false, true) {
+                Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
+                Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
+            }
+        }
+    } else {
+        match generate_fallback_move(ctx.engine, None, false, true) {
             Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
             Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
-        };
+        }
+    };
     log_on_stop_source("emergency");
     let meta = build_meta(source, 0, None, None, None);
     ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;
