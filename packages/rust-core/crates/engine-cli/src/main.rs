@@ -175,6 +175,22 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         ]));
                     }
 
+                    // Explicitly log acceptance gate for diagnostics: idle vs finalized
+                    let finalized_ready = current_finalized_flag
+                        .as_ref()
+                        .map(|f| f.load(Ordering::Acquire))
+                        .unwrap_or(false);
+                    let idle_ready = search_state.can_start_search();
+                    let gate = if idle_ready {
+                        "idle"
+                    } else if finalized_ready {
+                        "finalized"
+                    } else {
+                        "none"
+                    };
+                    let _ =
+                        send_info_string(log_tsv(&[("kind", "cmd_accept_gate"), ("gate", gate)]));
+
                     // Quit is handled specially
                     if matches!(cmd, UsiCommand::Quit) {
                         if let Some(ref emitter) = current_bestmove_emitter {
