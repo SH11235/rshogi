@@ -1,6 +1,7 @@
 use crate::emit_utils::log_tsv;
 use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::state::SearchState;
+use crate::types::PositionState;
 use crate::usi::send_info_string;
 use crate::worker::{lock_or_recover_adapter, wait_for_worker_with_timeout, WorkerMessage};
 use anyhow::Result;
@@ -141,6 +142,35 @@ pub fn generate_fallback_move(
             }
         }
     }
+}
+
+/// Generate an emergency move directly from PositionState without touching the adapter lock.
+/// Returns Some(usi_move) if a legal move exists; None if no legal moves (resign upstream).
+pub fn emergency_move_from_state(pos_state: &PositionState) -> Option<String> {
+    // Try fast snapshot restore first
+    if let Ok(pos) =
+        engine_core::usi::restore_snapshot_and_verify(&pos_state.sfen_snapshot, pos_state.root_hash)
+    {
+        return engine_core::util::emergency::emergency_move_usi(&pos);
+    }
+    // Fallback: parse canonical command and rebuild position
+    if let Ok(crate::usi::UsiCommand::Position {
+        startpos,
+        sfen,
+        moves,
+    }) = crate::usi::parse_usi_command(&pos_state.cmd_canonical)
+    {
+        if let Ok((pos_verified, _)) = engine_core::usi::rebuild_then_snapshot_fallback(
+            startpos,
+            sfen.as_deref(),
+            &moves,
+            Some(&pos_state.sfen_snapshot),
+            pos_state.root_hash,
+        ) {
+            return engine_core::util::emergency::emergency_move_usi(&pos_verified);
+        }
+    }
+    None
 }
 
 /// Wait for any ongoing search to complete

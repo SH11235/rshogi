@@ -723,33 +723,67 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 }
             }
 
-            // Pre-session fallback captured at go-time（軽量ガード: try_lockで一致時のみ使用）
+            // Pre-session fallback（try_lockで一致時のみ使用。1ms超ならスキップ）
             if let Some(saved_mv) = ctx.pre_session_fallback.clone() {
                 if let Ok(adapter) = ctx.engine.try_lock() {
-                    if adapter.get_position().map(|p| p.zobrist_hash())
-                        == *ctx.pre_session_fallback_hash
-                    {
-                        let meta = build_meta(
-                            BestmoveSource::EmergencyFallbackTimeout,
-                            0,
-                            None,
-                            None,
-                            Some(engine_core::search::types::StopInfo {
-                                reason: engine_core::search::types::TerminationReason::TimeLimit,
-                                elapsed_ms: 0,
-                                nodes: 0,
-                                depth_reached: 0,
-                                hard_timeout: false,
-                                soft_limit_ms: soft_ms,
-                                hard_limit_ms: hard_ms,
-                            }),
-                        );
-                        ctx.emit_and_finalize(saved_mv, None, meta, "WatchdogPreSession")?;
-                        let _ = send_info_string(log_tsv(&[
-                            ("kind", "watchdog_emit_latency"),
-                            ("ms", &emit_start.elapsed().as_millis().to_string()),
-                        ]));
-                        return Ok(());
+                    let t0 = std::time::Instant::now();
+                    if let Some(h) = adapter.get_position().map(|p| p.zobrist_hash()) {
+                        if Some(h) == *ctx.pre_session_fallback_hash {
+                            // 軽い再正規化（1ms 以内のみ）
+                            if let Some(pos) = adapter.get_position() {
+                                if let Some(norm) =
+                                    engine_core::util::usi_helpers::normalize_usi_move_str_logged(
+                                        pos, &saved_mv,
+                                    )
+                                {
+                                    let us = t0.elapsed().as_micros();
+                                    if us <= 1000 {
+                                        let meta = build_meta(
+                                            BestmoveSource::EmergencyFallbackTimeout,
+                                            0,
+                                            None,
+                                            None,
+                                            Some(engine_core::search::types::StopInfo {
+                                                reason: engine_core::search::types::TerminationReason::TimeLimit,
+                                                elapsed_ms: 0,
+                                                nodes: 0,
+                                                depth_reached: 0,
+                                                hard_timeout: false,
+                                                soft_limit_ms: soft_ms,
+                                                hard_limit_ms: hard_ms,
+                                            }),
+                                        );
+                                        ctx.emit_and_finalize(
+                                            norm,
+                                            None,
+                                            meta,
+                                            "WatchdogPreSession",
+                                        )?;
+                                        let _ = send_info_string(log_tsv(&[
+                                            ("kind", "watchdog_emit_latency"),
+                                            ("ms", &emit_start.elapsed().as_millis().to_string()),
+                                        ]));
+                                        return Ok(());
+                                    } else {
+                                        let _ = send_info_string(log_tsv(&[
+                                            ("kind", "watchdog_pre_session_skip"),
+                                            ("reason", "recheck_slow"),
+                                            ("us", &us.to_string()),
+                                        ]));
+                                    }
+                                } else {
+                                    let _ = send_info_string(log_tsv(&[
+                                        ("kind", "watchdog_pre_session_skip"),
+                                        ("reason", "normalize_failed"),
+                                    ]));
+                                }
+                            }
+                        } else {
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "watchdog_pre_session_skip"),
+                                ("reason", "hash_mismatch"),
+                            ]));
+                        }
                     }
                 } else {
                     let _ = send_info_string(log_tsv(&[
@@ -759,9 +793,9 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 }
             }
 
-            // Emergency
-            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
-                Ok((move_str, _)) => {
+            // Emergency（PositionState 優先でロック不要経路を試す）
+            if let Some(state) = ctx.position_state.as_ref() {
+                if let Some(m) = crate::helpers::emergency_move_from_state(state) {
                     let meta = build_meta(
                         BestmoveSource::EmergencyFallbackTimeout,
                         0,
@@ -777,33 +811,112 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                             hard_limit_ms: hard_ms,
                         }),
                     );
-                    ctx.emit_and_finalize(move_str, None, meta, "WatchdogEmergency")?;
+                    ctx.emit_and_finalize(m, None, meta, "WatchdogEmergencyState")?;
                     let _ = send_info_string(log_tsv(&[
                         ("kind", "watchdog_emit_latency"),
                         ("ms", &emit_start.elapsed().as_millis().to_string()),
                     ]));
+                } else {
+                    match generate_fallback_move(ctx.engine, None, false, true) {
+                        Ok((move_str, _)) => {
+                            let meta = build_meta(
+                                BestmoveSource::EmergencyFallbackTimeout,
+                                0,
+                                None,
+                                None,
+                                Some(engine_core::search::types::StopInfo {
+                                    reason:
+                                        engine_core::search::types::TerminationReason::TimeLimit,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 0,
+                                    hard_timeout: false,
+                                    soft_limit_ms: soft_ms,
+                                    hard_limit_ms: hard_ms,
+                                }),
+                            );
+                            ctx.emit_and_finalize(move_str, None, meta, "WatchdogEmergency")?;
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "watchdog_emit_latency"),
+                                ("ms", &emit_start.elapsed().as_millis().to_string()),
+                            ]));
+                        }
+                        Err(_) => {
+                            let meta = build_meta(
+                                BestmoveSource::ResignTimeout,
+                                0,
+                                None,
+                                None,
+                                Some(engine_core::search::types::StopInfo {
+                                    reason:
+                                        engine_core::search::types::TerminationReason::TimeLimit,
+                                    elapsed_ms: 0,
+                                    nodes: 0,
+                                    depth_reached: 0,
+                                    hard_timeout: true,
+                                    soft_limit_ms: soft_ms,
+                                    hard_limit_ms: hard_ms,
+                                }),
+                            );
+                            ctx.emit_and_finalize(
+                                "resign".to_string(),
+                                None,
+                                meta,
+                                "WatchdogResign",
+                            )?;
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "watchdog_emit_latency"),
+                                ("ms", &emit_start.elapsed().as_millis().to_string()),
+                            ]));
+                        }
+                    }
                 }
-                Err(_) => {
-                    let meta = build_meta(
-                        BestmoveSource::ResignTimeout,
-                        0,
-                        None,
-                        None,
-                        Some(engine_core::search::types::StopInfo {
-                            reason: engine_core::search::types::TerminationReason::TimeLimit,
-                            elapsed_ms: 0,
-                            nodes: 0,
-                            depth_reached: 0,
-                            hard_timeout: true,
-                            soft_limit_ms: soft_ms,
-                            hard_limit_ms: hard_ms,
-                        }),
-                    );
-                    ctx.emit_and_finalize("resign".to_string(), None, meta, "WatchdogResign")?;
-                    let _ = send_info_string(log_tsv(&[
-                        ("kind", "watchdog_emit_latency"),
-                        ("ms", &emit_start.elapsed().as_millis().to_string()),
-                    ]));
+            } else {
+                match generate_fallback_move(ctx.engine, None, false, true) {
+                    Ok((move_str, _)) => {
+                        let meta = build_meta(
+                            BestmoveSource::EmergencyFallbackTimeout,
+                            0,
+                            None,
+                            None,
+                            Some(engine_core::search::types::StopInfo {
+                                reason: engine_core::search::types::TerminationReason::TimeLimit,
+                                elapsed_ms: 0,
+                                nodes: 0,
+                                depth_reached: 0,
+                                hard_timeout: false,
+                                soft_limit_ms: soft_ms,
+                                hard_limit_ms: hard_ms,
+                            }),
+                        );
+                        ctx.emit_and_finalize(move_str, None, meta, "WatchdogEmergency")?;
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "watchdog_emit_latency"),
+                            ("ms", &emit_start.elapsed().as_millis().to_string()),
+                        ]));
+                    }
+                    Err(_) => {
+                        let meta = build_meta(
+                            BestmoveSource::ResignTimeout,
+                            0,
+                            None,
+                            None,
+                            Some(engine_core::search::types::StopInfo {
+                                reason: engine_core::search::types::TerminationReason::TimeLimit,
+                                elapsed_ms: 0,
+                                nodes: 0,
+                                depth_reached: 0,
+                                hard_timeout: true,
+                                soft_limit_ms: soft_ms,
+                                hard_limit_ms: hard_ms,
+                            }),
+                        );
+                        ctx.emit_and_finalize("resign".to_string(), None, meta, "WatchdogResign")?;
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "watchdog_emit_latency"),
+                            ("ms", &emit_start.elapsed().as_millis().to_string()),
+                        ]));
+                    }
                 }
             }
             return Ok(());
