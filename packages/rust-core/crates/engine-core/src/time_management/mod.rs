@@ -81,6 +81,10 @@ struct TimeManagerInner {
     // Planned rounded stop time (u64::MAX = unset)
     search_end_ms: AtomicU64,
 
+    // Final push (byoyomi) controls
+    final_push_active: AtomicBool,
+    final_push_min_ms: AtomicU64, // Minimum think time to use (cannot stop before this)
+
     // Search state
     nodes_searched: AtomicU64,
     stop_flag: AtomicBool,
@@ -155,6 +159,8 @@ impl TimeManager {
             hard_limit_ms: AtomicU64::new(hard_ms),
             opt_limit_ms: AtomicU64::new(opt_limit),
             search_end_ms: AtomicU64::new(u64::MAX),
+            final_push_active: AtomicBool::new(false),
+            final_push_min_ms: AtomicU64::new(0),
             nodes_searched: AtomicU64::new(0),
             stop_flag: AtomicBool::new(false),
             last_pv_change_ms: AtomicU64::new(0),
@@ -163,7 +169,36 @@ impl TimeManager {
             is_ponder: AtomicBool::new(matches!(&limits.time_control, TimeControl::Ponder(_))),
         });
 
-        Self { inner }
+        let tm = Self { inner };
+
+        // Final push activation (byoyomi-focused): if remaining is close to pure byoyomi
+        if let TimeControl::Byoyomi {
+            main_time_ms,
+            byoyomi_ms,
+            ..
+        } = &limits.time_control
+        {
+            let total = main_time_ms.saturating_add(*byoyomi_ms);
+            // Threshold: total <= 1.2 * byoyomi → final push
+            if total * 10 <= (*byoyomi_ms) * 12 {
+                let worst = tm.inner.params.network_delay2_ms;
+                let avg = tm.inner.params.overhead_ms;
+                let min_ms = total.saturating_sub(worst).saturating_sub(avg);
+                tm.inner.final_push_active.store(true, Ordering::Relaxed);
+                tm.inner.final_push_min_ms.store(min_ms, Ordering::Relaxed);
+                // Ensure opt is at least min_ms
+                let _ = tm.inner.opt_limit_ms.fetch_max(min_ms, Ordering::Relaxed);
+                log::debug!(
+                    "[FinalPush] active: total={}ms, min_ms={}ms (worst={}, avg={})",
+                    total,
+                    min_ms,
+                    worst,
+                    avg
+                );
+            }
+        }
+
+        tm
     }
 
     /// Create a new time manager for pondering
@@ -269,9 +304,16 @@ impl TimeManager {
             return true;
         }
 
-        // Soft limit with PV stability check
+        // Soft limit with PV stability check (respect final push minimum)
         let soft_limit = self.inner.soft_limit_ms.load(Ordering::Relaxed);
         if elapsed >= soft_limit && self.state_checker().is_pv_stable(elapsed) {
+            // Do not stop before final push minimum
+            if self.inner.final_push_active.load(Ordering::Relaxed) {
+                let min_ms = self.inner.final_push_min_ms.load(Ordering::Relaxed);
+                if elapsed < min_ms {
+                    return false;
+                }
+            }
             return true;
         }
 
@@ -421,7 +463,9 @@ impl TimeManager {
             } else {
                 0
             };
-            let mut target = hard.saturating_sub(safety_ms);
+            let mut target = hard
+                .saturating_sub(self.inner.params.network_delay2_ms)
+                .saturating_sub(safety_ms);
             // Prefer rounded stop in byoyomi period
             if self.is_in_byoyomi() {
                 let next_sec = ((elapsed_ms / 1000) + 1) * 1000;
@@ -435,7 +479,11 @@ impl TimeManager {
                 self.inner.search_end_ms.store(target, Ordering::Relaxed);
                 log::debug!(
                     "[TimeBudget] scheduled_end={}ms (elapsed={}, opt={}, hard={}, safety={})",
-                    target, elapsed_ms, opt, hard, safety_ms
+                    target,
+                    elapsed_ms,
+                    opt,
+                    hard,
+                    safety_ms
                 );
             }
         }

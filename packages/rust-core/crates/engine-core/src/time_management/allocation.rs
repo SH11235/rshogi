@@ -95,7 +95,7 @@ fn calculate_fischer_time(
 
     let soft_ms = ((base_ms as f64 * phase_factor * params.soft_multiplier) + 0.5) as u64;
     let hard_ms =
-        (((soft_ms as f64 * params.hard_multiplier) + 0.5) as u64).min(remain_ms * 8 / 10); // Never use more than 80% of remaining time
+        (((soft_ms as f64 * params.hard_multiplier) + 0.5) as u64).min(remain_ms * 8 / 10);
 
     // Apply overhead
     let overhead = params.overhead_ms;
