@@ -60,12 +60,12 @@ where
             let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
             if elapsed_ms < hard {
                 let remain = hard - elapsed_ms;
-                // Ramp up responsiveness as we approach hard limit
-                if remain <= 150 {
+                // Ramp up responsiveness as we approach hard limit (strictly inside thresholds)
+                if remain < 150 {
                     return EVERY_NODE; // check every node
-                } else if remain <= 300 {
+                } else if remain < 300 {
                     return N32_MASK; // ~32 nodes
-                } else if remain <= 500 {
+                } else if remain < 500 {
                     return N64_MASK; // ~64 nodes
                 }
             }

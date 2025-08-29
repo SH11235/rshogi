@@ -136,6 +136,10 @@ impl<'a> MoveGenImpl<'a> {
             }
 
             // Calculate king danger squares for single check from sliding pieces
+            // Note: Only mark squares in the direction AWAY from the checker.
+            // Capturing the checker on its square may be legal and must NOT be
+            // precluded by this mask. Safety is validated by is_attacked_by()
+            // during king move generation.
             if gen.checkers.count_ones() == 1 {
                 gen.calculate_king_danger_squares();
             }
@@ -680,44 +684,56 @@ impl<'a> MoveGenImpl<'a> {
             if let Some(checker_piece) = self.pos.board.piece_on(checker_sq) {
                 match checker_piece.piece_type {
                     PieceType::Rook => {
-                        // For rook, the entire rank and file through king position are dangerous
+                        // For rook, only squares along the line AWAY from the checker
                         if self.king_sq.file() == checker_sq.file() {
-                            // Same file - entire file is dangerous
-                            self.king_danger_squares |=
-                                Bitboard(FILE_MASKS[self.king_sq.file() as usize]);
-                        }
-                        if self.king_sq.rank() == checker_sq.rank() {
-                            // Same rank - entire rank is dangerous
-                            for file in 0..9 {
+                            // Same file - move away from checker direction
+                            let rank_step =
+                                (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                            let mut r = self.king_sq.rank() as i8 + rank_step;
+                            while (0..9).contains(&r) {
                                 self.king_danger_squares
-                                    .set(Square::new(file, self.king_sq.rank()));
+                                    .set(Square::new(self.king_sq.file(), r as u8));
+                                r += rank_step;
+                            }
+                        } else if self.king_sq.rank() == checker_sq.rank() {
+                            // Same rank - move away from checker direction
+                            let file_step =
+                                (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
+                            let mut f = self.king_sq.file() as i8 + file_step;
+                            while (0..9).contains(&f) {
+                                self.king_danger_squares
+                                    .set(Square::new(f as u8, self.king_sq.rank()));
+                                f += file_step;
                             }
                         }
                     }
                     PieceType::Bishop => {
-                        // For bishop, the diagonal lines through king position are dangerous
-                        let file_diff =
+                        // For bishop, only squares along the diagonal AWAY from the checker
+                        let file_step =
                             (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
-                        let rank_diff =
+                        let rank_step =
                             (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
 
-                        // Calculate both directions along the diagonal
-                        for dir in [-1, 1] {
-                            let mut file = self.king_sq.file() as i8 + file_diff * dir;
-                            let mut rank = self.king_sq.rank() as i8 + rank_diff * dir;
-
-                            while (0..9).contains(&file) && (0..9).contains(&rank) {
-                                self.king_danger_squares.set(Square::new(file as u8, rank as u8));
-                                file += file_diff * dir;
-                                rank += rank_diff * dir;
-                            }
+                        // Move one step away from checker direction
+                        let mut file = self.king_sq.file() as i8 + file_step;
+                        let mut rank = self.king_sq.rank() as i8 + rank_step;
+                        while (0..9).contains(&file) && (0..9).contains(&rank) {
+                            self.king_danger_squares.set(Square::new(file as u8, rank as u8));
+                            file += file_step;
+                            rank += rank_step;
                         }
                     }
                     PieceType::Lance => {
-                        // For lance, the entire file in the direction of attack is dangerous
+                        // For lance, only squares along the file AWAY from the checker
                         if self.king_sq.file() == checker_sq.file() {
-                            self.king_danger_squares |=
-                                Bitboard(FILE_MASKS[self.king_sq.file() as usize]);
+                            let rank_step =
+                                (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
+                            let mut r = self.king_sq.rank() as i8 + rank_step;
+                            while (0..9).contains(&r) {
+                                self.king_danger_squares
+                                    .set(Square::new(self.king_sq.file(), r as u8));
+                                r += rank_step;
+                            }
                         }
                     }
                     _ => {} // Other pieces don't have ray attacks
