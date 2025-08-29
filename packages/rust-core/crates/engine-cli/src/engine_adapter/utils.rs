@@ -3,8 +3,11 @@
 //! This module contains helper functions for debugging, state management,
 //! and static search execution.
 use engine_core::{
-    engine::controller::Engine, search::limits::SearchLimits, search::SearchResult,
-    shogi::Position, usi::move_to_usi,
+    engine::controller::Engine,
+    search::limits::SearchLimits,
+    search::{IterationCallback, SearchResult},
+    shogi::Position,
+    usi::move_to_usi,
 };
 use log::{debug, error, info};
 use std::sync::Arc;
@@ -74,6 +77,7 @@ impl EngineAdapter {
         mut position: Position,
         limits: SearchLimits,
         info_callback: Box<dyn Fn(SearchInfo) + Send + Sync>,
+        iteration_callback: Option<IterationCallback>,
     ) -> Result<ExtendedSearchResult, EngineError> {
         // Save original position state for verification
         let original_hash = position.zobrist_hash();
@@ -86,6 +90,7 @@ impl EngineAdapter {
         // Create a new SearchLimits with info_callback added
         let limits = SearchLimits {
             info_callback: Some(info_callback_inner),
+            iteration_callback,
             ..limits
         };
 
@@ -195,9 +200,6 @@ impl EngineAdapter {
             best_move: move_to_usi(&best_move),
             ponder_move,
             depth: result.stats.depth,
-            seldepth: result.stats.seldepth,
-            score: result.score,
-            pv,
             stop_info: result.stop_info,
             pv_owner_mismatches: result.stats.pv_owner_mismatches,
             pv_owner_checks: result.stats.pv_owner_checks,

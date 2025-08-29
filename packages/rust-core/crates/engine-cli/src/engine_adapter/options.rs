@@ -65,6 +65,10 @@ impl EngineAdapter {
                 MIN_BYOYOMI_SAFETY_MS as i64,
                 MAX_BYOYOMI_SAFETY_MS as i64,
             ),
+            // Quick fallback options (shallow search for immediate fallback move)
+            EngineOption::check("QuickFallback", false),
+            EngineOption::spin("QuickFallbackDepth", 2, 1, 5),
+            EngineOption::spin("QuickFallbackTimeMs", 30, 1, 500),
         ];
     }
 
@@ -209,6 +213,43 @@ impl EngineAdapter {
                         return Err(anyhow!("PVStabilitySlope must be between 0 and 20"));
                     }
                     self.pv_stability_slope = slope;
+                }
+            }
+            "QuickFallback" => {
+                // Enable/disable quick fallback shallow search
+                let enabled = value.and_then(|v| v.parse::<u8>().ok()).map(|v| v != 0);
+                if let Some(e) = enabled {
+                    self.quick_fallback_enabled = e;
+                } else if value == Some("true") || value == Some("on") {
+                    self.quick_fallback_enabled = true;
+                } else if value == Some("false") || value == Some("off") {
+                    self.quick_fallback_enabled = false;
+                }
+            }
+            "QuickFallbackDepth" => {
+                if let Some(val_str) = value {
+                    let d = val_str.parse::<u64>().with_context(|| {
+                        format!(
+                            "Invalid value for QuickFallbackDepth: '{val_str}'. Expected integer 1-5"
+                        )
+                    })?;
+                    if !(1..=5).contains(&d) {
+                        return Err(anyhow!("QuickFallbackDepth must be between 1 and 5"));
+                    }
+                    self.quick_fallback_depth = d as u8;
+                }
+            }
+            "QuickFallbackTimeMs" => {
+                if let Some(val_str) = value {
+                    let t = val_str.parse::<u64>().with_context(|| {
+                        format!(
+                            "Invalid value for QuickFallbackTimeMs: '{val_str}'. Expected integer 1-500"
+                        )
+                    })?;
+                    if !(1..=500).contains(&t) {
+                        return Err(anyhow!("QuickFallbackTimeMs must be between 1 and 500"));
+                    }
+                    self.quick_fallback_time_ms = t;
                 }
             }
             "EvalFile" => {

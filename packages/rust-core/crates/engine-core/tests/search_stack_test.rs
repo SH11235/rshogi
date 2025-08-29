@@ -27,6 +27,7 @@ fn test_search_stack_integration() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        iteration_callback: None,
         ponder_hit_flag: None,
     };
 
@@ -65,6 +66,7 @@ fn test_search_stack_killers() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        iteration_callback: None,
         ponder_hit_flag: None,
     };
 
@@ -95,6 +97,7 @@ fn test_search_stack_static_eval_cache() {
         time_parameters: None,
         stop_flag: None,
         info_callback: None,
+        iteration_callback: None,
         ponder_hit_flag: None,
     };
 

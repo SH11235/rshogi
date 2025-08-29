@@ -109,6 +109,26 @@ pub fn log_on_stop_source(src: &str) {
     let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", src)]));
 }
 
+/// Log unified on_stop diagnostic snapshot
+///
+/// This standardizes the first-line dump on stop handling for race analysis.
+pub fn log_on_stop_snapshot(
+    state: &str,
+    ponder: bool,
+    has_session: bool,
+    has_partial: bool,
+    has_pre_session: bool,
+) {
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "on_stop"),
+        ("state", state),
+        ("ponder", if ponder { "1" } else { "0" }),
+        ("session", if has_session { "1" } else { "0" }),
+        ("partial", if has_partial { "1" } else { "0" }),
+        ("pre_session_fallback", if has_pre_session { "1" } else { "0" }),
+    ]));
+}
+
 /// Log position store snapshot
 pub fn log_position_store(root_hash: u64, move_len: usize, sfen_snapshot: &str, stored_ms: u128) {
     let _ = send_info_string(log_tsv(&[
@@ -117,6 +137,17 @@ pub fn log_position_store(root_hash: u64, move_len: usize, sfen_snapshot: &str, 
         ("move_len", &move_len.to_string()),
         ("sfen_first_20", &sfen_snapshot.chars().take(20).collect::<String>()),
         ("stored_ms_since_start", &stored_ms.to_string()),
+    ]));
+}
+
+/// Log go_received with optional pre_session_fallback
+pub fn log_go_received(ponder: bool, pre_session_fallback: Option<&str>) {
+    let ponder_str = if ponder { "1" } else { "0" };
+    let fallback = pre_session_fallback.unwrap_or("none");
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "go_received"),
+        ("ponder", ponder_str),
+        ("pre_session_fallback", fallback),
     ]));
 }
 

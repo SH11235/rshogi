@@ -4,16 +4,12 @@
 //! including search results, ponder state, and callback function types.
 
 use engine_core::search::types::StopInfo;
-use engine_core::shogi::Move;
 
 /// Extended search result containing all necessary information
 pub struct ExtendedSearchResult {
     pub best_move: String,
     pub ponder_move: Option<String>,
     pub depth: u8,
-    pub seldepth: Option<u8>,
-    pub score: i32,
-    pub pv: Vec<Move>,
     pub stop_info: Option<StopInfo>,
     pub pv_owner_mismatches: Option<u64>,
     pub pv_owner_checks: Option<u64>,
@@ -34,7 +30,6 @@ pub struct PonderState {
 #[derive(Clone, Copy, Debug)]
 pub enum PonderSource {
     Pv,
-    CurrentIteration,
     TT,
     None,
 }
@@ -43,7 +38,6 @@ impl std::fmt::Display for PonderSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             PonderSource::Pv => "pv",
-            PonderSource::CurrentIteration => "current_iter",
             PonderSource::TT => "tt",
             PonderSource::None => "none",
         };

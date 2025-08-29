@@ -96,6 +96,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             time_parameters: limits.time_parameters,
                             stop_flag: limits.stop_flag.clone(),
                             info_callback: None, // Don't need callback for TimeManager
+                            iteration_callback: None,
                             ponder_hit_flag: None,
                             qnodes_counter: limits.qnodes_counter.clone(),
                         };
@@ -900,6 +901,37 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                 }
             } else {
                 debug!("No info callback available for iteration {iteration}");
+            }
+
+            // Report committed iteration via iteration_callback if available
+            if let Some(ref iter_cb) = limits.iteration_callback {
+                // Use nodes from shared_state which already aggregates all threads
+                let total_nodes = total_nodes_from_shared;
+                // Use elapsed time from search start
+                let elapsed = search_start.elapsed();
+                // Ensure PV is non-empty, fallback to single-move PV from best_move if needed
+                let pv_to_send = if result.stats.pv.is_empty() {
+                    if let Some(best_move) = result.best_move {
+                        vec![best_move]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    result.stats.pv.clone()
+                };
+
+                if !pv_to_send.is_empty() {
+                    let committed = crate::search::CommittedIteration {
+                        depth: result.stats.depth.max(main_depth),
+                        seldepth: result.stats.seldepth,
+                        score: result.score,
+                        pv: pv_to_send,
+                        node_type: result.node_type,
+                        nodes: total_nodes,
+                        elapsed,
+                    };
+                    iter_cb(&committed);
+                }
             }
 
             // Send heartbeat info if enough time or nodes have passed
