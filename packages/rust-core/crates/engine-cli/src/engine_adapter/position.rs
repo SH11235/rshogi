@@ -4,9 +4,7 @@
 //! and position updates from USI commands.
 
 use anyhow::{Context, Result};
-use engine_core::movegen::MoveGenerator;
 use engine_core::shogi::Position;
-use engine_core::usi::parse_usi_move;
 use log::{debug, info, warn};
 
 use crate::engine_adapter::{EngineAdapter, PonderState};
@@ -58,60 +56,13 @@ impl EngineAdapter {
         Ok(())
     }
 
-    /// Check if a USI move string is legal in the current position
-    ///
-    /// # Arguments
-    /// * `usi_move` - Move string in USI format (e.g., "7g7f", "2b3c+", "P*5e")
-    ///
-    /// # Returns
-    /// * `true` if the move is legal in the current position
-    /// * `false` if no position is set or the move is illegal
+    /// Check if a USI move string is legal in the current position (engine-core util)
     pub fn is_legal_move(&self, usi_move: &str) -> bool {
         let Some(position) = &self.position else {
             warn!("Cannot check move legality: no position set");
             return false;
         };
-
-        // Try to parse the USI move
-        let Ok(parsed_move) = parse_usi_move(usi_move) else {
-            debug!("Failed to parse USI move: {usi_move}");
-            return false;
-        };
-
-        // Generate legal moves
-        let movegen = MoveGenerator::new();
-        let legal_moves = match movegen.generate_all(position) {
-            Ok(moves) => moves,
-            Err(e) => {
-                debug!("Failed to generate legal moves: {e}");
-                return false;
-            }
-        };
-
-        // Check if the parsed move matches any legal move
-        // Note: We need to compare moves semantically (ignoring piece type encoding)
-        // because USI notation doesn't include piece type information
-        let is_legal = legal_moves.as_slice().iter().any(|&legal_move| {
-            // Basic move matching
-            parsed_move.from() == legal_move.from()
-                && parsed_move.to() == legal_move.to()
-                && parsed_move.is_drop() == legal_move.is_drop()
-                && (!parsed_move.is_drop()
-                    || parsed_move.drop_piece_type() == legal_move.drop_piece_type())
-                && (
-                    // Either promotion flags match exactly
-                    parsed_move.is_promote() == legal_move.is_promote()
-                    // OR the parsed move tries to promote but the legal move doesn't allow it
-                    // (This handles cases like "2b8h+" where promotion is impossible)
-                    || (parsed_move.is_promote() && !legal_move.is_promote())
-                )
-        });
-
-        if !is_legal {
-            debug!("Move {usi_move} is not legal in current position (parsed as {parsed_move:?})");
-        }
-
-        is_legal
+        engine_core::util::usi_helpers::is_legal_usi_move(position, usi_move)
     }
 
     /// Clear ponder state (internal helper)
