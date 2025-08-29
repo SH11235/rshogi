@@ -38,10 +38,10 @@ pub fn canonicalize_position_cmd(startpos: bool, sfen: Option<&str>, moves: &[St
     cmd
 }
 
-use anyhow::{anyhow, Result};
 use crate::movegen::MoveGenerator;
-use crate::usi::{parse_sfen, parse_usi_move, position_to_sfen};
 use crate::shogi::{Move, Position};
+use crate::usi::{parse_sfen, parse_usi_move, position_to_sfen};
+use anyhow::{anyhow, Result};
 use log::debug;
 
 /// Create a Position from USI position command arguments.

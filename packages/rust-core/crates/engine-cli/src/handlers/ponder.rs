@@ -28,4 +28,3 @@ pub(crate) fn handle_ponder_hit(ctx: &mut CommandContext) -> anyhow::Result<()> 
     }
     Ok(())
 }
-

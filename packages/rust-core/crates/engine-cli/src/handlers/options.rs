@@ -10,4 +10,3 @@ pub(crate) fn handle_set_option(
     engine.set_option(&name, value.as_deref())?;
     Ok(())
 }
-

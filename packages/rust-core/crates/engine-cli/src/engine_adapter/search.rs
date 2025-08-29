@@ -246,7 +246,8 @@ impl EngineAdapter {
         let mut engine = self.take_engine()?;
 
         // Use core helper for a shallow, time-bounded search
-        let mv_opt = engine_core::util::search_helpers::quick_search_move(&mut engine, &position, 3, 100);
+        let mv_opt =
+            engine_core::util::search_helpers::quick_search_move(&mut engine, &position, 3, 100);
 
         // Return engine
         self.return_engine(engine);

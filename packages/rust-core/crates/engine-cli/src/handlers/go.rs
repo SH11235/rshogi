@@ -1,12 +1,12 @@
+use crate::bestmove_emitter::BestmoveEmitter;
+use crate::command_handler::CommandContext;
+use crate::emit_utils::log_tsv;
 use crate::helpers::wait_for_search_completion;
 use crate::usi::{send_info_string, send_response, GoParams, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
-use crate::emit_utils::log_tsv;
-use crate::bestmove_emitter::BestmoveEmitter;
-use crate::command_handler::CommandContext;
-use engine_core::usi::position_to_sfen;
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
+use engine_core::usi::position_to_sfen;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
@@ -108,7 +108,11 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                 // Parse and apply the canonical position command
                 let mut need_fallback = false;
                 match crate::usi::parse_usi_command(&pos_state.cmd_canonical) {
-                    Ok(crate::usi::UsiCommand::Position { startpos, sfen, moves }) => {
+                    Ok(crate::usi::UsiCommand::Position {
+                        startpos,
+                        sfen,
+                        moves,
+                    }) => {
                         // First check move_len consistency
                         if moves.len() != pos_state.move_len {
                             log::warn!(

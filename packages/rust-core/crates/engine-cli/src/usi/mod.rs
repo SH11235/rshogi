@@ -1,13 +1,11 @@
 //! USI (Universal Shogi Interface) protocol implementation
 
 pub mod commands;
-pub mod conversion;
 pub mod options;
 pub mod output;
 pub mod parser;
 
 pub use commands::{GameResult, GoParams, UsiCommand};
-pub use conversion::create_position;
 pub use options::EngineOption;
 pub use output::{ensure_flush_on_exit, flush_final, send_info_string, send_response, UsiResponse};
 pub use parser::parse_usi_command;
@@ -35,14 +33,10 @@ pub fn clamp_periods(periods: u32, warn_on_clamp: bool) -> u32 {
 }
 
 // canonicalize_position_cmd is provided by engine-core::usi
-pub use engine_core::usi::canonicalize_position_cmd;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    // canonicalize_position_cmd tests moved to engine-core::usi::utils
 
     #[test]
     fn test_clamp_periods() {
