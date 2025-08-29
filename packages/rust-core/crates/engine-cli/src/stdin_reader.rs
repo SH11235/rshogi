@@ -43,7 +43,15 @@ pub fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
                             match cmd_tx.try_send(cmd) {
                                 Ok(()) => {}
                                 Err(crossbeam_channel::TrySendError::Full(_)) => {
-                                    log::warn!("Command channel full, dropping command");
+                                    // Log drop with USI-visible info so we can diagnose saturation
+                                    let _ = send_info_string(log_tsv(&[
+                                        ("kind", "cmd_drop"),
+                                        ("cmd", cmd_name),
+                                    ]));
+                                    log::warn!(
+                                        "Command channel full, dropping command: {}",
+                                        cmd_name
+                                    );
                                 }
                                 Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                                     log::debug!(

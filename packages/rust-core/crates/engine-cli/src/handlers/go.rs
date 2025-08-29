@@ -11,7 +11,6 @@ use crate::usi::{send_info_string, send_response, GoParams, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
-use engine_core::usi::parse_usi_move;
 use engine_core::usi::position_to_sfen;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -263,28 +262,13 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
 
     // Precompute a root fallback move (normalized and verified)
     {
-        let mut adapter = lock_or_recover_adapter(ctx.engine);
+        let adapter = lock_or_recover_adapter(ctx.engine);
         let pos_opt = adapter.get_position().cloned();
         if let Some(pos_clone) = pos_opt {
             let mut fallback_usi: Option<String> = None;
-            // Optional fast shallow search for a better fallback (USI options driven)
-            if adapter.quick_fallback_enabled {
-                if let Ok(mut eng) = adapter.take_engine() {
-                    if let Some(mv) = engine_core::util::search_helpers::quick_search_move(
-                        &mut eng,
-                        &pos_clone,
-                        adapter.quick_fallback_depth,
-                        adapter.quick_fallback_time_ms,
-                    ) {
-                        fallback_usi = Some(engine_core::usi::move_to_usi(&mv));
-                    }
-                    adapter.return_engine(eng);
-                }
-            }
-            if fallback_usi.is_none() {
-                if let Ok(m) = adapter.generate_emergency_move() {
-                    fallback_usi = Some(m);
-                }
+            // QuickFallback(浅い探索)は削除。常に軽量の emergency move で即時決定する。
+            if let Ok(m) = adapter.generate_emergency_move() {
+                fallback_usi = Some(m);
             }
             if let Some(mstr) = fallback_usi {
                 if let Some(norm) =
@@ -315,35 +299,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         ("search_id", &search_id.to_string()),
     ]));
 
-    // Phase 1: Pre-commit a tiny iteration result to ensure a sane fallback from normal search
-    // This avoids relying on emergency_fallback at the tail end when time is tight.
-    {
-        let mut adapter = lock_or_recover_adapter(ctx.engine);
-        // Run a tiny shallow search (depth from options, time budget small)
-        if let Ok(qm) = adapter.quick_search() {
-            if let Ok(parsed) = parse_usi_move(&qm) {
-                let committed = engine_core::search::CommittedIteration {
-                    depth: adapter.quick_fallback_depth.max(1),
-                    seldepth: None,
-                    score: 0, // score not available from quick_search; use neutral
-                    pv: vec![parsed],
-                    node_type: engine_core::search::types::NodeType::Exact,
-                    nodes: 0,
-                    elapsed: std::time::Duration::from_millis(0),
-                };
-                // Send as if from worker to unify the path
-                let _ = ctx.worker_tx.send(WorkerMessage::IterationCommitted {
-                    committed,
-                    search_id,
-                });
-                log::debug!(
-                    "Pre-committed tiny iteration for search_id={} with move {}",
-                    search_id,
-                    qm
-                );
-            }
-        }
-    }
+    // Removed: pre-commit tiny quick_search iteration to avoid go-path latency
 
     // Spawn worker thread for search with panic safety
     let handle = thread::spawn(move || {

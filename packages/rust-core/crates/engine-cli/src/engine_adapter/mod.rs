@@ -73,12 +73,6 @@ pub struct EngineAdapter {
     byoyomi_safety_ms: u64,
     /// Whether the last search was using byoyomi time control
     last_search_is_byoyomi: bool,
-    /// Quick fallback (shallow search) enable flag
-    pub(crate) quick_fallback_enabled: bool,
-    /// Quick fallback depth (plies)
-    pub(crate) quick_fallback_depth: u8,
-    /// Quick fallback time budget in ms
-    pub(crate) quick_fallback_time_ms: u64,
 }
 
 impl Default for EngineAdapter {
@@ -115,9 +109,6 @@ impl EngineAdapter {
             byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
             last_search_is_byoyomi: false,
-            quick_fallback_enabled: false,
-            quick_fallback_depth: 2,
-            quick_fallback_time_ms: 30,
         };
 
         // Initialize options
