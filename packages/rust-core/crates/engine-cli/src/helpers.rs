@@ -59,8 +59,8 @@ pub fn generate_fallback_move(
     // Stage 2: Try quick shallow search (depth 3, typically 10-50ms, max 100ms)
     log::info!("Attempting quick shallow search");
     let shallow_result = {
-        let mut engine = lock_or_recover_adapter(engine);
-        match engine.quick_search() {
+        let mut adapter = lock_or_recover_adapter(engine);
+        match adapter.quick_search() {
             Ok(move_str) => {
                 log::info!("Quick search successful: {move_str}");
                 Some(move_str)
