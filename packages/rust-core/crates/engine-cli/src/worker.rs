@@ -37,8 +37,16 @@ fn budget_from_limits(limits: &SearchLimits) -> (u64, u64) {
         TC::FixedTime { ms_per_move } => (*ms_per_move, *ms_per_move),
         TC::Byoyomi { byoyomi_ms, .. } => {
             if let Some(params) = limits.time_parameters {
+                // Soft: ratio of period (GUI/log用の近似値) - コア側ではoverhead等が別途考慮される
                 let soft = ((*byoyomi_ms as f64) * params.byoyomi_soft_ratio).floor() as u64;
-                let hard = byoyomi_ms.saturating_sub(params.byoyomi_hard_limit_reduction_ms);
+                // Hard: byoyomiの安全側マージンを最大限反映
+                // - 追加のbyoyomiセーフティ(byoyomi_hard_limit_reduction_ms)
+                // - GUI/IPC等の最悪遅延(network_delay2_ms) も減算
+                // これによりウォッチドッグがGUIの秒読みに確実に先行し、
+                // 稀な初手bestmove未送出（タイムフォーフィット）を防ぐ
+                let hard = byoyomi_ms
+                    .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
+                    .saturating_sub(params.network_delay2_ms);
                 clamp_pair(soft, hard)
             } else {
                 (*byoyomi_ms, *byoyomi_ms)
@@ -48,7 +56,9 @@ fn budget_from_limits(limits: &SearchLimits) -> (u64, u64) {
             TC::Byoyomi { byoyomi_ms, .. } => {
                 if let Some(params) = limits.time_parameters {
                     let soft = ((*byoyomi_ms as f64) * params.byoyomi_soft_ratio).floor() as u64;
-                    let hard = byoyomi_ms.saturating_sub(params.byoyomi_hard_limit_reduction_ms);
+                    let hard = byoyomi_ms
+                        .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
+                        .saturating_sub(params.network_delay2_ms);
                     clamp_pair(soft, hard)
                 } else {
                     (*byoyomi_ms, *byoyomi_ms)
