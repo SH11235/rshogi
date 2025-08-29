@@ -1,5 +1,5 @@
 use crate::command_handler::CommandContext;
-use crate::emit_utils::build_meta;
+use crate::emit_utils::{build_meta, log_on_stop_source};
 use crate::emit_utils::log_tsv;
 use crate::helpers::generate_fallback_move;
 use crate::types::BestmoveSource;
@@ -54,7 +54,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 None,
                 "PonderSessionOnStop",
             )? {
-                let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "session")]));
+                log_on_stop_source("session");
                 return Ok(());
             }
         }
@@ -70,7 +70,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     Some(format!("cp {s}")),
                     None,
                 );
-                let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "partial")]));
+                log_on_stop_source("partial");
                 ctx.emit_and_finalize(move_str, None, meta, "PonderPartialOnStop")?;
                 return Ok(());
             }
@@ -85,7 +85,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             if current_hash == *ctx.pre_session_fallback_hash {
                 let move_str = ctx.pre_session_fallback.take().unwrap();
                 let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "pre_session")]));
+                log_on_stop_source("pre_session");
                 ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStop")?;
                 return Ok(());
             } else {
@@ -106,7 +106,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
         };
         let meta = build_meta(from, 0, None, None, None);
-        let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "emergency")]));
+        log_on_stop_source("emergency");
         ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
         return Ok(());
     }
@@ -119,7 +119,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             None,
             "SessionOnStop",
         )? {
-            let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "session")]));
+            log_on_stop_source("session");
             return Ok(());
         }
     }
@@ -133,7 +133,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 Some(format!("cp {s}")),
                 None,
             );
-            let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "partial")]));
+            log_on_stop_source("partial");
             ctx.emit_and_finalize(move_str, None, meta, "ImmediatePartialOnStop")?;
             return Ok(());
         }
@@ -148,7 +148,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         if current_hash == *ctx.pre_session_fallback_hash {
             let move_str = ctx.pre_session_fallback.take().unwrap();
             let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-            let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "pre_session")]));
+            log_on_stop_source("pre_session");
             ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStop")?;
             return Ok(());
         } else {
@@ -167,7 +167,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
         Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
     };
-    let _ = send_info_string(log_tsv(&[("kind", "on_stop_source"), ("src", "emergency")]));
+    log_on_stop_source("emergency");
     let meta = build_meta(source, 0, None, None, None);
     ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;
     Ok(())

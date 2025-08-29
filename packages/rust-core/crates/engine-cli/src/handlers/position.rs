@@ -4,7 +4,6 @@ use crate::usi::{canonicalize_position_cmd, send_info_string};
 use crate::worker::lock_or_recover_adapter;
 use crate::helpers::wait_for_search_completion;
 use engine_core::usi::position_to_sfen;
-use std::time::Instant;
 
 pub(crate) fn handle_position_command(
     startpos: bool,
@@ -92,4 +91,3 @@ pub(crate) fn handle_position_command(
 
     Ok(())
 }
-
