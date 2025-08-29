@@ -53,6 +53,25 @@ where
         return N64_MASK; // ponderhit responsiveness
     }
 
+    // If TimeManager exists, adapt polling frequency near hard limit
+    if let Some(tm) = &searcher.time_manager {
+        let hard = tm.hard_limit_ms();
+        if hard < u64::MAX && hard > 0 {
+            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            if elapsed_ms < hard {
+                let remain = hard - elapsed_ms;
+                // Ramp up responsiveness as we approach hard limit
+                if remain <= 150 {
+                    return EVERY_NODE; // check every node
+                } else if remain <= 300 {
+                    return N32_MASK; // ~32 nodes
+                } else if remain <= 500 {
+                    return N64_MASK; // ~64 nodes
+                }
+            }
+        }
+    }
+
     // Special handling for Byoyomi time control - need more frequent checks
     if let Some(tm) = &searcher.time_manager {
         if let TimeControl::Byoyomi { .. } = tm.time_control() {
