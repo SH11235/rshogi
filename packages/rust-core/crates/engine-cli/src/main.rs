@@ -142,6 +142,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     // Diagnostics: timestamps for cross-event deltas
     let mut last_bestmove_sent_at: Option<Instant> = None;
     let mut last_go_begin_at: Option<Instant> = None;
+    // Armed worker watchdog threshold (None when not armed): used to suppress wall watchdog
+    let mut worker_watchdog_threshold: Option<u64> = None;
 
     // Main event loop - process USI commands and worker messages concurrently
     // Strategy: always drain cmd/ctrl first (non-blocking), then handle a bounded number
@@ -229,6 +231,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
+                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                     };
                     match handle_command(cmd, &mut ctx) {
                         Ok(()) => {}
@@ -286,6 +289,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
+                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                     };
                     match handle_command(cmd, &mut ctx) {
                         Ok(()) => {}
@@ -332,6 +336,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
+                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                     };
                     handle_worker_message(msg, &mut ctx)?;
                     processed_worker += 1;
@@ -383,6 +388,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
+                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                     };
                     match handle_command(cmd, &mut ctx) { Ok(()) => {}, Err(e) => { log::error!("[MAIN] ctrl handle_command error: {}", e); return Err(e); } }
                     continue;
@@ -459,6 +465,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_committed: &mut current_committed,
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
+                            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -505,6 +512,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_committed: &mut current_committed,
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
+                            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -521,7 +529,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(4400);
-                if thr_ms > 0 && search_state.is_searching() {
+                if thr_ms > 0 && search_state.is_searching() && worker_watchdog_threshold.is_none() {
                     if let Some(t0) = last_go_begin_at {
                         let elapsed = t0.elapsed().as_millis() as u64;
                         // Only fire if no bestmove has been sent since go-begin
@@ -553,11 +561,15 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 current_committed: &mut current_committed,
                                 last_bestmove_sent_at: &mut last_bestmove_sent_at,
                                 last_go_begin_at: &mut last_go_begin_at,
+                                current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                             };
                             // Force stop handling (best-effort fallback emission inside)
                             let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
                         }
                     }
+                } else if thr_ms > 0 && search_state.is_searching() && worker_watchdog_threshold.is_some() {
+                    // Suppress wall watchdog when worker watchdog is armed
+                    let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_suppress"), ("reason", "worker_watchdog_active")]));
                 }
             }
         }
@@ -940,6 +952,24 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
         WorkerMessage::Info { info, search_id } => {
             // Forward info messages only from current search
             if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
+                // Detect worker watchdog arming and record threshold to suppress wall watchdog
+                if let Some(ref s) = info.string {
+                    if s.contains("kind=watchdog_start") {
+                        // Parse threshold_ms from TSV
+                        let mut threshold: Option<u64> = None;
+                        for kv in s.split('\t') {
+                            if let Some((k, v)) = kv.split_once('=') {
+                                if k == "threshold_ms" {
+                                    if let Ok(ms) = v.parse::<u64>() {
+                                        threshold = Some(ms);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        *ctx.current_worker_watchdog_threshold = threshold;
+                    }
+                }
                 send_response(UsiResponse::Info(info))?;
             } else {
                 log::trace!(
@@ -1040,6 +1070,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             search_id,
             stop_info,
         } => {
+            // Clear any armed worker watchdog for this search
+            *ctx.current_worker_watchdog_threshold = None;
             // Handle search completion for current search（state非依存: emitter未finalizeなら許可）
             if search_id != *ctx.current_search_id {
                 let _ = send_info_string(log_tsv(&[

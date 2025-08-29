@@ -152,4 +152,9 @@ impl EngineAdapter {
         self.active_ponder_hit_flag = Some(flag.clone());
         flag
     }
+
+    /// Get configured number of threads (for diagnostics/logging)
+    pub fn threads(&self) -> usize {
+        self.threads
+    }
 }
