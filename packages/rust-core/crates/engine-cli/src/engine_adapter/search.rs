@@ -5,8 +5,11 @@
 
 use anyhow::{anyhow, Result};
 use engine_core::{
-    engine::controller::Engine, movegen::MoveGenerator, search::CommittedIteration,
-    shogi::Position, usi::move_to_usi,
+    engine::controller::{Engine, EngineType},
+    movegen::MoveGenerator,
+    search::CommittedIteration,
+    shogi::Position,
+    usi::move_to_usi,
 };
 use log::info;
 
@@ -173,6 +176,29 @@ impl EngineAdapter {
             }
         }
 
+        // Ensure an engine instance exists for upcoming searches
+        self.ensure_engine_available();
         info!("Engine state forcefully reset (position preserved)");
+    }
+
+    /// Ensure engine instance exists; create a fresh one if missing.
+    ///
+    /// This is a recovery path for rare races where the previous worker
+    /// still owns the engine during a new go. A temporary engine ensures
+    /// we can continue; the guard drop from the previous worker will later
+    /// overwrite this instance.
+    pub fn ensure_engine_available(&mut self) {
+        if self.engine.is_none() {
+            // Use current or default type (Material as safe baseline)
+            let mut e = Engine::new(EngineType::Material);
+            // Re-apply known configuration
+            e.set_threads(self.threads);
+            e.set_hash_size(self.hash_size);
+            if let Some(ref eval_file) = self.pending_eval_file {
+                let _ = e.load_nnue_weights(eval_file);
+            }
+            self.engine = Some(e);
+            info!("EngineAdapter: created temporary engine for availability recovery");
+        }
     }
 }

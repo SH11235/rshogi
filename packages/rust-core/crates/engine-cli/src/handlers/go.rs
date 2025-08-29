@@ -63,23 +63,45 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     // Check engine availability before proceeding
     {
         let mut adapter = lock_or_recover_adapter(ctx.engine);
-        let engine_available = adapter.is_engine_available();
+        let mut engine_available = adapter.is_engine_available();
         log::debug!("Engine availability after wait: {engine_available}");
         if !engine_available {
-            log::error!("Engine is not available after wait_for_search_completion");
-            // Force reset state to recover engine if it's stuck in another thread
-            log::warn!("Attempting to force reset engine state for recovery");
-            adapter.force_reset_state();
+            // Short grace period: the previous worker may be returning the engine via guard drop
+            let grace_ms = std::env::var("ENGINE_RECOVERY_GRACE_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(300);
+            if grace_ms > 0 {
+                let start = std::time::Instant::now();
+                drop(adapter); // avoid holding lock while waiting
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "engine_recovery_grace_wait"),
+                    ("ms", &grace_ms.to_string()),
+                ]));
+                while start.elapsed().as_millis() as u64 <= grace_ms {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    let a = lock_or_recover_adapter(ctx.engine);
+                    engine_available = a.is_engine_available();
+                    if engine_available {
+                        break;
+                    }
+                }
+                adapter = lock_or_recover_adapter(ctx.engine);
+            }
 
-            // Check again after reset
-            let engine_available_after_reset = adapter.is_engine_available();
-            if !engine_available_after_reset {
-                log::error!(
-                    "Engine still not available after force reset - falling back to emergency move"
-                );
-                // Continue anyway - fallback mechanisms will handle this
-            } else {
-                log::debug!("Engine recovered after force reset");
+            if !engine_available {
+                log::error!("Engine is not available after grace wait; attempting force reset");
+                adapter.force_reset_state();
+                let _ = send_info_string(log_tsv(&[("kind", "engine_recovery_force_reset")]));
+                // Check again after reset
+                engine_available = adapter.is_engine_available();
+                if engine_available {
+                    log::debug!("Engine recovered after force reset");
+                } else {
+                    log::error!(
+                        "Engine still not available after force reset - proceeding with fallback paths"
+                    );
+                }
             }
         }
     }
