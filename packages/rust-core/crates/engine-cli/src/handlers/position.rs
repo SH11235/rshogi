@@ -3,9 +3,8 @@ use crate::emit_utils::log_position_store;
 use crate::emit_utils::log_tsv;
 use crate::helpers::wait_for_search_completion;
 use crate::usi::send_info_string;
-use crate::worker::lock_or_recover_adapter;
 use engine_core::usi::canonicalize_position_cmd;
-use engine_core::usi::position_to_sfen;
+use engine_core::usi::{position_to_sfen, rebuild_then_snapshot_fallback};
 use std::time::Instant;
 
 pub(crate) fn handle_position_command(
@@ -51,54 +50,94 @@ pub(crate) fn handle_position_command(
     *ctx.pre_session_fallback = None;
     *ctx.pre_session_fallback_hash = None;
 
-    let mut engine = lock_or_recover_adapter(ctx.engine);
-    match engine.set_position(startpos, sfen.as_deref(), &moves) {
-        Ok(()) => {
-            // Get position info and create PositionState
-            if let Some(pos) = engine.get_position() {
-                let sfen_snapshot = position_to_sfen(pos);
-                let root_hash = pos.zobrist_hash();
-                let move_len = moves.len();
+    // Position store fast path with non-blocking lock attempt
+    let store_start = Instant::now();
+    let _ = send_info_string(log_tsv(&[("kind", "position_store_begin")]));
+    // Try to acquire adapter lock without blocking; if busy, defer store using pure-core rebuild
+    match ctx.engine.try_lock() {
+        Ok(mut engine) => {
+            // Got the lock quickly – proceed with normal set_position
+            match engine.set_position(startpos, sfen.as_deref(), &moves) {
+                Ok(()) => {
+                    if let Some(pos) = engine.get_position() {
+                        let sfen_snapshot = position_to_sfen(pos);
+                        let root_hash = pos.zobrist_hash();
+                        let move_len = moves.len();
 
-                // Store the position state
-                let position_state = crate::types::PositionState::new(
-                    cmd_canonical.clone(),
-                    root_hash,
-                    move_len,
-                    sfen_snapshot.clone(),
-                );
+                        let position_state = crate::types::PositionState::new(
+                            cmd_canonical.clone(),
+                            root_hash,
+                            move_len,
+                            sfen_snapshot.clone(),
+                        );
+                        *ctx.position_state = Some(position_state);
 
-                *ctx.position_state = Some(position_state);
-
-                log::debug!(
-                    "Stored position state: cmd={}, hash={:#016x}",
-                    cmd_canonical,
-                    root_hash
-                );
-                log::info!(
-                    "Position command completed - SFEN: {}, root_hash: {:#016x}, side_to_move: {:?}, move_count: {}",
-                    sfen_snapshot, root_hash, pos.side_to_move, move_len
-                );
-
-                // Send structured log for position store via helper
-                let stored_ms = ctx.program_start.elapsed().as_millis();
-                log_position_store(root_hash, move_len, &sfen_snapshot, stored_ms);
-                // Also mark logical end of position handling
-                let _ = send_info_string(log_tsv(&[
-                    ("kind", "position_end"),
-                    ("move_len", &move_len.to_string()),
-                ]));
-            } else {
-                log::error!("Position set but unable to retrieve for state storage");
+                        let stored_ms = ctx.program_start.elapsed().as_millis();
+                        log_position_store(root_hash, move_len, &sfen_snapshot, stored_ms);
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "position_store_end"),
+                            ("elapsed_ms", &store_start.elapsed().as_millis().to_string()),
+                        ]));
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "position_end"),
+                            ("move_len", &move_len.to_string()),
+                        ]));
+                    } else {
+                        log::error!("Position set but unable to retrieve for state storage");
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "position_store_error"),
+                            ("reason", "get_position_none"),
+                        ]));
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to set position: {e:?}");
+                    send_info_string(format!("Error: Failed to set position - {e:?}"))?;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "position_store_error"),
+                        ("reason", "set_position_failed"),
+                    ]));
+                }
             }
         }
-        Err(e) => {
-            // Log error but don't crash - USI engines should be robust
-            // Use debug formatting to include error chain for better diagnostics
-            log::error!("Failed to set position: {e:?}");
-            send_info_string(format!("Error: Failed to set position - {e:?}"))?;
-            // Don't update position_state on failure - keep the previous valid one
-            log::debug!("Keeping previous position state due to error");
+        Err(_) => {
+            // Adapter lock busy – compute PositionState without touching adapter, then defer actual engine update
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "position_store_deferred"),
+                ("reason", "adapter_lock_busy"),
+            ]));
+            match rebuild_then_snapshot_fallback(startpos, sfen.as_deref(), &moves, None, 0) {
+                Ok((pos_verified, _src)) => {
+                    let sfen_snapshot = position_to_sfen(&pos_verified);
+                    let root_hash = pos_verified.zobrist_hash();
+                    let move_len = moves.len();
+                    let position_state = crate::types::PositionState::new(
+                        cmd_canonical.clone(),
+                        root_hash,
+                        move_len,
+                        sfen_snapshot.clone(),
+                    );
+                    *ctx.position_state = Some(position_state);
+                    let stored_ms = ctx.program_start.elapsed().as_millis();
+                    log_position_store(root_hash, move_len, &sfen_snapshot, stored_ms);
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "position_store_end"),
+                        ("elapsed_ms", &store_start.elapsed().as_millis().to_string()),
+                    ]));
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "position_end"),
+                        ("move_len", &move_len.to_string()),
+                    ]));
+                }
+                Err(e) => {
+                    log::error!("Deferred position rebuild failed: {e}");
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "position_store_error"),
+                        ("reason", "deferred_rebuild_failed"),
+                    ]));
+                    // Keep previous position_state; do not block main loop
+                }
+            }
         }
     }
 
