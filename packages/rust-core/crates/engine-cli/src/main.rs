@@ -309,48 +309,45 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
             default(Duration::from_millis(1)) => {
                 // Small idle to prevent busy loop
-                // Optional wall-clock watchdog: force stop before GUI timeout to avoid time losses
-                if std::env::var("WALL_WATCHDOG_MS").is_ok() {
-                    let thr_ms = std::env::var("WALL_WATCHDOG_MS")
-                        .ok()
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .unwrap_or(0);
-                    if thr_ms > 0 && search_state.is_searching() {
-                        if let Some(t0) = last_go_begin_at {
-                            let elapsed = t0.elapsed().as_millis() as u64;
-                            // Only fire if no bestmove has been sent since go-begin
-                            let best_after_begin = last_bestmove_sent_at.map(|tb| tb >= t0).unwrap_or(false);
-                            if elapsed > thr_ms && !best_after_begin {
-                                let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_fire"), ("elapsed_ms", &elapsed.to_string()), ("threshold_ms", &thr_ms.to_string())]));
-
-                                // Build a context and immediately handle stop
-                                let mut _legacy_session3: Option<()> = None;
-                                let mut ctx = CommandContext {
-                                    engine: &engine,
-                                    stop_flag: &stop_flag,
-                                    worker_tx: &worker_tx,
-                                    worker_rx: &worker_rx,
-                                    worker_handle: &mut worker_handle,
-                                    search_state: &mut search_state,
-                                    search_id_counter: &mut search_id_counter,
-                                    current_search_id: &mut current_search_id,
-                                    current_search_is_ponder: &mut current_search_is_ponder,
-                                    current_session: &mut _legacy_session3,
-                                    current_bestmove_emitter: &mut current_bestmove_emitter,
-                                    current_stop_flag: &mut current_stop_flag,
-                                    allow_null_move,
-                                    position_state: &mut position_state,
-                                    program_start,
-                                    last_partial_result: &mut last_partial_result,
-                                    pre_session_fallback: &mut pre_session_fallback,
-                                    pre_session_fallback_hash: &mut pre_session_fallback_hash,
-                                    current_committed: &mut current_committed,
-                                    last_bestmove_sent_at: &mut last_bestmove_sent_at,
-                                    last_go_begin_at: &mut last_go_begin_at,
-                                };
-                                // Force stop handling (best-effort fallback emission inside)
-                                let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
-                            }
+                // Wall-clock watchdog: default有効（Byoyomi前提 4.4s）。環境変数で上書き可能。
+                let thr_ms = std::env::var("WALL_WATCHDOG_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(4400);
+                if thr_ms > 0 && search_state.is_searching() {
+                    if let Some(t0) = last_go_begin_at {
+                        let elapsed = t0.elapsed().as_millis() as u64;
+                        // Only fire if no bestmove has been sent since go-begin
+                        let best_after_begin = last_bestmove_sent_at.map(|tb| tb >= t0).unwrap_or(false);
+                        if elapsed > thr_ms && !best_after_begin {
+                            let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_fire"), ("elapsed_ms", &elapsed.to_string()), ("threshold_ms", &thr_ms.to_string())]));
+                            // Build a context and immediately handle stop
+                            let mut _legacy_session3: Option<()> = None;
+                            let mut ctx = CommandContext {
+                                engine: &engine,
+                                stop_flag: &stop_flag,
+                                worker_tx: &worker_tx,
+                                worker_rx: &worker_rx,
+                                worker_handle: &mut worker_handle,
+                                search_state: &mut search_state,
+                                search_id_counter: &mut search_id_counter,
+                                current_search_id: &mut current_search_id,
+                                current_search_is_ponder: &mut current_search_is_ponder,
+                                current_session: &mut _legacy_session3,
+                                current_bestmove_emitter: &mut current_bestmove_emitter,
+                                current_stop_flag: &mut current_stop_flag,
+                                allow_null_move,
+                                position_state: &mut position_state,
+                                program_start,
+                                last_partial_result: &mut last_partial_result,
+                                pre_session_fallback: &mut pre_session_fallback,
+                                pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                                current_committed: &mut current_committed,
+                                last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                                last_go_begin_at: &mut last_go_begin_at,
+                            };
+                            // Force stop handling (best-effort fallback emission inside)
+                            let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
                         }
                     }
                 }
@@ -391,6 +388,151 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 /// Handle worker messages during normal operation
 fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result<()> {
     match msg {
+        WorkerMessage::WatchdogFired {
+            search_id,
+            soft_ms,
+            hard_ms,
+            wait_ms,
+        } => {
+            // Emit immediately on watchdog fire (state非依存、emitter未finalizeで一度だけ)
+            if search_id != *ctx.current_search_id {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "watchdog_emit_drop"),
+                    ("reason", "id_mismatch"),
+                ]));
+                return Ok(());
+            }
+            if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                if emitter.is_finalized() || emitter.is_terminated() {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "watchdog_emit_drop"),
+                        ("reason", "finalized_or_terminated"),
+                    ]));
+                    return Ok(());
+                }
+            } else {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "watchdog_emit_drop"),
+                    ("reason", "no_emitter"),
+                ]));
+                return Ok(());
+            }
+
+            // Prefer committed iteration
+            if let Some(committed) = ctx.current_committed.clone() {
+                let stop_info = engine_core::search::types::StopInfo {
+                    reason: engine_core::search::types::TerminationReason::TimeLimit,
+                    elapsed_ms: 0,
+                    nodes: 0,
+                    depth_reached: committed.depth,
+                    hard_timeout: false,
+                    soft_limit_ms: soft_ms,
+                    hard_limit_ms: hard_ms,
+                };
+                if ctx.emit_best_from_committed(
+                    &committed,
+                    BestmoveSource::PartialResultTimeout,
+                    Some(stop_info),
+                    "WatchdogCommitted",
+                )? {
+                    return Ok(());
+                }
+            }
+
+            // Fallback chain: partial → pre_session → emergency
+            if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
+                if let Ok((move_str, _)) =
+                    generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+                {
+                    let meta = build_meta(
+                        BestmoveSource::PartialResultTimeout,
+                        d,
+                        None,
+                        Some(format!("cp {s}")),
+                        Some(engine_core::search::types::StopInfo {
+                            reason: engine_core::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: d,
+                            hard_timeout: false,
+                            soft_limit_ms: soft_ms,
+                            hard_limit_ms: hard_ms,
+                        }),
+                    );
+                    ctx.emit_and_finalize(move_str, None, meta, "WatchdogPartial")?;
+                    return Ok(());
+                }
+            }
+
+            // Pre-session fallback captured at go-time
+            if let Some(mv) = ctx.pre_session_fallback.clone() {
+                let adapter = lock_or_recover_adapter(ctx.engine);
+                if adapter.get_position().map(|p| p.zobrist_hash())
+                    == *ctx.pre_session_fallback_hash
+                {
+                    let meta = build_meta(
+                        BestmoveSource::EmergencyFallbackTimeout,
+                        0,
+                        None,
+                        None,
+                        Some(engine_core::search::types::StopInfo {
+                            reason: engine_core::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: 0,
+                            hard_timeout: false,
+                            soft_limit_ms: soft_ms,
+                            hard_limit_ms: hard_ms,
+                        }),
+                    );
+                    drop(adapter);
+                    ctx.emit_and_finalize(mv, None, meta, "WatchdogPreSession")?;
+                    return Ok(());
+                }
+                drop(adapter);
+            }
+
+            // Emergency
+            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
+                Ok((move_str, _)) => {
+                    let meta = build_meta(
+                        BestmoveSource::EmergencyFallbackTimeout,
+                        0,
+                        None,
+                        None,
+                        Some(engine_core::search::types::StopInfo {
+                            reason: engine_core::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: 0,
+                            hard_timeout: false,
+                            soft_limit_ms: soft_ms,
+                            hard_limit_ms: hard_ms,
+                        }),
+                    );
+                    ctx.emit_and_finalize(move_str, None, meta, "WatchdogEmergency")?;
+                }
+                Err(_) => {
+                    let meta = build_meta(
+                        BestmoveSource::ResignTimeout,
+                        0,
+                        None,
+                        None,
+                        Some(engine_core::search::types::StopInfo {
+                            reason: engine_core::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: 0,
+                            hard_timeout: true,
+                            soft_limit_ms: soft_ms,
+                            hard_limit_ms: hard_ms,
+                        }),
+                    );
+                    ctx.emit_and_finalize("resign".to_string(), None, meta, "WatchdogResign")?;
+                }
+            }
+            return Ok(());
+        }
         WorkerMessage::Info { info, search_id } => {
             // Forward info messages only from current search
             if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
@@ -494,9 +636,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             search_id,
             stop_info,
         } => {
-            // Handle search completion for current search
-            // Only process if we're still in Searching state (not StopRequested)
-            if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Searching {
+            // Handle search completion for current search（state非依存: emitter未finalizeなら許可）
+            if search_id == *ctx.current_search_id {
                 log::info!("Search {search_id} finished (root_hash: {root_hash:016x})");
 
                 // Check if emitter is finalized or terminated
@@ -510,7 +651,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         return Ok(());
                     }
                 }
-
                 // Send bestmove immediately if not ponder
                 if !*ctx.current_search_is_ponder {
                     if let Some(ref _emitter) = ctx.current_bestmove_emitter {
