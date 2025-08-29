@@ -5,6 +5,7 @@ use crate::helpers::generate_fallback_move;
 use crate::types::BestmoveSource;
 use crate::usi::send_info_string;
 use anyhow::Result;
+use engine_core::movegen::MoveGenerator;
 
 pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     let _ = send_info_string(log_tsv(&[("kind", "stop_begin")]));
@@ -28,6 +29,104 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         ctx.last_partial_result.is_some(),
         ctx.pre_session_fallback.is_some(),
     );
+
+    // Early pre_session attempt (both normal and ponder): prioritize known-safe fallback
+    if let Some(saved_move) = ctx.pre_session_fallback.clone() {
+        if let Ok(adapter) = ctx.engine.try_lock() {
+            let t0 = std::time::Instant::now();
+            let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
+            if current_hash == *ctx.pre_session_fallback_hash {
+                if let Some(pos) = adapter.get_position() {
+                    if let Some(norm_a) =
+                        engine_core::util::usi_helpers::normalize_usi_move_str_logged(
+                            pos,
+                            &saved_move,
+                        )
+                    {
+                        // If PositionState exists, double-check; otherwise accept adapter result
+                        let accept = if let Some(state) = ctx.position_state.as_ref() {
+                            if let Ok(pos2) = engine_core::usi::restore_snapshot_and_verify(
+                                &state.sfen_snapshot,
+                                state.root_hash,
+                            ) {
+                                let mg = MoveGenerator::new();
+                                if let Ok(legal) = mg.generate_all(&pos2) {
+                                    if legal.as_slice().is_empty() {
+                                        let _ = send_info_string(log_tsv(&[("kind", "stop_pre_session_skip"), ("reason", "no_legal_moves")]));
+                                        false
+                                    } else if let Some(norm_s) = engine_core::util::usi_helpers::normalize_usi_move_str_logged(&pos2, &saved_move) {
+                                        norm_a == norm_s
+                                    } else {
+                                        let _ = send_info_string(log_tsv(&[("kind", "stop_pre_session_skip"), ("reason", "normalize_failed_state")]));
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            true
+                        };
+
+                        if accept {
+                            *ctx.pre_session_fallback = None;
+                            *ctx.pre_session_fallback_hash = None;
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "stop_pre_session_ok"),
+                                ("us", &t0.elapsed().as_micros().to_string()),
+                            ]));
+                            let meta =
+                                build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                            log_on_stop_source("pre_session");
+                            ctx.emit_and_finalize(norm_a, None, meta, "EarlyPreSessionOnStop")?;
+                            return Ok(());
+                        }
+                    } else {
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "stop_pre_session_skip"),
+                            ("reason", "normalize_failed"),
+                        ]));
+                    }
+                }
+            } else {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "stop_pre_session_skip"),
+                    ("reason", "hash_mismatch"),
+                ]));
+            }
+        } else {
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "stop_pre_session_skip"),
+                ("reason", "adapter_lock_busy"),
+            ]));
+        }
+        // 不採用の場合は削除（のちの正常パスで再計算・Emergencyへ）
+        *ctx.pre_session_fallback = None;
+        *ctx.pre_session_fallback_hash = None;
+    }
+
+    // Early: PositionState-based no-legal-move detection (lock-free)
+    if let Some(state) = ctx.position_state.as_ref() {
+        if let Ok(pos_verified) =
+            engine_core::usi::restore_snapshot_and_verify(&state.sfen_snapshot, state.root_hash)
+        {
+            let mg = MoveGenerator::new();
+            if let Ok(legal) = mg.generate_all(&pos_verified) {
+                if legal.as_slice().is_empty() {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "stop_pre_session_skip"),
+                        ("reason", "no_legal_moves"),
+                    ]));
+                    log_on_stop_source("emergency_resign");
+                    let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                    ctx.emit_and_finalize("resign".to_string(), None, meta, "StopNoLegalMoves")?;
+                    return Ok(());
+                }
+            }
+        }
+    }
 
     // Ponder stop: emit immediately for GUI compatibility
     if *ctx.current_search_is_ponder {
@@ -71,28 +170,93 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
                 if current_hash == *ctx.pre_session_fallback_hash {
                     if let Some(pos) = adapter.get_position() {
-                        if let Some(norm) =
+                        if let Some(norm_a) =
                             engine_core::util::usi_helpers::normalize_usi_move_str_logged(
                                 pos,
                                 &saved_move,
                             )
                         {
-                            let ms = t0.elapsed().as_micros();
-                            if ms <= 1000 {
-                                // ≈1ms 以内なら採用
+                            // State側でも同じ手を再正規化して一致を確認
+                            if let Some(state) = ctx.position_state.as_ref() {
+                                if let Ok(pos2) = engine_core::usi::restore_snapshot_and_verify(
+                                    &state.sfen_snapshot,
+                                    state.root_hash,
+                                ) {
+                                    // まず合法手が存在するかチェック
+                                    let mg = MoveGenerator::new();
+                                    if let Ok(legal) = mg.generate_all(&pos2) {
+                                        if legal.as_slice().is_empty() {
+                                            let _ = send_info_string(log_tsv(&[
+                                                ("kind", "stop_pre_session_skip"),
+                                                ("reason", "no_legal_moves"),
+                                            ]));
+                                            *ctx.pre_session_fallback = None;
+                                            *ctx.pre_session_fallback_hash = None;
+                                            // fall through to emergency below
+                                        } else if let Some(norm_s) = engine_core::util::usi_helpers::normalize_usi_move_str_logged(&pos2, &saved_move)
+                                        {
+                                            let us = t0.elapsed().as_micros();
+                                            if norm_a == norm_s && us <= 1000 {
+                                                // 採用（Adapter/Stateで一致、≤1ms）
+                                                *ctx.pre_session_fallback = None;
+                                                *ctx.pre_session_fallback_hash = None;
+                                                let _ = send_info_string(log_tsv(&[
+                                                    ("kind", "stop_pre_session_ok"),
+                                                    ("us", &us.to_string()),
+                                                ]));
+                                                let meta = build_meta(
+                                                    BestmoveSource::SessionOnStop,
+                                                    0,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                );
+                                                log_on_stop_source("pre_session");
+                                                ctx.emit_and_finalize(
+                                                    norm_a,
+                                                    None,
+                                                    meta,
+                                                    "PonderPreSessionOnStop",
+                                                )?;
+                                                return Ok(());
+                                            } else if us > 1000 {
+                                                let _ = send_info_string(log_tsv(&[
+                                                    ("kind", "stop_pre_session_skip"),
+                                                    ("reason", "recheck_slow"),
+                                                    ("us", &us.to_string()),
+                                                ]));
+                                            } else {
+                                                let _ = send_info_string(log_tsv(&[
+                                                    ("kind", "stop_pre_session_skip"),
+                                                    ("reason", "state_mismatch"),
+                                                ]));
+                                            }
+                                        } else {
+                                            let _ = send_info_string(log_tsv(&[
+                                                ("kind", "stop_pre_session_skip"),
+                                                ("reason", "normalize_failed_state"),
+                                            ]));
+                                        }
+                                    }
+                                }
+                            } else {
+                                // PositionState が無い場合は Adapter の結果を採用
                                 *ctx.pre_session_fallback = None;
                                 *ctx.pre_session_fallback_hash = None;
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "stop_pre_session_ok"),
+                                    ("note", "state_absent"),
+                                ]));
                                 let meta =
                                     build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
                                 log_on_stop_source("pre_session");
-                                ctx.emit_and_finalize(norm, None, meta, "PonderPreSessionOnStop")?;
+                                ctx.emit_and_finalize(
+                                    norm_a,
+                                    None,
+                                    meta,
+                                    "PonderPreSessionOnStop",
+                                )?;
                                 return Ok(());
-                            } else {
-                                let _ = send_info_string(log_tsv(&[
-                                    ("kind", "stop_pre_session_skip"),
-                                    ("reason", "recheck_slow"),
-                                    ("us", &ms.to_string()),
-                                ]));
                             }
                         } else {
                             let _ = send_info_string(log_tsv(&[
@@ -178,27 +342,62 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
             if current_hash == *ctx.pre_session_fallback_hash {
                 if let Some(pos) = adapter.get_position() {
-                    if let Some(norm) =
+                    if let Some(norm_a) =
                         engine_core::util::usi_helpers::normalize_usi_move_str_logged(
                             pos,
                             &saved_move,
                         )
                     {
-                        let us = t0.elapsed().as_micros();
-                        if us <= 1000 {
-                            *ctx.pre_session_fallback = None;
-                            *ctx.pre_session_fallback_hash = None;
-                            let meta =
-                                build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-                            log_on_stop_source("pre_session");
-                            ctx.emit_and_finalize(norm, None, meta, "ImmediatePreSessionOnStop")?;
-                            return Ok(());
-                        } else {
-                            let _ = send_info_string(log_tsv(&[
-                                ("kind", "stop_pre_session_skip"),
-                                ("reason", "recheck_slow"),
-                                ("us", &us.to_string()),
-                            ]));
+                        // State側でも一致を確認
+                        if let Some(state) = ctx.position_state.as_ref() {
+                            if let Ok(pos2) = engine_core::usi::restore_snapshot_and_verify(
+                                &state.sfen_snapshot,
+                                state.root_hash,
+                            ) {
+                                let mg = MoveGenerator::new();
+                                if let Ok(legal) = mg.generate_all(&pos2) {
+                                    if legal.as_slice().is_empty() {
+                                        let _ = send_info_string(log_tsv(&[("kind", "stop_pre_session_skip"), ("reason", "no_legal_moves")]));
+                                        *ctx.pre_session_fallback = None;
+                                        *ctx.pre_session_fallback_hash = None;
+                                    } else if let Some(norm_s) = engine_core::util::usi_helpers::normalize_usi_move_str_logged(&pos2, &saved_move) {
+                                        let us = t0.elapsed().as_micros();
+                                        if norm_a == norm_s && us <= 1000 {
+                                            *ctx.pre_session_fallback = None;
+                                            *ctx.pre_session_fallback_hash = None;
+                                            let _ = send_info_string(log_tsv(&[("kind", "stop_pre_session_ok"), ("us", &us.to_string())]));
+                                            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                                            log_on_stop_source("pre_session");
+                                            ctx.emit_and_finalize(norm_a, None, meta, "ImmediatePreSessionOnStop")?;
+                                            return Ok(());
+                                        } else if us > 1000 {
+                                            let _ = send_info_string(log_tsv(&[("kind", "stop_pre_session_skip"), ("reason", "recheck_slow"), ("us", &us.to_string())]));
+                                        } else {
+                                            let _ = send_info_string(log_tsv(&[("kind", "stop_pre_session_skip"), ("reason", "state_mismatch")]));
+                                        }
+                                    } else {
+                                        let _ = send_info_string(log_tsv(&[("kind", "stop_pre_session_skip"), ("reason", "normalize_failed_state")]));
+                                    }
+                                }
+                            } else {
+                                // PositionState が無い場合は Adapter の結果を採用
+                                *ctx.pre_session_fallback = None;
+                                *ctx.pre_session_fallback_hash = None;
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "stop_pre_session_ok"),
+                                    ("note", "state_absent"),
+                                ]));
+                                let meta =
+                                    build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                                log_on_stop_source("pre_session");
+                                ctx.emit_and_finalize(
+                                    norm_a,
+                                    None,
+                                    meta,
+                                    "ImmediatePreSessionOnStop",
+                                )?;
+                                return Ok(());
+                            }
                         }
                     } else {
                         let _ = send_info_string(log_tsv(&[
@@ -228,15 +427,18 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         if let Some(m) = crate::helpers::emergency_move_from_state(state) {
             (m, BestmoveSource::EmergencyFallbackTimeout)
         } else {
-            match generate_fallback_move(ctx.engine, None, false, true) {
-                Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
-                Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
-            }
+            // state側で合法手ゼロ → 必ず resign
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "emergency_resign"),
+                ("reason", "no_legal_moves"),
+            ]));
+            ("resign".to_string(), BestmoveSource::SessionOnStop)
         }
     } else {
+        // Stateが無ければ従来どおり（ただしエラー時はresign）
         match generate_fallback_move(ctx.engine, None, false, true) {
             Ok((m, _)) => (m, BestmoveSource::EmergencyFallbackTimeout),
-            Err(_) => ("resign".to_string(), BestmoveSource::ResignTimeout),
+            Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
         }
     };
     log_on_stop_source("emergency");
