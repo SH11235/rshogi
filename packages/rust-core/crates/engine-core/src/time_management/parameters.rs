@@ -11,6 +11,8 @@ use std::fmt;
 pub struct TimeParameters {
     // Overhead
     pub overhead_ms: u64, // Default: 50
+    /// Worst-case network delay (GUI/IPC), used for byoyomi hard budgeting
+    pub network_delay2_ms: u64, // Default: 1000
 
     // PV stability
     pub pv_base_threshold_ms: u64, // Default: 80
@@ -38,6 +40,7 @@ impl Default for TimeParameters {
     fn default() -> Self {
         Self {
             overhead_ms: 50,
+            network_delay2_ms: 1000,
             pv_base_threshold_ms: 80,
             pv_depth_slope_ms: 5,
             critical_fischer_ms: 300,
@@ -142,6 +145,19 @@ impl TimeParametersBuilder {
             });
         }
         self.params.overhead_ms = ms;
+        Ok(self)
+    }
+
+    /// Set worst-case network delay (NetworkDelay2)
+    pub fn network_delay2_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
+        if ms > constants::MAX_OVERHEAD_MS {
+            return Err(TimeParameterError::Overhead {
+                value: ms,
+                min: constants::MIN_OVERHEAD_MS,
+                max: constants::MAX_OVERHEAD_MS,
+            });
+        }
+        self.params.network_delay2_ms = ms;
         Ok(self)
     }
 
