@@ -404,6 +404,12 @@ where
 
                 // Save PV for next iteration's move ordering
                 self.previous_pv = self.stats.pv.clone();
+
+                // Phase 1: advise rounded stop near hard if we've already spent opt
+                if let Some(ref tm) = self.time_manager {
+                    let elapsed_ms = self.context.elapsed().as_millis() as u64;
+                    tm.advise_after_iteration(elapsed_ms);
+                }
             }
 
             depth += 1;
