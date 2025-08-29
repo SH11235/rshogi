@@ -158,6 +158,12 @@ where
         // Process events (including ponder hit) every move at root
         searcher.context.process_events(&searcher.time_manager);
 
+        // Phase 1: advise rounded stop near hard while iterating root moves
+        if let Some(ref tm) = searcher.time_manager {
+            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            tm.advise_after_iteration(elapsed_ms);
+        }
+
         // Also check time manager at root (but ensure at least one move is fully searched)
         if move_idx > 0
             && searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager)
