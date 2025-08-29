@@ -143,7 +143,191 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut last_go_begin_at: Option<Instant> = None;
 
     // Main event loop - process USI commands and worker messages concurrently
+    // Strategy: always drain cmd/ctrl first (non-blocking), then handle a bounded number
+    // of worker messages to avoid starvation, then fall back to a short select tick.
+    let mut pending_quit = false;
     loop {
+        // 1) Drain pending normal commands first (position/go 優先)
+        'drain_cmds: loop {
+            match cmd_rx.try_recv() {
+                Ok(cmd) => {
+                    log::debug!("USI command (drain phase): {:?}", cmd);
+                    let cmd_name = match &cmd {
+                        UsiCommand::Usi => "usi",
+                        UsiCommand::IsReady => "isready",
+                        UsiCommand::Quit => "quit",
+                        UsiCommand::Stop => "stop",
+                        UsiCommand::Position { .. } => "position",
+                        UsiCommand::Go(_) => "go",
+                        UsiCommand::SetOption { .. } => "setoption",
+                        UsiCommand::GameOver { .. } => "gameover",
+                        UsiCommand::PonderHit => "ponderhit",
+                        UsiCommand::UsiNewGame => "usinewgame",
+                    };
+                    let _ = send_info_string(log_tsv(&[("kind", "cmd_rx"), ("cmd", cmd_name)]));
+                    if let Some(t) = last_bestmove_sent_at {
+                        let delta = t.elapsed().as_millis();
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "post_bestmove_to_cmd_rx"),
+                            ("elapsed_ms", &delta.to_string()),
+                            ("cmd", cmd_name),
+                        ]));
+                    }
+
+                    // Quit is handled specially
+                    if matches!(cmd, UsiCommand::Quit) {
+                        if let Some(ref emitter) = current_bestmove_emitter {
+                            emitter.terminate();
+                        }
+                        stop_flag.store(true, Ordering::Release);
+                        if let Some(ref search_stop_flag) = current_stop_flag {
+                            search_stop_flag.store(true, Ordering::Release);
+                        }
+                        pending_quit = true;
+                        break 'drain_cmds; // proceed to shutdown via outer flow
+                    }
+
+                    // Handle other commands with fresh context
+                    let mut _legacy_session: Option<()> = None;
+                    let mut ctx = CommandContext {
+                        engine: &engine,
+                        stop_flag: &stop_flag,
+                        worker_tx: &worker_tx,
+                        worker_rx: &worker_rx,
+                        worker_handle: &mut worker_handle,
+                        search_state: &mut search_state,
+                        search_id_counter: &mut search_id_counter,
+                        current_search_id: &mut current_search_id,
+                        current_search_is_ponder: &mut current_search_is_ponder,
+                        current_session: &mut _legacy_session,
+                        current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_stop_flag: &mut current_stop_flag,
+                        allow_null_move,
+                        position_state: &mut position_state,
+                        program_start,
+                        last_partial_result: &mut last_partial_result,
+                        pre_session_fallback: &mut pre_session_fallback,
+                        pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                        current_committed: &mut current_committed,
+                        last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                        last_go_begin_at: &mut last_go_begin_at,
+                    };
+                    match handle_command(cmd, &mut ctx) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("[MAIN] drain handle_command error: {}", e);
+                            return Err(e);
+                        }
+                    }
+                    let _ =
+                        send_info_string(log_tsv(&[("kind", "cmd_handled"), ("cmd", cmd_name)]));
+                    continue; // try drain next command
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break 'drain_cmds,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break 'drain_cmds,
+            }
+        }
+
+        // 2) Drain control-plane commands next（stop/gameover/quit 優先）
+        'drain_ctrl: loop {
+            match ctrl_rx.try_recv() {
+                Ok(cmd) => {
+                    log::info!("[MAIN] Ctrl command (drain phase): {:?}", cmd);
+                    if matches!(cmd, UsiCommand::Quit) {
+                        if let Some(ref emitter) = current_bestmove_emitter {
+                            emitter.terminate();
+                        }
+                        stop_flag.store(true, Ordering::Release);
+                        if let Some(ref search_stop_flag) = current_stop_flag {
+                            search_stop_flag.store(true, Ordering::Release);
+                        }
+                        pending_quit = true; // allow normal shutdown path after loop
+                        break 'drain_ctrl;
+                    }
+                    let mut _legacy_session_c: Option<()> = None;
+                    let mut ctx = CommandContext {
+                        engine: &engine,
+                        stop_flag: &stop_flag,
+                        worker_tx: &worker_tx,
+                        worker_rx: &worker_rx,
+                        worker_handle: &mut worker_handle,
+                        search_state: &mut search_state,
+                        search_id_counter: &mut search_id_counter,
+                        current_search_id: &mut current_search_id,
+                        current_search_is_ponder: &mut current_search_is_ponder,
+                        current_session: &mut _legacy_session_c,
+                        current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_stop_flag: &mut current_stop_flag,
+                        allow_null_move,
+                        position_state: &mut position_state,
+                        program_start,
+                        last_partial_result: &mut last_partial_result,
+                        pre_session_fallback: &mut pre_session_fallback,
+                        pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                        current_committed: &mut current_committed,
+                        last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                        last_go_begin_at: &mut last_go_begin_at,
+                    };
+                    match handle_command(cmd, &mut ctx) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("[MAIN] ctrl drain handle_command error: {}", e);
+                            return Err(e);
+                        }
+                    }
+                    continue; // try drain next ctrl
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break 'drain_ctrl,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break 'drain_ctrl,
+            }
+        }
+
+        // 3) Process a limited number of worker messages to avoid starving cmd_rx
+        let worker_budget: usize =
+            std::env::var("WORKER_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(32);
+        let mut processed_worker = 0usize;
+        while processed_worker < worker_budget {
+            match worker_rx.try_recv() {
+                Ok(msg) => {
+                    let mut _legacy_session2: Option<()> = None;
+                    let mut ctx = CommandContext {
+                        engine: &engine,
+                        stop_flag: &stop_flag,
+                        worker_tx: &worker_tx,
+                        worker_rx: &worker_rx,
+                        worker_handle: &mut worker_handle,
+                        search_state: &mut search_state,
+                        search_id_counter: &mut search_id_counter,
+                        current_search_id: &mut current_search_id,
+                        current_search_is_ponder: &mut current_search_is_ponder,
+                        current_session: &mut _legacy_session2,
+                        current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_stop_flag: &mut current_stop_flag,
+                        allow_null_move,
+                        position_state: &mut position_state,
+                        program_start,
+                        last_partial_result: &mut last_partial_result,
+                        pre_session_fallback: &mut pre_session_fallback,
+                        pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                        current_committed: &mut current_committed,
+                        last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                        last_go_begin_at: &mut last_go_begin_at,
+                    };
+                    handle_worker_message(msg, &mut ctx)?;
+                    processed_worker += 1;
+                    continue;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        // 4) Break out early if quit was requested during drain phase
+        if pending_quit {
+            break;
+        }
+
+        // 5) Fall back to select! for blocking wait (short tick via default below)
         select! {
             // High-priority control commands
             recv(ctrl_rx) -> ctrl => {
