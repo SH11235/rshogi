@@ -571,6 +571,64 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
 /// Handle worker messages during normal operation
 fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result<()> {
+    // If bestmove has already been finalized for the current search, drop non-critical
+    // worker messages for this search_id to avoid backlog starving cmd_rx.
+    // Keep Finished so that join/waits can still complete cleanly.
+    let drop_after_finalize = match (&ctx.current_bestmove_emitter, &ctx.search_state) {
+        (Some(em), _) if em.is_finalized() || em.is_terminated() => true,
+        (None, _) => true, // finalize_search() sets emitter=None
+        _ => false,
+    };
+
+    // Helper to log standardized drop reason
+    let mut log_drop = |reason: &str, extra: &[(&str, String)]| {
+        let mut kv = vec![
+            ("kind", "worker_drop_after_finalize".to_string()),
+            ("reason", reason.to_string()),
+        ];
+        kv.extend(extra.iter().cloned());
+        let _ = send_info_string(log_tsv(
+            &kv.iter().map(|(k, v)| (*k, v.as_str())).collect::<Vec<_>>(),
+        ));
+    };
+
+    // Inspect search_id for drop decision
+    match &msg {
+        WorkerMessage::Finished { search_id, .. } => {
+            // Never drop Finished — allow cleanup/join logic to observe it later if needed.
+        }
+        _ if drop_after_finalize => {
+            // Drop only if message is from current search; otherwise let normal path handle it
+            let mut current_id = *ctx.current_search_id;
+            let id = match &msg {
+                WorkerMessage::Info { search_id, .. } => *search_id,
+                WorkerMessage::WatchdogFired { search_id, .. } => *search_id,
+                WorkerMessage::SearchStarted { search_id, .. } => *search_id,
+                WorkerMessage::IterationCommitted { search_id, .. } => *search_id,
+                WorkerMessage::SearchFinished { search_id, .. } => *search_id,
+                WorkerMessage::PartialResult { search_id, .. } => *search_id,
+                WorkerMessage::Finished { search_id, .. } => *search_id, // already excluded above
+                WorkerMessage::Error { search_id, .. } => *search_id,
+            };
+            if id == current_id {
+                // Log and drop
+                let tag = match &msg {
+                    WorkerMessage::Info { .. } => "info",
+                    WorkerMessage::WatchdogFired { .. } => "watchdog",
+                    WorkerMessage::SearchStarted { .. } => "started",
+                    WorkerMessage::IterationCommitted { .. } => "committed",
+                    WorkerMessage::SearchFinished { .. } => "finished",
+                    WorkerMessage::PartialResult { .. } => "partial",
+                    WorkerMessage::Error { .. } => "error",
+                    WorkerMessage::Finished { .. } => "finished", // unreachable here
+                };
+                log_drop(tag, &[("search_id", id.to_string())]);
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+
     match msg {
         WorkerMessage::WatchdogFired {
             search_id,
