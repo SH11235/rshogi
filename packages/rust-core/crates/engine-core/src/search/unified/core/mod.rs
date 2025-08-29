@@ -44,6 +44,17 @@ where
     // Increment node count here (not in search_node to avoid double counting)
     searcher.stats.nodes += 1;
 
+    // Fast-path: if a planned rounded stop is set and we've reached it, exit immediately
+    if let Some(tm) = &searcher.time_manager {
+        let planned = tm.scheduled_end_ms();
+        if planned != u64::MAX {
+            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+            if elapsed_ms >= planned {
+                return alpha;
+            }
+        }
+    }
+
     // Early stop check
     if searcher.context.should_stop() {
         return alpha;
