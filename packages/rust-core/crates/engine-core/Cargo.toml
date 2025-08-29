@@ -92,3 +92,7 @@ harness = false
 [[bench]]
 name = "movelist_bench"
 harness = false
+
+[[bench]]
+name = "regression_nodes_bench"
+harness = false

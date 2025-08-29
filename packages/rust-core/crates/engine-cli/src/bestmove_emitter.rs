@@ -23,19 +23,6 @@ use std::sync::Mutex;
 static LAST_EMIT_SOURCE_BY_ID: Lazy<Mutex<HashMap<u64, BestmoveSource>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(test)]
-/// Get the last BestmoveSource for a specific search_id
-pub fn last_source_for(search_id: u64) -> Option<BestmoveSource> {
-    LAST_EMIT_SOURCE_BY_ID.lock().ok()?.get(&search_id).copied()
-}
-
-#[cfg(test)]
-/// Clear all tracked BestmoveSources (for test isolation)
-pub fn clear_all_last_sources() {
-    if let Ok(mut map) = LAST_EMIT_SOURCE_BY_ID.lock() {
-        map.clear();
-    }
-}
 
 /// Statistics for bestmove emission
 #[derive(Debug, Clone)]
@@ -283,7 +270,6 @@ impl BestmoveEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usi::output::{test_clear_info_strings, test_take_info_strings};
 
     fn default_meta() -> BestmoveMeta {
         BestmoveMeta {
@@ -323,7 +309,7 @@ mod tests {
         let infos = crate::usi::output::test_info_from(start_idx0);
         let sent_count = infos
             .iter()
-            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42"))
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42\t"))
             .count();
         assert_eq!(sent_count, 1, "bestmove_sent count mismatch: {:?}", infos);
         // Second emit should be no-op
@@ -334,7 +320,7 @@ mod tests {
         let infos = crate::usi::output::test_info_from(start_idx1);
         let sent_count = infos
             .iter()
-            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42"))
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42\t"))
             .count();
         assert_eq!(sent_count, 0, "unexpected extra bestmove_sent: {:?}", infos);
     }
@@ -353,7 +339,7 @@ mod tests {
         let infos = crate::usi::output::test_info_from(start_idx);
         let sent_count = infos
             .iter()
-            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=43"))
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=43\t"))
             .count();
         assert_eq!(sent_count, 0, "bestmove_sent should be suppressed: {:?}", infos);
     }
@@ -375,7 +361,7 @@ mod tests {
         let infos = crate::usi::output::test_info_from(start_idx);
         let sent_count = infos
             .iter()
-            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=44"))
+            .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=44\t"))
             .count();
         assert_eq!(sent_count, 1, "expected exactly one bestmove_sent: {:?}", infos);
     }
