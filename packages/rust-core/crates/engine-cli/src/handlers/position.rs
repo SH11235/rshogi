@@ -1,10 +1,12 @@
 use crate::command_handler::CommandContext;
 use crate::emit_utils::log_position_store;
+use crate::emit_utils::log_tsv;
 use crate::helpers::wait_for_search_completion;
 use crate::usi::send_info_string;
 use crate::worker::lock_or_recover_adapter;
 use engine_core::usi::canonicalize_position_cmd;
 use engine_core::usi::position_to_sfen;
+use std::time::Instant;
 
 pub(crate) fn handle_position_command(
     startpos: bool,
@@ -16,10 +18,18 @@ pub(crate) fn handle_position_command(
         "Handling position command - startpos: {startpos}, sfen: {sfen:?}, moves: {moves:?}"
     );
 
+    // USI-visible diagnostic: position handler entry
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "position_begin"),
+        ("startpos", if startpos { "1" } else { "0" }),
+        ("moves", &moves.len().to_string()),
+    ]));
+
     // Build the canonical position command string
     let cmd_canonical = canonicalize_position_cmd(startpos, sfen.as_deref(), &moves);
 
     // Wait for any ongoing search to complete before updating position
+    let wait_start = Instant::now();
     wait_for_search_completion(
         ctx.search_state,
         ctx.stop_flag,
@@ -28,6 +38,11 @@ pub(crate) fn handle_position_command(
         ctx.worker_rx,
         ctx.engine,
     )?;
+    let wait_ms = wait_start.elapsed().as_millis();
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "position_wait_done"),
+        ("elapsed_ms", &wait_ms.to_string()),
+    ]));
 
     // Clean up any remaining search state
     ctx.finalize_search("Position");
@@ -68,6 +83,11 @@ pub(crate) fn handle_position_command(
                 // Send structured log for position store via helper
                 let stored_ms = ctx.program_start.elapsed().as_millis();
                 log_position_store(root_hash, move_len, &sfen_snapshot, stored_ms);
+                // Also mark logical end of position handling
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "position_end"),
+                    ("move_len", &move_len.to_string()),
+                ]));
             } else {
                 log::error!("Position set but unable to retrieve for state storage");
             }

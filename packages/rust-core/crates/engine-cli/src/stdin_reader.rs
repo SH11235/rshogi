@@ -1,4 +1,5 @@
-use crate::usi::{parse_usi_command, UsiCommand};
+use crate::emit_utils::log_tsv;
+use crate::usi::{parse_usi_command, send_info_string, UsiCommand};
 use crossbeam_channel::Sender;
 use std::io::{self, BufRead};
 use std::thread::{self, JoinHandle};
@@ -21,6 +22,23 @@ pub fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
 
                     match parse_usi_command(line) {
                         Ok(cmd) => {
+                            // Diagnostic: emit an info string when a command is parsed from stdin
+                            let cmd_name = match &cmd {
+                                UsiCommand::Usi => "usi",
+                                UsiCommand::IsReady => "isready",
+                                UsiCommand::Quit => "quit",
+                                UsiCommand::Stop => "stop",
+                                UsiCommand::Position { .. } => "position",
+                                UsiCommand::Go(_) => "go",
+                                UsiCommand::SetOption { .. } => "setoption",
+                                UsiCommand::GameOver { .. } => "gameover",
+                                UsiCommand::PonderHit => "ponderhit",
+                                UsiCommand::UsiNewGame => "usinewgame",
+                            };
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "stdin_parsed"),
+                                ("cmd", cmd_name),
+                            ]));
                             // Use try_send to avoid blocking
                             match cmd_tx.try_send(cmd) {
                                 Ok(()) => {}

@@ -1,10 +1,14 @@
 use crate::command_handler::CommandContext;
+use crate::emit_utils::log_tsv;
 use crate::helpers::wait_for_search_completion;
 use crate::usi::commands::GameResult;
+use crate::usi::send_info_string;
 use crate::worker::lock_or_recover_adapter;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 pub(crate) fn handle_gameover(result: GameResult, ctx: &mut CommandContext) -> anyhow::Result<()> {
+    let _ = send_info_string(log_tsv(&[("kind", "gameover_begin")]));
     // Terminate emitter first to prevent any bestmove output
     if let Some(ref emitter) = ctx.current_bestmove_emitter {
         emitter.terminate();
@@ -15,6 +19,7 @@ pub(crate) fn handle_gameover(result: GameResult, ctx: &mut CommandContext) -> a
     ctx.stop_flag.store(true, Ordering::Release);
 
     // Wait for any ongoing search to complete before notifying game over
+    let wait_start = Instant::now();
     wait_for_search_completion(
         ctx.search_state,
         ctx.stop_flag,
@@ -23,6 +28,10 @@ pub(crate) fn handle_gameover(result: GameResult, ctx: &mut CommandContext) -> a
         ctx.worker_rx,
         ctx.engine,
     )?;
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "gameover_wait_done"),
+        ("elapsed_ms", &wait_start.elapsed().as_millis().to_string()),
+    ]));
 
     // Log the previous search ID for debugging
     log::debug!("Reset state after gameover: prev_search_id={}", *ctx.current_search_id);
@@ -37,11 +46,17 @@ pub(crate) fn handle_gameover(result: GameResult, ctx: &mut CommandContext) -> a
     log::debug!("Cleared position_state for new game");
 
     // Notify engine of game result
+    let lock_start = Instant::now();
     let mut engine = lock_or_recover_adapter(ctx.engine);
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "gameover_lock_adapter_ms"),
+        ("elapsed_ms", &lock_start.elapsed().as_millis().to_string()),
+    ]));
     engine.game_over(result);
 
     // Note: stop_flag is already reset to false by wait_for_search_completion
     log::debug!("Game over processed, worker cleaned up, state reset to Idle");
+    let _ = send_info_string(log_tsv(&[("kind", "gameover_end")]));
     Ok(())
 }
 

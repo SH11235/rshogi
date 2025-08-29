@@ -41,6 +41,10 @@ pub struct CommandContext<'a> {
     pub pre_session_fallback: &'a mut Option<String>,
     /// Hash of the position when pre_session_fallback was computed
     pub pre_session_fallback_hash: &'a mut Option<u64>,
+    /// Timestamp of last bestmove successfully sent
+    pub last_bestmove_sent_at: &'a mut Option<std::time::Instant>,
+    /// Timestamp when the latest go handler started
+    pub last_go_begin_at: &'a mut Option<std::time::Instant>,
 }
 
 impl<'a> CommandContext<'a> {
@@ -110,12 +114,21 @@ impl<'a> CommandContext<'a> {
         meta: BestmoveMeta,
         finalize_label: &str,
     ) -> Result<()> {
+        // USI-visible diagnostic: finalize entry
+        let _ =
+            send_info_string(crate::emit_utils::log_tsv(&[("kind", "bestmove_finalize_begin")]));
         // Metrics logging is handled before this call in emit_best_from_session
         // Try to emit via BestmoveEmitter if available
         if let Some(ref emitter) = self.current_bestmove_emitter {
             match emitter.emit(best_move.clone(), ponder.clone(), meta.clone()) {
                 Ok(()) => {
+                    // Mark the time when bestmove was sent successfully
+                    *self.last_bestmove_sent_at = Some(std::time::Instant::now());
                     self.finalize_search(finalize_label);
+                    let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                        ("kind", "bestmove_finalize_end"),
+                        ("path", "emitter"),
+                    ]));
                     Ok(())
                 }
                 Err(e) => {
@@ -133,7 +146,12 @@ impl<'a> CommandContext<'a> {
                         // Continue without propagating error - USI requires best effort
                     }
                     // Always finalize search after attempting to emit
+                    *self.last_bestmove_sent_at = Some(std::time::Instant::now());
                     self.finalize_search(finalize_label);
+                    let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                        ("kind", "bestmove_finalize_end"),
+                        ("path", "emitter_fallback"),
+                    ]));
                     Ok(())
                 }
             }
@@ -146,7 +164,12 @@ impl<'a> CommandContext<'a> {
                 // Continue without propagating error - USI requires best effort
             }
             // Always finalize search after attempting to emit
+            *self.last_bestmove_sent_at = Some(std::time::Instant::now());
             self.finalize_search(finalize_label);
+            let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                ("kind", "bestmove_finalize_end"),
+                ("path", "direct"),
+            ]));
             Ok(())
         }
     }
@@ -429,6 +452,8 @@ mod tests {
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,
+            last_bestmove_sent_at: &mut None,
+            last_go_begin_at: &mut None,
         };
 
         // Execute stop
@@ -506,6 +531,8 @@ mod tests {
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut current_committed,
+            last_bestmove_sent_at: &mut None,
+            last_go_begin_at: &mut None,
         };
 
         // Execute stop
@@ -591,6 +618,8 @@ mod tests {
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut current_committed,
+            last_bestmove_sent_at: &mut None,
+            last_go_begin_at: &mut None,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -731,6 +760,8 @@ mod tests {
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,
+            last_bestmove_sent_at: &mut None,
+            last_go_begin_at: &mut None,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -798,6 +829,8 @@ mod tests {
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,
+            last_bestmove_sent_at: &mut None,
+            last_go_begin_at: &mut None,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -866,6 +899,8 @@ mod tests {
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,
+            last_bestmove_sent_at: &mut None,
+            last_go_begin_at: &mut None,
         };
 
         handle_command(

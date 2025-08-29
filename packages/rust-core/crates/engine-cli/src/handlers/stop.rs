@@ -1,13 +1,18 @@
 use crate::command_handler::CommandContext;
+use crate::emit_utils::log_tsv;
 use crate::emit_utils::{build_meta, log_on_stop_snapshot, log_on_stop_source};
 use crate::helpers::generate_fallback_move;
 use crate::types::BestmoveSource;
+use crate::usi::send_info_string;
 use crate::worker::lock_or_recover_adapter;
 use anyhow::Result;
+use std::time::Instant;
 
 pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
+    let _ = send_info_string(log_tsv(&[("kind", "stop_begin")]));
     // If nothing to stop, return
     if !ctx.search_state.is_searching() {
+        let _ = send_info_string(log_tsv(&[("kind", "stop_noop")]));
         return Ok(());
     }
 
@@ -64,7 +69,12 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         // 3) Pre-session fallback captured at go-time (with hash verification)
         if let Some(_move_str) = ctx.pre_session_fallback.as_ref() {
             // Verify hash matches current position
+            let lock_start = Instant::now();
             let adapter = lock_or_recover_adapter(ctx.engine);
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "stop_lock_adapter_ms"),
+                ("elapsed_ms", &lock_start.elapsed().as_millis().to_string()),
+            ]));
             let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
 
             if current_hash == *ctx.pre_session_fallback_hash {
@@ -145,7 +155,12 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     // Pre-session fallback captured at go-time (with hash verification)
     if let Some(_move_str) = ctx.pre_session_fallback.as_ref() {
         // Verify hash matches current position
+        let lock_start = Instant::now();
         let adapter = lock_or_recover_adapter(ctx.engine);
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "stop_lock_adapter_ms"),
+            ("elapsed_ms", &lock_start.elapsed().as_millis().to_string()),
+        ]));
         let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
 
         if current_hash == *ctx.pre_session_fallback_hash {
@@ -186,5 +201,6 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     log_on_stop_source("emergency");
     let meta = build_meta(source, 0, None, None, None);
     ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;
+    let _ = send_info_string(log_tsv(&[("kind", "stop_end")]));
     Ok(())
 }

@@ -1,12 +1,13 @@
 use crate::bestmove_emitter::BestmoveEmitter;
 use crate::command_handler::CommandContext;
+use crate::emit_utils::log_tsv;
 use crate::emit_utils::{
     log_go_received, log_position_restore_fallback, log_position_restore_resign,
     log_position_restore_success, log_position_restore_try,
 };
 use crate::handlers::common::resign_on_position_restore_fail;
 use crate::helpers::wait_for_search_completion;
-use crate::usi::{send_response, GoParams, UsiResponse};
+use crate::usi::{send_info_string, send_response, GoParams, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
@@ -22,6 +23,15 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     let go_received_time = Instant::now();
     log::debug!("NewSearchStart: go received at {go_received_time:?}");
 
+    // USI-visible diagnostic: go handler entry
+    let now = Instant::now();
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "go_begin"),
+        ("ponder", if params.ponder { "1" } else { "0" }),
+    ]));
+    // Track go-begin timestamp for SearchStarted delta measurement
+    *ctx.last_go_begin_at = Some(now);
+
     // Stop any ongoing search and ensure engine is available
     let wait_start = Instant::now();
     wait_for_search_completion(
@@ -34,6 +44,10 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     )?;
     let wait_duration = wait_start.elapsed();
     log::debug!("Wait for search completion took: {wait_duration:?}");
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "go_wait_done"),
+        ("elapsed_ms", &wait_duration.as_millis().to_string()),
+    ]));
 
     // Clear any pending messages from previous search to prevent interference
     let mut cleared_messages = 0;
@@ -296,6 +310,10 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     let tx_clone: Sender<WorkerMessage> = ctx.worker_tx.clone();
     log::debug!("Using per-search stop flag for search_id={search_id}");
     log::debug!("About to spawn worker thread for search_id={search_id}");
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "go_spawn_worker"),
+        ("search_id", &search_id.to_string()),
+    ]));
 
     // Phase 1: Pre-commit a tiny iteration result to ensure a sane fallback from normal search
     // This avoids relying on emergency_fallback at the tail end when time is tight.
@@ -353,6 +371,10 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         log::error!("Failed to transition to searching state from {:?}", ctx.search_state);
     }
     log::debug!("Worker thread handle stored, search_state = Searching");
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "go_spawned"),
+        ("search_state", &format!("{:?}", ctx.search_state)),
+    ]));
 
     // Send immediate info depth 1 to confirm search started
     send_response(UsiResponse::Info(crate::usi::output::SearchInfo {
