@@ -1032,7 +1032,8 @@ mod tests {
             .build();
         let (soft, hard) = budget_from_limits(&limits);
         assert_eq!(soft, 8000);
-        assert_eq!(hard, 9500);
+        // Hard now subtracts byoyomi_safety(500) and network_delay2(1000): 10000 - 500 - 1000 = 8500
+        assert_eq!(hard, 8500);
     }
 
     #[test]
@@ -1045,7 +1046,8 @@ mod tests {
             .build();
         let (soft, hard) = budget_from_limits(&limits);
         assert_eq!(soft, 4800); // 6000 * 0.8
-        assert_eq!(hard, 5500); // 6000 - 500
+        // Hard would be 6000 - 500 - 1000 = 4500, but we clamp to at least soft when hard < soft
+        assert_eq!(hard, 4800);
     }
 
     #[test]
