@@ -103,14 +103,12 @@ impl EngineAdapter {
         // Compose effective byoyomi hard safety: base safety + GUI-side byoyomi overhead
         // This makes the core's hard limit reflect real wall-clock constraints (go→bestmove),
         // avoiding time losses due to pre-start latency not visible to the core timer.
-        let effective_byoyomi_safety_ms: u32 = (
-            self.byoyomi_safety_ms
-                + if is_byoyomi_active {
-                    self.byoyomi_overhead_ms
-                } else {
-                    0
-                }
-        ) as u32;
+        let effective_byoyomi_safety_ms: u32 = (self.byoyomi_safety_ms
+            + if is_byoyomi_active {
+                self.byoyomi_overhead_ms
+            } else {
+                0
+            }) as u32;
 
         // Apply go parameters to get search limits with the effective safety
         let limits = crate::engine_adapter::time_control::apply_go_params(

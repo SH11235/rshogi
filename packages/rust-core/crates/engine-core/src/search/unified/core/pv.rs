@@ -347,8 +347,7 @@ pub fn trim_legal_pv(pos: Position, pv: &[Move]) -> Vec<Move> {
             // Don't undo - keep position updated for next move check
         } else {
             // First illegal move found - stop here
-            #[cfg(debug_assertions)]
-            eprintln!(
+            log::debug!(
                 "[PV TRIM] Trimming PV at move {}: {}",
                 clean.len(),
                 crate::usi::move_to_usi(&mv)
