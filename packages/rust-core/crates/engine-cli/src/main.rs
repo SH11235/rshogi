@@ -581,7 +581,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
     };
 
     // Helper to log standardized drop reason
-    let mut log_drop = |reason: &str, extra: &[(&str, String)]| {
+    let log_drop = |reason: &str, extra: &[(&str, String)]| {
         let mut kv = vec![
             ("kind", "worker_drop_after_finalize".to_string()),
             ("reason", reason.to_string()),
@@ -594,12 +594,12 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
     // Inspect search_id for drop decision
     match &msg {
-        WorkerMessage::Finished { search_id, .. } => {
+        WorkerMessage::Finished { .. } => {
             // Never drop Finished — allow cleanup/join logic to observe it later if needed.
         }
         _ if drop_after_finalize => {
             // Drop only if message is from current search; otherwise let normal path handle it
-            let mut current_id = *ctx.current_search_id;
+            let current_id = *ctx.current_search_id;
             let id = match &msg {
                 WorkerMessage::Info { search_id, .. } => *search_id,
                 WorkerMessage::WatchdogFired { search_id, .. } => *search_id,
@@ -636,6 +636,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             hard_ms,
             wait_ms: _,
         } => {
+            let emit_start = Instant::now();
             // Emit immediately on watchdog fire (state非依存、emitter未finalizeで一度だけ)
             if search_id != *ctx.current_search_id {
                 let _ = send_info_string(log_tsv(&[
@@ -677,6 +678,11 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     Some(stop_info),
                     "WatchdogCommitted",
                 )? {
+                    // Emit-latency (watchdog_fire → bestmove_sent) observation
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "watchdog_emit_latency"),
+                        ("ms", &emit_start.elapsed().as_millis().to_string()),
+                    ]));
                     return Ok(());
                 }
             }
@@ -702,6 +708,10 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         }),
                     );
                     ctx.emit_and_finalize(move_str, None, meta, "WatchdogPartial")?;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "watchdog_emit_latency"),
+                        ("ms", &emit_start.elapsed().as_millis().to_string()),
+                    ]));
                     return Ok(());
                 }
             }
@@ -729,6 +739,10 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     );
                     drop(adapter);
                     ctx.emit_and_finalize(mv, None, meta, "WatchdogPreSession")?;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "watchdog_emit_latency"),
+                        ("ms", &emit_start.elapsed().as_millis().to_string()),
+                    ]));
                     return Ok(());
                 }
                 drop(adapter);
@@ -753,6 +767,10 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         }),
                     );
                     ctx.emit_and_finalize(move_str, None, meta, "WatchdogEmergency")?;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "watchdog_emit_latency"),
+                        ("ms", &emit_start.elapsed().as_millis().to_string()),
+                    ]));
                 }
                 Err(_) => {
                     let meta = build_meta(
@@ -771,6 +789,10 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         }),
                     );
                     ctx.emit_and_finalize("resign".to_string(), None, meta, "WatchdogResign")?;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "watchdog_emit_latency"),
+                        ("ms", &emit_start.elapsed().as_millis().to_string()),
+                    ]));
                 }
             }
             return Ok(());
@@ -879,19 +901,36 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             stop_info,
         } => {
             // Handle search completion for current search（state非依存: emitter未finalizeなら許可）
+            if search_id != *ctx.current_search_id {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "searchfinished_drop"),
+                    ("reason", "id_mismatch"),
+                    ("search_id", &search_id.to_string()),
+                    ("current", &ctx.current_search_id.to_string()),
+                ]));
+                return Ok(());
+            }
+
             if search_id == *ctx.current_search_id {
                 log::info!("Search {search_id} finished (root_hash: {root_hash:016x})");
 
                 // Check if emitter is finalized or terminated
                 if let Some(ref emitter) = ctx.current_bestmove_emitter {
                     if emitter.is_finalized() || emitter.is_terminated() {
-                        log::debug!(
-                            "Ignoring SearchFinished: emitter finalized={} terminated={}",
-                            emitter.is_finalized(),
-                            emitter.is_terminated()
-                        );
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "searchfinished_drop"),
+                            ("reason", "finalized_or_terminated"),
+                            ("search_id", &search_id.to_string()),
+                        ]));
                         return Ok(());
                     }
+                } else {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "searchfinished_drop"),
+                        ("reason", "no_emitter"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
+                    return Ok(());
                 }
                 // Send bestmove immediately if not ponder
                 if !*ctx.current_search_is_ponder {
@@ -969,22 +1008,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     // (normally ponder ends via stop/ponderhit, but handle natural termination)
                     ctx.finalize_search("PonderFinished");
                 }
-            } else if search_id == *ctx.current_search_id
-                && *ctx.search_state == SearchState::StopRequested
-            {
-                // SearchFinished arrived after stop command already handled bestmove
-                // State transition timeline: Searching → StopRequested (stop handler sends bestmove) → Idle
-                // This SearchFinished message arrives during StopRequested state, after bestmove was already sent
-                log::debug!("SearchFinished for search {} ignored (state=StopRequested, bestmove already sent by stop handler)", search_id);
-                // Still finalize to clean up state and transition to Idle
-                ctx.finalize_search("SearchFinished after stop");
-            } else if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Idle
-            {
-                // SearchFinished arrived after bestmove was already sent (typically from stop timeout)
-                log::debug!(
-                    "SearchFinished for search {} ignored (state=Idle, bestmove already sent)",
-                    search_id
-                );
             }
         }
 
@@ -1012,8 +1035,36 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             from_guard,
             search_id,
         } => {
-            // Handle worker thread completion
-            if search_id == *ctx.current_search_id && *ctx.search_state == SearchState::Searching {
+            // Handle worker thread completion (state非依存: emitter未finalizeなら許可)
+            if search_id != *ctx.current_search_id {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "finished_drop"),
+                    ("reason", "id_mismatch"),
+                    ("search_id", &search_id.to_string()),
+                    ("current", &ctx.current_search_id.to_string()),
+                ]));
+                return Ok(());
+            }
+            // If already finalized or no emitter, drop with reason
+            if let Some(ref emitter) = ctx.current_bestmove_emitter {
+                if emitter.is_finalized() || emitter.is_terminated() {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "finished_drop"),
+                        ("reason", "finalized_or_terminated"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
+                    return Ok(());
+                }
+            } else {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "finished_drop"),
+                    ("reason", "no_emitter"),
+                    ("search_id", &search_id.to_string()),
+                ]));
+                return Ok(());
+            }
+
+            if search_id == *ctx.current_search_id {
                 log::warn!(
                     "Worker Finished without SearchFinished (from_guard: {from_guard}), emitting fallback"
                 );
@@ -1072,13 +1123,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         ctx.emit_and_finalize("resign".to_string(), None, meta, "FinishedResign")?;
                     }
                 }
-            } else {
-                log::trace!(
-                    "Ignoring Finished from search_id={} (current={}, state={:?})",
-                    search_id,
-                    *ctx.current_search_id,
-                    *ctx.search_state
-                );
             }
         }
 
