@@ -76,6 +76,10 @@ struct TimeManagerInner {
     // Limits (Atomic for lock-free access)
     soft_limit_ms: AtomicU64,
     hard_limit_ms: AtomicU64,
+    // Phase 1 budget (optimum). Minimum/maximum will be introduced when needed.
+    opt_limit_ms: AtomicU64,
+    // Planned rounded stop time (u64::MAX = unset)
+    search_end_ms: AtomicU64,
 
     // Search state
     nodes_searched: AtomicU64,
@@ -137,6 +141,9 @@ impl TimeManager {
         // Initialize byoyomi state if needed
         let byoyomi_state = byoyomi::ByoyomiManager::init_state(&limits.time_control);
 
+        // Derive simple optimum budget from soft (Phase 1)
+        let opt_limit = soft_ms;
+
         let inner = Arc::new(TimeManagerInner {
             side_to_move: side,
             start_ply: ply,
@@ -146,6 +153,8 @@ impl TimeManager {
             start_mono_ms: AtomicU64::new(monotonic_ms()),
             soft_limit_ms: AtomicU64::new(soft_ms),
             hard_limit_ms: AtomicU64::new(hard_ms),
+            opt_limit_ms: AtomicU64::new(opt_limit),
+            search_end_ms: AtomicU64::new(u64::MAX),
             nodes_searched: AtomicU64::new(0),
             stop_flag: AtomicBool::new(false),
             last_pv_change_ms: AtomicU64::new(0),
@@ -254,6 +263,12 @@ impl TimeManager {
             return true;
         }
 
+        // Planned rounded stop (Phase 1)
+        let planned = self.inner.search_end_ms.load(Ordering::Relaxed);
+        if planned != u64::MAX && elapsed >= planned {
+            return true;
+        }
+
         // Soft limit with PV stability check
         let soft_limit = self.inner.soft_limit_ms.load(Ordering::Relaxed);
         if elapsed >= soft_limit && self.state_checker().is_pv_stable(elapsed) {
@@ -294,6 +309,16 @@ impl TimeManager {
     /// Get hard time limit in milliseconds
     pub fn hard_limit_ms(&self) -> u64 {
         self.inner.hard_limit_ms.load(Ordering::Relaxed)
+    }
+
+    /// Get opt time budget (Phase 1)
+    pub fn opt_limit_ms(&self) -> u64 {
+        self.inner.opt_limit_ms.load(Ordering::Relaxed)
+    }
+
+    /// Get scheduled rounded stop time (ms since start) or u64::MAX if unset
+    pub fn scheduled_end_ms(&self) -> u64 {
+        self.inner.search_end_ms.load(Ordering::Relaxed)
     }
 
     /// Build StopInfo for TimeLimit termination using current state
@@ -366,6 +391,33 @@ impl TimeManager {
     /// Get current time information (for USI/logging)
     pub fn get_time_info(&self) -> TimeInfo {
         self.state_checker().get_time_info(self.elapsed_ms())
+    }
+
+    /// Phase 1: Advise a rounded stop near hard after finishing an iteration
+    pub fn advise_after_iteration(&self, elapsed_ms: u64) {
+        let opt = self.inner.opt_limit_ms.load(Ordering::Relaxed);
+        let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
+        if hard == u64::MAX {
+            return;
+        }
+        if elapsed_ms >= opt {
+            // Safety window ~max(120ms, 3% of hard), capped at 400ms
+            let three_percent = hard.saturating_mul(3) / 100;
+            let safety_ms = three_percent.clamp(120, 400);
+            let target = hard.saturating_sub(safety_ms);
+            let current = self.inner.search_end_ms.load(Ordering::Relaxed);
+            if current == u64::MAX || target < current {
+                self.inner.search_end_ms.store(target, Ordering::Relaxed);
+                log::debug!(
+                    "[TimeBudget] scheduled_end={}ms (elapsed={}, opt={}, hard={}, safety={})",
+                    target,
+                    elapsed_ms,
+                    opt,
+                    hard,
+                    safety_ms
+                );
+            }
+        }
     }
 
     /// Handle ponder hit (convert ponder to normal search)
