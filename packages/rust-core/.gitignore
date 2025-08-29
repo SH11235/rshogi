@@ -35,3 +35,5 @@ system-info.json
 complete-result.json
 
 .cargo/config.local.toml
+
+memo/
