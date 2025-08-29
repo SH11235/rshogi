@@ -321,6 +321,17 @@ impl TimeManager {
         self.inner.search_end_ms.load(Ordering::Relaxed)
     }
 
+    /// Are we currently in byoyomi period (Phase 1 helper)?
+    pub fn is_in_byoyomi(&self) -> bool {
+        let active_tc = self.get_active_time_control();
+        if let TimeControl::Byoyomi { .. } = &*active_tc {
+            let st = self.inner.byoyomi_state.lock();
+            st.in_byoyomi
+        } else {
+            false
+        }
+    }
+
     /// Build StopInfo for TimeLimit termination using current state
     pub fn build_stop_info(&self, depth_reached: u8, nodes: u64) -> crate::search::types::StopInfo {
         use crate::search::types::{StopInfo, TerminationReason};
@@ -401,20 +412,30 @@ impl TimeManager {
             return;
         }
         if elapsed_ms >= opt {
-            // Safety window ~max(120ms, 3% of hard), capped at 400ms
-            let three_percent = hard.saturating_mul(3) / 100;
-            let safety_ms = three_percent.clamp(120, 400);
-            let target = hard.saturating_sub(safety_ms);
+            // Safety window (adaptive)
+            let safety_ms = if hard >= 500 {
+                let three_percent = hard.saturating_mul(3) / 100;
+                three_percent.clamp(120, 400)
+            } else if hard >= 200 {
+                40
+            } else {
+                0
+            };
+            let mut target = hard.saturating_sub(safety_ms);
+            // Prefer rounded stop in byoyomi period
+            if self.is_in_byoyomi() {
+                let next_sec = ((elapsed_ms / 1000) + 1) * 1000;
+                let rounded = next_sec.saturating_sub(self.inner.params.overhead_ms);
+                if rounded < target {
+                    target = rounded;
+                }
+            }
             let current = self.inner.search_end_ms.load(Ordering::Relaxed);
             if current == u64::MAX || target < current {
                 self.inner.search_end_ms.store(target, Ordering::Relaxed);
                 log::debug!(
                     "[TimeBudget] scheduled_end={}ms (elapsed={}, opt={}, hard={}, safety={})",
-                    target,
-                    elapsed_ms,
-                    opt,
-                    hard,
-                    safety_ms
+                    target, elapsed_ms, opt, hard, safety_ms
                 );
             }
         }
