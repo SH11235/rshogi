@@ -5,7 +5,10 @@ use std::io::{self, BufRead};
 use std::thread::{self, JoinHandle};
 
 /// Spawn stdin reader thread
-pub fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
+pub fn spawn_stdin_reader(
+    cmd_tx: Sender<UsiCommand>,
+    ctrl_tx: Sender<UsiCommand>,
+) -> JoinHandle<()> {
     thread::spawn(move || {
         let stdin = io::stdin();
         let reader = stdin.lock();
@@ -39,8 +42,13 @@ pub fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
                                 ("kind", "stdin_parsed"),
                                 ("cmd", cmd_name),
                             ]));
-                            // Use try_send to avoid blocking
-                            match cmd_tx.try_send(cmd) {
+                            // Use try_send to avoid blocking (control-plane commands to ctrl_tx)
+                            let is_ctrl = matches!(
+                                cmd,
+                                UsiCommand::Stop | UsiCommand::GameOver { .. } | UsiCommand::Quit
+                            );
+                            let target = if is_ctrl { &ctrl_tx } else { &cmd_tx };
+                            match target.try_send(cmd) {
                                 Ok(()) => {}
                                 Err(crossbeam_channel::TrySendError::Full(_)) => {
                                     // Log drop with USI-visible info so we can diagnose saturation
@@ -85,7 +93,7 @@ pub fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
                     }
 
                     // Try to send quit command for graceful shutdown
-                    match cmd_tx.try_send(UsiCommand::Quit) {
+                    match ctrl_tx.try_send(UsiCommand::Quit) {
                         Ok(()) => {
                             log::debug!("Sent quit command for graceful shutdown");
                         }
@@ -99,7 +107,7 @@ pub fn spawn_stdin_reader(cmd_tx: Sender<UsiCommand>) -> JoinHandle<()> {
         }
 
         // Reached here = normal EOF. GUI closed the pipe, send quit
-        match cmd_tx.try_send(UsiCommand::Quit) {
+        match ctrl_tx.try_send(UsiCommand::Quit) {
             Ok(()) => log::info!("Sent quit command after EOF"),
             Err(_) => log::debug!("Channel closed before quit after EOF"),
         }

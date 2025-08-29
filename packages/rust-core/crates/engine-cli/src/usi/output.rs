@@ -1,6 +1,7 @@
 //! USI protocol output formatting
 
 use crate::utils::lock_or_recover_generic;
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use engine_core::search::NodeType;
 use once_cell::sync::Lazy;
 use std::fmt;
@@ -8,6 +9,7 @@ use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 #[cfg(feature = "buffered-io")]
 use std::time::Instant;
@@ -382,10 +384,46 @@ impl UsiWriter {
             }
         }
     }
+
+    // Single-writer path: write a preformatted line and flush immediately
+    fn write_line_raw(&self, line: &str) -> std::io::Result<()> {
+        let mut writer = lock_or_recover_generic(&self.inner);
+        writeln!(writer, "{}", line)?;
+        writer.flush()?;
+        Ok(())
+    }
 }
 
 /// Global USI writer instance
 static USI_WRITER: Lazy<UsiWriter> = Lazy::new(UsiWriter::new);
+
+// Single-writer channel and thread
+pub enum OutputMsg {
+    Line(String),
+    Flush,
+    Shutdown,
+}
+
+static OUTPUT_CHAN: Lazy<(Sender<OutputMsg>, Receiver<OutputMsg>)> = Lazy::new(unbounded);
+static WRITER_THREAD: Lazy<JoinHandle<()>> = Lazy::new(|| {
+    std::thread::spawn(move || {
+        let (_tx, rx) = (&OUTPUT_CHAN.0, &OUTPUT_CHAN.1);
+        loop {
+            match rx.recv() {
+                Ok(OutputMsg::Line(line)) => {
+                    let _ = USI_WRITER.write_line_raw(&line);
+                }
+                Ok(OutputMsg::Flush) => {
+                    let _ = USI_WRITER.try_flush_all();
+                }
+                Ok(OutputMsg::Shutdown) | Err(_) => {
+                    let _ = USI_WRITER.try_flush_all();
+                    break;
+                }
+            }
+        }
+    })
+});
 
 /// Send USI response with error handling and retry logic
 fn send_response_with_retry(response: &UsiResponse) -> std::io::Result<()> {
@@ -478,42 +516,14 @@ fn usi_disabled() -> bool {
 ///
 /// Use this in main thread and contexts where errors can be propagated up the call stack.
 pub fn send_response(response: UsiResponse) -> Result<(), StdoutError> {
-    use std::io;
-
     // Skip all USI output if USI_DRY_RUN is set
     if usi_disabled() {
         return Ok(());
     }
-
-    // Determine if this is a critical response
-    let is_critical = matches!(
-        response,
-        UsiResponse::IdName(_)
-            | UsiResponse::IdAuthor(_)
-            | UsiResponse::UsiOk
-            | UsiResponse::ReadyOk
-            | UsiResponse::BestMove { .. }
-    );
-
-    // Try to send with retry
-    if let Err(e) = send_response_with_retry(&response) {
-        // Increment error count
-        let error_count = STDOUT_ERROR_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-
-        // Handle based on error type and criticality
-        match e.kind() {
-            io::ErrorKind::BrokenPipe => Err(StdoutError::BrokenPipe),
-            _ if error_count >= MAX_STDOUT_ERRORS => Err(StdoutError::TooManyErrors(error_count)),
-            _ if is_critical => Err(StdoutError::CriticalMessageFailed(e)),
-            _ => {
-                // Non-critical error - log and continue
-                log::warn!("Failed to send response: {e} (error #{error_count})");
-                Ok(())
-            }
-        }
-    } else {
-        Ok(())
-    }
+    // Enqueue line for single-writer thread
+    let line = response.to_string();
+    let _ = OUTPUT_CHAN.0.send(OutputMsg::Line(line));
+    Ok(())
 }
 
 /// Helper to send info string message, returning Result for error propagation
@@ -527,7 +537,11 @@ pub fn send_info_string(message: impl Into<String>) -> Result<(), StdoutError> {
         let mut guard = lock_or_recover_generic(&INFO_MESSAGES);
         guard.push(msg.clone());
     }
-    send_response(UsiResponse::String(msg))
+    if usi_disabled() {
+        return Ok(());
+    }
+    let _ = OUTPUT_CHAN.0.send(OutputMsg::Line(UsiResponse::String(msg).to_string()));
+    Ok(())
 }
 
 /// Ensure stdout is flushed on exit
@@ -535,6 +549,8 @@ pub fn send_info_string(message: impl Into<String>) -> Result<(), StdoutError> {
 pub fn ensure_flush_on_exit() {
     // Force initialization of USI_WRITER
     Lazy::force(&USI_WRITER);
+    // Spawn writer thread
+    Lazy::force(&WRITER_THREAD);
 
     // Set panic hook to flush on panic
     let original_hook = std::panic::take_hook();
@@ -548,7 +564,9 @@ pub fn ensure_flush_on_exit() {
 /// Flush any remaining buffered output
 /// Call this before normal program exit
 pub fn flush_final() -> std::io::Result<()> {
-    USI_WRITER.flush_all()
+    let _ = OUTPUT_CHAN.0.send(OutputMsg::Flush);
+    let _ = OUTPUT_CHAN.0.send(OutputMsg::Shutdown);
+    Ok(())
 }
 
 #[cfg(test)]

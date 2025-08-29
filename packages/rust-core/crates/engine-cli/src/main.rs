@@ -109,7 +109,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
     // Create communication channels
     let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
-    // Use unbounded command channel to avoid control-plane drops; stdin uses try_send
+    // Separate control-plane channel for prioritizing stop/gameover/quit
+    let (ctrl_tx, ctrl_rx) = unbounded::<UsiCommand>();
+    // Use unbounded command channel to avoid drops for normal commands
     let (cmd_tx, cmd_rx) = unbounded::<UsiCommand>();
 
     // Create engine adapter (thread-safe)
@@ -119,7 +121,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     // Spawn stdin reader thread
-    let stdin_handle = spawn_stdin_reader(cmd_tx.clone());
+    let stdin_handle = spawn_stdin_reader(cmd_tx.clone(), ctrl_tx.clone());
 
     // Store active worker thread handle
     let mut worker_handle: Option<JoinHandle<()>> = None;
@@ -143,6 +145,44 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     // Main event loop - process USI commands and worker messages concurrently
     loop {
         select! {
+            // High-priority control commands
+            recv(ctrl_rx) -> ctrl => {
+                if let Ok(cmd) = ctrl {
+                    log::info!("[MAIN] Ctrl command received: {:?}", cmd);
+                    if matches!(cmd, UsiCommand::Quit) {
+                        if let Some(ref emitter) = current_bestmove_emitter { emitter.terminate(); }
+                        stop_flag.store(true, Ordering::Release);
+                        if let Some(ref search_stop_flag) = current_stop_flag { search_stop_flag.store(true, Ordering::Release); }
+                        break;
+                    }
+                    let mut _legacy_session_c: Option<()> = None;
+                    let mut ctx = CommandContext {
+                        engine: &engine,
+                        stop_flag: &stop_flag,
+                        worker_tx: &worker_tx,
+                        worker_rx: &worker_rx,
+                        worker_handle: &mut worker_handle,
+                        search_state: &mut search_state,
+                        search_id_counter: &mut search_id_counter,
+                        current_search_id: &mut current_search_id,
+                        current_search_is_ponder: &mut current_search_is_ponder,
+                        current_session: &mut _legacy_session_c,
+                        current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_stop_flag: &mut current_stop_flag,
+                        allow_null_move,
+                        position_state: &mut position_state,
+                        program_start,
+                        last_partial_result: &mut last_partial_result,
+                        pre_session_fallback: &mut pre_session_fallback,
+                        pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                        current_committed: &mut current_committed,
+                        last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                        last_go_begin_at: &mut last_go_begin_at,
+                    };
+                    match handle_command(cmd, &mut ctx) { Ok(()) => {}, Err(e) => { log::error!("[MAIN] ctrl handle_command error: {}", e); return Err(e); } }
+                    continue;
+                }
+            }
             // Handle USI commands
             recv(cmd_rx) -> cmd => {
                 match cmd {
