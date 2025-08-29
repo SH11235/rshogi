@@ -11,6 +11,7 @@ use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiRespo
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
+use engine_core::movegen::MoveGenerator;
 use engine_core::usi::position_to_sfen;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -101,6 +102,34 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
             position_info
         );
         return Err(anyhow!("Invalid state for starting search"));
+    }
+
+    // Fast path: if PositionState indicates no legal moves, resign immediately (no worker)
+    if let Some(pos_state) = ctx.position_state.as_ref() {
+        if let Ok(pos_verified) = engine_core::usi::restore_snapshot_and_verify(
+            &pos_state.sfen_snapshot,
+            pos_state.root_hash,
+        ) {
+            let mg = MoveGenerator::new();
+            if let Ok(legal) = mg.generate_all(&pos_verified) {
+                if legal.as_slice().is_empty() {
+                    let _ = send_info_string(crate::emit_utils::log_tsv(&[(
+                        "kind",
+                        "go_no_legal_moves",
+                    )]));
+                    let meta = crate::emit_utils::build_meta(
+                        crate::types::BestmoveSource::Resign,
+                        0,
+                        None,
+                        None,
+                        None,
+                    );
+                    // Emit bestmove resign and finalize immediately
+                    ctx.emit_and_finalize("resign".to_string(), None, meta, "GoNoLegalMoves")?;
+                    return Ok(());
+                }
+            }
+        }
     }
 
     // Verify position is set and consistent before starting search
@@ -306,6 +335,12 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                         }
                     }
                 }
+                // Log positive consistency
+                let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                    ("kind", "go_position_consistency_ok"),
+                    ("adapter_hash", &format!("{:?}", current_hash.map(|h| format!("{h:#016x}")))),
+                    ("state_hash", &format!("{:#016x}", pos_state.root_hash)),
+                ]));
             }
         }
     }

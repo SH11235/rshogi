@@ -5,11 +5,8 @@
 
 use anyhow::{anyhow, Result};
 use engine_core::{
-    engine::controller::Engine,
-    movegen::MoveGenerator,
-    search::CommittedIteration,
-    shogi::Position,
-    usi::move_to_usi,
+    engine::controller::Engine, movegen::MoveGenerator, search::CommittedIteration,
+    shogi::Position, usi::move_to_usi,
 };
 use log::info;
 
