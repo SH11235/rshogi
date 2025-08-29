@@ -7,17 +7,13 @@ use anyhow::{anyhow, Result};
 use engine_core::{
     engine::controller::Engine,
     movegen::MoveGenerator,
-    search::{limits::SearchLimits, CommittedIteration},
+    search::CommittedIteration,
     shogi::Position,
-    time_management::TimeControl,
     usi::move_to_usi,
 };
 use log::info;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 use crate::engine_adapter::{EngineAdapter, EngineError};
-use crate::usi::GoParams;
 
 impl EngineAdapter {
     /// Take the engine out for searching
@@ -57,120 +53,6 @@ impl EngineAdapter {
         // Return the engine
         self.engine = Some(engine);
     }
-
-    /// Prepare search parameters
-    ///
-    /// Returns (position, search_limits, ponder_hit_flag)
-    pub fn prepare_search(
-        &mut self,
-        params: &GoParams,
-        stop_flag: Arc<AtomicBool>,
-    ) -> Result<(Position, SearchLimits, Option<Arc<AtomicBool>>)> {
-        // Check if position is set
-        let position = self.get_position().ok_or_else(|| anyhow!("Position not set"))?.clone();
-
-        // Store search start state
-        self.search_start_position_hash = Some(position.zobrist_hash());
-        self.search_start_side_to_move = Some(position.side_to_move);
-
-        // Detect if this is byoyomi time control to determine overhead
-        let is_byoyomi = match params {
-            GoParams {
-                byoyomi: Some(byo), ..
-            } if *byo > 0 => {
-                // Check if it's not Fischer disguised as byoyomi
-                !crate::engine_adapter::time_control::is_fischer_disguised_as_byoyomi(
-                    *byo,
-                    params.binc,
-                    params.winc,
-                )
-            }
-            _ => false,
-        };
-
-        // Overheadの扱い: soft側を不必要に削らないため、
-        // 一般オーバーヘッドはTimeParameters.overhead_msへ、
-        // Byoyomi固有の追加オーバーヘッドはhard側の安全マージンとして扱う。
-        // これにより soft ≒ ratio*period - overhead_ms となり、
-        // 「常に period*ratio - (overhead+byoyomi_overhead)」に固定されるのを防ぐ。
-        let is_byoyomi_active = is_byoyomi && !params.ponder;
-        let overhead_ms: u32 = self.overhead_ms as u32;
-
-        // Check stop flag before applying go params
-        let stop_value_before = stop_flag.load(std::sync::atomic::Ordering::Acquire);
-        log::info!("prepare_search: stop_flag value before apply_go_params = {stop_value_before}");
-
-        // Compose effective byoyomi hard safety: base safety + GUI-side byoyomi overhead
-        // This makes the core's hard limit reflect real wall-clock constraints (go→bestmove),
-        // avoiding time losses due to pre-start latency not visible to the core timer.
-        let effective_byoyomi_safety_ms: u32 = self.byoyomi_safety_ms as u32;
-        let network_delay2_ms: u32 = if is_byoyomi_active {
-            self.byoyomi_overhead_ms as u32
-        } else {
-            0
-        };
-
-        // Apply go parameters to get search limits with the effective safety
-        let limits = crate::engine_adapter::time_control::apply_go_params(
-            params,
-            &position,
-            overhead_ms,
-            Some(stop_flag.clone()),
-            effective_byoyomi_safety_ms,
-            network_delay2_ms,
-            self.byoyomi_early_finish_ratio,
-            self.pv_stability_base,
-            self.pv_stability_slope,
-        )?;
-
-        // 監視用ログ（デバッグレベル）: byoyomi時の安全マージン適用結果
-        if is_byoyomi_active {
-            if let engine_core::time_management::TimeControl::Byoyomi { .. } = limits.time_control {
-                log::debug!(
-                    "byoyomi hard safety applied: base={}ms + overhead={}ms => effective={}ms",
-                    self.byoyomi_safety_ms,
-                    self.byoyomi_overhead_ms,
-                    effective_byoyomi_safety_ms
-                );
-            }
-        }
-
-        // Check stop flag after applying go params
-        let stop_value_after = stop_flag.load(std::sync::atomic::Ordering::Acquire);
-        log::info!("prepare_search: stop_flag value after apply_go_params = {stop_value_after}");
-
-        // Detect if this is actually byoyomi time control by looking at the real TimeControl
-        match &limits.time_control {
-            TimeControl::Byoyomi { byoyomi_ms, .. } => {
-                self.last_search_is_byoyomi = true;
-                let _ = byoyomi_ms; // period not tracked at adapter level anymore
-            }
-            TimeControl::Ponder(inner) => {
-                self.last_search_is_byoyomi = matches!(**inner, TimeControl::Byoyomi { .. });
-                // Do not store period on ponder (stop handler ignores bestmove on ponder stop)
-            }
-            _ => {
-                self.last_search_is_byoyomi = false;
-            }
-        }
-
-        // Setup ponder state if applicable
-        let ponder_hit_flag = if params.ponder {
-            self.ponder_state.is_pondering = true;
-            self.ponder_state.ponder_start = Some(std::time::Instant::now());
-            let flag = Arc::new(AtomicBool::new(false));
-            self.active_ponder_hit_flag = Some(flag.clone());
-            self.current_stop_flag = Some(stop_flag);
-            Some(flag)
-        } else {
-            self.current_stop_flag = Some(stop_flag);
-            None
-        };
-
-        Ok((position, limits, ponder_hit_flag))
-    }
-
-    // session-based validation removed
 
     /// Validate and get bestmove from a committed iteration (core type)
     pub fn validate_and_get_bestmove_from_committed(
