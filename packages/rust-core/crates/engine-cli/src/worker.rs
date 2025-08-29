@@ -435,6 +435,46 @@ pub fn search_worker(
     // Pre-compute budget hint from limits before moving it into the engine
     let (budget_soft_ms, budget_hard_ms) = budget_from_limits(&limits);
 
+    // Phase: Add a conservative watchdog to avoid time loss on edge cases
+    if !params.ponder {
+        let tx_deadline = tx.clone();
+        let stop_for_watchdog = stop_flag.clone();
+        let search_id_for_watchdog = search_id;
+        let root_hash_for_watchdog = position.zobrist_hash();
+        std::thread::spawn(move || {
+            // Compute adaptive safety similar to core
+            let safety_ms = if budget_hard_ms >= 500 {
+                let three_percent = budget_hard_ms.saturating_mul(3) / 100;
+                three_percent.clamp(120, 400)
+            } else if budget_hard_ms >= 200 {
+                40
+            } else {
+                0
+            };
+            let wait_ms = budget_hard_ms.saturating_sub(safety_ms);
+            if wait_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+            }
+            // If not already stopped, set stop and notify main loop
+            if !stop_for_watchdog.load(std::sync::atomic::Ordering::Acquire) {
+                stop_for_watchdog.store(true, std::sync::atomic::Ordering::Release);
+                let _ = tx_deadline.send(WorkerMessage::SearchFinished {
+                    root_hash: root_hash_for_watchdog,
+                    search_id: search_id_for_watchdog,
+                    stop_info: Some(engine_core::search::types::StopInfo {
+                        reason: engine_core::search::types::TerminationReason::TimeLimit,
+                        elapsed_ms: 0,
+                        nodes: 0,
+                        depth_reached: 0,
+                        hard_timeout: false,
+                        soft_limit_ms: budget_soft_ms,
+                        hard_limit_ms: budget_hard_ms,
+                    }),
+                });
+            }
+        });
+    }
+
     // Create search session
     // legacy session removed
 
