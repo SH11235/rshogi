@@ -85,7 +85,6 @@ pub enum WorkerMessage {
         search_id: u64,
         soft_ms: u64,
         hard_ms: u64,
-        wait_ms: u64,
     },
 
     /// Search has started
@@ -245,6 +244,7 @@ pub fn search_worker(
     stop_flag: Arc<AtomicBool>,
     tx: Sender<WorkerMessage>,
     search_id: u64,
+    finalized_flag: Option<Arc<AtomicBool>>,
 ) {
     log::debug!("Search worker thread started with params: {params:?}");
     let initial_stop_value = stop_flag.load(Ordering::SeqCst);
@@ -286,11 +286,19 @@ pub fn search_worker(
     let tx_partial = tx.clone();
     let last_partial_depth = Arc::new(Mutex::new(0u8));
     let stop_flag_for_info = stop_flag.clone();
+    let finalized_for_info = finalized_flag.clone();
     let info_callback = move |info: SearchInfo| {
         // Check stop flag before sending messages
         if stop_flag_for_info.load(Ordering::SeqCst) {
             log::trace!("Info callback: stop flag set, skipping message");
             return;
+        }
+        // Suppress after finalize to avoid backlog
+        if let Some(flag) = &finalized_for_info {
+            if flag.load(Ordering::Acquire) {
+                log::trace!("Info callback: finalized flag set, skipping message");
+                return;
+            }
         }
 
         // Always send the info message
@@ -503,7 +511,14 @@ pub fn search_worker(
         let stop_for_watchdog = stop_flag.clone();
         let search_id_for_watchdog = search_id;
         let root_hash_for_watchdog = position.zobrist_hash();
+        let finalized_for_watchdog = finalized_flag.clone();
         std::thread::spawn(move || {
+            if let Some(flag) = &finalized_for_watchdog {
+                if flag.load(Ordering::Acquire) {
+                    // Already finalized before watchdog start
+                    return;
+                }
+            }
             let _ = tx_deadline.send(WorkerMessage::Info {
                 info: SearchInfo {
                     string: Some(log_tsv(&[
@@ -531,12 +546,17 @@ pub fn search_worker(
             }
             // If not already stopped, set stop and notify main loop
             if !stop_for_watchdog.load(std::sync::atomic::Ordering::Acquire) {
+                if let Some(flag) = &finalized_for_watchdog {
+                    if flag.load(Ordering::Acquire) {
+                        // Already finalized; skip watchdog notifications
+                        return;
+                    }
+                }
                 // New explicit watchdog event（メインはこれで即emit）
                 let _ = tx_deadline.send(WorkerMessage::WatchdogFired {
                     search_id: search_id_for_watchdog,
                     soft_ms: budget_soft_ms,
                     hard_ms: budget_hard_ms,
-                    wait_ms,
                 });
                 // 互換: 情報ログ（Writer一元化でメイン経由）
                 let _ = tx_deadline.send(WorkerMessage::Info {
@@ -710,6 +730,12 @@ pub fn search_worker(
                 log::info!(
                     "Sending search completion: was_ponder={was_ponder}, ponder_hit={ponder_hit_occurred}"
                 );
+                if let Some(flag) = &finalized_flag {
+                    if flag.load(Ordering::Acquire) {
+                        // Already finalized; skip SearchFinished
+                        return;
+                    }
+                }
                 // Send SearchFinished to indicate we're done
                 if let Err(e) = tx.send(WorkerMessage::SearchFinished {
                     root_hash: position.zobrist_hash(),
@@ -786,6 +812,12 @@ pub fn search_worker(
 
                 // If not ponder OR ponder was converted via ponderhit, finalize; main emits fallback
                 if !was_ponder || ponder_hit_occurred {
+                    if let Some(flag) = &finalized_flag {
+                        if flag.load(Ordering::Acquire) {
+                            // Already finalized; skip SearchFinished
+                            return;
+                        }
+                    }
                     if let Err(e) = tx.send(WorkerMessage::SearchFinished {
                         root_hash: position.zobrist_hash(),
                         search_id,

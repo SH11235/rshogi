@@ -31,6 +31,8 @@ pub struct CommandContext<'a> {
     /// Latest committed iteration from core (preferred over session)
     pub current_committed: &'a mut Option<CommittedIteration>,
     pub current_bestmove_emitter: &'a mut Option<BestmoveEmitter>,
+    /// Per-search finalized flag shared with worker for sender-side suppression
+    pub current_finalized_flag: &'a mut Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub current_stop_flag: &'a mut Option<Arc<AtomicBool>>, // Per-search stop flag
     pub allow_null_move: bool,
     pub position_state: &'a mut Option<PositionState>, // Store position state for recovery
@@ -95,6 +97,10 @@ impl<'a> CommandContext<'a> {
         self.search_state.set_idle();
         *self.current_search_is_ponder = false;
         *self.current_bestmove_emitter = None;
+        // Mark finalized flag if present for sender-side suppression
+        if let Some(flag) = self.current_finalized_flag.as_ref() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
         *self.current_session = None;
 
         // Drop the current stop flag without resetting it
@@ -444,6 +450,7 @@ mod tests {
             current_search_is_ponder: &mut current_search_is_ponder,
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut None,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
@@ -523,6 +530,7 @@ mod tests {
             current_search_is_ponder: &mut current_search_is_ponder,
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut None,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: true, // permit null move emergency if needed
             position_state: &mut position_state,
@@ -610,6 +618,7 @@ mod tests {
             current_search_is_ponder: &mut current_search_is_ponder,
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut None,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
@@ -680,6 +689,7 @@ mod tests {
             current_search_is_ponder: &mut current_search_is_ponder,
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut None,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
@@ -749,6 +759,7 @@ mod tests {
             current_search_is_ponder: &mut current_search_is_ponder,
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut None,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,
@@ -819,6 +830,7 @@ mod tests {
             current_search_is_ponder: &mut current_search_is_ponder,
             current_session: &mut current_session,
             current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut None,
             current_stop_flag: &mut current_stop_flag,
             allow_null_move: false,
             position_state: &mut position_state,

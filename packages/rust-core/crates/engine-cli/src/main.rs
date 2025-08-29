@@ -38,7 +38,7 @@ use types::{BestmoveSource, PositionState};
 use usi::{
     ensure_flush_on_exit, flush_final, send_info_string, send_response, UsiCommand, UsiResponse,
 };
-use worker::{lock_or_recover_adapter, WorkerMessage};
+use worker::WorkerMessage;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -137,6 +137,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut last_partial_result: Option<(String, u8, i32)> = None; // Cache latest partial result
     let mut pre_session_fallback: Option<String> = None; // Precomputed fallback move at go-time
     let mut pre_session_fallback_hash: Option<u64> = None; // Hash when pre_session_fallback was computed
+    let mut current_finalized_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None; // Share finalize with worker
 
     // Diagnostics: timestamps for cross-event deltas
     let mut last_bestmove_sent_at: Option<Instant> = None;
@@ -201,6 +202,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_search_is_ponder: &mut current_search_is_ponder,
                         current_session: &mut _legacy_session,
                         current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_finalized_flag: &mut current_finalized_flag,
                         current_stop_flag: &mut current_stop_flag,
                         allow_null_move,
                         position_state: &mut position_state,
@@ -257,6 +259,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_search_is_ponder: &mut current_search_is_ponder,
                         current_session: &mut _legacy_session_c,
                         current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_finalized_flag: &mut current_finalized_flag,
                         current_stop_flag: &mut current_stop_flag,
                         allow_null_move,
                         position_state: &mut position_state,
@@ -302,6 +305,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_search_is_ponder: &mut current_search_is_ponder,
                         current_session: &mut _legacy_session2,
                         current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_finalized_flag: &mut current_finalized_flag,
                         current_stop_flag: &mut current_stop_flag,
                         allow_null_move,
                         position_state: &mut position_state,
@@ -352,6 +356,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_search_is_ponder: &mut current_search_is_ponder,
                         current_session: &mut _legacy_session_c,
                         current_bestmove_emitter: &mut current_bestmove_emitter,
+                        current_finalized_flag: &mut current_finalized_flag,
                         current_stop_flag: &mut current_stop_flag,
                         allow_null_move,
                         position_state: &mut position_state,
@@ -427,6 +432,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_search_is_ponder: &mut current_search_is_ponder,
                             current_session: &mut _legacy_session,
                             current_bestmove_emitter: &mut current_bestmove_emitter,
+                            current_finalized_flag: &mut current_finalized_flag,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
                             position_state: &mut position_state,
@@ -472,6 +478,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_search_is_ponder: &mut current_search_is_ponder,
                             current_session: &mut _legacy_session2,
                             current_bestmove_emitter: &mut current_bestmove_emitter,
+                            current_finalized_flag: &mut current_finalized_flag,
                             current_stop_flag: &mut current_stop_flag,
                             allow_null_move,
                             position_state: &mut position_state,
@@ -519,6 +526,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 current_search_is_ponder: &mut current_search_is_ponder,
                                 current_session: &mut _legacy_session3,
                                 current_bestmove_emitter: &mut current_bestmove_emitter,
+                                current_finalized_flag: &mut current_finalized_flag,
                                 current_stop_flag: &mut current_stop_flag,
                                 allow_null_move,
                                 position_state: &mut position_state,
@@ -634,7 +642,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             search_id,
             soft_ms,
             hard_ms,
-            wait_ms: _,
         } => {
             let emit_start = Instant::now();
             // Emit immediately on watchdog fire (state非依存、emitter未finalizeで一度だけ)
@@ -690,7 +697,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             // Fallback chain: partial → pre_session → emergency
             if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
                 if let Ok((move_str, _)) =
-                    generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+                    generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
                 {
                     let meta = build_meta(
                         BestmoveSource::PartialResultTimeout,
@@ -718,38 +725,31 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
             // Pre-session fallback captured at go-time
             if let Some(mv) = ctx.pre_session_fallback.clone() {
-                let adapter = lock_or_recover_adapter(ctx.engine);
-                if adapter.get_position().map(|p| p.zobrist_hash())
-                    == *ctx.pre_session_fallback_hash
-                {
-                    let meta = build_meta(
-                        BestmoveSource::EmergencyFallbackTimeout,
-                        0,
-                        None,
-                        None,
-                        Some(engine_core::search::types::StopInfo {
-                            reason: engine_core::search::types::TerminationReason::TimeLimit,
-                            elapsed_ms: 0,
-                            nodes: 0,
-                            depth_reached: 0,
-                            hard_timeout: false,
-                            soft_limit_ms: soft_ms,
-                            hard_limit_ms: hard_ms,
-                        }),
-                    );
-                    drop(adapter);
-                    ctx.emit_and_finalize(mv, None, meta, "WatchdogPreSession")?;
-                    let _ = send_info_string(log_tsv(&[
-                        ("kind", "watchdog_emit_latency"),
-                        ("ms", &emit_start.elapsed().as_millis().to_string()),
-                    ]));
-                    return Ok(());
-                }
-                drop(adapter);
+                let meta = build_meta(
+                    BestmoveSource::EmergencyFallbackTimeout,
+                    0,
+                    None,
+                    None,
+                    Some(engine_core::search::types::StopInfo {
+                        reason: engine_core::search::types::TerminationReason::TimeLimit,
+                        elapsed_ms: 0,
+                        nodes: 0,
+                        depth_reached: 0,
+                        hard_timeout: false,
+                        soft_limit_ms: soft_ms,
+                        hard_limit_ms: hard_ms,
+                    }),
+                );
+                ctx.emit_and_finalize(mv, None, meta, "WatchdogPreSessionFast")?;
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "watchdog_emit_latency"),
+                    ("ms", &emit_start.elapsed().as_millis().to_string()),
+                ]));
+                return Ok(());
             }
 
             // Emergency
-            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
+            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
                 Ok((move_str, _)) => {
                     let meta = build_meta(
                         BestmoveSource::EmergencyFallbackTimeout,
@@ -961,7 +961,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         }
 
                         // Fallback if session validation failed
-                        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move) {
+                        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, false) {
                             Ok((fallback_move, _used_partial)) => {
                                 let meta = build_meta(
                                     BestmoveSource::EmergencyFallback,
@@ -1087,7 +1087,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                 // Fallback: use cached partial result if available
                 if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
-                    match generate_fallback_move(ctx.engine, Some((mv, d, s)), false) {
+                    match generate_fallback_move(ctx.engine, Some((mv, d, s)), false, false) {
                         Ok((move_str, _)) => {
                             let meta = build_meta(
                                 BestmoveSource::EmergencyFallbackOnFinish,
@@ -1106,7 +1106,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 }
 
                 // Emergency last resort
-                match generate_fallback_move(ctx.engine, None, false) {
+                match generate_fallback_move(ctx.engine, None, false, false) {
                     Ok((move_str, _)) => {
                         let meta = build_meta(
                             BestmoveSource::EmergencyFallbackOnFinish,
