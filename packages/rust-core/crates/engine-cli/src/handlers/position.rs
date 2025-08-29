@@ -1,6 +1,7 @@
 use crate::command_handler::CommandContext;
 use crate::emit_utils::log_tsv;
-use crate::usi::{canonicalize_position_cmd, send_info_string};
+use crate::usi::send_info_string;
+use engine_core::usi::canonicalize_position_cmd;
 use crate::worker::lock_or_recover_adapter;
 use crate::helpers::wait_for_search_completion;
 use engine_core::usi::position_to_sfen;
