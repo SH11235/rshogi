@@ -1,7 +1,6 @@
 use crate::command_handler::CommandContext;
 use crate::worker::lock_or_recover_adapter;
 use crate::helpers::wait_for_search_completion;
-use crate::state::SearchState;
 use crate::usi::commands::GameResult;
 use std::sync::atomic::Ordering;
 
@@ -71,4 +70,3 @@ pub(crate) fn handle_usi_new_game(ctx: &mut CommandContext) -> anyhow::Result<()
     log::debug!("New game started");
     Ok(())
 }
-

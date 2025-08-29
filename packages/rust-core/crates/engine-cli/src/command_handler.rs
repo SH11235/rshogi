@@ -1,17 +1,16 @@
 use crate::engine_adapter::EngineAdapter;
-use crate::helpers::{generate_fallback_move, wait_for_search_completion};
+// use crate::helpers::{generate_fallback_move, wait_for_search_completion};
 use crate::search_session::SearchSession;
 use crate::state::SearchState;
 use crate::types::{BestmoveSource, PositionState, ResignReason};
 use crate::usi::{send_info_string, send_response, UsiCommand, UsiResponse};
-use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
-use anyhow::{anyhow, Result};
+use crate::worker::{lock_or_recover_adapter, WorkerMessage};
+use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
-use engine_core::usi::position_to_sfen;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::Instant;
 
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta};
 use crate::emit_utils::{build_meta, log_tsv};
