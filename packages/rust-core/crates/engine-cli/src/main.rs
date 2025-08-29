@@ -149,6 +149,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     // Strategy: always drain cmd/ctrl first (non-blocking), then handle a bounded number
     // of worker messages to avoid starvation, then fall back to a short select tick.
     let mut pending_quit = false;
+    // Log wall watchdog suppression only once per armed period
+    let mut wall_watchdog_suppressed_logged = false;
     loop {
         // 1) Drain pending normal commands first (position/go 優先)
         'drain_cmds: loop {
@@ -530,6 +532,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(4400);
                 if thr_ms > 0 && search_state.is_searching() && worker_watchdog_threshold.is_none() {
+                    // Leaving armed period: reset suppression log flag
+                    wall_watchdog_suppressed_logged = false;
                     if let Some(t0) = last_go_begin_at {
                         let elapsed = t0.elapsed().as_millis() as u64;
                         // Only fire if no bestmove has been sent since go-begin
@@ -568,8 +572,11 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         }
                     }
                 } else if thr_ms > 0 && search_state.is_searching() && worker_watchdog_threshold.is_some() {
-                    // Suppress wall watchdog when worker watchdog is armed
-                    let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_suppress"), ("reason", "worker_watchdog_active")]));
+                    // Suppress wall watchdog when worker watchdog is armed - log once per armed period
+                    if !wall_watchdog_suppressed_logged {
+                        let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_suppress"), ("reason", "worker_watchdog_active")]));
+                        wall_watchdog_suppressed_logged = true;
+                    }
                 }
             }
         }

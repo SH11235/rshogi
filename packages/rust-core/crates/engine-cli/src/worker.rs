@@ -638,9 +638,15 @@ pub fn search_worker(
                 }
             }
             if let Some((soft_ms, hard_ms)) = budgets {
-                // threshold = min(soft + δ, hard) with δ=+50ms (micro margin).
-                // Do NOT subtract NetworkDelay2 here to avoid double subtraction.
-                let threshold_ms = soft_ms.saturating_add(50).min(hard_ms);
+                // threshold = min(max(soft + δ, MIN_THINK_MS), hard)
+                // δ=+50ms (micro margin). MIN_THINK_MS is optional safeguard.
+                let min_think_ms = std::env::var("MIN_THINK_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                // Base threshold without double subtraction
+                let base = soft_ms.saturating_add(50).min(hard_ms);
+                let threshold_ms = base.max(min_think_ms).min(hard_ms);
 
                 // Suppress arming when threshold is too short (search not yet warmed up)
                 if threshold_ms <= 200 {
