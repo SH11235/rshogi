@@ -450,10 +450,33 @@ where
                         self.stats.pv.clear();
                         self.stats.pv.push(mv);
                     } else {
-                        log::error!("No legal moves available for fallback at root");
+                        // No legal moves at root: this is a terminal position.
+                        // Treat as mate (side to move has no legal moves) and attach StopInfo.
+                        log::info!("No legal moves at root; treating as terminal (mate)");
+                        final_stop_info = Some(crate::search::types::StopInfo {
+                            reason: crate::search::types::TerminationReason::Mate,
+                            elapsed_ms: self.context.elapsed().as_millis() as u64,
+                            nodes: self.stats.nodes,
+                            depth_reached: self.stats.depth,
+                            hard_timeout: false,
+                            soft_limit_ms: 0,
+                            hard_limit_ms: 0,
+                        });
                     }
                 } else {
-                    log::error!("Failed to generate legal moves for fallback at root");
+                    // Move generation failed unexpectedly; downgrade to warn and attach Completed
+                    log::warn!("Failed to generate legal moves for fallback at root");
+                    if final_stop_info.is_none() {
+                        final_stop_info = Some(crate::search::types::StopInfo {
+                            reason: crate::search::types::TerminationReason::Completed,
+                            elapsed_ms: self.context.elapsed().as_millis() as u64,
+                            nodes: self.stats.nodes,
+                            depth_reached: self.stats.depth,
+                            hard_timeout: false,
+                            soft_limit_ms: 0,
+                            hard_limit_ms: 0,
+                        });
+                    }
                 }
             }
         }
