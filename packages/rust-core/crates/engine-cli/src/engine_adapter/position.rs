@@ -8,7 +8,7 @@ use engine_core::shogi::Position;
 use log::{debug, info, warn};
 
 use crate::engine_adapter::{EngineAdapter, PonderState};
-use crate::usi::create_position;
+use engine_core::usi::create_position;
 
 impl EngineAdapter {
     /// Check if a position is currently set
