@@ -7,7 +7,7 @@ use crate::emit_utils::{
 };
 use crate::handlers::common::resign_on_position_restore_fail;
 use crate::helpers::wait_for_search_completion;
-use crate::usi::{send_info_string, send_response, GoParams, UsiResponse};
+use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
 use crossbeam_channel::Sender;
@@ -103,7 +103,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         return Err(anyhow!("Invalid state for starting search"));
     }
 
-    // Verify position is set before starting search
+    // Verify position is set and consistent before starting search
     {
         let mut engine = lock_or_recover_adapter(ctx.engine);
         if !engine.has_position() {
@@ -234,6 +234,78 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                     crate::types::ResignReason::Checkmate,
                     "no_legal_moves",
                 );
+            }
+        } else {
+            // Consistency check: adapter position hash must match PositionState when available
+            if let Some(pos_state) = ctx.position_state.as_ref() {
+                let current_hash = engine.get_position().map(|p| p.zobrist_hash());
+                if current_hash != Some(pos_state.root_hash) {
+                    log::warn!(
+                        "Adapter position hash mismatch (adapter={:?}, state={:#016x}) - rebuilding from PositionState",
+                        current_hash,
+                        pos_state.root_hash
+                    );
+                    // Try fast snapshot verify first
+                    match engine_core::usi::restore_snapshot_and_verify(
+                        &pos_state.sfen_snapshot,
+                        pos_state.root_hash,
+                    ) {
+                        Ok(pos_verified) => {
+                            engine.set_raw_position(pos_verified);
+                            log_position_restore_success("sfen_snapshot_consistency");
+                        }
+                        Err(e) => {
+                            log::error!("Consistency rebuild via snapshot failed: {e}");
+                            // Fall back: parse cmd_canonical and rebuild
+                            match crate::usi::parse_usi_command(&pos_state.cmd_canonical) {
+                                Ok(UsiCommand::Position {
+                                    startpos,
+                                    sfen,
+                                    moves,
+                                }) => {
+                                    match engine_core::usi::rebuild_then_snapshot_fallback(
+                                        startpos,
+                                        sfen.as_deref(),
+                                        &moves,
+                                        Some(&pos_state.sfen_snapshot),
+                                        pos_state.root_hash,
+                                    ) {
+                                        Ok((pos_verified, source)) => {
+                                            engine.set_raw_position(pos_verified);
+                                            match source {
+                                                engine_core::usi::RestoreSource::Command => {
+                                                    log_position_restore_success(
+                                                        "command_consistency",
+                                                    )
+                                                }
+                                                engine_core::usi::RestoreSource::Snapshot => {
+                                                    log_position_restore_success(
+                                                        "sfen_snapshot_consistency",
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        Err(e2) => {
+                                            log::error!(
+                                                "Consistency rebuild+snapshot failed: {e2}"
+                                            );
+                                            let _ = send_info_string(log_tsv(&[(
+                                                "kind",
+                                                "go_position_consistency_failed",
+                                            )]));
+                                        }
+                                    }
+                                }
+                                Ok(_) | Err(_) => {
+                                    let _ = send_info_string(log_tsv(&[(
+                                        "kind",
+                                        "go_position_consistency_parse_failed",
+                                    )]));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

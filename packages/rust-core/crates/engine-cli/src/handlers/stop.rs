@@ -64,15 +64,38 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             }
         }
 
-        // 3) Pre-session fallback captured at go-time（時間優先: 追加のロック/検証を行わず即使用）
-        if let Some(move_str) = ctx.pre_session_fallback.clone() {
-            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-            log_on_stop_source("pre_session_fast");
-            // Clear to avoid reuse
-            *ctx.pre_session_fallback = None;
-            *ctx.pre_session_fallback_hash = None;
-            ctx.emit_and_finalize(move_str, None, meta, "PonderPreSessionOnStopFast")?;
-            return Ok(());
+        // 3) Pre-session fallback（ハッシュ一致時のみ使用。try_lockで非ブロッキング検査）
+        if let Some(saved_move) = ctx.pre_session_fallback.clone() {
+            if let Ok(adapter) = ctx.engine.try_lock() {
+                let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
+                if current_hash == *ctx.pre_session_fallback_hash {
+                    if let Some(pos) = adapter.get_position() {
+                        if let Some(norm) =
+                            engine_core::util::usi_helpers::normalize_usi_move_str_logged(
+                                pos,
+                                &saved_move,
+                            )
+                        {
+                            *ctx.pre_session_fallback = None;
+                            *ctx.pre_session_fallback_hash = None;
+                            let meta =
+                                build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                            log_on_stop_source("pre_session");
+                            ctx.emit_and_finalize(norm, None, meta, "PonderPreSessionOnStop")?;
+                            return Ok(());
+                        }
+                    }
+                }
+                // 不一致・不正なら削除
+                *ctx.pre_session_fallback = None;
+                *ctx.pre_session_fallback_hash = None;
+            } else {
+                // アダプタがビジーならプリセッションは使わず次へ（Emergency にフォールバック）
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "stop_pre_session_skip"),
+                    ("reason", "adapter_lock_busy"),
+                ]));
+            }
         }
 
         // 4) Emergency fallback
@@ -117,14 +140,36 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         }
     }
 
-    // Pre-session fallback captured at go-time (with hash verification)
-    if let Some(move_str) = ctx.pre_session_fallback.clone() {
-        let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
-        log_on_stop_source("pre_session_fast");
-        *ctx.pre_session_fallback = None;
-        *ctx.pre_session_fallback_hash = None;
-        ctx.emit_and_finalize(move_str, None, meta, "ImmediatePreSessionOnStopFast")?;
-        return Ok(());
+    // Pre-session fallback（通常 stop でもハッシュ一致時のみ使用。try_lock で検査）
+    if let Some(saved_move) = ctx.pre_session_fallback.clone() {
+        if let Ok(adapter) = ctx.engine.try_lock() {
+            let current_hash = adapter.get_position().map(|p| p.zobrist_hash());
+            if current_hash == *ctx.pre_session_fallback_hash {
+                if let Some(pos) = adapter.get_position() {
+                    if let Some(norm) =
+                        engine_core::util::usi_helpers::normalize_usi_move_str_logged(
+                            pos,
+                            &saved_move,
+                        )
+                    {
+                        *ctx.pre_session_fallback = None;
+                        *ctx.pre_session_fallback_hash = None;
+                        let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+                        log_on_stop_source("pre_session");
+                        ctx.emit_and_finalize(norm, None, meta, "ImmediatePreSessionOnStop")?;
+                        return Ok(());
+                    }
+                }
+            }
+            // 不一致・不正なら削除
+            *ctx.pre_session_fallback = None;
+            *ctx.pre_session_fallback_hash = None;
+        } else {
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "stop_pre_session_skip"),
+                ("reason", "adapter_lock_busy"),
+            ]));
+        }
     }
 
     let (move_str, source) =
