@@ -1,9 +1,9 @@
 use crate::command_handler::CommandContext;
 use crate::emit_utils::log_tsv;
-use crate::usi::send_info_string;
-use engine_core::usi::canonicalize_position_cmd;
-use crate::worker::lock_or_recover_adapter;
 use crate::helpers::wait_for_search_completion;
+use crate::usi::send_info_string;
+use crate::worker::lock_or_recover_adapter;
+use engine_core::usi::canonicalize_position_cmd;
 use engine_core::usi::position_to_sfen;
 
 pub(crate) fn handle_position_command(
@@ -71,10 +71,7 @@ pub(crate) fn handle_position_command(
                     ("kind", "position_store"),
                     ("root_hash", &format!("{:#016x}", root_hash)),
                     ("move_len", &move_len.to_string()),
-                    (
-                        "sfen_first_20",
-                        &sfen_snapshot.chars().take(20).collect::<String>(),
-                    ),
+                    ("sfen_first_20", &sfen_snapshot.chars().take(20).collect::<String>()),
                     ("stored_ms_since_start", &stored_ms.to_string()),
                 ]))?;
             } else {

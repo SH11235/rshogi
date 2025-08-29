@@ -18,16 +18,16 @@ pub struct PrefetchStats {
     pub distance: usize,
 }
 
-/// Adaptive prefetcher that tracks hit/miss rates
-pub(crate) struct AdaptivePrefetcher {
+/// Lightweight prefetch statistics tracker used internally by TT
+pub(crate) struct PrefetchStatsTracker {
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
-impl AdaptivePrefetcher {
+impl PrefetchStatsTracker {
     /// Create new adaptive prefetcher
     pub fn new() -> Self {
-        AdaptivePrefetcher {
+        PrefetchStatsTracker {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }

@@ -1,6 +1,6 @@
 use crate::command_handler::CommandContext;
-use crate::emit_utils::{build_meta, log_on_stop_source};
 use crate::emit_utils::log_tsv;
+use crate::emit_utils::{build_meta, log_on_stop_source};
 use crate::helpers::generate_fallback_move;
 use crate::types::BestmoveSource;
 use crate::usi::send_info_string;
@@ -25,19 +25,35 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         ("state", &format!("{:?}", *ctx.search_state)),
         (
             "ponder",
-            if *ctx.current_search_is_ponder { "1" } else { "0" },
+            if *ctx.current_search_is_ponder {
+                "1"
+            } else {
+                "0"
+            },
         ),
         (
             "session",
-            if ctx.current_session.is_some() { "1" } else { "0" },
+            if ctx.current_session.is_some() {
+                "1"
+            } else {
+                "0"
+            },
         ),
         (
             "partial",
-            if ctx.last_partial_result.is_some() { "1" } else { "0" },
+            if ctx.last_partial_result.is_some() {
+                "1"
+            } else {
+                "0"
+            },
         ),
         (
             "pre_session_fallback",
-            if ctx.pre_session_fallback.is_some() { "1" } else { "0" },
+            if ctx.pre_session_fallback.is_some() {
+                "1"
+            } else {
+                "0"
+            },
         ),
     ]);
     let _ = send_info_string(diag);
@@ -61,7 +77,8 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
 
         // 2) Partial result
         if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
-            if let Ok((move_str, _)) = generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+            if let Ok((move_str, _)) =
+                generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
             {
                 let meta = build_meta(
                     BestmoveSource::SessionOnStop,
@@ -125,7 +142,9 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
     }
 
     if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
-        if let Ok((move_str, _)) = generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move) {
+        if let Ok((move_str, _)) =
+            generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move)
+        {
             let meta = build_meta(
                 BestmoveSource::PartialResultTimeout,
                 d,

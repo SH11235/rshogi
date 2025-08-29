@@ -1,8 +1,8 @@
 //! Utilities for emission metadata and structured logging
 
 use crate::types::BestmoveSource;
-use engine_core::search::types::{StopInfo, TerminationReason};
 use crate::usi::send_info_string;
+use engine_core::search::types::{StopInfo, TerminationReason};
 
 /// Create a TSV-formatted log string from key-value pairs
 /// Values are sanitized to prevent TSV format corruption

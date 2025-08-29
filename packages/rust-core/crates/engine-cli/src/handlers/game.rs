@@ -1,7 +1,7 @@
 use crate::command_handler::CommandContext;
-use crate::worker::lock_or_recover_adapter;
 use crate::helpers::wait_for_search_completion;
 use crate::usi::commands::GameResult;
+use crate::worker::lock_or_recover_adapter;
 use std::sync::atomic::Ordering;
 
 pub(crate) fn handle_gameover(result: GameResult, ctx: &mut CommandContext) -> anyhow::Result<()> {

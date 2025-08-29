@@ -4,8 +4,8 @@ mod bestmove_emitter;
 mod command_handler;
 mod emit_utils;
 mod engine_adapter;
-mod handlers;
 mod flushing_logger;
+mod handlers;
 mod helpers;
 mod search_session;
 mod state;
@@ -15,11 +15,11 @@ mod usi;
 mod utils;
 mod worker;
 
+use crate::emit_utils::build_meta;
 use anyhow::Result;
 use bestmove_emitter::BestmoveEmitter;
 use clap::Parser;
 use command_handler::{handle_command, CommandContext};
-use crate::emit_utils::build_meta;
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
 use helpers::generate_fallback_move;
@@ -130,7 +130,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_stop_flag: Option<Arc<AtomicBool>> = None; // Per-search stop flag
     let mut position_state: Option<PositionState> = None; // Position state for recovery
     let mut last_partial_result: Option<(String, u8, i32)> = None; // Cache latest partial result
-    let mut legal_moves_check_logged = false; // Track if we've logged the legal moves check status
     let mut pre_session_fallback: Option<String> = None; // Precomputed fallback move at go-time
     let mut pre_session_fallback_hash: Option<u64> = None; // Hash when pre_session_fallback was computed
 
@@ -182,7 +181,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             allow_null_move,
                             position_state: &mut position_state,
                             program_start,
-                            legal_moves_check_logged: &mut legal_moves_check_logged,
                             last_partial_result: &mut last_partial_result,
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,
@@ -222,7 +220,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             allow_null_move,
                             position_state: &mut position_state,
                             program_start,
-                            legal_moves_check_logged: &mut legal_moves_check_logged,
                             last_partial_result: &mut last_partial_result,
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,

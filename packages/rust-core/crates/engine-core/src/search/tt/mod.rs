@@ -14,8 +14,10 @@
 
 pub mod bucket;
 pub mod bucket_simd;
+pub mod budget;
 pub mod constants;
 pub mod entry;
+pub mod filter;
 pub mod flexible_bucket;
 pub mod gc;
 pub mod metrics;
@@ -31,7 +33,7 @@ use crate::{util, Position};
 use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
 use flexible_bucket::FlexibleTTBucket;
-use prefetch::AdaptivePrefetcher;
+use prefetch::PrefetchStatsTracker;
 // Integrated PV reconstruction here
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
@@ -68,8 +70,8 @@ pub struct TranspositionTable {
     /// Bucket size configuration
     #[allow(dead_code)]
     bucket_size: Option<BucketSize>,
-    /// Adaptive prefetcher
-    prefetcher: Option<AdaptivePrefetcher>,
+    /// Prefetch statistics tracker (legacy, lightweight)
+    prefetcher: Option<PrefetchStatsTracker>,
     /// TT performance metrics
     #[cfg(feature = "tt_metrics")]
     metrics: Option<DetailedTTMetrics>,
@@ -207,7 +209,7 @@ impl TranspositionTable {
 
     /// Enable adaptive prefetcher
     pub fn enable_prefetcher(&mut self) {
-        self.prefetcher = Some(AdaptivePrefetcher::new());
+        self.prefetcher = Some(PrefetchStatsTracker::new());
     }
 
     /// Enable detailed metrics collection

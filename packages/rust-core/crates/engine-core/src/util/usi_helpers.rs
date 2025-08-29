@@ -34,4 +34,3 @@ pub fn is_legal_usi_move(position: &Position, usi_move: &str) -> bool {
             )
     })
 }
-

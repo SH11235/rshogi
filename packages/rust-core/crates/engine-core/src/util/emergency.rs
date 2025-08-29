@@ -21,8 +21,7 @@ pub fn emergency_move_usi(position: &Position) -> Option<String> {
     let slice = legal_moves.as_slice();
     let common_opening_moves = [
         // Black (sente) common moves
-        "7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h",
-        // White (gote) common moves
+        "7g7f", "2g2f", "6i7h", "5i6h", "8h7g", "2h7h", // White (gote) common moves
         "3c3d", "7c7d", "6a7b", "5a6b", "2b7b", "8c8d",
     ];
 
@@ -43,4 +42,3 @@ pub fn emergency_move_usi(position: &Position) -> Option<String> {
 
     Some(move_to_usi(&best))
 }
-

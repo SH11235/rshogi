@@ -6,33 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-/// Common search context trait for shared functionality
-pub trait SearchContext {
-    /// Get current node count
-    fn nodes(&self) -> u64;
-
-    /// Increment node count
-    fn increment_nodes(&mut self);
-
-    /// Get search start time
-    fn start_time(&self) -> Instant;
-
-    /// Check if search should stop
-    fn should_stop(&self) -> bool;
-
-    /// Increment node count and check if search should stop
-    /// Returns true if search can continue, false if it should stop
-    #[inline]
-    fn bump_nodes_and_check(&mut self) -> bool {
-        // Check limits BEFORE incrementing to avoid exceeding
-        if self.should_stop() {
-            return false;
-        }
-        self.increment_nodes();
-        true
-    }
-}
-
 /// Shared stop information that can be set once
 pub struct SharedStopInfo {
     inner: OnceLock<StopInfo>,
