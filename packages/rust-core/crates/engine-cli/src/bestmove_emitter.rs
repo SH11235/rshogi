@@ -164,64 +164,9 @@ impl BestmoveEmitter {
                     }
                 }
 
-                // Finalize to prevent further emissions or logs
+                // Finalize emitter to prevent duplicate emissions.
+                // NOTE: Global search finalization is handled by emit_and_finalize() on main thread.
                 self.finalize();
-
-                // Debug-only observability info
-                #[cfg(debug_assertions)]
-                {
-                    let _ = send_info_string(format!(
-                        "Emitter: search_id={} from={}",
-                        self.search_id, meta.from
-                    ));
-                }
-
-                // Send unified tab-separated key=value log (single line for machine readability)
-                // Note: The score field contains spaces (e.g., "cp 150", "mate 7") following USI protocol format.
-                // External parsers should use tab as the delimiter, not spaces.
-                let stop_reason = meta.stop_info.reason.to_string();
-                let ponder_str = ponder.as_deref().unwrap_or("none");
-
-                let seldepth_str =
-                    meta.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
-
-                let info_string = format!(
-                    "kind=bestmove_sent\t\
-                     search_id={}\t\
-                     bestmove_from={}\t\
-                     stop_reason={}\t\
-                     depth={}\t\
-                     seldepth={}\t\
-                     depth_reached={}\t\
-                     score={}\t\
-                     nodes={}\t\
-                     nps={}\t\
-                     elapsed_ms={}\t\
-                     time_soft_ms={}\t\
-                     time_hard_ms={}\t\
-                     hard_timeout={}\t\
-                     bestmove={}\t\
-                     ponder={}",
-                    self.search_id,
-                    meta.from,
-                    stop_reason,
-                    meta.stats.depth,
-                    seldepth_str,
-                    meta.stop_info.depth_reached,
-                    meta.stats.score,
-                    meta.stats.nodes,
-                    meta.stats.nps,
-                    meta.stop_info.elapsed_ms,
-                    meta.stop_info.soft_limit_ms,
-                    meta.stop_info.hard_limit_ms,
-                    meta.stop_info.hard_timeout,
-                    best_move,
-                    ponder_str
-                );
-
-                if let Err(e) = send_info_string(info_string) {
-                    log::warn!("Failed to send tab-separated info after bestmove: {}", e);
-                }
                 Ok(())
             }
             Err(e) => {
@@ -313,24 +258,29 @@ mod tests {
         let r1 = emitter.emit("7g7f".into(), Some("3c3d".into()), meta.clone());
         assert!(r1.is_ok());
         assert!(emitter.is_finalized());
-        // Verify bestmove_sent logged once for search_id=42
+        // In the centralized design, BestmoveEmitter no longer logs bestmove_sent itself.
+        // Verify that emitter-level emit does not produce bestmove_sent.
         let infos = crate::usi::output::test_info_from(start_idx0);
         let sent_count = infos
             .iter()
             .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42\t"))
             .count();
-        assert_eq!(sent_count, 1, "bestmove_sent count mismatch: {:?}", infos);
+        assert_eq!(
+            sent_count, 0,
+            "bestmove_sent should be emitted by outer path, not emitter: {:?}",
+            infos
+        );
         // Second emit should be no-op
         let start_idx1 = crate::usi::output::test_info_len();
         let r2 = emitter.emit("7g7f".into(), None, meta);
         assert!(r2.is_ok());
-        // No additional bestmove_sent logs for search_id=42 (after second emit)
+        // Still no bestmove_sent at emitter level
         let infos = crate::usi::output::test_info_from(start_idx1);
         let sent_count = infos
             .iter()
             .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=42\t"))
             .count();
-        assert_eq!(sent_count, 0, "unexpected extra bestmove_sent: {:?}", infos);
+        assert_eq!(sent_count, 0, "unexpected bestmove_sent at emitter level: {:?}", infos);
     }
 
     #[test]
@@ -343,13 +293,17 @@ mod tests {
         // Emit should be suppressed after terminate
         let r = emitter.emit("7g7f".into(), None, meta);
         assert!(r.is_ok());
-        // No bestmove_sent should be logged for search_id=43
+        // No bestmove_sent should be logged at emitter level for search_id=43
         let infos = crate::usi::output::test_info_from(start_idx);
         let sent_count = infos
             .iter()
             .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=43\t"))
             .count();
-        assert_eq!(sent_count, 0, "bestmove_sent should be suppressed: {:?}", infos);
+        assert_eq!(
+            sent_count, 0,
+            "bestmove_sent should be emitted by outer path, not emitter: {:?}",
+            infos
+        );
     }
 
     #[test]
@@ -365,12 +319,16 @@ mod tests {
                                          // Second emit should be suppressed
         let r2 = emitter.emit("8h7g".into(), None, meta);
         assert!(r2.is_ok());
-        // Exactly one bestmove_sent for search_id=44
+        // Emitter level should not log bestmove_sent
         let infos = crate::usi::output::test_info_from(start_idx);
         let sent_count = infos
             .iter()
             .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=44\t"))
             .count();
-        assert_eq!(sent_count, 1, "expected exactly one bestmove_sent: {:?}", infos);
+        assert_eq!(
+            sent_count, 0,
+            "bestmove_sent should be emitted by outer path, not emitter: {:?}",
+            infos
+        );
     }
 }
