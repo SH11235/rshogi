@@ -21,7 +21,7 @@ use anyhow::Result;
 use bestmove_emitter::BestmoveEmitter;
 use clap::Parser;
 use command_handler::{handle_command, CommandContext};
-use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
+use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
 use engine_core::search::CommittedIteration;
 use helpers::generate_fallback_move;
@@ -39,9 +39,6 @@ use usi::{
     ensure_flush_on_exit, flush_final, send_info_string, send_response, UsiCommand, UsiResponse,
 };
 use worker::{lock_or_recover_adapter, WorkerMessage};
-
-// Constants for timeout and channel management
-const CHANNEL_SIZE: usize = 1024;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -112,7 +109,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
     // Create communication channels
     let (worker_tx, worker_rx): (Sender<WorkerMessage>, Receiver<WorkerMessage>) = unbounded();
-    let (cmd_tx, cmd_rx) = bounded::<UsiCommand>(CHANNEL_SIZE);
+    // Use unbounded command channel to avoid control-plane drops; stdin uses try_send
+    let (cmd_tx, cmd_rx) = unbounded::<UsiCommand>();
 
     // Create engine adapter (thread-safe)
     let engine = Arc::new(Mutex::new(EngineAdapter::new()));
@@ -271,6 +269,51 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
             default(Duration::from_millis(1)) => {
                 // Small idle to prevent busy loop
+                // Optional wall-clock watchdog: force stop before GUI timeout to avoid time losses
+                if std::env::var("WALL_WATCHDOG_MS").is_ok() {
+                    let thr_ms = std::env::var("WALL_WATCHDOG_MS")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if thr_ms > 0 && search_state.is_searching() {
+                        if let Some(t0) = last_go_begin_at {
+                            let elapsed = t0.elapsed().as_millis() as u64;
+                            // Only fire if no bestmove has been sent since go-begin
+                            let best_after_begin = last_bestmove_sent_at.map(|tb| tb >= t0).unwrap_or(false);
+                            if elapsed > thr_ms && !best_after_begin {
+                                let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_fire"), ("elapsed_ms", &elapsed.to_string()), ("threshold_ms", &thr_ms.to_string())]));
+
+                                // Build a context and immediately handle stop
+                                let mut _legacy_session3: Option<()> = None;
+                                let mut ctx = CommandContext {
+                                    engine: &engine,
+                                    stop_flag: &stop_flag,
+                                    worker_tx: &worker_tx,
+                                    worker_rx: &worker_rx,
+                                    worker_handle: &mut worker_handle,
+                                    search_state: &mut search_state,
+                                    search_id_counter: &mut search_id_counter,
+                                    current_search_id: &mut current_search_id,
+                                    current_search_is_ponder: &mut current_search_is_ponder,
+                                    current_session: &mut _legacy_session3,
+                                    current_bestmove_emitter: &mut current_bestmove_emitter,
+                                    current_stop_flag: &mut current_stop_flag,
+                                    allow_null_move,
+                                    position_state: &mut position_state,
+                                    program_start,
+                                    last_partial_result: &mut last_partial_result,
+                                    pre_session_fallback: &mut pre_session_fallback,
+                                    pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                                    current_committed: &mut current_committed,
+                                    last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                                    last_go_begin_at: &mut last_go_begin_at,
+                                };
+                                // Force stop handling (best-effort fallback emission inside)
+                                let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

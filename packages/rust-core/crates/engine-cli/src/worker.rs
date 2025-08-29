@@ -1,3 +1,4 @@
+use crate::emit_utils::log_tsv;
 use crate::engine_adapter::EngineAdapter;
 use crate::state::SearchState;
 use crate::usi::output::{Score, SearchInfo};
@@ -336,6 +337,10 @@ pub fn search_worker(
     let (mut engine_guard, position, limits, ponder_hit_flag) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::debug!("Adapter lock acquired, calling take_engine");
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "worker_take_engine_begin"),
+            ("search_id", &search_id.to_string()),
+        ]));
         let engine_available = adapter.is_engine_available();
         log::info!("Worker: engine available before take: {engine_available}");
         match adapter.take_engine() {
@@ -343,12 +348,28 @@ pub fn search_worker(
                 log::debug!("Engine taken successfully, preparing search");
                 let take_duration = engine_take_start.elapsed();
                 log::info!("Worker: engine taken successfully after {take_duration:?}");
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "worker_take_engine_end"),
+                    ("search_id", &search_id.to_string()),
+                    ("elapsed_ms", &take_duration.as_millis().to_string()),
+                ]));
                 // Create guard immediately so any panic/early return still returns engine
                 let guard =
                     EngineReturnGuard::new(engine, engine_adapter.clone(), tx.clone(), search_id);
+                let prep_begin = Instant::now();
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "prepare_search_begin"),
+                    ("search_id", &search_id.to_string()),
+                ]));
                 match adapter.prepare_search(&params, stop_flag.clone()) {
                     Ok((pos, lim, flag)) => {
                         log::debug!("Search prepared successfully");
+                        let prep_el = prep_begin.elapsed();
+                        let _ = send_info_string(log_tsv(&[
+                            ("kind", "prepare_search_end"),
+                            ("search_id", &search_id.to_string()),
+                            ("elapsed_ms", &prep_el.as_millis().to_string()),
+                        ]));
                         (guard, pos, lim, flag)
                     }
                     Err(e) => {
@@ -452,6 +473,12 @@ pub fn search_worker(
         let search_id_for_watchdog = search_id;
         let root_hash_for_watchdog = position.zobrist_hash();
         std::thread::spawn(move || {
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "watchdog_start"),
+                ("search_id", &search_id_for_watchdog.to_string()),
+                ("soft_ms", &budget_soft_ms.to_string()),
+                ("hard_ms", &budget_hard_ms.to_string()),
+            ]));
             // Compute adaptive safety similar to core
             let safety_ms = if budget_hard_ms >= 500 {
                 let three_percent = budget_hard_ms.saturating_mul(3) / 100;
@@ -467,6 +494,11 @@ pub fn search_worker(
             }
             // If not already stopped, set stop and notify main loop
             if !stop_for_watchdog.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "watchdog_fire"),
+                    ("search_id", &search_id_for_watchdog.to_string()),
+                    ("wait_ms", &wait_ms.to_string()),
+                ]));
                 stop_for_watchdog.store(true, std::sync::atomic::Ordering::Release);
                 let _ = tx_deadline.send(WorkerMessage::SearchFinished {
                     root_hash: root_hash_for_watchdog,
@@ -513,6 +545,10 @@ pub fn search_worker(
     // Execute search without holding the lock
     log::info!("Calling execute_search_static");
     let search_start = Instant::now();
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "execute_search_begin"),
+        ("search_id", &search_id.to_string()),
+    ]));
     let result = EngineAdapter::execute_search_static(
         &mut engine_guard,
         position.clone(),
@@ -522,6 +558,11 @@ pub fn search_worker(
     );
     let search_duration = search_start.elapsed();
     log::info!("execute_search_static returned after {search_duration:?}: {:?}", result.is_ok());
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "execute_search_end"),
+        ("search_id", &search_id.to_string()),
+        ("elapsed_ms", &search_duration.as_millis().to_string()),
+    ]));
 
     // Handle result
     match result {
