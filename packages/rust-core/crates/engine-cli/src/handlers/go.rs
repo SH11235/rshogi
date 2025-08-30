@@ -407,34 +407,8 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
 
     // Track if this is a ponder search
     *ctx.current_search_is_ponder = params.ponder;
-
-    // Precompute a root fallback move (normalized and verified)
-    {
-        let adapter = lock_or_recover_adapter(ctx.engine);
-        let pos_opt = adapter.get_position().cloned();
-        if let Some(pos_clone) = pos_opt {
-            let mut fallback_usi: Option<String> = None;
-            // QuickFallback(浅い探索)は削除。常に軽量の emergency move で即時決定する。
-            if let Ok(m) = adapter.generate_emergency_move() {
-                fallback_usi = Some(m);
-            }
-            if let Some(mstr) = fallback_usi {
-                if let Some(norm) =
-                    engine_core::util::usi_helpers::normalize_usi_move_str_logged(&pos_clone, &mstr)
-                {
-                    *ctx.pre_session_fallback = Some(norm.clone());
-                    *ctx.pre_session_fallback_hash = Some(pos_clone.zobrist_hash());
-                    log_go_received(params.ponder, Some(&norm));
-                } else {
-                    log_go_received(params.ponder, None);
-                }
-            } else {
-                log_go_received(params.ponder, None);
-            }
-        } else {
-            log_go_received(params.ponder, None);
-        }
-    }
+    // 旧pre_session系は段階撤去。ここでは受領ログのみ。
+    log_go_received(params.ponder, None);
 
     // Clone necessary data for worker thread
     let engine_clone = Arc::clone(ctx.engine);
