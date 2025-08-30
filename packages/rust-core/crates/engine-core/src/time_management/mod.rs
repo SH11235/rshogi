@@ -463,9 +463,8 @@ impl TimeManager {
             } else {
                 0
             };
-            let mut target = hard
-                .saturating_sub(self.inner.params.network_delay2_ms)
-                .saturating_sub(safety_ms);
+            // Hard already accounts for GUI/IPC delay; avoid double subtraction here.
+            let mut target = hard.saturating_sub(safety_ms);
             // Prefer rounded stop in byoyomi period
             if self.is_in_byoyomi() {
                 let next_sec = ((elapsed_ms / 1000) + 1) * 1000;

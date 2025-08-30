@@ -1196,8 +1196,15 @@ mod tests {
             .build();
         let pos = engine_core::shogi::Position::startpos();
         let (soft, hard) = derive_budgets_via_core(&pos, &limits).expect("budgets for byoyomi");
-        assert_eq!(soft, 8000 - params.overhead_ms);
-        assert_eq!(hard, 10_000 - (params.overhead_ms + params.byoyomi_hard_limit_reduction_ms));
+        // Soft includes half of network_delay2_ms; hard includes full network_delay2_ms
+        assert_eq!(soft, 8000 - params.overhead_ms - params.network_delay2_ms / 2);
+        assert_eq!(
+            hard,
+            10_000
+                - (params.overhead_ms
+                    + params.byoyomi_hard_limit_reduction_ms
+                    + params.network_delay2_ms)
+        );
     }
 
     #[test]
