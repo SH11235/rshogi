@@ -30,32 +30,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         ctx.pre_session_fallback.is_some(),
     );
 
-    // Central finalize attempt immediately on stop (non-ponder, minimal guard)
-    if !*ctx.current_search_is_ponder {
-        let stop_info = engine_core::search::types::StopInfo {
-            reason: engine_core::search::types::TerminationReason::UserStop,
-            elapsed_ms: 0,
-            nodes: 0,
-            depth_reached: ctx.current_committed.as_ref().map(|c| c.depth).unwrap_or(0),
-            hard_timeout: false,
-            soft_limit_ms: 0,
-            hard_limit_ms: 0,
-        };
-        if ctx.finalize_emit_if_possible("stop", Some(stop_info.clone()))? {
-            return Ok(());
-        }
-        // 旧分岐を段階撤去するため、中央finalizeが不可能な場合は最小限のresignで確実に送出
-        let meta = build_meta(BestmoveSource::ResignOnFinish, 0, None, None, Some(stop_info));
-        let info = crate::usi::output::SearchInfo {
-            multipv: Some(1),
-            pv: vec!["resign".to_string()],
-            ..Default::default()
-        };
-        ctx.inject_final_pv(info, "stop_resign_minimal");
-        ctx.emit_and_finalize("resign".to_string(), None, meta, "StopMinimalResign")?;
-        let _ = send_info_string(log_tsv(&[("kind", "stop_end")]));
-        return Ok(());
-    }
+    // Central finalize is deferred to the end to allow pre_session/emergency precedence.
 
     // Early pre_session attempt (both normal and ponder): prioritize known-safe fallback（段階撤去予定）
     if let Some(saved_move) = ctx.pre_session_fallback.clone() {
@@ -166,6 +141,40 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                     return Ok(());
                 }
             }
+        }
+    }
+
+    // Non-ponder: prefer committed result if available
+    if !*ctx.current_search_is_ponder {
+        if let Some(committed) = ctx.current_committed.clone() {
+            if ctx.emit_best_from_committed(
+                &committed,
+                BestmoveSource::SessionOnStop,
+                None,
+                "StopCommitted",
+            )? {
+                log_on_stop_source("committed");
+                return Ok(());
+            }
+        }
+    }
+
+    // Non-ponder: emergency fallback (fast path) before central finalize
+    if !*ctx.current_search_is_ponder {
+        if let Ok((move_str, _)) =
+            generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true)
+        {
+            // Inject final PV so GUI PV aligns with bestmove
+            let info = crate::usi::output::SearchInfo {
+                multipv: Some(1),
+                pv: vec![move_str.clone()],
+                ..Default::default()
+            };
+            ctx.inject_final_pv(info, "stop_emergency_fast");
+            log_on_stop_source("emergency");
+            let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
+            ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;
+            return Ok(());
         }
     }
 
@@ -379,6 +388,33 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             log_on_stop_source("committed");
             return Ok(());
         }
+    }
+
+    // Fallback: central finalize attempt for non-ponder (minimal guard)
+    if !*ctx.current_search_is_ponder {
+        let stop_info = engine_core::search::types::StopInfo {
+            reason: engine_core::search::types::TerminationReason::UserStop,
+            elapsed_ms: 0,
+            nodes: 0,
+            depth_reached: ctx.current_committed.as_ref().map(|c| c.depth).unwrap_or(0),
+            hard_timeout: false,
+            soft_limit_ms: 0,
+            hard_limit_ms: 0,
+        };
+        if ctx.finalize_emit_if_possible("stop", Some(stop_info.clone()))? {
+            return Ok(());
+        }
+        // As a last resort, ensure we emit a move and finalize
+        let meta = build_meta(BestmoveSource::ResignOnFinish, 0, None, None, Some(stop_info));
+        let info = crate::usi::output::SearchInfo {
+            multipv: Some(1),
+            pv: vec!["resign".to_string()],
+            ..Default::default()
+        };
+        ctx.inject_final_pv(info, "stop_resign_minimal");
+        ctx.emit_and_finalize("resign".to_string(), None, meta, "StopMinimalResign")?;
+        let _ = send_info_string(log_tsv(&[("kind", "stop_end")]));
+        return Ok(());
     }
 
     if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
