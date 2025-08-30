@@ -41,9 +41,26 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             soft_limit_ms: 0,
             hard_limit_ms: 0,
         };
-        if ctx.finalize_emit_if_possible("stop", Some(stop_info))? {
+        if ctx.finalize_emit_if_possible("stop", Some(stop_info.clone()))? {
             return Ok(());
         }
+        // 旧分岐を段階撤去するため、中央finalizeが不可能な場合は最小限のresignで確実に送出
+        let meta = build_meta(
+            BestmoveSource::ResignOnFinish,
+            0,
+            None,
+            None,
+            Some(stop_info),
+        );
+        let info = crate::usi::output::SearchInfo {
+            multipv: Some(1),
+            pv: vec!["resign".to_string()],
+            ..Default::default()
+        };
+        ctx.inject_final_pv(info, "stop_resign_minimal");
+        ctx.emit_and_finalize("resign".to_string(), None, meta, "StopMinimalResign")?;
+        let _ = send_info_string(log_tsv(&[("kind", "stop_end")]));
+        return Ok(());
     }
 
     // Early pre_session attempt (both normal and ponder): prioritize known-safe fallback（段階撤去予定）
