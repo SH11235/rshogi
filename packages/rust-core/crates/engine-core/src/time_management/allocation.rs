@@ -125,13 +125,30 @@ fn calculate_byoyomi_time(
         (soft, hard)
     } else {
         // In byoyomi period
-        // Use configurable ratio of period as soft limit
-        let soft = ((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64;
-        let hard = byoyomi_ms;
+        // Incorporate GUI/IPC delay (network_delay2_ms) into budgeting.
+        // hard = byoyomi - overhead - safety - network_delay2
+        // soft = (byoyomi * ratio) - overhead - (network_delay2 / 2)
+        // Ensure soft <= hard (keep a small margin when needed).
         let overhead = params.overhead_ms;
-        // Apply additional safety margin for byoyomi hard limit
-        let hard_reduction = overhead + params.byoyomi_hard_limit_reduction_ms;
-        (soft.saturating_sub(overhead), hard.saturating_sub(hard_reduction))
+        let nd2 = params.network_delay2_ms;
+
+        let soft_base = ((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64;
+        let mut soft = soft_base.saturating_sub(overhead).saturating_sub(nd2 / 2);
+
+        let hard = byoyomi_ms
+            .saturating_sub(overhead)
+            .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
+            .saturating_sub(nd2);
+
+        // Guard: keep soft strictly below hard where possible
+        if hard != u64::MAX {
+            let hard_floor = hard.saturating_sub(50);
+            if soft > hard_floor {
+                soft = hard_floor;
+            }
+        }
+
+        (soft, hard)
     }
 }
 
@@ -251,11 +268,16 @@ mod tests {
             &params,
         );
 
-        // Should use 80% of period as soft limit
-        assert_eq!(soft, 24000 - params.overhead_ms); // 80% of 30000 - overhead
-                                                      // Hard limit should subtract both overhead and byoyomi_hard_limit_reduction_ms
-        assert_eq!(hard, 30000 - params.overhead_ms - params.byoyomi_hard_limit_reduction_ms);
-        // Full period - overhead - byoyomi_hard_limit_reduction_ms
+        // Should use 80% of period as soft limit minus overhead and half of network_delay2
+        assert_eq!(soft, 24000 - params.overhead_ms - params.network_delay2_ms / 2);
+        // Hard limit should subtract overhead, byoyomi safety, and full network_delay2
+        assert_eq!(
+            hard,
+            30000
+                - params.overhead_ms
+                - params.byoyomi_hard_limit_reduction_ms
+                - params.network_delay2_ms
+        );
     }
 
     #[test]
