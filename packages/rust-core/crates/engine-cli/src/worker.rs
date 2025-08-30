@@ -263,6 +263,13 @@ pub fn search_worker(
     let tx_info = tx.clone();
     let tx_partial = tx.clone();
     let last_partial_depth = Arc::new(Mutex::new(0u8));
+    // Throttling state for info messages
+    let last_info_sent = Arc::new(Mutex::new(Instant::now()));
+    let last_pv_head = Arc::new(Mutex::new(String::new()));
+    let min_info_interval_ms = std::env::var("USI_INFO_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(100);
     let stop_flag_for_info = stop_flag.clone();
     let finalized_for_info = finalized_flag.clone();
     let info_callback = move |info: SearchInfo| {
@@ -279,11 +286,23 @@ pub fn search_worker(
             }
         }
 
-        // Always send the info message
-        let _ = tx_info.send(WorkerMessage::Info {
-            info: info.clone(),
-            search_id,
-        });
+        // Throttle: forward only if head changed or min interval elapsed
+        let head = info.pv.first().cloned().unwrap_or_default();
+        let mut last_head = lock_or_recover_generic(&last_pv_head);
+        let mut last_sent = lock_or_recover_generic(&last_info_sent);
+        let allow = if head != *last_head {
+            *last_head = head;
+            true
+        } else {
+            last_sent.elapsed() >= std::time::Duration::from_millis(min_info_interval_ms)
+        };
+        if allow {
+            *last_sent = Instant::now();
+            let _ = tx_info.send(WorkerMessage::Info {
+                info: info.clone(),
+                search_id,
+            });
+        }
         // Send partial result at certain depth intervals (unchanged)
         if let (Some(depth), Some(score), Some(pv)) =
             (info.depth, info.score.as_ref(), info.pv.first())

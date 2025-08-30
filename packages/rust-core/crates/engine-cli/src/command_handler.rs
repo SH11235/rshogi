@@ -307,6 +307,11 @@ impl<'a> CommandContext<'a> {
                         ponder_str
                     );
                     let _ = send_info_string(info_string);
+                    // Additional confirm log for observability
+                    let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                        ("kind", "bestmove_sent_logged"),
+                        ("search_id", &self.current_search_id.to_string()),
+                    ]));
                     self.finalize_search(finalize_label);
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_end"),
@@ -383,6 +388,11 @@ impl<'a> CommandContext<'a> {
                         ponder_str
                     );
                     let _ = send_info_string(info_string);
+                    // Additional confirm log for observability
+                    let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                        ("kind", "bestmove_sent_logged"),
+                        ("search_id", &self.current_search_id.to_string()),
+                    ]));
                     self.finalize_search(finalize_label);
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_end"),
@@ -450,6 +460,11 @@ impl<'a> CommandContext<'a> {
                 ponder_str
             );
             let _ = send_info_string(info_string);
+            // Additional confirm log for observability
+            let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                ("kind", "bestmove_sent_logged"),
+                ("search_id", &self.current_search_id.to_string()),
+            ]));
             self.finalize_search(finalize_label);
             let _ = send_info_string(crate::emit_utils::log_tsv(&[
                 ("kind", "bestmove_finalize_end"),
