@@ -88,6 +88,10 @@ pub struct EngineAdapter {
     last_search_is_byoyomi: bool,
     /// Stochastic ponder mode (special ponderhit behavior)
     stochastic_ponder: bool,
+    /// Force terminate on hard deadline (emit backstop bestmove)
+    force_terminate_on_hard_deadline: bool,
+    /// Enable mate-early-stop in core (distance-based)
+    mate_early_stop: bool,
     /// Last received GoParams (for stochastic ponder restart)
     last_go_params: Option<GoParams>,
 }
@@ -132,6 +136,8 @@ impl EngineAdapter {
             move_horizon_min_moves: 0,
             last_search_is_byoyomi: false,
             stochastic_ponder: false,
+            force_terminate_on_hard_deadline: true,
+            mate_early_stop: true,
             last_go_params: None,
         };
 
@@ -210,6 +216,17 @@ impl EngineAdapter {
     /// Whether Stochastic_Ponder is enabled
     pub fn is_stochastic_ponder(&self) -> bool {
         self.stochastic_ponder
+    }
+
+    /// Return whether hard-deadline backstop is enabled
+    pub fn force_terminate_on_hard_deadline(&self) -> bool {
+        self.force_terminate_on_hard_deadline
+    }
+
+    /// Set mate early stop globally (propagates to core config)
+    pub fn set_mate_early_stop(&mut self, enabled: bool) {
+        self.mate_early_stop = enabled;
+        engine_core::search::config::set_mate_early_stop_enabled(enabled);
     }
 
     /// Choose final bestmove using core decision path (book→committed→TT→legal/resign)

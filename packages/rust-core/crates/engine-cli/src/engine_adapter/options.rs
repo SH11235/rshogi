@@ -73,6 +73,9 @@ impl EngineAdapter {
             EngineOption::spin(OPT_MAX_TIME_RATIO_PCT, 500, 100, 800),
             EngineOption::spin(OPT_MOVE_HORIZON_TRIGGER_MS, 0, 0, 600000),
             EngineOption::spin(OPT_MOVE_HORIZON_MIN_MOVES, 0, 0, 200),
+            // Debug/safety options
+            EngineOption::check("ForceTerminateOnHardDeadline", true),
+            EngineOption::check("MateEarlyStop", true),
         ];
     }
 
@@ -103,6 +106,21 @@ impl EngineAdapter {
     /// Set engine option
     pub fn set_option(&mut self, name: &str, value: Option<&str>) -> Result<()> {
         match name {
+            "ForceTerminateOnHardDeadline" => {
+                if let Some(val_str) = value {
+                    let on = matches!(val_str, "true" | "1" | "on" | "yes");
+                    // Apply immediately
+                    self.force_terminate_on_hard_deadline = on;
+                    debug!("ForceTerminateOnHardDeadline set to {on}");
+                }
+            }
+            "MateEarlyStop" => {
+                if let Some(val_str) = value {
+                    let on = matches!(val_str, "true" | "1" | "on" | "yes");
+                    self.set_mate_early_stop(on);
+                    debug!("MateEarlyStop set to {on}");
+                }
+            }
             "USI_Hash" => {
                 if let Some(val) = value {
                     let hash_size = Self::parse_u64_in_range("USI_Hash", val, 1, 32768)? as usize;

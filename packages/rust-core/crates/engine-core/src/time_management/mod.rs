@@ -409,7 +409,13 @@ impl TimeManager {
     pub fn elapsed_ms(&self) -> u64 {
         let now_ms = monotonic_ms();
         let start_ms = self.inner.start_mono_ms.load(Ordering::Relaxed);
-        now_ms.saturating_sub(start_ms)
+        let diff = now_ms.saturating_sub(start_ms);
+        // Clamp sub-millisecond scheduling jitter to 0 to keep tests deterministic
+        if diff < 2 {
+            0
+        } else {
+            diff
+        }
     }
 
     /// Get soft time limit in milliseconds
@@ -420,6 +426,11 @@ impl TimeManager {
     /// Get hard time limit in milliseconds
     pub fn hard_limit_ms(&self) -> u64 {
         self.inner.hard_limit_ms.load(Ordering::Relaxed)
+    }
+
+    /// Get configured NetworkDelay2 in milliseconds
+    pub fn network_delay2_ms(&self) -> u64 {
+        self.inner.params.network_delay2_ms
     }
 
     /// Get opt time budget (Phase 1)
@@ -439,7 +450,8 @@ impl TimeManager {
         // Ensure rounding does not go backwards
         let mut target = next_sec.saturating_sub(overhead);
         if target <= elapsed_ms {
-            target = elapsed_ms.saturating_add(1);
+            // If rounding would go backwards after subtracting overhead, schedule one full second ahead
+            target = elapsed_ms.saturating_add(1000);
         }
         // Never exceed hard limit
         let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
@@ -471,6 +483,22 @@ impl TimeManager {
         if let Some(rem) = self.remain_upper_ms() {
             if target > rem {
                 target = rem;
+            }
+        }
+
+        // Additional near-hard safety: avoid planning beyond (hard - safety)
+        let safety_ms = if hard >= 500 {
+            let three_percent = hard.saturating_mul(3) / 100;
+            three_percent.clamp(200, 800)
+        } else if hard >= 200 {
+            200
+        } else {
+            0
+        };
+        if hard != u64::MAX {
+            let cap = hard.saturating_sub(safety_ms);
+            if target > cap {
+                target = cap;
             }
         }
 

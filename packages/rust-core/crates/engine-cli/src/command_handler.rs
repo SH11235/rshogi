@@ -40,6 +40,10 @@ pub struct CommandContext<'a> {
     pub program_start: Instant, // Program start time for elapsed calculations
     /// Last received partial result (move, depth, score) for current search
     pub last_partial_result: &'a mut Option<(String, u8, i32)>,
+    /// Root legal move set snapshot captured from latest committed iteration
+    pub root_legal_moves: &'a mut Option<Vec<String>>,
+    /// Guard to ensure HardDeadlineFire backstop emits exactly-once per search
+    pub hard_deadline_taken: &'a mut bool,
     /// Precomputed root fallback move captured at go-time for stop-time emergencies
     pub pre_session_fallback: &'a mut Option<String>,
     /// Hash of the position when pre_session_fallback was computed
@@ -781,6 +785,8 @@ mod tests {
         let start_idx = test_info_len();
 
         let mut final_pv_injected_flag = false;
+        let mut hard_deadline_taken = false;
+        let mut root_legal_moves: Option<Vec<String>> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -799,6 +805,8 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,
@@ -863,6 +871,8 @@ mod tests {
         let start_idx = test_info_len();
 
         let mut final_pv_injected_flag = false;
+        let mut hard_deadline_taken = false;
+        let mut root_legal_moves: Option<Vec<String>> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -881,6 +891,8 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut current_committed,
@@ -953,6 +965,8 @@ mod tests {
         let start_idx = test_info_len();
 
         let mut final_pv_injected_flag = false;
+        let mut hard_deadline_taken = false;
+        let mut root_legal_moves: Option<Vec<String>> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -971,6 +985,8 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut current_committed,
@@ -1026,6 +1042,8 @@ mod tests {
         let start_idx = test_info_len();
 
         let mut final_pv_injected_flag = false;
+        let mut hard_deadline_taken = false;
+        let mut root_legal_moves: Option<Vec<String>> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1044,6 +1062,8 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,
@@ -1098,6 +1118,8 @@ mod tests {
         let start_idx = test_info_len();
 
         let mut final_pv_injected_flag = false;
+        let mut hard_deadline_taken = false;
+        let mut root_legal_moves: Option<Vec<String>> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1116,6 +1138,8 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,
@@ -1171,6 +1195,8 @@ mod tests {
 
         // Local flag for PV injection guard
         let mut final_pv_injected_flag = false;
+        let mut hard_deadline_taken = false;
+        let mut root_legal_moves: Option<Vec<String>> = None;
 
         // Invoke GameOver
         let mut ctx = CommandContext {
@@ -1191,6 +1217,8 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
             pre_session_fallback_hash: &mut pre_session_fallback_hash,
             current_committed: &mut None,

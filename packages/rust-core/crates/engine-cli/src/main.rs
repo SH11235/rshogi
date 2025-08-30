@@ -23,7 +23,9 @@ use clap::Parser;
 use command_handler::{handle_command, CommandContext};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use engine_adapter::EngineAdapter;
+use engine_core::movegen::MoveGenerator;
 use engine_core::search::CommittedIteration;
+use engine_core::usi::move_to_usi;
 use helpers::generate_fallback_move;
 // use search_session::SearchSession;
 use crate::emit_utils::log_tsv;
@@ -145,6 +147,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut last_bestmove_sent_at: Option<Instant> = None;
     let mut last_go_begin_at: Option<Instant> = None;
 
+    // Additional per-search guards/state (reset by go handler)
+    let mut hard_deadline_taken: bool = false; // exactly-once backstop for HardDeadlineFire
+    let mut root_legal_moves: Option<Vec<String>> = None; // snapshot of root legal moves
+
     // Main event loop - process USI commands and worker messages concurrently
     // Strategy: always drain cmd/ctrl first (non-blocking), then handle a bounded number
     // of worker messages to avoid starvation, then fall back to a short select tick.
@@ -226,6 +232,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        root_legal_moves: &mut root_legal_moves,
+                        hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
                         pre_session_fallback_hash: &mut pre_session_fallback_hash,
                         current_committed: &mut current_committed,
@@ -284,6 +292,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        root_legal_moves: &mut root_legal_moves,
+                        hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
                         pre_session_fallback_hash: &mut pre_session_fallback_hash,
                         current_committed: &mut current_committed,
@@ -331,6 +341,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        root_legal_moves: &mut root_legal_moves,
+                        hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
                         pre_session_fallback_hash: &mut pre_session_fallback_hash,
                         current_committed: &mut current_committed,
@@ -383,6 +395,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        root_legal_moves: &mut root_legal_moves,
+                        hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
                         pre_session_fallback_hash: &mut pre_session_fallback_hash,
                         current_committed: &mut current_committed,
@@ -460,6 +474,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             position_state: &mut position_state,
                             program_start,
                             last_partial_result: &mut last_partial_result,
+                            root_legal_moves: &mut root_legal_moves,
+                            hard_deadline_taken: &mut hard_deadline_taken,
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,
                             current_committed: &mut current_committed,
@@ -507,6 +523,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             position_state: &mut position_state,
                             program_start,
                             last_partial_result: &mut last_partial_result,
+                            root_legal_moves: &mut root_legal_moves,
+                            hard_deadline_taken: &mut hard_deadline_taken,
                             pre_session_fallback: &mut pre_session_fallback,
                             pre_session_fallback_hash: &mut pre_session_fallback_hash,
                             current_committed: &mut current_committed,
@@ -629,7 +647,44 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             if search_id != *ctx.current_search_id {
                 return Ok(());
             }
-            let stop_info = engine_core::search::types::StopInfo {
+
+            // Check option: ForceTerminateOnHardDeadline
+            if let Ok(adapter) = ctx.engine.try_lock() {
+                if !adapter.force_terminate_on_hard_deadline() {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "hard_deadline_skip"),
+                        ("reason", "option_disabled"),
+                    ]));
+                    return Ok(());
+                }
+            }
+
+            // Exactly-once backstop for this search
+            if *ctx.hard_deadline_taken {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "hard_deadline_skip"),
+                    ("reason", "already_taken"),
+                ]));
+                return Ok(());
+            }
+            *ctx.hard_deadline_taken = true;
+
+            // If emitter missing or already finalized, nothing to do
+            if ctx
+                .current_bestmove_emitter
+                .as_ref()
+                .map(|e| e.is_finalized() || e.is_terminated())
+                .unwrap_or(true)
+            {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "hard_deadline_skip"),
+                    ("reason", "no_emitter_or_finalized"),
+                ]));
+                return Ok(());
+            }
+
+            // Build base StopInfo (hard timeout)
+            let base_stop = engine_core::search::types::StopInfo {
                 reason: engine_core::search::types::TerminationReason::TimeLimit,
                 elapsed_ms: 0,
                 nodes: 0,
@@ -638,8 +693,141 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 soft_limit_ms: 0,
                 hard_limit_ms: hard_ms,
             };
-            let _ = ctx.finalize_emit_if_possible("hard", Some(stop_info));
-            return Ok(());
+
+            // 1) Try committed iteration path first
+            if let Some(committed) = ctx.current_committed.clone() {
+                if ctx.emit_best_from_committed(
+                    &committed,
+                    BestmoveSource::EmergencyFallbackTimeout,
+                    Some(base_stop.clone()),
+                    "HardCommitted",
+                )? {
+                    // Ensure prompt flush
+                    crate::usi::output::flush_now();
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "hard_deadline_path"),
+                        ("src", "committed"),
+                    ]));
+                    return Ok(());
+                }
+            }
+
+            // 2) Use cached partial result if available
+            if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
+                if let Ok((move_str, _)) =
+                    generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
+                {
+                    // Inject final PV to align with bestmove
+                    let info = crate::usi::output::SearchInfo {
+                        depth: Some(d as u32),
+                        score: Some(crate::utils::to_usi_score(s)),
+                        pv: vec![move_str.clone()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "hard_partial");
+                    let meta = build_meta(
+                        BestmoveSource::EmergencyFallbackTimeout,
+                        d,
+                        None,
+                        Some(format!("cp {s}")),
+                        Some(base_stop.clone()),
+                    );
+                    ctx.emit_and_finalize(move_str, None, meta, "HardPartialFallback")?;
+                    crate::usi::output::flush_now();
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "hard_deadline_path"),
+                        ("src", "partial"),
+                    ]));
+                    return Ok(());
+                }
+            }
+
+            // 3) Root legal move set snapshot
+            if let Some(legal) = ctx.root_legal_moves.as_ref() {
+                // Prefer PV head from committed when legal
+                let (chosen, depth_for_meta) =
+                    if let Some(committed) = ctx.current_committed.as_ref() {
+                        if let Some(first) = committed.pv.first() {
+                            let pv_best = move_to_usi(first);
+                            if legal.iter().any(|s| s == &pv_best) {
+                                (pv_best, committed.depth)
+                            } else {
+                                (legal[0].clone(), committed.depth)
+                            }
+                        } else {
+                            (legal[0].clone(), committed.depth)
+                        }
+                    } else {
+                        (legal[0].clone(), 0)
+                    };
+
+                // Inject final PV then emit
+                let info = crate::usi::output::SearchInfo {
+                    multipv: Some(1),
+                    pv: vec![chosen.clone()],
+                    ..Default::default()
+                };
+                ctx.inject_final_pv(info, "hard_root_legal");
+                let meta = build_meta(
+                    BestmoveSource::EmergencyFallbackTimeout,
+                    depth_for_meta,
+                    None,
+                    None,
+                    Some(base_stop.clone()),
+                );
+                ctx.emit_and_finalize(chosen.clone(), None, meta, "HardRootLegalFallback")?;
+                crate::usi::output::flush_now();
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "hard_deadline_path"),
+                    ("src", "root_legal"),
+                ]));
+                return Ok(());
+            }
+
+            // 4) Emergency generator
+            match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, true) {
+                Ok((move_str, _)) => {
+                    // Inject PV and emit
+                    let info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        pv: vec![move_str.clone()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "hard_emergency");
+                    let meta = build_meta(
+                        BestmoveSource::EmergencyFallbackTimeout,
+                        0,
+                        None,
+                        None,
+                        Some(base_stop.clone()),
+                    );
+                    ctx.emit_and_finalize(move_str, None, meta, "HardEmergencyFallback")?;
+                    crate::usi::output::flush_now();
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "hard_deadline_path"),
+                        ("src", "emergency"),
+                    ]));
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Last resort: resign
+                    let info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        pv: vec!["resign".to_string()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "hard_resign");
+                    let meta =
+                        build_meta(BestmoveSource::Resign, 0, None, None, Some(base_stop.clone()));
+                    ctx.emit_and_finalize("resign".to_string(), None, meta, "HardResign")?;
+                    crate::usi::output::flush_now();
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "hard_deadline_path"),
+                        ("src", "resign"),
+                    ]));
+                    return Ok(());
+                }
+            }
         }
         WorkerMessage::Info { info, search_id } => {
             // Forward info messages only from current search
@@ -730,7 +918,29 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     search_id,
                     committed.depth
                 );
+                // Save committed and capture root legal move set (for hard-deadline backstop)
                 *ctx.current_committed = Some(committed);
+                // Best-effort snapshot (non-blocking try_lock to avoid stalls)
+                if let Ok(adapter) = ctx.engine.try_lock() {
+                    if let Some(pos) = adapter.get_position() {
+                        let mg = MoveGenerator::new();
+                        if let Ok(list) = mg.generate_all(pos) {
+                            let v: Vec<String> = list.iter().map(move_to_usi).collect();
+                            *ctx.root_legal_moves = Some(v);
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "committed_root_legal_snapshot"),
+                                (
+                                    "count",
+                                    &ctx.root_legal_moves
+                                        .as_ref()
+                                        .map(|v| v.len())
+                                        .unwrap_or(0)
+                                        .to_string(),
+                                ),
+                            ]));
+                        }
+                    }
+                }
             } else {
                 log::trace!(
                     "Ignoring IterationCommitted from old search: {search_id} (current: {})",
