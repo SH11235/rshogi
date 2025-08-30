@@ -132,21 +132,14 @@ fn calculate_byoyomi_time(
         let overhead = params.overhead_ms;
         let nd2 = params.network_delay2_ms;
 
-        let soft_base = ((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64;
-        let mut soft = soft_base.saturating_sub(overhead).saturating_sub(nd2 / 2);
+        let soft = (((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64)
+            .saturating_sub(overhead)
+            .saturating_sub(nd2 / 2);
 
         let hard = byoyomi_ms
             .saturating_sub(overhead)
             .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
             .saturating_sub(nd2);
-
-        // Guard: keep soft strictly below hard where possible
-        if hard != u64::MAX {
-            let hard_floor = hard.saturating_sub(50);
-            if soft > hard_floor {
-                soft = hard_floor;
-            }
-        }
 
         (soft, hard)
     }

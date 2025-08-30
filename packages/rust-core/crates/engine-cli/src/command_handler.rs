@@ -14,6 +14,7 @@ use std::time::Instant;
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta};
 use crate::emit_utils::{build_meta, log_tsv};
 use engine_core::search::{types::StopInfo, CommittedIteration};
+use engine_core::usi::move_to_usi;
 
 /// Context for handling USI commands
 pub struct CommandContext<'a> {
@@ -49,9 +50,29 @@ pub struct CommandContext<'a> {
     pub last_go_begin_at: &'a mut Option<std::time::Instant>,
     /// Threshold armed by worker watchdog (None when not armed)
     pub current_worker_watchdog_threshold: &'a mut Option<u64>,
+    /// Guard to ensure final PV is injected exactly once per search
+    pub final_pv_injected: &'a mut bool,
 }
 
 impl<'a> CommandContext<'a> {
+    /// Inject a final PV info line once per search, guarded by a flag
+    pub fn inject_final_pv(&mut self, info: crate::usi::output::SearchInfo, source: &str) {
+        // Safety: if emitter is finalized or terminated, suppress any late injections
+        if let Some(em) = self.current_bestmove_emitter.as_ref() {
+            if em.is_finalized() || em.is_terminated() {
+                return;
+            }
+        }
+
+        if !*self.final_pv_injected {
+            let _ = crate::usi::send_response(crate::usi::UsiResponse::Info(info));
+            let _ = crate::usi::send_info_string(crate::emit_utils::log_tsv(&[
+                ("kind", "final_pv_injected"),
+                ("source", source),
+            ]));
+            *self.final_pv_injected = true;
+        }
+    }
     /// Try to emit bestmove from a committed iteration
     pub(crate) fn emit_best_from_committed(
         &mut self,
@@ -83,6 +104,39 @@ impl<'a> CommandContext<'a> {
                     ("ponder_present", if ponder.is_some() { "true" } else { "false" }),
                 ]);
                 let _ = send_info_string(metrics);
+
+                // Inject a final PV built from the committed iteration just before bestmove
+                // Only emit when the committed PV's first move matches the bestmove to avoid
+                // showing a PV that doesn't correspond to the emitted move (e.g., emergency fallback).
+                if let Some(first_mv) = committed.pv.first() {
+                    let pv_best = move_to_usi(first_mv);
+                    if pv_best == best_move {
+                        let elapsed_ms = committed.elapsed.as_millis() as u64;
+                        let time_opt = if elapsed_ms > 0 {
+                            Some(elapsed_ms)
+                        } else {
+                            None
+                        };
+                        let nps_opt = if elapsed_ms > 0 && committed.nodes > 0 {
+                            Some(committed.nodes.saturating_mul(1000) / elapsed_ms)
+                        } else {
+                            None
+                        };
+                        let info = crate::usi::output::SearchInfo {
+                            multipv: Some(1),
+                            depth: Some(committed.depth as u32),
+                            seldepth: committed.seldepth.map(|v| v as u32),
+                            time: time_opt,
+                            nodes: Some(committed.nodes),
+                            pv: committed.pv.iter().map(move_to_usi).collect::<Vec<_>>(),
+                            score: Some(score_enum),
+                            score_bound: Some(committed.node_type.into()),
+                            nps: nps_opt,
+                            ..Default::default()
+                        };
+                        self.inject_final_pv(info, "committed");
+                    }
+                }
 
                 let meta =
                     build_meta(from, committed.depth, committed.seldepth, score_str, stop_info);
@@ -202,6 +256,13 @@ impl<'a> CommandContext<'a> {
                         Some(&meta),
                         "emitter_failed",
                     );
+                    // Inject final PV before direct send (emitter failed)
+                    let pv_info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        pv: vec![best_move.clone()],
+                        ..Default::default()
+                    };
+                    self.inject_final_pv(pv_info, "emitter_failed");
                     // Try direct send as fallback
                     if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
                         log::error!("Failed to send bestmove even with direct fallback: {e}");
@@ -266,6 +327,13 @@ impl<'a> CommandContext<'a> {
             log::warn!("BestmoveEmitter not available; sending bestmove directly");
             // Send TSV log for direct send
             self.send_fallback_tsv_log(&best_move, ponder.as_deref(), Some(&meta), "no_emitter");
+            // Inject final PV before direct send (no emitter)
+            let pv_info = crate::usi::output::SearchInfo {
+                multipv: Some(1),
+                pv: vec![best_move.clone()],
+                ..Default::default()
+            };
+            self.inject_final_pv(pv_info, "direct_emit");
             if let Err(e) = send_response(UsiResponse::BestMove { best_move, ponder }) {
                 log::error!("Failed to send bestmove directly: {e}");
                 // Continue without propagating error - USI requires best effort
@@ -582,6 +650,9 @@ mod tests {
         // Clear test hooks
         let start_idx = test_info_len();
 
+        let mut final_pv_injected_flag = false;
+        let mut final_pv_injected_flag = false;
+        let mut final_pv_injected_flag = false;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -606,6 +677,7 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+            final_pv_injected: &mut final_pv_injected_flag,
         };
 
         // Execute stop
@@ -664,6 +736,7 @@ mod tests {
         // Clear test hooks
         let start_idx = test_info_len();
 
+        let mut final_pv_injected_flag = false;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -688,6 +761,7 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+            final_pv_injected: &mut final_pv_injected_flag,
         };
 
         // Execute stop
@@ -754,6 +828,7 @@ mod tests {
 
         let start_idx = test_info_len();
 
+        let mut final_pv_injected_flag = false;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -778,6 +853,7 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+            final_pv_injected: &mut final_pv_injected_flag,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -827,6 +903,7 @@ mod tests {
 
         let start_idx = test_info_len();
 
+        let mut final_pv_injected_flag = false;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -851,6 +928,7 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+            final_pv_injected: &mut final_pv_injected_flag,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -899,6 +977,7 @@ mod tests {
 
         let start_idx = test_info_len();
 
+        let mut final_pv_injected_flag = false;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -923,6 +1002,7 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+            final_pv_injected: &mut final_pv_injected_flag,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -996,6 +1076,7 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+            final_pv_injected: &mut final_pv_injected_flag,
         };
 
         handle_command(

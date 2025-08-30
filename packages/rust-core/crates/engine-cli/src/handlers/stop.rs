@@ -77,6 +77,13 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                 ("kind", "stop_pre_session_ok"),
                                 ("us", &t0.elapsed().as_micros().to_string()),
                             ]));
+                            // Inject final PV for pre_session to align with bestmove
+                            let info = crate::usi::output::SearchInfo {
+                                multipv: Some(1),
+                                pv: vec![norm_a.clone()],
+                                ..Default::default()
+                            };
+                            ctx.inject_final_pv(info, "stop_pre_session_early");
                             let meta =
                                 build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
                             log_on_stop_source("pre_session");
@@ -119,6 +126,13 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                         ("kind", "stop_pre_session_skip"),
                         ("reason", "no_legal_moves"),
                     ]));
+                    // Inject final PV for resign on stop
+                    let info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        pv: vec!["resign".to_string()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "stop_no_legal_moves");
                     log_on_stop_source("emergency_resign");
                     let meta = build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
                     ctx.emit_and_finalize("resign".to_string(), None, meta, "StopNoLegalMoves")?;
@@ -150,6 +164,14 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             if let Ok((move_str, _)) =
                 generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
             {
+                // Inject a final info pv from partial result so PV aligns with bestmove
+                let info = crate::usi::output::SearchInfo {
+                    depth: Some(d as u32),
+                    score: Some(crate::utils::to_usi_score(s)),
+                    pv: vec![move_str.clone()],
+                    ..Default::default()
+                };
+                ctx.inject_final_pv(info, "stop_partial_ponder");
                 let meta = build_meta(
                     BestmoveSource::SessionOnStop,
                     d,
@@ -204,12 +226,19 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                                     ("kind", "stop_pre_session_ok"),
                                                     ("us", &us.to_string()),
                                                 ]));
-                                                let meta = build_meta(
-                                                    BestmoveSource::SessionOnStop,
-                                                    0,
-                                                    None,
-                                                    None,
-                                                    None,
+                                            // Inject final PV for pre_session (ponder)
+                                            let info = crate::usi::output::SearchInfo {
+                                                multipv: Some(1),
+                                                pv: vec![norm_a.clone()],
+                                                ..Default::default()
+                                            };
+                                            ctx.inject_final_pv(info, "stop_pre_session_ponder");
+                                            let meta = build_meta(
+                                                BestmoveSource::SessionOnStop,
+                                                0,
+                                                None,
+                                                None,
+                                                None,
                                                 );
                                                 log_on_stop_source("pre_session");
                                                 ctx.emit_and_finalize(
@@ -299,6 +328,13 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                 Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
             }
         };
+        // Inject final PV for emergency (ponder)
+        let info = crate::usi::output::SearchInfo {
+            multipv: Some(1),
+            pv: vec![move_str.clone()],
+            ..Default::default()
+        };
+        ctx.inject_final_pv(info, "stop_emergency_ponder");
         let meta = build_meta(from, 0, None, None, None);
         log_on_stop_source("emergency");
         ctx.emit_and_finalize(move_str, None, meta, "PonderEmergencyOnStop")?;
@@ -322,6 +358,14 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         if let Ok((move_str, _)) =
             generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
         {
+            // Inject a final info pv from partial result so PV aligns with bestmove
+            let info = crate::usi::output::SearchInfo {
+                depth: Some(d as u32),
+                score: Some(crate::utils::to_usi_score(s)),
+                pv: vec![move_str.clone()],
+                ..Default::default()
+            };
+            ctx.inject_final_pv(info, "stop_partial");
             let meta = build_meta(
                 BestmoveSource::PartialResultTimeout,
                 d,
@@ -387,6 +431,13 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
                                     ("kind", "stop_pre_session_ok"),
                                     ("note", "state_absent"),
                                 ]));
+                                // Inject final PV for pre_session immediate path
+                                let info = crate::usi::output::SearchInfo {
+                                    multipv: Some(1),
+                                    pv: vec![norm_a.clone()],
+                                    ..Default::default()
+                                };
+                                ctx.inject_final_pv(info, "stop_pre_session_immediate");
                                 let meta =
                                     build_meta(BestmoveSource::SessionOnStop, 0, None, None, None);
                                 log_on_stop_source("pre_session");
@@ -441,6 +492,13 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             Err(_) => ("resign".to_string(), BestmoveSource::SessionOnStop),
         }
     };
+    // Inject final PV for emergency immediate path
+    let info = crate::usi::output::SearchInfo {
+        multipv: Some(1),
+        pv: vec![move_str.clone()],
+        ..Default::default()
+    };
+    ctx.inject_final_pv(info, "stop_emergency_immediate");
     log_on_stop_source("emergency");
     let meta = build_meta(source, 0, None, None, None);
     ctx.emit_and_finalize(move_str, None, meta, "ImmediateEmergencyOnStop")?;

@@ -98,6 +98,9 @@ struct TimeManagerInner {
 
     // Ponder-specific state
     is_ponder: AtomicBool, // Whether currently pondering
+
+    // Budget status
+    budget_clamped: AtomicBool,
 }
 
 lazy_static! {
@@ -133,7 +136,7 @@ impl TimeManager {
         let params = limits.time_parameters.unwrap_or_default();
 
         // Calculate initial time allocation
-        let (soft_ms, hard_ms) = calculate_time_allocation(
+        let (raw_soft, raw_hard) = calculate_time_allocation(
             &limits.time_control,
             side,
             ply,
@@ -141,6 +144,39 @@ impl TimeManager {
             game_phase,
             &params,
         );
+
+        // Apply conservative lower bounds and ordering clamps (small, safe)
+        let mut soft_ms = raw_soft;
+        let mut hard_ms = raw_hard;
+        let mut budget_clamped = false;
+
+        // Only clamp when budgets are finite
+        if soft_ms != u64::MAX && hard_ms != u64::MAX {
+            let lower = match &limits.time_control {
+                TimeControl::Byoyomi { .. } => params.critical_byoyomi_ms.max(50),
+                TimeControl::Fischer { .. } => params.critical_fischer_ms.max(50),
+                TimeControl::FixedTime { .. } => 50,
+                _ => 0,
+            };
+
+            if lower > 0 {
+                if hard_ms < lower {
+                    hard_ms = lower;
+                    budget_clamped = true;
+                }
+                if soft_ms < lower {
+                    soft_ms = lower;
+                    budget_clamped = true;
+                }
+                if soft_ms >= hard_ms {
+                    let new_soft = hard_ms.saturating_sub(1);
+                    if new_soft != soft_ms {
+                        soft_ms = new_soft;
+                        budget_clamped = true;
+                    }
+                }
+            }
+        }
 
         // Initialize byoyomi state if needed
         let byoyomi_state = byoyomi::ByoyomiManager::init_state(&limits.time_control);
@@ -167,6 +203,7 @@ impl TimeManager {
             pv_threshold_ms: AtomicU64::new(params.pv_base_threshold_ms),
             byoyomi_state: Mutex::new(byoyomi_state),
             is_ponder: AtomicBool::new(matches!(&limits.time_control, TimeControl::Ponder(_))),
+            budget_clamped: AtomicBool::new(budget_clamped),
         });
 
         let tm = Self { inner };
@@ -199,6 +236,12 @@ impl TimeManager {
         }
 
         tm
+    }
+
+    /// Whether initial budgets were clamped to maintain sane bounds/order
+    #[inline]
+    pub fn budgets_were_clamped(&self) -> bool {
+        self.inner.budget_clamped.load(Ordering::Relaxed)
     }
 
     /// Create a new time manager for pondering
