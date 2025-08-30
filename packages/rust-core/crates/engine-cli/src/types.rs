@@ -62,6 +62,8 @@ pub enum BestmoveSource {
     EmergencyFallbackTimeout,
     /// Emergency fallback on finish
     EmergencyFallbackOnFinish,
+    /// Core finalize (book/committed/TT/legal) on finish
+    CoreFinalize,
 }
 
 impl fmt::Display for BestmoveSource {
@@ -80,6 +82,7 @@ impl fmt::Display for BestmoveSource {
             Self::PartialResultTimeout => "partial_result_timeout",
             Self::EmergencyFallbackTimeout => "emergency_fallback_timeout",
             Self::EmergencyFallbackOnFinish => "emergency_fallback_on_finish",
+            Self::CoreFinalize => "core_finalize",
         };
         write!(f, "{s}")
     }

@@ -1173,86 +1173,33 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     ]));
                     return Ok(());
                 }
-                // Send bestmove immediately if not ponder
+                // Send bestmove immediately if not ponder (Core finalize)
                 if !*ctx.current_search_is_ponder {
                     if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                        // Prefer committed iteration
-                        if let Some(committed) = ctx.current_committed.clone() {
-                            log::debug!("Using committed iteration for bestmove generation");
-                            if ctx.emit_best_from_committed(
-                                &committed,
-                                BestmoveSource::SessionInSearchFinished,
-                                stop_info.clone(),
-                                "SearchFinishedCommitted",
-                            )? {
-                                return Ok(());
-                            }
-                        }
-
-                        // Try committed-based bestmove
-                        if let Some(committed) = ctx.current_committed.clone() {
-                            if ctx.emit_best_from_committed(
-                                &committed,
-                                BestmoveSource::SessionInSearchFinished,
-                                stop_info.clone(),
-                                "SearchFinishedCommitted",
-                            )? {
-                                return Ok(());
-                            }
-                        }
-
-                        // Fallback if session validation failed
-                        match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, false) {
-                            Ok((fallback_move, _used_partial)) => {
-                                // Inject final PV for emergency on SearchFinished
-                                let info = crate::usi::output::SearchInfo {
-                                    multipv: Some(1),
-                                    pv: vec![fallback_move.clone()],
-                                    ..Default::default()
-                                };
-                                ctx.inject_final_pv(info, "finished_emergency");
-                                let meta = build_meta(
-                                    BestmoveSource::EmergencyFallback,
-                                    0,         // depth
-                                    None,      // seldepth
-                                    None,      // score
-                                    stop_info, // Pass the provided stop_info
-                                );
-
-                                ctx.emit_and_finalize(
-                                    fallback_move,
-                                    None,
-                                    meta,
-                                    "SearchFinished with fallback",
-                                )?;
-                            }
-                            Err(e) => {
-                                log::error!("Fallback move generation failed: {e}");
-                                let meta = build_meta(
-                                    BestmoveSource::Resign,
-                                    0,         // depth
-                                    None,      // seldepth
-                                    None,      // score
-                                    stop_info, // Pass the provided stop_info
-                                );
-                                // Inject final PV for resign on SearchFinished
-                                let info = crate::usi::output::SearchInfo {
-                                    multipv: Some(1),
-                                    pv: vec!["resign".to_string()],
-                                    ..Default::default()
-                                };
-                                ctx.inject_final_pv(info, "finished_resign");
-                                ctx.emit_and_finalize(
-                                    "resign".to_string(),
-                                    None,
-                                    meta,
-                                    "SearchFinished with fallback",
-                                )?;
-                            }
+                        let adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
+                        if let Some((bm, pv, src)) =
+                            adapter.choose_final_bestmove_core(ctx.current_committed.as_ref())
+                        {
+                            let info = crate::usi::output::SearchInfo {
+                                multipv: Some(1),
+                                pv,
+                                ..Default::default()
+                            };
+                            ctx.inject_final_pv(info, "searchfinished_core_finalize");
+                            let meta = build_meta(
+                                BestmoveSource::CoreFinalize,
+                                0,
+                                None,
+                                Some(format!("string core_src={src}")),
+                                stop_info,
+                            );
+                            ctx.emit_and_finalize(bm, None, meta, "SearchFinishedCoreFinalize")?;
+                            return Ok(());
+                        } else {
+                            log::warn!("Core finalize selection unavailable at SearchFinished; emitter present but engine/position missing");
+                            return Ok(());
                         }
                     } else {
-                        // No emitter available => 既に他経路（stop/watchdog等）でemit済みの可能性が高い。
-                        // 二重送出を避けるため、直接送出は行わずに無視する。
                         log::debug!("SearchFinished: emitter not available; ignoring direct send (likely already emitted)");
                         return Ok(());
                     }
@@ -1322,6 +1269,30 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 log::warn!(
                     "Worker Finished without SearchFinished (from_guard: {from_guard}), emitting fallback"
                 );
+
+                // Try core finalize first (book→committed→TT→legal/resign)
+                if !*ctx.current_search_is_ponder {
+                    let adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
+                    if let Some((bm, pv, src)) =
+                        adapter.choose_final_bestmove_core(ctx.current_committed.as_ref())
+                    {
+                        let info = crate::usi::output::SearchInfo {
+                            multipv: Some(1),
+                            pv,
+                            ..Default::default()
+                        };
+                        ctx.inject_final_pv(info, "core_finalize_on_finished");
+                        let meta = build_meta(
+                            BestmoveSource::CoreFinalize,
+                            0,
+                            None,
+                            Some(format!("string core_src={src}")),
+                            None,
+                        );
+                        ctx.emit_and_finalize(bm, None, meta, "CoreFinalizeOnFinished")?;
+                        return Ok(());
+                    }
+                }
 
                 // Try committed-based bestmove first
                 if let Some(committed) = ctx.current_committed.clone() {

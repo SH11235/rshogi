@@ -26,6 +26,8 @@ pub mod types;
 pub mod utils;
 
 // Re-export commonly used types
+use engine_core::search::CommittedIteration;
+use engine_core::usi::move_to_usi;
 pub use error::EngineError;
 pub use types::{ExtendedSearchResult, PonderState};
 
@@ -164,5 +166,29 @@ impl EngineAdapter {
     /// Get configured number of threads (for diagnostics/logging)
     pub fn threads(&self) -> usize {
         self.threads
+    }
+
+    /// Choose final bestmove using core decision path (book→committed→TT→legal/resign)
+    /// Returns (bestmove_usi, pv_usi_vec, source_label)
+    pub fn choose_final_bestmove_core(
+        &self,
+        committed: Option<&CommittedIteration>,
+    ) -> Option<(String, Vec<String>, String)> {
+        let engine = self.engine.as_ref()?;
+        let pos = self.position.as_ref()?;
+        let decision = engine.choose_final_bestmove(pos, committed);
+        let pv_usi: Vec<String> = decision.pv.iter().map(move_to_usi).collect();
+        let source = match decision.source {
+            engine_core::engine::controller::FinalBestSource::Book => "book",
+            engine_core::engine::controller::FinalBestSource::Committed => "committed",
+            engine_core::engine::controller::FinalBestSource::TT => "tt_root",
+            engine_core::engine::controller::FinalBestSource::LegalFallback => "legal_fallback",
+            engine_core::engine::controller::FinalBestSource::Resign => "resign",
+        };
+        let bm = decision
+            .best_move
+            .map(|m| move_to_usi(&m))
+            .unwrap_or_else(|| "resign".to_string());
+        Some((bm, pv_usi, source.to_string()))
     }
 }
