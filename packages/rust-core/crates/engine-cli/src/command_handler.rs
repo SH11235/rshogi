@@ -81,6 +81,7 @@ impl<'a> CommandContext<'a> {
         path: &str,
         stop_info: Option<StopInfo>,
     ) -> Result<bool> {
+        let finalize_begin = Instant::now();
         // Flags snapshot
         let (emitter_present, finalized, terminated) =
             if let Some(ref em) = self.current_bestmove_emitter {
@@ -134,6 +135,11 @@ impl<'a> CommandContext<'a> {
                 ("kind", "finalize_source"),
                 ("search_id", &self.current_search_id.to_string()),
                 ("source", &src),
+            ]));
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "finalize_elapsed_ms"),
+                ("search_id", &self.current_search_id.to_string()),
+                ("ms", &finalize_begin.elapsed().as_millis().to_string()),
             ]));
             return Ok(true);
         }
