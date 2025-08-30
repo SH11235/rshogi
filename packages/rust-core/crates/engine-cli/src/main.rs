@@ -629,17 +629,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             if search_id != *ctx.current_search_id {
                 return Ok(());
             }
-
-            // IMPORTANT: Stop the search immediately on hard deadline
-            ctx.search_state.request_stop();
-            if let Some(ref stop_flag) = *ctx.current_stop_flag {
-                stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = send_info_string(log_tsv(&[
-                    ("kind", "hard_deadline_stop_flag_set"),
-                    ("search_id", &search_id.to_string()),
-                ]));
-            }
-
             let stop_info = engine_core::search::types::StopInfo {
                 reason: engine_core::search::types::TerminationReason::TimeLimit,
                 elapsed_ms: 0,
