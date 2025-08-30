@@ -226,7 +226,7 @@ mod tests {
 
     fn default_meta() -> BestmoveMeta {
         BestmoveMeta {
-            from: BestmoveSource::SessionInSearchFinished,
+            from: BestmoveSource::CoreFinalize,
             stop_info: StopInfo {
                 reason: engine_core::search::types::TerminationReason::Completed,
                 elapsed_ms: 0,

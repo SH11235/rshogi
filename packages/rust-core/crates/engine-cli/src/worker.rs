@@ -680,7 +680,12 @@ pub fn search_worker(
     };
 
     // Phase: Add a conservative watchdog (single insurance) only when budgets are valid
-    if !params.ponder {
+    // Allow disabling worker watchdog via env (default OFF when not explicitly enabled)
+    let worker_wd_enabled = std::env::var("WORKER_WATCHDOG_ENABLED")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if worker_wd_enabled && !params.ponder {
         let tx_deadline = tx.clone();
         let stop_for_watchdog = stop_flag.clone();
         let search_id_for_watchdog = search_id;

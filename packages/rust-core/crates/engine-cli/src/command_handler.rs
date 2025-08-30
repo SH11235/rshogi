@@ -266,8 +266,7 @@ impl<'a> CommandContext<'a> {
         // USI-visible diagnostic: finalize entry
         let _ =
             send_info_string(crate::emit_utils::log_tsv(&[("kind", "bestmove_finalize_begin")]));
-        // Guard: ensure finalize tail happens exactly once even on unexpected path
-        let mut finalize_tail_done = false;
+        // Emit paths below call finalize_search() themselves; guard tail removed.
         // Metrics logging is handled before this call in emit_best_from_session
         // Try to emit via BestmoveEmitter if available
         if let Some(ref emitter) = self.current_bestmove_emitter {
@@ -327,7 +326,6 @@ impl<'a> CommandContext<'a> {
                         ("path", "emitter"),
                     ]));
                     self.finalize_search(finalize_label);
-                    finalize_tail_done = true;
                     // Latency from finalize_begin to finalize_end
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_latency"),
@@ -409,7 +407,6 @@ impl<'a> CommandContext<'a> {
                         ("path", "emitter_fallback"),
                     ]));
                     self.finalize_search(finalize_label);
-                    finalize_tail_done = true;
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_latency"),
                         ("ms", &finalize_start.elapsed().as_millis().to_string()),
@@ -483,21 +480,13 @@ impl<'a> CommandContext<'a> {
                 ("path", "direct"),
             ]));
             self.finalize_search(finalize_label);
-            finalize_tail_done = true;
             let _ = send_info_string(crate::emit_utils::log_tsv(&[
                 ("kind", "bestmove_finalize_latency"),
                 ("ms", &finalize_start.elapsed().as_millis().to_string()),
             ]));
             // Do not return here; fall through to tail guard
         }
-        // Final guard: if finalize tail was not completed for any reason, emit it now (idempotent)
-        if !finalize_tail_done {
-            let _ = send_info_string(crate::emit_utils::log_tsv(&[
-                ("kind", "bestmove_finalize_end"),
-                ("path", "guard_final"),
-            ]));
-            self.finalize_search(finalize_label);
-        }
+        // Tail guard removed: finalize is executed in each branch above.
         Ok(())
     }
 
@@ -673,11 +662,7 @@ mod tests {
         }
 
         // Normal completion
-        for &src in &[
-            S::EmergencyFallback,
-            S::EmergencyFallbackOnFinish,
-            S::SessionInSearchFinished,
-        ] {
+        for &src in &[S::EmergencyFallbackOnFinish, S::CoreFinalize] {
             let m = build_meta(src, 12, None, None, None);
             assert_eq!(m.stop_info.reason, TerminationReason::Completed);
             assert!(!m.stop_info.hard_timeout);
@@ -710,8 +695,7 @@ mod tests {
             soft_limit_ms: 111,
             hard_limit_ms: 222,
         };
-        let m =
-            build_meta(S::SessionInSearchFinished, 1, None, Some("cp 0".into()), Some(si.clone()));
+        let m = build_meta(S::CoreFinalize, 1, None, Some("cp 0".into()), Some(si.clone()));
         assert_eq!(m.stop_info.elapsed_ms, 123);
         assert_eq!(m.stop_info.nodes, 456);
         assert_eq!(m.stop_info.soft_limit_ms, 111);
@@ -760,8 +744,6 @@ mod tests {
         // Clear test hooks
         let start_idx = test_info_len();
 
-        let mut final_pv_injected_flag = false;
-        let mut final_pv_injected_flag = false;
         let mut final_pv_injected_flag = false;
         let mut ctx = CommandContext {
             engine: &engine,

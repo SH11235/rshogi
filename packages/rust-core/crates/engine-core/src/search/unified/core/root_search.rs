@@ -244,6 +244,11 @@ where
                 }
             }
 
+            // Notify time manager that PV head changed to refresh PV stability window
+            if let Some(ref tm) = searcher.time_manager {
+                tm.on_pv_change(depth as u32);
+            }
+
             if score > alpha {
                 alpha = score;
             }
