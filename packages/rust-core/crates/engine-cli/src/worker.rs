@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 fn derive_budgets_via_core(
     position: &engine_core::shogi::Position,
     limits: &SearchLimits,
-) -> Option<(u64, u64)> {
+) -> Option<(u64, u64, bool)> {
     // Convert SearchLimits to core TimeLimits and instantiate a TimeManager to get soft/hard
     let time_limits: core_tm::TimeLimits = limits.clone().into();
     // Determine game phase consistently with core
@@ -35,6 +35,7 @@ fn derive_budgets_via_core(
     let tm = TimeManager::new(&time_limits, position.side_to_move, position.ply as u32, phase);
     let soft = tm.soft_limit_ms();
     let hard = tm.hard_limit_ms();
+    let clamped = tm.budgets_were_clamped();
 
     // Discard non-finite or zero budgets
     if soft == u64::MAX || hard == u64::MAX || soft == 0 || hard == 0 {
@@ -42,7 +43,7 @@ fn derive_budgets_via_core(
     }
     // Clamp to ensure hard >= soft
     let hard = hard.max(soft);
-    Some((soft, hard))
+    Some((soft, hard, clamped))
 }
 
 /// Messages from worker thread to main thread
@@ -594,7 +595,10 @@ pub fn search_worker(
     // Emit go_received_detail with budgets and time control summary
     {
         let (soft_log, hard_log, note) = match budgets {
-            Some((s, h)) => (s, h, "ok".to_string()),
+            Some((s, h, clamped)) => {
+                let note = if clamped { "clamped" } else { "ok" };
+                (s, h, note.to_string())
+            }
             None => (0, 0, "no_budget".to_string()),
         };
         let tc_label = match &limits.time_control {
@@ -606,6 +610,11 @@ pub fn search_worker(
             engine_core::time_management::TimeControl::Ponder(_) => "ponder",
         };
         let mtg = limits.moves_to_go.unwrap_or(0);
+        // Extract overhead/safety/nd2 from limits' time parameters for observability
+        let (ov_ms, saf_ms, nd2_ms) = match &limits.time_parameters {
+            Some(tp) => (tp.overhead_ms, tp.byoyomi_hard_limit_reduction_ms, tp.network_delay2_ms),
+            None => (0, 0, 0),
+        };
         let _ = tx.send(WorkerMessage::Info {
             info: SearchInfo {
                 string: Some(log_tsv(&[
@@ -617,6 +626,9 @@ pub fn search_worker(
                     ("mtg", &mtg.to_string()),
                     ("threads", &threads_for_log.to_string()),
                     ("budget_status", &note),
+                    ("overhead_ms", &ov_ms.to_string()),
+                    ("safety_ms", &saf_ms.to_string()),
+                    ("nd2_ms", &nd2_ms.to_string()),
                 ])),
                 ..Default::default()
             },
@@ -637,7 +649,7 @@ pub fn search_worker(
                     return;
                 }
             }
-            if let Some((soft_ms, hard_ms)) = budgets {
+            if let Some((soft_ms, hard_ms, _)) = budgets {
                 // threshold = min(max(soft + δ, MIN_THINK_MS), hard)
                 // δ=+50ms (micro margin). MIN_THINK_MS is optional safeguard.
                 let min_think_ms = std::env::var("MIN_THINK_MS")
@@ -712,7 +724,7 @@ pub fn search_worker(
                     }
                 }
                 // New explicit watchdog event（メインはこれで即emit）
-                if let Some((soft_ms, hard_ms)) = budgets {
+                if let Some((soft_ms, hard_ms, _)) = budgets {
                     let _ = tx_deadline.send(WorkerMessage::WatchdogFired {
                         search_id: search_id_for_watchdog,
                         soft_ms,
@@ -733,7 +745,7 @@ pub fn search_worker(
                 // 停止フラグ
                 stop_for_watchdog.store(true, std::sync::atomic::Ordering::Release);
                 // 補助: SearchFinished も投げておく
-                let (s, h) = budgets.unwrap_or((0, 0));
+                let (s, h, _) = budgets.unwrap_or((0, 0, false));
                 let _ = tx_deadline.send(WorkerMessage::SearchFinished {
                     root_hash: root_hash_for_watchdog,
                     search_id: search_id_for_watchdog,
@@ -1195,7 +1207,7 @@ mod tests {
             .time_parameters(params)
             .build();
         let pos = engine_core::shogi::Position::startpos();
-        let (soft, hard) = derive_budgets_via_core(&pos, &limits).expect("budgets for byoyomi");
+        let (soft, hard, _) = derive_budgets_via_core(&pos, &limits).expect("budgets for byoyomi");
         // Soft includes half of network_delay2_ms; hard includes full network_delay2_ms
         assert_eq!(soft, 8000 - params.overhead_ms - params.network_delay2_ms / 2);
         assert_eq!(

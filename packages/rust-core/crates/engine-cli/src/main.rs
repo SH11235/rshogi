@@ -138,6 +138,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut pre_session_fallback: Option<String> = None; // Precomputed fallback move at go-time
     let mut pre_session_fallback_hash: Option<u64> = None; // Hash when pre_session_fallback was computed
     let mut current_finalized_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None; // Share finalize with worker
+                                                                                                  // Guard: ensure final PV injection exactly once per search
+    let mut final_pv_injected: bool = false;
 
     // Diagnostics: timestamps for cross-event deltas
     let mut last_bestmove_sent_at: Option<Instant> = None;
@@ -234,6 +236,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                        final_pv_injected: &mut final_pv_injected,
                     };
                     match handle_command(cmd, &mut ctx) {
                         Ok(()) => {}
@@ -292,6 +295,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                        final_pv_injected: &mut final_pv_injected,
                     };
                     match handle_command(cmd, &mut ctx) {
                         Ok(()) => {}
@@ -339,6 +343,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                        final_pv_injected: &mut final_pv_injected,
                     };
                     handle_worker_message(msg, &mut ctx)?;
                     processed_worker += 1;
@@ -391,6 +396,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                        final_pv_injected: &mut final_pv_injected,
                     };
                     match handle_command(cmd, &mut ctx) { Ok(()) => {}, Err(e) => { log::error!("[MAIN] ctrl handle_command error: {}", e); return Err(e); } }
                     continue;
@@ -468,6 +474,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
                             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                            final_pv_injected: &mut final_pv_injected,
                         };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
@@ -515,6 +522,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
                             current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                            final_pv_injected: &mut final_pv_injected,
                         };
                         handle_worker_message(msg, &mut ctx)?;
                     }
@@ -566,6 +574,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 last_bestmove_sent_at: &mut last_bestmove_sent_at,
                                 last_go_begin_at: &mut last_go_begin_at,
                                 current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                                final_pv_injected: &mut final_pv_injected,
                             };
                             // Force stop handling (best-effort fallback emission inside)
                             let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
@@ -734,6 +743,31 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 if let Ok((move_str, _)) =
                     generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
                 {
+                    // Emit a final info pv reflecting the partial result used for bestmove
+                    // so that the last PV seen by GUIs matches the emitted bestmove.
+                    let (time_opt, nodes_opt, nps_opt, depth_opt) =
+                        if let Some(committed) = ctx.current_committed.clone() {
+                            let ems = committed.elapsed.as_millis() as u64;
+                            let nps = if ems > 0 && committed.nodes > 0 {
+                                Some(committed.nodes.saturating_mul(1000) / ems)
+                            } else {
+                                None
+                            };
+                            (Some(ems), Some(committed.nodes), nps, Some(committed.depth as u32))
+                        } else {
+                            (None, None, None, Some(d as u32))
+                        };
+                    let info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        depth: depth_opt,
+                        time: time_opt,
+                        nodes: nodes_opt,
+                        nps: nps_opt,
+                        score: Some(crate::utils::to_usi_score(s)),
+                        pv: vec![move_str.clone()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "watchdog_partial");
                     let meta = build_meta(
                         BestmoveSource::PartialResultTimeout,
                         d,
@@ -773,6 +807,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                                 {
                                     let us = t0.elapsed().as_micros();
                                     if us <= 1000 {
+                                        // Inject final PV for pre_session watchdog path
+                                        let info = crate::usi::output::SearchInfo {
+                                            multipv: Some(1),
+                                            pv: vec![norm.clone()],
+                                            ..Default::default()
+                                        };
+                                        ctx.inject_final_pv(info, "watchdog_pre_session");
                                         let meta = build_meta(
                                             BestmoveSource::EmergencyFallbackTimeout,
                                             0,
@@ -831,6 +872,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             // Emergency（PositionState 優先でロック不要経路を試す）
             if let Some(state) = ctx.position_state.as_ref() {
                 if let Some(m) = crate::helpers::emergency_move_from_state(state) {
+                    // Inject final PV for emergency(state) watchdog path
+                    let info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        pv: vec![m.clone()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "watchdog_emergency_state");
                     let meta = build_meta(
                         BestmoveSource::EmergencyFallbackTimeout,
                         0,
@@ -909,6 +957,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             } else {
                 match generate_fallback_move(ctx.engine, None, false, true) {
                     Ok((move_str, _)) => {
+                        // Inject final PV for emergency watchdog path
+                        let info = crate::usi::output::SearchInfo {
+                            multipv: Some(1),
+                            pv: vec![move_str.clone()],
+                            ..Default::default()
+                        };
+                        ctx.inject_final_pv(info, "watchdog_emergency");
                         let meta = build_meta(
                             BestmoveSource::EmergencyFallbackTimeout,
                             0,
@@ -931,6 +986,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         ]));
                     }
                     Err(_) => {
+                        // Inject final PV for resign watchdog path
+                        let info = crate::usi::output::SearchInfo {
+                            multipv: Some(1),
+                            pv: vec!["resign".to_string()],
+                            ..Default::default()
+                        };
+                        ctx.inject_final_pv(info, "watchdog_resign");
                         let meta = build_meta(
                             BestmoveSource::ResignTimeout,
                             0,
@@ -1142,6 +1204,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         // Fallback if session validation failed
                         match generate_fallback_move(ctx.engine, None, ctx.allow_null_move, false) {
                             Ok((fallback_move, _used_partial)) => {
+                                // Inject final PV for emergency on SearchFinished
+                                let info = crate::usi::output::SearchInfo {
+                                    multipv: Some(1),
+                                    pv: vec![fallback_move.clone()],
+                                    ..Default::default()
+                                };
+                                ctx.inject_final_pv(info, "finished_emergency");
                                 let meta = build_meta(
                                     BestmoveSource::EmergencyFallback,
                                     0,         // depth
@@ -1166,7 +1235,13 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                                     None,      // score
                                     stop_info, // Pass the provided stop_info
                                 );
-
+                                // Inject final PV for resign on SearchFinished
+                                let info = crate::usi::output::SearchInfo {
+                                    multipv: Some(1),
+                                    pv: vec!["resign".to_string()],
+                                    ..Default::default()
+                                };
+                                ctx.inject_final_pv(info, "finished_resign");
                                 ctx.emit_and_finalize(
                                     "resign".to_string(),
                                     None,
@@ -1268,6 +1343,14 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
                     match generate_fallback_move(ctx.engine, Some((mv, d, s)), false, false) {
                         Ok((move_str, _)) => {
+                            // Emit a final info pv based on the partial result to align with bestmove
+                            let info = crate::usi::output::SearchInfo {
+                                depth: Some(d as u32),
+                                score: Some(crate::utils::to_usi_score(s)),
+                                pv: vec![move_str.clone()],
+                                ..Default::default()
+                            };
+                            let _ = crate::usi::send_response(crate::usi::UsiResponse::Info(info));
                             let meta = build_meta(
                                 BestmoveSource::EmergencyFallbackOnFinish,
                                 d,

@@ -22,6 +22,8 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     log::debug!("Received go command with params: {params:?}");
     let go_received_time = Instant::now();
     log::debug!("NewSearchStart: go received at {go_received_time:?}");
+    // Reset per-search final PV injection guard
+    *ctx.final_pv_injected = false;
 
     // USI-visible diagnostic: go handler entry
     let now = Instant::now();
@@ -148,6 +150,13 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                         None,
                         None,
                     );
+                    // Inject final PV for resign to align GUI display
+                    let info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        pv: vec!["resign".to_string()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "go_no_legal_moves");
                     // Emit bestmove resign and finalize immediately
                     ctx.emit_and_finalize("resign".to_string(), None, meta, "GoNoLegalMoves")?;
                     return Ok(());
@@ -384,6 +393,12 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     *ctx.current_search_id = *ctx.search_id_counter;
     let search_id = *ctx.current_search_id;
     log::info!("Starting new search with ID: {search_id}, ponder: {}", params.ponder);
+    // Reset final PV guard and log for diagnostics
+    *ctx.final_pv_injected = false;
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "final_pv_guard_reset"),
+        ("search_id", &search_id.to_string()),
+    ]));
 
     // Create new BestmoveEmitter and finalized flag for this search
     *ctx.current_bestmove_emitter = Some(BestmoveEmitter::new(search_id));
