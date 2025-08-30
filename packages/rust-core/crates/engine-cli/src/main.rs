@@ -144,15 +144,11 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     // Diagnostics: timestamps for cross-event deltas
     let mut last_bestmove_sent_at: Option<Instant> = None;
     let mut last_go_begin_at: Option<Instant> = None;
-    // Armed worker watchdog threshold (None when not armed): used to suppress wall watchdog
-    let mut worker_watchdog_threshold: Option<u64> = None;
 
     // Main event loop - process USI commands and worker messages concurrently
     // Strategy: always drain cmd/ctrl first (non-blocking), then handle a bounded number
     // of worker messages to avoid starvation, then fall back to a short select tick.
     let mut pending_quit = false;
-    // Log wall watchdog suppression only once per armed period
-    let mut wall_watchdog_suppressed_logged = false;
     loop {
         // 1) Drain pending normal commands first (position/go 優先)
         'drain_cmds: loop {
@@ -235,7 +231,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
-                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                         final_pv_injected: &mut final_pv_injected,
                     };
                     match handle_command(cmd, &mut ctx) {
@@ -294,7 +289,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
-                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                         final_pv_injected: &mut final_pv_injected,
                     };
                     match handle_command(cmd, &mut ctx) {
@@ -342,7 +336,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
-                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                         final_pv_injected: &mut final_pv_injected,
                     };
                     handle_worker_message(msg, &mut ctx)?;
@@ -395,7 +388,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         current_committed: &mut current_committed,
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
-                        current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                         final_pv_injected: &mut final_pv_injected,
                     };
                     match handle_command(cmd, &mut ctx) { Ok(()) => {}, Err(e) => { log::error!("[MAIN] ctrl handle_command error: {}", e); return Err(e); } }
@@ -473,7 +465,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_committed: &mut current_committed,
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
-                            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                             final_pv_injected: &mut final_pv_injected,
                         };
                         match handle_command(cmd, &mut ctx) {
@@ -521,7 +512,6 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_committed: &mut current_committed,
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
-                            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
                             final_pv_injected: &mut final_pv_injected,
                         };
                         handle_worker_message(msg, &mut ctx)?;
@@ -533,73 +523,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
             }
 
             default(Duration::from_millis(1)) => {
-                // Small idle to prevent busy loop
-                // Wall-clock watchdog: 既定は無効。環境変数で有効化かつ閾値上書き可能。
-                // Set env WALL_WATCHDOG_MS>0 to enable. Example: 4400 for 6s byoyomi guard.
-                let wall_thr_ms = std::env::var("WALL_WATCHDOG_MS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(0);
-                // Additional delta when worker watchdog is armed
-                let wall_delta_ms = std::env::var("WALL_WATCHDOG_DELTA_MS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(200);
-
-                if search_state.is_searching() {
-                    if let Some(t0) = last_go_begin_at {
-                        let elapsed = t0.elapsed().as_millis() as u64;
-                        let best_after_begin = last_bestmove_sent_at.map(|tb| tb >= t0).unwrap_or(false);
-                        // If worker WD is armed, prefer armed threshold + delta; otherwise use wall threshold
-                        let armed_thr = worker_watchdog_threshold.map(|t| t.saturating_add(wall_delta_ms));
-                        let eff_thr = armed_thr.or(if wall_thr_ms > 0 { Some(wall_thr_ms) } else { None });
-                        match eff_thr {
-                            Some(thr) if elapsed > thr && !best_after_begin => {
-                                // Fire wall watchdog fallback
-                                let _ = send_info_string(log_tsv(&[
-                                    ("kind", "wall_watchdog_fire"),
-                                    ("elapsed_ms", &elapsed.to_string()),
-                                    ("threshold_ms", &thr.to_string()),
-                                ]));
-                                let mut _legacy_session3: Option<()> = None;
-                                let mut ctx = CommandContext {
-                                    engine: &engine,
-                                    stop_flag: &stop_flag,
-                                    worker_tx: &worker_tx,
-                                    worker_rx: &worker_rx,
-                                    worker_handle: &mut worker_handle,
-                                    search_state: &mut search_state,
-                                    search_id_counter: &mut search_id_counter,
-                                    current_search_id: &mut current_search_id,
-                                    current_search_is_ponder: &mut current_search_is_ponder,
-                                    current_session: &mut _legacy_session3,
-                                    current_bestmove_emitter: &mut current_bestmove_emitter,
-                                    current_finalized_flag: &mut current_finalized_flag,
-                                    current_stop_flag: &mut current_stop_flag,
-                                    allow_null_move,
-                                    position_state: &mut position_state,
-                                    program_start,
-                                    last_partial_result: &mut last_partial_result,
-                                    pre_session_fallback: &mut pre_session_fallback,
-                                    pre_session_fallback_hash: &mut pre_session_fallback_hash,
-                                    current_committed: &mut current_committed,
-                                    last_bestmove_sent_at: &mut last_bestmove_sent_at,
-                                    last_go_begin_at: &mut last_go_begin_at,
-                                    current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
-                                    final_pv_injected: &mut final_pv_injected,
-                                };
-                                let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
-                            }
-                            _ => {
-                                // Optional suppress log when worker WD is armed but threshold not yet passed
-                                if worker_watchdog_threshold.is_some() && !wall_watchdog_suppressed_logged {
-                                    let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_suppress"), ("reason", "worker_watchdog_active")]));
-                                    wall_watchdog_suppressed_logged = true;
-                                }
-                            }
-                        }
-                    }
-                }
+                // Small idle to prevent busy loop (no wall watchdog)
             }
         }
     }
@@ -667,7 +591,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             let current_id = *ctx.current_search_id;
             let id = match &msg {
                 WorkerMessage::Info { search_id, .. } => *search_id,
-                WorkerMessage::WatchdogFired { search_id, .. } => *search_id,
                 WorkerMessage::SearchStarted { search_id, .. } => *search_id,
                 WorkerMessage::IterationCommitted { search_id, .. } => *search_id,
                 WorkerMessage::SearchFinished { search_id, .. } => *search_id,
@@ -680,7 +603,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 // Log and drop
                 let tag = match &msg {
                     WorkerMessage::Info { .. } => "info",
-                    WorkerMessage::WatchdogFired { .. } => "watchdog",
                     WorkerMessage::SearchStarted { .. } => "started",
                     WorkerMessage::IterationCommitted { .. } => "committed",
                     WorkerMessage::SearchFinished { .. } => "finished",
@@ -697,203 +619,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
     }
 
     match msg {
-        WorkerMessage::WatchdogFired {
-            search_id,
-            soft_ms,
-            hard_ms,
-        } => {
-            let emit_start = Instant::now();
-            // Central finalize on watchdog fire（必ず試行）
-            if search_id != *ctx.current_search_id {
-                let _ = send_info_string(log_tsv(&[
-                    ("kind", "watchdog_emit_drop"),
-                    ("reason", "id_mismatch"),
-                ]));
-                return Ok(());
-            }
-
-            // Compute threshold_ms for diagnostics
-            let min_think = {
-                let adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
-                adapter.min_think_ms() as u64
-            };
-            let threshold_ms = hard_ms.min(soft_ms.saturating_add(50).max(min_think));
-            let now_ms = ctx.last_go_begin_at.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
-            let _ = send_info_string(log_tsv(&[
-                ("kind", "watchdog_fired_handled"),
-                ("search_id", &search_id.to_string()),
-                ("now_ms", &now_ms.to_string()),
-                ("threshold_ms", &threshold_ms.to_string()),
-                ("state", &format!("{:?}", *ctx.search_state)),
-            ]));
-
-            let stop_info = engine_core::search::types::StopInfo {
-                reason: engine_core::search::types::TerminationReason::TimeLimit,
-                elapsed_ms: 0,
-                nodes: 0,
-                depth_reached: ctx.current_committed.as_ref().map(|c| c.depth).unwrap_or(0),
-                hard_timeout: false,
-                soft_limit_ms: soft_ms,
-                hard_limit_ms: hard_ms,
-            };
-
-            if ctx.finalize_emit_if_possible("watchdog", Some(stop_info))? {
-                let _ = send_info_string(log_tsv(&[
-                    ("kind", "watchdog_emit_latency"),
-                    ("ms", &emit_start.elapsed().as_millis().to_string()),
-                ]));
-                return Ok(());
-            }
-
-            // Emergency（PositionState 優先でロック不要経路を試す）
-            if let Some(state) = ctx.position_state.as_ref() {
-                if let Some(m) = crate::helpers::emergency_move_from_state(state) {
-                    // Inject final PV for emergency(state) watchdog path
-                    let info = crate::usi::output::SearchInfo {
-                        multipv: Some(1),
-                        pv: vec![m.clone()],
-                        ..Default::default()
-                    };
-                    ctx.inject_final_pv(info, "watchdog_emergency_state");
-                    let meta = build_meta(
-                        BestmoveSource::EmergencyFallbackTimeout,
-                        0,
-                        None,
-                        None,
-                        Some(engine_core::search::types::StopInfo {
-                            reason: engine_core::search::types::TerminationReason::TimeLimit,
-                            elapsed_ms: 0,
-                            nodes: 0,
-                            depth_reached: 0,
-                            hard_timeout: false,
-                            soft_limit_ms: soft_ms,
-                            hard_limit_ms: hard_ms,
-                        }),
-                    );
-                    ctx.emit_and_finalize(m, None, meta, "WatchdogEmergencyState")?;
-                    let _ = send_info_string(log_tsv(&[
-                        ("kind", "watchdog_emit_latency"),
-                        ("ms", &emit_start.elapsed().as_millis().to_string()),
-                    ]));
-                } else {
-                    match generate_fallback_move(ctx.engine, None, false, true) {
-                        Ok((move_str, _)) => {
-                            let meta = build_meta(
-                                BestmoveSource::EmergencyFallbackTimeout,
-                                0,
-                                None,
-                                None,
-                                Some(engine_core::search::types::StopInfo {
-                                    reason:
-                                        engine_core::search::types::TerminationReason::TimeLimit,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: false,
-                                    soft_limit_ms: soft_ms,
-                                    hard_limit_ms: hard_ms,
-                                }),
-                            );
-                            ctx.emit_and_finalize(move_str, None, meta, "WatchdogEmergency")?;
-                            let _ = send_info_string(log_tsv(&[
-                                ("kind", "watchdog_emit_latency"),
-                                ("ms", &emit_start.elapsed().as_millis().to_string()),
-                            ]));
-                        }
-                        Err(_) => {
-                            let meta = build_meta(
-                                BestmoveSource::ResignTimeout,
-                                0,
-                                None,
-                                None,
-                                Some(engine_core::search::types::StopInfo {
-                                    reason:
-                                        engine_core::search::types::TerminationReason::TimeLimit,
-                                    elapsed_ms: 0,
-                                    nodes: 0,
-                                    depth_reached: 0,
-                                    hard_timeout: true,
-                                    soft_limit_ms: soft_ms,
-                                    hard_limit_ms: hard_ms,
-                                }),
-                            );
-                            ctx.emit_and_finalize(
-                                "resign".to_string(),
-                                None,
-                                meta,
-                                "WatchdogResign",
-                            )?;
-                            let _ = send_info_string(log_tsv(&[
-                                ("kind", "watchdog_emit_latency"),
-                                ("ms", &emit_start.elapsed().as_millis().to_string()),
-                            ]));
-                        }
-                    }
-                }
-            } else {
-                match generate_fallback_move(ctx.engine, None, false, true) {
-                    Ok((move_str, _)) => {
-                        // Inject final PV for emergency watchdog path
-                        let info = crate::usi::output::SearchInfo {
-                            multipv: Some(1),
-                            pv: vec![move_str.clone()],
-                            ..Default::default()
-                        };
-                        ctx.inject_final_pv(info, "watchdog_emergency");
-                        let meta = build_meta(
-                            BestmoveSource::EmergencyFallbackTimeout,
-                            0,
-                            None,
-                            None,
-                            Some(engine_core::search::types::StopInfo {
-                                reason: engine_core::search::types::TerminationReason::TimeLimit,
-                                elapsed_ms: 0,
-                                nodes: 0,
-                                depth_reached: 0,
-                                hard_timeout: false,
-                                soft_limit_ms: soft_ms,
-                                hard_limit_ms: hard_ms,
-                            }),
-                        );
-                        ctx.emit_and_finalize(move_str, None, meta, "WatchdogEmergency")?;
-                        let _ = send_info_string(log_tsv(&[
-                            ("kind", "watchdog_emit_latency"),
-                            ("ms", &emit_start.elapsed().as_millis().to_string()),
-                        ]));
-                    }
-                    Err(_) => {
-                        // Inject final PV for resign watchdog path
-                        let info = crate::usi::output::SearchInfo {
-                            multipv: Some(1),
-                            pv: vec!["resign".to_string()],
-                            ..Default::default()
-                        };
-                        ctx.inject_final_pv(info, "watchdog_resign");
-                        let meta = build_meta(
-                            BestmoveSource::ResignTimeout,
-                            0,
-                            None,
-                            None,
-                            Some(engine_core::search::types::StopInfo {
-                                reason: engine_core::search::types::TerminationReason::TimeLimit,
-                                elapsed_ms: 0,
-                                nodes: 0,
-                                depth_reached: 0,
-                                hard_timeout: true,
-                                soft_limit_ms: soft_ms,
-                                hard_limit_ms: hard_ms,
-                            }),
-                        );
-                        ctx.emit_and_finalize("resign".to_string(), None, meta, "WatchdogResign")?;
-                        let _ = send_info_string(log_tsv(&[
-                            ("kind", "watchdog_emit_latency"),
-                            ("ms", &emit_start.elapsed().as_millis().to_string()),
-                        ]));
-                    }
-                }
-            }
-            return Ok(());
-        }
         WorkerMessage::HardDeadlineFire { search_id, hard_ms } => {
             // Insurance: hard deadline single-shot
             let _ = send_info_string(log_tsv(&[
@@ -919,24 +644,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
         WorkerMessage::Info { info, search_id } => {
             // Forward info messages only from current search
             if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
-                // Detect worker watchdog arming and record threshold to suppress wall watchdog
-                if let Some(ref s) = info.string {
-                    if s.contains("kind=watchdog_start") {
-                        // Parse threshold_ms from TSV
-                        let mut threshold: Option<u64> = None;
-                        for kv in s.split('\t') {
-                            if let Some((k, v)) = kv.split_once('=') {
-                                if k == "threshold_ms" {
-                                    if let Ok(ms) = v.parse::<u64>() {
-                                        threshold = Some(ms);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        *ctx.current_worker_watchdog_threshold = threshold;
-                    }
-                }
                 send_response(UsiResponse::Info(info))?;
             } else {
                 log::trace!(
@@ -1037,8 +744,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             search_id,
             stop_info,
         } => {
-            // Clear any armed worker watchdog for this search
-            *ctx.current_worker_watchdog_threshold = None;
             // Handle search completion for current search（state非依存: emitter未finalizeなら許可）
             if search_id != *ctx.current_search_id {
                 let _ = send_info_string(log_tsv(&[

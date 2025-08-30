@@ -48,8 +48,6 @@ pub enum BestmoveSource {
     Resign,
     /// Session result on stop command
     SessionOnStop,
-    /// Resign due to timeout
-    ResignTimeout,
     /// Resign in search finished handler
     ResignOnFinish,
     /// Partial result on timeout
@@ -71,7 +69,6 @@ impl fmt::Display for BestmoveSource {
         let s = match self {
             Self::Resign => "resign",
             Self::SessionOnStop => "session_on_stop",
-            Self::ResignTimeout => "resign_timeout",
             Self::ResignOnFinish => "resign_on_finish",
             Self::PartialResultTimeout => "partial_result_timeout",
             Self::EmergencyFallbackTimeout => "emergency_fallback_timeout",

@@ -49,8 +49,6 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     ]));
     // Track go-begin timestamp for SearchStarted delta measurement
     *ctx.last_go_begin_at = Some(now);
-    // Reset worker watchdog threshold on new search begin
-    *ctx.current_worker_watchdog_threshold = None;
 
     // Stop any ongoing search and ensure engine is available
     let wait_start = Instant::now();

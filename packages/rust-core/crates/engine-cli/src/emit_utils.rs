@@ -31,9 +31,9 @@ pub fn build_meta(
     let si = stop_info.unwrap_or(StopInfo {
         reason: match from {
             // Timeout cases -> TimeLimit
-            BestmoveSource::ResignTimeout
-            | BestmoveSource::EmergencyFallbackTimeout
-            | BestmoveSource::PartialResultTimeout => TerminationReason::TimeLimit,
+            BestmoveSource::EmergencyFallbackTimeout | BestmoveSource::PartialResultTimeout => {
+                TerminationReason::TimeLimit
+            }
             // Normal completion cases -> Completed
             BestmoveSource::EmergencyFallbackOnFinish | BestmoveSource::CoreFinalize => {
                 TerminationReason::Completed
@@ -48,9 +48,7 @@ pub fn build_meta(
         depth_reached: depth,
         hard_timeout: matches!(
             from,
-            BestmoveSource::EmergencyFallbackTimeout
-                | BestmoveSource::PartialResultTimeout
-                | BestmoveSource::ResignTimeout
+            BestmoveSource::EmergencyFallbackTimeout | BestmoveSource::PartialResultTimeout
         ),
         soft_limit_ms: 0,
         hard_limit_ms: 0,
