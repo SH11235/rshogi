@@ -906,27 +906,34 @@ impl Engine {
         }
 
         // 4) Legal fallback or resign
+        // Be extra defensive: even though generate_all() returns legal moves,
+        // verify with pos.is_legal_move() before emitting to avoid rare race/edge bugs.
         let gen = MoveGenerator::new();
         match gen.generate_all(pos) {
             Ok(moves) => {
-                if let Some(&mv) = moves.as_slice().first() {
+                // Find the first move that passes an independent legality check
+                if let Some(mv) = moves.as_slice().iter().copied().find(|&m| pos.is_legal_move(m)) {
                     return FinalBest {
                         best_move: Some(mv),
                         pv: vec![mv],
                         source: FinalBestSource::LegalFallback,
                     };
                 }
+                warn!("generate_all returned no independently legal moves; resigning");
                 FinalBest {
                     best_move: None,
                     pv: Vec::new(),
                     source: FinalBestSource::Resign,
                 }
             }
-            Err(_) => FinalBest {
-                best_move: None,
-                pv: Vec::new(),
-                source: FinalBestSource::Resign,
-            },
+            Err(e) => {
+                warn!("move generation failed in final fallback: {}", e);
+                FinalBest {
+                    best_move: None,
+                    pv: Vec::new(),
+                    source: FinalBestSource::Resign,
+                }
+            }
         }
     }
 }
