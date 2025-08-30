@@ -534,57 +534,69 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
             default(Duration::from_millis(1)) => {
                 // Small idle to prevent busy loop
-                // Wall-clock watchdog: default有効（Byoyomi前提 4.4s）。環境変数で上書き可能。
-                let thr_ms = std::env::var("WALL_WATCHDOG_MS")
+                // Wall-clock watchdog: default有効（Byoyomi前提）。環境変数で上書き可能。
+                let wall_thr_ms = std::env::var("WALL_WATCHDOG_MS")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(4400);
-                if thr_ms > 0 && search_state.is_searching() && worker_watchdog_threshold.is_none() {
-                    // Leaving armed period: reset suppression log flag
-                    wall_watchdog_suppressed_logged = false;
+                    .unwrap_or(0);
+                // Additional delta when worker watchdog is armed
+                let wall_delta_ms = std::env::var("WALL_WATCHDOG_DELTA_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(200);
+
+                if search_state.is_searching() {
                     if let Some(t0) = last_go_begin_at {
                         let elapsed = t0.elapsed().as_millis() as u64;
-                        // Only fire if no bestmove has been sent since go-begin
                         let best_after_begin = last_bestmove_sent_at.map(|tb| tb >= t0).unwrap_or(false);
-                        if elapsed > thr_ms && !best_after_begin {
-                            let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_fire"), ("elapsed_ms", &elapsed.to_string()), ("threshold_ms", &thr_ms.to_string())]));
-                            // Build a context and immediately handle stop
-                            let mut _legacy_session3: Option<()> = None;
-                            let mut ctx = CommandContext {
-                                engine: &engine,
-                                stop_flag: &stop_flag,
-                                worker_tx: &worker_tx,
-                                worker_rx: &worker_rx,
-                                worker_handle: &mut worker_handle,
-                                search_state: &mut search_state,
-                                search_id_counter: &mut search_id_counter,
-                                current_search_id: &mut current_search_id,
-                                current_search_is_ponder: &mut current_search_is_ponder,
-                                current_session: &mut _legacy_session3,
-                                current_bestmove_emitter: &mut current_bestmove_emitter,
-                                current_finalized_flag: &mut current_finalized_flag,
-                                current_stop_flag: &mut current_stop_flag,
-                                allow_null_move,
-                                position_state: &mut position_state,
-                                program_start,
-                                last_partial_result: &mut last_partial_result,
-                                pre_session_fallback: &mut pre_session_fallback,
-                                pre_session_fallback_hash: &mut pre_session_fallback_hash,
-                                current_committed: &mut current_committed,
-                                last_bestmove_sent_at: &mut last_bestmove_sent_at,
-                                last_go_begin_at: &mut last_go_begin_at,
-                                current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
-                                final_pv_injected: &mut final_pv_injected,
-                            };
-                            // Force stop handling (best-effort fallback emission inside)
-                            let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
+                        // If worker WD is armed, prefer armed threshold + delta; otherwise use wall threshold
+                        let armed_thr = worker_watchdog_threshold.map(|t| t.saturating_add(wall_delta_ms));
+                        let eff_thr = armed_thr.or(if wall_thr_ms > 0 { Some(wall_thr_ms) } else { None });
+                        match eff_thr {
+                            Some(thr) if elapsed > thr && !best_after_begin => {
+                                // Fire wall watchdog fallback
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "wall_watchdog_fire"),
+                                    ("elapsed_ms", &elapsed.to_string()),
+                                    ("threshold_ms", &thr.to_string()),
+                                ]));
+                                let mut _legacy_session3: Option<()> = None;
+                                let mut ctx = CommandContext {
+                                    engine: &engine,
+                                    stop_flag: &stop_flag,
+                                    worker_tx: &worker_tx,
+                                    worker_rx: &worker_rx,
+                                    worker_handle: &mut worker_handle,
+                                    search_state: &mut search_state,
+                                    search_id_counter: &mut search_id_counter,
+                                    current_search_id: &mut current_search_id,
+                                    current_search_is_ponder: &mut current_search_is_ponder,
+                                    current_session: &mut _legacy_session3,
+                                    current_bestmove_emitter: &mut current_bestmove_emitter,
+                                    current_finalized_flag: &mut current_finalized_flag,
+                                    current_stop_flag: &mut current_stop_flag,
+                                    allow_null_move,
+                                    position_state: &mut position_state,
+                                    program_start,
+                                    last_partial_result: &mut last_partial_result,
+                                    pre_session_fallback: &mut pre_session_fallback,
+                                    pre_session_fallback_hash: &mut pre_session_fallback_hash,
+                                    current_committed: &mut current_committed,
+                                    last_bestmove_sent_at: &mut last_bestmove_sent_at,
+                                    last_go_begin_at: &mut last_go_begin_at,
+                                    current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
+                                    final_pv_injected: &mut final_pv_injected,
+                                };
+                                let _ = crate::handlers::stop::handle_stop_command(&mut ctx);
+                            }
+                            _ => {
+                                // Optional suppress log when worker WD is armed but threshold not yet passed
+                                if worker_watchdog_threshold.is_some() && !wall_watchdog_suppressed_logged {
+                                    let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_suppress"), ("reason", "worker_watchdog_active")]));
+                                    wall_watchdog_suppressed_logged = true;
+                                }
+                            }
                         }
-                    }
-                } else if thr_ms > 0 && search_state.is_searching() && worker_watchdog_threshold.is_some() {
-                    // Suppress wall watchdog when worker watchdog is armed - log once per armed period
-                    if !wall_watchdog_suppressed_logged {
-                        let _ = send_info_string(log_tsv(&[("kind", "wall_watchdog_suppress"), ("reason", "worker_watchdog_active")]));
-                        wall_watchdog_suppressed_logged = true;
                     }
                 }
             }
