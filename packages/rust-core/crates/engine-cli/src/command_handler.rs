@@ -261,10 +261,13 @@ impl<'a> CommandContext<'a> {
         finalize_label: &str,
     ) -> Result<()> {
         let finalize_start = std::time::Instant::now();
+        // Note: finalize chain must log finalize_end and transition to Idle.
         let bm_for_log = best_move.clone();
         // USI-visible diagnostic: finalize entry
         let _ =
             send_info_string(crate::emit_utils::log_tsv(&[("kind", "bestmove_finalize_begin")]));
+        // Guard: ensure finalize tail happens exactly once even on unexpected path
+        let mut finalize_tail_done = false;
         // Metrics logging is handled before this call in emit_best_from_session
         // Try to emit via BestmoveEmitter if available
         if let Some(ref emitter) = self.current_bestmove_emitter {
@@ -324,12 +327,13 @@ impl<'a> CommandContext<'a> {
                         ("path", "emitter"),
                     ]));
                     self.finalize_search(finalize_label);
+                    finalize_tail_done = true;
                     // Latency from finalize_begin to finalize_end
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_latency"),
                         ("ms", &finalize_start.elapsed().as_millis().to_string()),
                     ]));
-                    Ok(())
+                    // Do not return here; fall through to tail guard
                 }
                 Err(e) => {
                     log::error!("BestmoveEmitter::emit failed: {e}");
@@ -405,11 +409,12 @@ impl<'a> CommandContext<'a> {
                         ("path", "emitter_fallback"),
                     ]));
                     self.finalize_search(finalize_label);
+                    finalize_tail_done = true;
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_latency"),
                         ("ms", &finalize_start.elapsed().as_millis().to_string()),
                     ]));
-                    Ok(())
+                    // Do not return here; fall through to tail guard
                 }
             }
         } else {
@@ -472,21 +477,28 @@ impl<'a> CommandContext<'a> {
                 ("kind", "bestmove_sent_logged"),
                 ("search_id", &self.current_search_id.to_string()),
             ]));
+            // finalize_end before transitioning Idle
             let _ = send_info_string(crate::emit_utils::log_tsv(&[
                 ("kind", "bestmove_finalize_end"),
                 ("path", "direct"),
             ]));
             self.finalize_search(finalize_label);
-            let _ = send_info_string(crate::emit_utils::log_tsv(&[
-                ("kind", "bestmove_finalize_end"),
-                ("path", "direct"),
-            ]));
+            finalize_tail_done = true;
             let _ = send_info_string(crate::emit_utils::log_tsv(&[
                 ("kind", "bestmove_finalize_latency"),
                 ("ms", &finalize_start.elapsed().as_millis().to_string()),
             ]));
-            Ok(())
+            // Do not return here; fall through to tail guard
         }
+        // Final guard: if finalize tail was not completed for any reason, emit it now (idempotent)
+        if !finalize_tail_done {
+            let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                ("kind", "bestmove_finalize_end"),
+                ("path", "guard_final"),
+            ]));
+            self.finalize_search(finalize_label);
+        }
+        Ok(())
     }
 
     /// Send TSV log for direct fallback bestmove (when BestmoveEmitter is not available or fails)
@@ -1148,6 +1160,9 @@ mod tests {
         let mut worker_watchdog_threshold: Option<u64> = None;
 
         let start_idx = test_info_len();
+
+        // Local flag for PV injection guard
+        let mut final_pv_injected_flag = false;
 
         // Invoke GameOver
         let mut ctx = CommandContext {
