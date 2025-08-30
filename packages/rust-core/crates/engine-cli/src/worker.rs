@@ -739,6 +739,19 @@ pub fn search_worker(
                 // Sleep relative to go_begin baseline
                 let now_since_go = go_begin_at.elapsed().as_millis() as u64;
                 let wait_ms = threshold_ms.saturating_sub(now_since_go);
+                // Thread-level diagnostics: arm
+                let _ = tx_deadline.send(WorkerMessage::Info {
+                    info: SearchInfo {
+                        string: Some(log_tsv(&[
+                            ("kind", "watchdog_thread_arm"),
+                            ("search_id", &search_id_for_watchdog.to_string()),
+                            ("threshold_ms", &threshold_ms.to_string()),
+                            ("now_ms", &now_since_go.to_string()),
+                        ])),
+                        ..Default::default()
+                    },
+                    search_id: search_id_for_watchdog,
+                });
                 if wait_ms > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(wait_ms));
                 }
@@ -759,6 +772,17 @@ pub fn search_worker(
             }
             // If not already stopped, set stop and notify main loop
             if !stop_for_watchdog.load(std::sync::atomic::Ordering::Acquire) {
+                // Thread-level diagnostics: wake
+                let _ = tx_deadline.send(WorkerMessage::Info {
+                    info: SearchInfo {
+                        string: Some(log_tsv(&[
+                            ("kind", "watchdog_thread_wake"),
+                            ("search_id", &search_id_for_watchdog.to_string()),
+                        ])),
+                        ..Default::default()
+                    },
+                    search_id: search_id_for_watchdog,
+                });
                 if let Some(flag) = &finalized_for_watchdog {
                     if flag.load(Ordering::Acquire) {
                         // Already finalized; skip watchdog notifications
@@ -767,6 +791,16 @@ pub fn search_worker(
                 }
                 // New explicit watchdog event（メインはこれで即emit）
                 if let Some((soft_ms, hard_ms, _)) = budgets {
+                    let _ = tx_deadline.send(WorkerMessage::Info {
+                        info: SearchInfo {
+                            string: Some(log_tsv(&[
+                                ("kind", "watchdog_thread_fire_send"),
+                                ("search_id", &search_id_for_watchdog.to_string()),
+                            ])),
+                            ..Default::default()
+                        },
+                        search_id: search_id_for_watchdog,
+                    });
                     let _ = tx_deadline.send(WorkerMessage::WatchdogFired {
                         search_id: search_id_for_watchdog,
                         soft_ms,
@@ -786,6 +820,16 @@ pub fn search_worker(
                 });
                 // 停止フラグ
                 stop_for_watchdog.store(true, std::sync::atomic::Ordering::Release);
+                let _ = tx_deadline.send(WorkerMessage::Info {
+                    info: SearchInfo {
+                        string: Some(log_tsv(&[
+                            ("kind", "watchdog_thread_fire_set_stop"),
+                            ("search_id", &search_id_for_watchdog.to_string()),
+                        ])),
+                        ..Default::default()
+                    },
+                    search_id: search_id_for_watchdog,
+                });
                 // 補助: SearchFinished も投げておく
                 let (s, h, _) = budgets.unwrap_or((0, 0, false));
                 let _ = tx_deadline.send(WorkerMessage::SearchFinished {
