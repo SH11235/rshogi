@@ -21,6 +21,13 @@ pub const OPT_OVERHEAD_MS: &str = "OverheadMs";
 pub const OPT_BYOYOMI_OVERHEAD_MS: &str = "ByoyomiOverheadMs";
 pub const OPT_BYOYOMI_SAFETY_MS: &str = "ByoyomiSafetyMs";
 
+/// Additional time policy options
+pub const OPT_SLOW_MOVER: &str = "SlowMover"; // percent (50-200)
+pub const OPT_MAX_TIME_RATIO_PCT: &str = "MaxTimeRatioPct"; // percent (100-800 for 1.00-8.00)
+pub const OPT_MOVE_HORIZON_TRIGGER_MS: &str = "MoveHorizonTriggerMs"; // 0 disables
+pub const OPT_MOVE_HORIZON_MIN_MOVES: &str = "MoveHorizonMinMoves"; // 0 disables
+pub const OPT_STOCHASTIC_PONDER: &str = "Stochastic_Ponder"; // bool (default false)
+
 /// Clamp periods value to valid range with optional warning
 pub fn clamp_periods(periods: u32, warn_on_clamp: bool) -> u32 {
     let clamped = periods.clamp(MIN_BYOYOMI_PERIODS, MAX_BYOYOMI_PERIODS);

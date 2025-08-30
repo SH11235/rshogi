@@ -440,6 +440,12 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
 
     // Removed: pre-commit tiny quick_search iteration to avoid go-path latency
 
+    // Record last GoParams in adapter (for stochastic ponder restart)
+    {
+        let mut adapter = lock_or_recover_adapter(ctx.engine);
+        adapter.set_last_go_params(&params);
+    }
+
     // Spawn worker thread for search with panic safety
     let handle = thread::spawn(move || {
         log::debug!("Worker thread spawned");

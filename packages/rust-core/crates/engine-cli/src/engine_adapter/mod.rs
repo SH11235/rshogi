@@ -3,6 +3,7 @@
 //! This module provides a bridge between the USI protocol and the engine-core,
 //! organized into submodules for better maintainability.
 
+use crate::usi::GoParams;
 use engine_core::{
     engine::controller::{Engine, EngineType},
     shogi::{Color, Position},
@@ -75,8 +76,20 @@ pub struct EngineAdapter {
     byoyomi_safety_ms: u64,
     /// Minimum think time lower bound (ms)
     min_think_ms: u64,
+    /// Slow mover percent (50-200)
+    slow_mover_pct: u8,
+    /// Max time ratio percent (100-800 for 1.00-8.00)
+    max_time_ratio_pct: u32,
+    /// Move horizon guard trigger (ms); 0 disables
+    move_horizon_trigger_ms: u64,
+    /// Move horizon minimum moves to guard; 0 disables
+    move_horizon_min_moves: u32,
     /// Whether the last search was using byoyomi time control
     last_search_is_byoyomi: bool,
+    /// Stochastic ponder mode (special ponderhit behavior)
+    stochastic_ponder: bool,
+    /// Last received GoParams (for stochastic ponder restart)
+    last_go_params: Option<GoParams>,
 }
 
 impl Default for EngineAdapter {
@@ -113,7 +126,13 @@ impl EngineAdapter {
             byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
             min_think_ms: 200, // Phase1 default to reduce "即指し"
+            slow_mover_pct: 100,
+            max_time_ratio_pct: 500,
+            move_horizon_trigger_ms: 0,
+            move_horizon_min_moves: 0,
             last_search_is_byoyomi: false,
+            stochastic_ponder: false,
+            last_go_params: None,
         };
 
         // Initialize options
@@ -133,9 +152,29 @@ impl EngineAdapter {
         )
     }
 
+    /// Get additional time policy parameters
+    pub fn get_time_policy_extras(&self) -> (u8, u32, u64, u32) {
+        (
+            self.slow_mover_pct,
+            self.max_time_ratio_pct,
+            self.move_horizon_trigger_ms,
+            self.move_horizon_min_moves,
+        )
+    }
+
     /// Get MinThinkMs
     pub fn min_think_ms(&self) -> u64 {
         self.min_think_ms
+    }
+
+    /// Save last GoParams
+    pub fn set_last_go_params(&mut self, params: &GoParams) {
+        self.last_go_params = Some(params.clone());
+    }
+
+    /// Get last GoParams (clone)
+    pub fn get_last_go_params(&self) -> Option<GoParams> {
+        self.last_go_params.clone()
     }
 
     /// Set snapshot of search start state (for diagnostics/consistency)
@@ -166,6 +205,11 @@ impl EngineAdapter {
     /// Get configured number of threads (for diagnostics/logging)
     pub fn threads(&self) -> usize {
         self.threads
+    }
+
+    /// Whether Stochastic_Ponder is enabled
+    pub fn is_stochastic_ponder(&self) -> bool {
+        self.stochastic_ponder
     }
 
     /// Choose final bestmove using core decision path (book→committed→TT→legal/resign)

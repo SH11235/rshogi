@@ -136,6 +136,10 @@ pub fn apply_go_params(
     pv_stability_base_ms: u64,
     pv_stability_slope_ms: u64,
     min_think_ms: u32,
+    slow_mover_pct: u8,
+    max_time_ratio_pct: u32,
+    move_horizon_trigger_ms: u64,
+    move_horizon_min_moves: u32,
 ) -> Result<SearchLimits> {
     let mut builder = SearchLimitsBuilder::default();
 
@@ -177,6 +181,11 @@ pub fn apply_go_params(
     tp.network_delay2_ms = network_delay2_ms as u64;
     // Propagate MinThinkMs to core (applies as soft lower bound for finite modes)
     tp.min_think_ms = min_think_ms as u64;
+    // Time policy extras
+    tp.slow_mover_pct = slow_mover_pct;
+    tp.max_time_ratio = (max_time_ratio_pct as f64) / 100.0;
+    tp.move_horizon_trigger_ms = move_horizon_trigger_ms;
+    tp.move_horizon_min_moves = move_horizon_min_moves;
     builder = builder.time_parameters(tp);
 
     // Apply stop flag if available
@@ -216,7 +225,8 @@ mod tests {
         };
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 100, None, 500, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 100, None, 500, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         assert_eq!(limits.depth, Some(10));
     }
 
@@ -228,7 +238,8 @@ mod tests {
         };
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 100, None, 500, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 100, None, 500, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         assert_eq!(limits.nodes, Some(1000000));
     }
 
@@ -240,7 +251,8 @@ mod tests {
         };
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 100, None, 500, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 100, None, 500, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         assert!(matches!(limits.time_control, engine_core::TimeControl::Infinite));
     }
 
@@ -256,7 +268,8 @@ mod tests {
 
         let position = Position::startpos(); // Black to move at start
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
 
         match limits.time_control {
             engine_core::TimeControl::Byoyomi {
@@ -282,7 +295,8 @@ mod tests {
         params.wtime = Some(0);
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         match limits.time_control {
             engine_core::TimeControl::Byoyomi { periods, .. } => {
                 assert_eq!(periods, MAX_BYOYOMI_PERIODS);
@@ -301,7 +315,8 @@ mod tests {
         params.wtime = Some(60000);
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         match limits.time_control {
             engine_core::TimeControl::Fischer {
                 white_ms,
@@ -325,7 +340,8 @@ mod tests {
         params.wtime = Some(180000);
         let position = Position::startpos(); // Black to move -> use binc
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         match limits.time_control {
             engine_core::TimeControl::Fischer {
                 white_ms,
@@ -347,7 +363,8 @@ mod tests {
         params.wtime = Some(130000);
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         match limits.time_control {
             engine_core::TimeControl::Fischer {
                 white_ms,
@@ -370,7 +387,8 @@ mod tests {
         };
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         assert_eq!(limits.moves_to_go, Some(20));
     }
 
@@ -381,7 +399,8 @@ mod tests {
         params.movetime = Some(1000);
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
 
         match limits.time_control {
             engine_core::TimeControl::Ponder(inner) => match *inner {
@@ -402,7 +421,8 @@ mod tests {
         };
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
         assert_eq!(limits.depth, Some(127));
     }
 
@@ -427,7 +447,8 @@ mod tests {
 
         let position = Position::startpos();
         let limits =
-            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0).unwrap();
+            apply_go_params(&params, &position, 50, None, 300, 1000, 80, 80, 5, 0, 100, 500, 0, 0)
+                .unwrap();
 
         match limits.time_control {
             engine_core::TimeControl::Ponder(inner) => match *inner {
@@ -443,6 +464,36 @@ mod tests {
                 other => panic!("Expected inner Fischer, got: {other:?}"),
             },
             other => panic!("Expected Ponder, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_go_params_time_policy_extras_mapped() {
+        let params = make_go_params();
+        let position = Position::startpos();
+        let limits = apply_go_params(
+            &params, &position, 50,   // overhead
+            None, // stop_flag
+            300,  // byoyomi_safety
+            1000, // network_delay2
+            80,   // byoyomi_early_finish_ratio
+            80,   // pv_base
+            5,    // pv_slope
+            200,  // min_think_ms
+            150,  // slow_mover_pct
+            300,  // max_time_ratio_pct (=3.00x)
+            6000, // move_horizon_trigger_ms
+            10,   // move_horizon_min_moves
+        )
+        .unwrap();
+
+        if let Some(tp) = limits.time_parameters {
+            assert_eq!(tp.slow_mover_pct, 150);
+            assert!((tp.max_time_ratio - 3.0).abs() < 1e-6);
+            assert_eq!(tp.move_horizon_trigger_ms, 6000);
+            assert_eq!(tp.move_horizon_min_moves, 10);
+        } else {
+            panic!("Expected time_parameters to be set");
         }
     }
 }

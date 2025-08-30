@@ -11,8 +11,9 @@ use log::{debug, info, warn};
 use crate::engine_adapter::EngineAdapter;
 use crate::usi::{
     clamp_periods, send_info_string, EngineOption, MAX_BYOYOMI_PERIODS, MIN_BYOYOMI_PERIODS,
-    OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_OVERHEAD_MS,
-    OPT_USI_BYOYOMI_PERIODS,
+    OPT_BYOYOMI_OVERHEAD_MS, OPT_BYOYOMI_PERIODS, OPT_BYOYOMI_SAFETY_MS, OPT_MAX_TIME_RATIO_PCT,
+    OPT_MOVE_HORIZON_MIN_MOVES, OPT_MOVE_HORIZON_TRIGGER_MS, OPT_OVERHEAD_MS, OPT_SLOW_MOVER,
+    OPT_STOCHASTIC_PONDER, OPT_USI_BYOYOMI_PERIODS,
 };
 use engine_core::time_management::constants::{
     DEFAULT_BYOYOMI_OVERHEAD_MS, DEFAULT_BYOYOMI_SAFETY_MS, DEFAULT_OVERHEAD_MS,
@@ -48,6 +49,7 @@ impl EngineAdapter {
             EngineOption::spin("ByoyomiEarlyFinishRatio", 80, 50, 95),
             EngineOption::spin("PVStabilityBase", 80, 10, 200),
             EngineOption::spin("PVStabilitySlope", 5, 0, 20),
+            EngineOption::check(OPT_STOCHASTIC_PONDER, false),
             EngineOption::spin(
                 OPT_OVERHEAD_MS,
                 DEFAULT_OVERHEAD_MS as i64,
@@ -66,6 +68,11 @@ impl EngineAdapter {
                 MIN_BYOYOMI_SAFETY_MS as i64,
                 MAX_BYOYOMI_SAFETY_MS as i64,
             ),
+            // Time policy extras
+            EngineOption::spin(OPT_SLOW_MOVER, 100, 50, 200),
+            EngineOption::spin(OPT_MAX_TIME_RATIO_PCT, 500, 100, 800),
+            EngineOption::spin(OPT_MOVE_HORIZON_TRIGGER_MS, 0, 0, 600000),
+            EngineOption::spin(OPT_MOVE_HORIZON_MIN_MOVES, 0, 0, 200),
         ];
     }
 
@@ -282,6 +289,35 @@ impl EngineAdapter {
                     )?;
                 }
             }
+            OPT_SLOW_MOVER => {
+                if let Some(val) = value {
+                    let v = Self::parse_u64_in_range(OPT_SLOW_MOVER, val, 50, 200)? as u8;
+                    self.slow_mover_pct = v;
+                }
+            }
+            OPT_MAX_TIME_RATIO_PCT => {
+                if let Some(val) = value {
+                    let v = Self::parse_u64_in_range(OPT_MAX_TIME_RATIO_PCT, val, 100, 800)?;
+                    self.max_time_ratio_pct = v as u32;
+                }
+            }
+            OPT_MOVE_HORIZON_TRIGGER_MS => {
+                if let Some(val) = value {
+                    let v = Self::parse_u64_in_range(OPT_MOVE_HORIZON_TRIGGER_MS, val, 0, 600000)?;
+                    self.move_horizon_trigger_ms = v;
+                }
+            }
+            OPT_MOVE_HORIZON_MIN_MOVES => {
+                if let Some(val) = value {
+                    let v = Self::parse_u64_in_range(OPT_MOVE_HORIZON_MIN_MOVES, val, 0, 200)?;
+                    self.move_horizon_min_moves = v as u32;
+                }
+            }
+            OPT_STOCHASTIC_PONDER => {
+                if let Some(val) = value {
+                    self.stochastic_ponder = val.to_lowercase() == "true";
+                }
+            }
             "ClearHash" => {
                 if let Some(ref mut engine) = self.engine {
                     engine.clear_hash();
@@ -461,5 +497,18 @@ mod tests {
         let result = adapter.set_option("Threads", Some("not_a_number"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid Threads"));
+    }
+
+    #[test]
+    fn test_stochastic_ponder_option() {
+        let mut adapter = EngineAdapter::new();
+        // default false
+        assert!(!adapter.is_stochastic_ponder());
+        // set true
+        adapter.set_option(crate::usi::OPT_STOCHASTIC_PONDER, Some("true")).unwrap();
+        assert!(adapter.is_stochastic_ponder());
+        // set false
+        adapter.set_option(crate::usi::OPT_STOCHASTIC_PONDER, Some("false")).unwrap();
+        assert!(!adapter.is_stochastic_ponder());
     }
 }
