@@ -233,26 +233,26 @@ impl TimeManager {
 
         let tm = Self { inner };
 
-        // Final push activation (byoyomi-focused): if remaining is close to pure byoyomi
+        // Final push activation (strict): enable when already in byoyomi (main_time == 0)
         if let TimeControl::Byoyomi {
             main_time_ms,
             byoyomi_ms,
             ..
         } = &limits.time_control
         {
-            let total = main_time_ms.saturating_add(*byoyomi_ms);
-            // Threshold: total <= 1.2 * byoyomi → final push
-            if total * 10 <= (*byoyomi_ms) * 12 {
+            if *main_time_ms == 0 {
                 let worst = tm.inner.params.network_delay2_ms;
                 let avg = tm.inner.params.overhead_ms;
-                let min_ms = total.saturating_sub(worst).saturating_sub(avg);
+                let min_ms = byoyomi_ms.saturating_sub(worst).saturating_sub(avg);
                 tm.inner.final_push_active.store(true, Ordering::Relaxed);
                 tm.inner.final_push_min_ms.store(min_ms, Ordering::Relaxed);
-                // Ensure opt is at least min_ms
-                let _ = tm.inner.opt_limit_ms.fetch_max(min_ms, Ordering::Relaxed);
+                // Ensure opt covers minimum but never above hard
+                let hard = tm.inner.hard_limit_ms.load(Ordering::Relaxed);
+                let target_opt = min_ms.min(hard);
+                let _ = tm.inner.opt_limit_ms.fetch_max(target_opt, Ordering::Relaxed);
                 log::debug!(
-                    "[FinalPush] active: total={}ms, min_ms={}ms (worst={}, avg={})",
-                    total,
+                    "[FinalPush] active (in byoyomi): period={}ms, min_ms={}ms (worst={}, avg={})",
+                    byoyomi_ms,
                     min_ms,
                     worst,
                     avg
@@ -372,17 +372,18 @@ impl TimeManager {
             return true;
         }
 
-        // Soft limit with PV stability check (respect final push minimum)
+        // Soft limit with PV stability → schedule rounded stop instead of immediate stop
         let soft_limit = self.inner.soft_limit_ms.load(Ordering::Relaxed);
         if elapsed >= soft_limit && self.state_checker().is_pv_stable(elapsed) {
-            // Do not stop before final push minimum
-            if self.inner.final_push_active.load(Ordering::Relaxed) {
-                let min_ms = self.inner.final_push_min_ms.load(Ordering::Relaxed);
-                if elapsed < min_ms {
-                    return false;
-                }
+            // Schedule a rounded stop near the next second boundary
+            self.set_search_end(elapsed);
+
+            // After scheduling, stop only when we reach the scheduled end
+            let scheduled = self.inner.search_end_ms.load(Ordering::Relaxed);
+            if scheduled != u64::MAX && elapsed >= scheduled {
+                return true;
             }
-            return true;
+            return false;
         }
 
         // Emergency stop if critically low on time
@@ -429,6 +430,97 @@ impl TimeManager {
     /// Get scheduled rounded stop time (ms since start) or u64::MAX if unset
     pub fn scheduled_end_ms(&self) -> u64 {
         self.inner.search_end_ms.load(Ordering::Relaxed)
+    }
+
+    /// Compute a rounded stop target: next second boundary minus average overhead
+    fn round_up(&self, elapsed_ms: u64) -> u64 {
+        let next_sec = ((elapsed_ms / 1000).saturating_add(1)).saturating_mul(1000);
+        let overhead = self.inner.params.overhead_ms;
+        // Ensure rounding does not go backwards
+        let mut target = next_sec.saturating_sub(overhead);
+        if target <= elapsed_ms {
+            target = elapsed_ms.saturating_add(1);
+        }
+        // Never exceed hard limit
+        let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
+        if hard != u64::MAX && target > hard {
+            target = hard;
+        }
+        target
+    }
+
+    /// Schedule a rounded stop time, respecting final-push minimum and hard limit
+    fn set_search_end(&self, elapsed_ms: u64) {
+        let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
+        if hard == u64::MAX {
+            // No scheduling for infinite/ponder modes
+            return;
+        }
+
+        let mut target = self.round_up(elapsed_ms);
+
+        // Respect final push minimum (cannot exceed hard)
+        if self.inner.final_push_active.load(Ordering::Relaxed) {
+            let min_ms = self.inner.final_push_min_ms.load(Ordering::Relaxed);
+            if target < min_ms {
+                target = min_ms.min(hard);
+            }
+        }
+
+        // Remain-time upper clamp (lightweight safety)
+        if let Some(rem) = self.remain_upper_ms() {
+            if target > rem {
+                target = rem;
+            }
+        }
+
+        let current = self.inner.search_end_ms.load(Ordering::Relaxed);
+        if current == u64::MAX || target < current {
+            self.inner.search_end_ms.store(target, Ordering::Relaxed);
+            log::debug!(
+                "[TimeBudget] schedule stop at {}ms (elapsed={}, hard={})",
+                target,
+                elapsed_ms,
+                hard
+            );
+        }
+    }
+
+    /// Conservative remain-time upper bound (ms since start),
+    /// subtracting NetworkDelay2 and average overhead as safety margins.
+    fn remain_upper_ms(&self) -> Option<u64> {
+        let overhead = self.inner.params.overhead_ms;
+        let nd2 = self.inner.params.network_delay2_ms;
+        let tc = self.get_active_time_control();
+        match &*tc {
+            TimeControl::Fischer {
+                white_ms,
+                black_ms,
+                increment_ms: _,
+            } => {
+                let remain = if self.inner.side_to_move == crate::Color::White {
+                    *white_ms
+                } else {
+                    *black_ms
+                };
+                Some(remain.saturating_sub(nd2).saturating_sub(overhead).max(50))
+            }
+            TimeControl::Byoyomi {
+                main_time_ms,
+                byoyomi_ms,
+                ..
+            } => {
+                if self.is_in_byoyomi() {
+                    Some(byoyomi_ms.saturating_sub(nd2).saturating_sub(overhead).max(50))
+                } else {
+                    Some(main_time_ms.saturating_sub(nd2).saturating_sub(overhead).max(50))
+                }
+            }
+            TimeControl::FixedTime { ms_per_move } => {
+                Some(ms_per_move.saturating_sub(overhead).max(50))
+            }
+            _ => None,
+        }
     }
 
     /// Are we currently in byoyomi period (Phase 1 helper)?
@@ -514,7 +606,7 @@ impl TimeManager {
         self.state_checker().get_time_info(self.elapsed_ms())
     }
 
-    /// Phase 1: Advise a rounded stop near hard after finishing an iteration
+    /// Phase 1: Advise a rounded stop after finishing an iteration
     pub fn advise_after_iteration(&self, elapsed_ms: u64) {
         let opt = self.inner.opt_limit_ms.load(Ordering::Relaxed);
         let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
@@ -522,7 +614,10 @@ impl TimeManager {
             return;
         }
         if elapsed_ms >= opt {
-            // Safety window (adaptive)
+            // First, schedule a rounded stop based on next second boundary
+            self.set_search_end(elapsed_ms);
+
+            // Also ensure we don't plan past a conservative near-hard deadline
             let safety_ms = if hard >= 500 {
                 let three_percent = hard.saturating_mul(3) / 100;
                 three_percent.clamp(120, 400)
@@ -531,22 +626,20 @@ impl TimeManager {
             } else {
                 0
             };
-            // Hard already accounts for GUI/IPC delay; avoid double subtraction here.
-            let mut target = hard.saturating_sub(safety_ms);
-            // Prefer rounded stop in byoyomi period
-            if self.is_in_byoyomi() {
-                let next_sec = ((elapsed_ms / 1000) + 1) * 1000;
-                let rounded = next_sec.saturating_sub(self.inner.params.overhead_ms);
-                if rounded < target {
-                    target = rounded;
+            let mut deadline = hard.saturating_sub(safety_ms);
+            // Do not tighten below final-push minimum when active
+            if self.inner.final_push_active.load(Ordering::Relaxed) {
+                let min_ms = self.inner.final_push_min_ms.load(Ordering::Relaxed);
+                if deadline < min_ms {
+                    deadline = min_ms;
                 }
             }
             let current = self.inner.search_end_ms.load(Ordering::Relaxed);
-            if current == u64::MAX || target < current {
-                self.inner.search_end_ms.store(target, Ordering::Relaxed);
+            if current == u64::MAX || deadline < current {
+                self.inner.search_end_ms.store(deadline, Ordering::Relaxed);
                 log::debug!(
-                    "[TimeBudget] scheduled_end={}ms (elapsed={}, opt={}, hard={}, safety={})",
-                    target,
+                    "[TimeBudget] tighten schedule to {}ms (elapsed={}, opt={}, hard={}, safety={})",
+                    deadline,
                     elapsed_ms,
                     opt,
                     hard,
@@ -616,6 +709,9 @@ impl TimeManager {
             params: self.inner.params,
             last_pv_change_ms: &self.inner.last_pv_change_ms,
             pv_threshold_ms: &self.inner.pv_threshold_ms,
+            final_push_active: &self.inner.final_push_active,
+            final_push_min_ms: &self.inner.final_push_min_ms,
+            opt_limit_ms: &self.inner.opt_limit_ms,
         }
     }
 
@@ -634,6 +730,9 @@ impl TimeManager {
             params: self.inner.params,
             last_pv_change_ms: &self.inner.last_pv_change_ms,
             pv_threshold_ms: &self.inner.pv_threshold_ms,
+            final_push_active: &self.inner.final_push_active,
+            final_push_min_ms: &self.inner.final_push_min_ms,
+            opt_limit_ms: &self.inner.opt_limit_ms,
         }
     }
 

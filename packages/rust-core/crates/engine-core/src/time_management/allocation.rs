@@ -93,9 +93,32 @@ fn calculate_fischer_time(
         GamePhase::EndGame => params.endgame_factor,
     };
 
-    let soft_ms = ((base_ms as f64 * phase_factor * params.soft_multiplier) + 0.5) as u64;
-    let hard_ms =
+    let mut soft_ms = ((base_ms as f64 * phase_factor * params.soft_multiplier) + 0.5) as u64;
+    let mut hard_ms =
         (((soft_ms as f64 * params.hard_multiplier) + 0.5) as u64).min(remain_ms * 8 / 10);
+
+    // Apply SlowMover (%) to soft budget
+    soft_ms = ((soft_ms as u128 * params.slow_mover_pct as u128 + 50) / 100) as u64;
+
+    // Clamp hard to soft * max_time_ratio
+    if params.max_time_ratio > 0.0 {
+        let max_hard = ((soft_ms as f64 * params.max_time_ratio) + 0.5) as u64;
+        if hard_ms > max_hard {
+            hard_ms = max_hard;
+        }
+    }
+
+    // Optional move horizon guard (disabled by default)
+    if increment_ms == 0
+        && params.move_horizon_trigger_ms > 0
+        && remain_ms <= params.move_horizon_trigger_ms
+        && params.move_horizon_min_moves > 0
+    {
+        let guard_share = remain_ms / (params.move_horizon_min_moves as u64);
+        if hard_ms > guard_share {
+            hard_ms = guard_share.max(soft_ms.saturating_add(50));
+        }
+    }
 
     // Apply overhead
     let overhead = params.overhead_ms;
@@ -104,11 +127,19 @@ fn calculate_fischer_time(
 
 /// Calculate time for fixed time per move
 fn calculate_fixed_time(ms_per_move: u64, params: &TimeParameters) -> (u64, u64) {
-    // Use integer arithmetic: 90% = 9/10
-    let soft = (ms_per_move * 9) / 10;
+    // Use integer arithmetic: 90% = 9/10, then apply SlowMover
+    let mut soft = (ms_per_move * 9) / 10;
+    soft = ((soft as u128 * params.slow_mover_pct as u128 + 50) / 100) as u64;
     // Use minimal overhead for FixedTime to ensure responsiveness
     let overhead = 10u64.min(params.overhead_ms); // Max 10ms overhead for fixed time
-    (soft.saturating_sub(overhead), ms_per_move.saturating_sub(overhead))
+    let mut hard = ms_per_move;
+    if params.max_time_ratio > 0.0 {
+        let max_hard = ((soft as f64 * params.max_time_ratio) + 0.5) as u64;
+        if hard > max_hard {
+            hard = max_hard;
+        }
+    }
+    (soft.saturating_sub(overhead), hard.saturating_sub(overhead))
 }
 
 /// Calculate time for byoyomi
@@ -120,8 +151,16 @@ fn calculate_byoyomi_time(
     if main_time_ms > 0 {
         // Still in main time - treat like Fischer without increment
         // Conservative allocation: 20% soft, 50% hard
-        let soft = main_time_ms / 5; // 20% = 1/5
-        let hard = main_time_ms / 2; // 50% = 1/2
+        let mut soft = main_time_ms / 5; // 20% = 1/5
+        let mut hard = main_time_ms / 2; // 50% = 1/2
+                                         // Apply SlowMover and ratio clamp
+        soft = ((soft as u128 * params.slow_mover_pct as u128 + 50) / 100) as u64;
+        if params.max_time_ratio > 0.0 {
+            let max_hard = ((soft as f64 * params.max_time_ratio) + 0.5) as u64;
+            if hard > max_hard {
+                hard = max_hard;
+            }
+        }
         (soft, hard)
     } else {
         // In byoyomi period
@@ -132,14 +171,25 @@ fn calculate_byoyomi_time(
         let overhead = params.overhead_ms;
         let nd2 = params.network_delay2_ms;
 
-        let soft = (((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64)
+        let mut soft = (((byoyomi_ms as f64 * params.byoyomi_soft_ratio) + 0.5) as u64)
             .saturating_sub(overhead)
             .saturating_sub(nd2 / 2);
 
-        let hard = byoyomi_ms
+        // Apply SlowMover to soft in byoyomi as well (keeps behavior consistent)
+        soft = ((soft as u128 * params.slow_mover_pct as u128 + 50) / 100) as u64;
+
+        let mut hard = byoyomi_ms
             .saturating_sub(overhead)
             .saturating_sub(params.byoyomi_hard_limit_reduction_ms)
             .saturating_sub(nd2);
+
+        // Clamp hard by ratio if needed
+        if params.max_time_ratio > 0.0 {
+            let max_hard = ((soft as f64 * params.max_time_ratio) + 0.5) as u64;
+            if hard > max_hard {
+                hard = max_hard;
+            }
+        }
 
         (soft, hard)
     }
@@ -306,5 +356,43 @@ mod tests {
         );
 
         assert_eq!(soft1, soft2, "Integer arithmetic should be deterministic");
+    }
+
+    #[test]
+    fn test_fixed_time_slow_mover_and_ratio() {
+        let mut params = TimeParameters::default();
+        // Slow mover 150%
+        params.slow_mover_pct = 150;
+        // Ratio clamp 1.05
+        params.max_time_ratio = 1.05;
+
+        let (soft, hard) = calculate_time_allocation(
+            &TimeControl::FixedTime { ms_per_move: 1000 },
+            Color::Black,
+            0,
+            None,
+            GamePhase::MiddleGame,
+            &params,
+        );
+
+        // soft: 900 * 1.5 - overhead(<=10) = 1350 - 10 = 1340
+        assert!(soft >= 1330 && soft <= 1340);
+        // hard: clamp to soft*1.05 (rounded), then - overhead
+        let max_hard = ((soft as f64 * 1.05) + 0.5) as u64;
+        assert!(hard <= max_hard);
+    }
+
+    #[test]
+    fn test_fischer_move_horizon_guard() {
+        let mut params = TimeParameters::default();
+        params.move_horizon_trigger_ms = 6000;
+        params.move_horizon_min_moves = 10; // guard share = remain/10
+
+        // remain=5000ms, inc=0 → guard 有効
+        let (soft, hard) = calculate_fischer_time(5000, 0, 0, None, GamePhase::MiddleGame, &params);
+        // guard で hard は guard_share 以下（overhead 差し引きで更に下がる）
+        assert!(hard <= 5000 / 10);
+        // soft は hard より小さい
+        assert!(soft < hard);
     }
 }

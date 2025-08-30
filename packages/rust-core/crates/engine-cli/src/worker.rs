@@ -438,6 +438,7 @@ pub fn search_worker(
                 let threads_for_log = adapter.threads();
                 // Capture MinThinkMs before dropping adapter
                 let min_think_ms_val = adapter.min_think_ms() as u32;
+                let time_policy_extras = adapter.get_time_policy_extras();
                 drop(adapter); // release adapter lock early
 
                 // Compute effective byoyomi status without holding adapter lock
@@ -474,6 +475,10 @@ pub fn search_worker(
                     pv_base,
                     pv_slope,
                     min_think_ms_val,
+                    time_policy_extras.0,
+                    time_policy_extras.1,
+                    time_policy_extras.2,
+                    time_policy_extras.3,
                 );
                 let limits = match limits_res {
                     Ok(l) => l,
@@ -1155,7 +1160,6 @@ pub fn wait_for_worker_with_timeout(
     search_state: &mut SearchState,
     timeout: Duration,
 ) -> Result<()> {
-    use crate::helpers::MIN_JOIN_TIMEOUT;
     use crossbeam_channel::select;
     const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -1183,6 +1187,13 @@ pub fn wait_for_worker_with_timeout(
                             log::trace!("Ignoring duplicate Finished message #{finished_count} (from_guard: {from_guard})");
                         }
                     }
+                    Ok(WorkerMessage::SearchFinished { .. }) => {
+                        // Treat SearchFinished as completion signal in shutdown wait
+                        // The EngineReturnGuard::drop will still run; join attempt follows below.
+                        log::debug!("Worker reported SearchFinished during shutdown wait");
+                        finished = true;
+                        break;
+                    }
                     Ok(WorkerMessage::HardDeadlineFire { .. }) => {
                         // ignore in shutdown wait loop
                         log::trace!("HardDeadlineFire during shutdown - ignoring");
@@ -1204,10 +1215,6 @@ pub fn wait_for_worker_with_timeout(
                         // Committed iteration updates during shutdown can be ignored
                         log::trace!("IterationCommitted during shutdown - ignoring");
                     }
-                    Ok(WorkerMessage::SearchFinished { .. }) => {
-                        // Search finished during shutdown can be ignored
-                        log::trace!("SearchFinished during shutdown - ignoring");
-                    }
                     Ok(WorkerMessage::SearchStarted { .. }) => {
                         // Search started during shutdown can be ignored
                         log::trace!("SearchStarted during shutdown - ignoring");
@@ -1224,7 +1231,7 @@ pub fn wait_for_worker_with_timeout(
             }
             default(SELECT_TIMEOUT) => {
                 if Instant::now() > deadline {
-                    log::error!("Worker thread timeout after {:?}", timeout.max(MIN_JOIN_TIMEOUT));
+                    log::error!("Worker thread timeout (timeout={:?})", timeout);
                     // Return error instead of exit for graceful handling
                     return Err(anyhow::anyhow!("Worker thread timeout"));
                 }

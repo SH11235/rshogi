@@ -26,6 +26,11 @@ pub struct PonderManager<'a> {
     pub(crate) params: TimeParameters,
     pub(crate) last_pv_change_ms: &'a AtomicU64,
     pub(crate) pv_threshold_ms: &'a AtomicU64,
+    // Final push controls (to be recomputed on ponderhit if Byoyomi)
+    pub(crate) final_push_active: &'a AtomicBool,
+    pub(crate) final_push_min_ms: &'a AtomicU64,
+    // Optimum limit (Phase 1 budget), to ensure it covers minimum when needed
+    pub(crate) opt_limit_ms: &'a AtomicU64,
 }
 
 impl<'a> PonderManager<'a> {
@@ -142,6 +147,34 @@ impl<'a> PonderManager<'a> {
 
         // Clear ponder flag
         self.is_ponder.store(false, Ordering::Release);
+
+        // Recompute FinalPush if we're now in Byoyomi (strict rule)
+        if let TimeControl::Byoyomi {
+            periods: _,
+            byoyomi_ms,
+            main_time_ms,
+        } = &actual_time_control
+        {
+            if *main_time_ms == 0 {
+                let worst = self.params.network_delay2_ms;
+                let avg = self.params.overhead_ms;
+                let min_ms = byoyomi_ms.saturating_sub(worst).saturating_sub(avg);
+                self.final_push_active.store(true, Ordering::Relaxed);
+                self.final_push_min_ms.store(min_ms, Ordering::Relaxed);
+                // Ensure opt covers minimum but never above hard
+                let hard = self.hard_limit_ms.load(Ordering::Relaxed);
+                let target_opt = min_ms.min(hard);
+                let _ = self.opt_limit_ms.fetch_max(target_opt, Ordering::Relaxed);
+                log::debug!(
+                    "[FinalPush] (ponderhit) active in byoyomi: period={}ms, min_ms={}ms",
+                    byoyomi_ms,
+                    min_ms
+                );
+            } else {
+                self.final_push_active.store(false, Ordering::Relaxed);
+                self.final_push_min_ms.store(0, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Create ponder limits from pending limits

@@ -249,6 +249,65 @@ pub fn wait_for_search_completion(
     Ok(())
 }
 
+/// Wait for any ongoing search to complete with a custom timeout
+pub fn wait_for_search_completion_with_timeout(
+    search_state: &mut SearchState,
+    stop_flag: &Arc<AtomicBool>,
+    current_stop_flag: Option<&Arc<AtomicBool>>, // Per-search stop flag
+    worker_handle: &mut Option<JoinHandle<()>>,
+    worker_rx: &Receiver<WorkerMessage>,
+    _engine: &Arc<Mutex<EngineAdapter>>,
+    timeout: Duration,
+) -> Result<()> {
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "wait_for_search_begin"),
+        ("state", &format!("{:?}", *search_state)),
+    ]));
+    if search_state.is_searching() {
+        log::info!(
+            "wait_for_search_completion_with_timeout: stopping ongoing search, state={:?}",
+            search_state
+        );
+        let stop_start = std::time::Instant::now();
+        *search_state = SearchState::StopRequested;
+        stop_flag.store(true, Ordering::Release);
+        if let Some(search_flag) = current_stop_flag {
+            search_flag.store(true, Ordering::Release);
+            log::debug!(
+                "wait_for_search_completion_with_timeout: set per-search stop flag to true"
+            );
+        }
+        log::debug!("Waiting up to {:?} for worker to finish (custom)", timeout);
+        let wait_result =
+            wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, timeout);
+        let stop_duration = stop_start.elapsed();
+        log::info!("wait_for_search_completion_with_timeout: completed in {stop_duration:?}");
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "wait_for_search_done"),
+            ("elapsed_ms", &stop_duration.as_millis().to_string()),
+        ]));
+
+        if let Err(e) = wait_result {
+            let position_info = {
+                let adapter = lock_or_recover_adapter(_engine);
+                adapter
+                    .get_position()
+                    .map(position_to_sfen)
+                    .unwrap_or_else(|| "<no position>".to_string())
+            };
+            log::error!("wait_for_worker_with_timeout failed at position {position_info}: {e}, forcing clean state");
+            *search_state = SearchState::Idle;
+        }
+        // Reset stop flag to false after completion
+        stop_flag.store(false, Ordering::Release);
+        log::debug!("wait_for_search_completion_with_timeout: reset stop_flag to false after stopping search");
+    } else {
+        let _ =
+            send_info_string(log_tsv(&[("kind", "state_idle_after_finalize"), ("search_id", "0")]));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,9 +31,21 @@ pub struct TimeParameters {
     pub hard_multiplier: f64, // Default: 4.0
     pub increment_usage: f64, // Default: 0.8
 
+    // Slow mover (%): scales soft/optimum budget, 100 = 1.0x
+    pub slow_mover_pct: u8, // Default: 100
+
+    // Max time ratio: clamp hard <= soft * max_time_ratio
+    pub max_time_ratio: f64, // Default: 5.0
+
     // Byoyomi specific
     pub byoyomi_soft_ratio: f64, // Default: 0.8 (80% of byoyomi time)
     pub byoyomi_hard_limit_reduction_ms: u64, // Default: 500 (additional safety margin for byoyomi hard limit)
+
+    // Move horizon (sudden-death guard). Disabled by default.
+    /// Apply guard only when remain <= trigger (0 disables).
+    pub move_horizon_trigger_ms: u64, // Default: 0
+    /// Minimum number of moves to guard (0 disables)
+    pub move_horizon_min_moves: u32, // Default: 0
 
     // Game phase factors
     pub opening_factor: f64, // Default: 1.2
@@ -53,10 +65,14 @@ impl Default for TimeParameters {
             soft_multiplier: 1.0,
             hard_multiplier: 4.0,
             increment_usage: 0.8,
+            slow_mover_pct: 100,
+            max_time_ratio: 5.0,
             byoyomi_soft_ratio: 0.8,
             byoyomi_hard_limit_reduction_ms: 500,
             opening_factor: 1.2,
             endgame_factor: 0.8,
+            move_horizon_trigger_ms: 0,
+            move_horizon_min_moves: 0,
         }
     }
 }
@@ -77,6 +93,8 @@ pub enum TimeParameterError {
     SoftMultiplier { value: f64, min: f64, max: f64 },
     HardMultiplier { value: f64, min: f64, max: f64 },
     IncrementUsage { value: f64, min: f64, max: f64 },
+    SlowMoverPct { value: u8, min: u8, max: u8 },
+    MaxTimeRatio { value: f64, min: f64, max: f64 },
 }
 
 impl fmt::Display for TimeParameterError {
@@ -106,6 +124,12 @@ impl fmt::Display for TimeParameterError {
             Self::IncrementUsage { value, min, max } => {
                 write!(f, "Increment usage must be between {min} and {max}, got {value}")
             }
+            Self::SlowMoverPct { value, min, max } => {
+                write!(f, "Slow mover percent must be between {min} and {max}, got {value}")
+            }
+            Self::MaxTimeRatio { value, min, max } => {
+                write!(f, "Max time ratio must be between {min} and {max}, got {value}")
+            }
         }
     }
 }
@@ -130,6 +154,12 @@ pub mod constants {
     pub const MAX_PV_STABILITY_BASE: u64 = 200;
     pub const MIN_PV_STABILITY_SLOPE: u64 = 0;
     pub const MAX_PV_STABILITY_SLOPE: u64 = 20;
+
+    // Slow mover and ratio ranges
+    pub const MIN_SLOW_MOVER_PCT: u8 = 50;
+    pub const MAX_SLOW_MOVER_PCT: u8 = 200;
+    pub const MIN_MAX_TIME_RATIO: f64 = 1.0;
+    pub const MAX_MAX_TIME_RATIO: f64 = 8.0;
 }
 
 impl TimeParametersBuilder {
@@ -256,6 +286,43 @@ impl TimeParametersBuilder {
             });
         }
         self.params.increment_usage = usage;
+        Ok(self)
+    }
+
+    /// Set slow mover percent (50 - 200)
+    pub fn slow_mover_pct(mut self, pct: u8) -> Result<Self, TimeParameterError> {
+        if !(constants::MIN_SLOW_MOVER_PCT..=constants::MAX_SLOW_MOVER_PCT).contains(&pct) {
+            return Err(TimeParameterError::SlowMoverPct {
+                value: pct,
+                min: constants::MIN_SLOW_MOVER_PCT,
+                max: constants::MAX_SLOW_MOVER_PCT,
+            });
+        }
+        self.params.slow_mover_pct = pct;
+        Ok(self)
+    }
+
+    /// Set max time ratio (1.0 - 8.0)
+    pub fn max_time_ratio(mut self, ratio: f64) -> Result<Self, TimeParameterError> {
+        if !(constants::MIN_MAX_TIME_RATIO..=constants::MAX_MAX_TIME_RATIO).contains(&ratio) {
+            return Err(TimeParameterError::MaxTimeRatio {
+                value: ratio,
+                min: constants::MIN_MAX_TIME_RATIO,
+                max: constants::MAX_MAX_TIME_RATIO,
+            });
+        }
+        self.params.max_time_ratio = ratio;
+        Ok(self)
+    }
+
+    /// Enable move horizon guard (trigger_ms=0 disables)
+    pub fn move_horizon_guard(
+        mut self,
+        trigger_ms: u64,
+        min_moves: u32,
+    ) -> Result<Self, TimeParameterError> {
+        self.params.move_horizon_trigger_ms = trigger_ms;
+        self.params.move_horizon_min_moves = min_moves;
         Ok(self)
     }
 
