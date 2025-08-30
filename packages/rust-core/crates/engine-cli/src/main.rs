@@ -661,6 +661,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 WorkerMessage::PartialResult { search_id, .. } => *search_id,
                 WorkerMessage::Finished { search_id, .. } => *search_id, // already excluded above
                 WorkerMessage::Error { search_id, .. } => *search_id,
+                WorkerMessage::HardDeadlineFire { search_id, .. } => *search_id,
             };
             if id == current_id {
                 // Log and drop
@@ -673,6 +674,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     WorkerMessage::PartialResult { .. } => "partial",
                     WorkerMessage::Error { .. } => "error",
                     WorkerMessage::Finished { .. } => "finished", // unreachable here
+                    WorkerMessage::HardDeadlineFire { .. } => "hard_deadline",
                 };
                 log_drop(tag, &[("search_id", id.to_string())]);
                 return Ok(());
@@ -688,7 +690,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             hard_ms,
         } => {
             let emit_start = Instant::now();
-            // Emit immediately on watchdog fire (state非依存、emitter未finalizeで一度だけ)
+            // Central finalize on watchdog fire（必ず試行）
             if search_id != *ctx.current_search_id {
                 let _ = send_info_string(log_tsv(&[
                     ("kind", "watchdog_emit_drop"),
@@ -696,49 +698,41 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 ]));
                 return Ok(());
             }
-            if let Some(ref emitter) = ctx.current_bestmove_emitter {
-                if emitter.is_finalized() || emitter.is_terminated() {
-                    let _ = send_info_string(log_tsv(&[
-                        ("kind", "watchdog_emit_drop"),
-                        ("reason", "finalized_or_terminated"),
-                    ]));
-                    return Ok(());
-                }
-            } else {
+
+            // Compute threshold_ms for diagnostics
+            let min_think = {
+                let adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
+                adapter.min_think_ms() as u64
+            };
+            let threshold_ms = hard_ms.min(soft_ms.saturating_add(50).max(min_think));
+            let now_ms = ctx.last_go_begin_at.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "watchdog_fired_handled"),
+                ("search_id", &search_id.to_string()),
+                ("now_ms", &now_ms.to_string()),
+                ("threshold_ms", &threshold_ms.to_string()),
+                ("state", &format!("{:?}", *ctx.search_state)),
+            ]));
+
+            let stop_info = engine_core::search::types::StopInfo {
+                reason: engine_core::search::types::TerminationReason::TimeLimit,
+                elapsed_ms: 0,
+                nodes: 0,
+                depth_reached: ctx.current_committed.as_ref().map(|c| c.depth).unwrap_or(0),
+                hard_timeout: false,
+                soft_limit_ms: soft_ms,
+                hard_limit_ms: hard_ms,
+            };
+
+            if ctx.finalize_emit_if_possible("watchdog", Some(stop_info))? {
                 let _ = send_info_string(log_tsv(&[
-                    ("kind", "watchdog_emit_drop"),
-                    ("reason", "no_emitter"),
+                    ("kind", "watchdog_emit_latency"),
+                    ("ms", &emit_start.elapsed().as_millis().to_string()),
                 ]));
                 return Ok(());
             }
 
-            // Prefer committed iteration
-            if let Some(committed) = ctx.current_committed.clone() {
-                let stop_info = engine_core::search::types::StopInfo {
-                    reason: engine_core::search::types::TerminationReason::TimeLimit,
-                    elapsed_ms: 0,
-                    nodes: 0,
-                    depth_reached: committed.depth,
-                    hard_timeout: false,
-                    soft_limit_ms: soft_ms,
-                    hard_limit_ms: hard_ms,
-                };
-                if ctx.emit_best_from_committed(
-                    &committed,
-                    BestmoveSource::PartialResultTimeout,
-                    Some(stop_info),
-                    "WatchdogCommitted",
-                )? {
-                    // Emit-latency (watchdog_fire → bestmove_sent) observation
-                    let _ = send_info_string(log_tsv(&[
-                        ("kind", "watchdog_emit_latency"),
-                        ("ms", &emit_start.elapsed().as_millis().to_string()),
-                    ]));
-                    return Ok(());
-                }
-            }
-
-            // Fallback chain: partial → pre_session → emergency
+            // Fallback chain（残置・段階撤去予定）: partial → pre_session → emergency
             if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
                 if let Ok((move_str, _)) =
                     generate_fallback_move(ctx.engine, Some((mv, d, s)), ctx.allow_null_move, true)
@@ -1016,6 +1010,28 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     }
                 }
             }
+            return Ok(());
+        }
+        WorkerMessage::HardDeadlineFire { search_id, hard_ms } => {
+            // Insurance: hard deadline single-shot
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "hard_deadline_fire"),
+                ("search_id", &search_id.to_string()),
+                ("hard_ms", &hard_ms.to_string()),
+            ]));
+            if search_id != *ctx.current_search_id {
+                return Ok(());
+            }
+            let stop_info = engine_core::search::types::StopInfo {
+                reason: engine_core::search::types::TerminationReason::TimeLimit,
+                elapsed_ms: 0,
+                nodes: 0,
+                depth_reached: ctx.current_committed.as_ref().map(|c| c.depth).unwrap_or(0),
+                hard_timeout: true,
+                soft_limit_ms: 0,
+                hard_limit_ms: hard_ms,
+            };
+            let _ = ctx.finalize_emit_if_possible("hard", Some(stop_info));
             return Ok(());
         }
         WorkerMessage::Info { info, search_id } => {

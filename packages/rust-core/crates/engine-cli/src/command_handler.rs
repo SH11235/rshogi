@@ -73,6 +73,78 @@ impl<'a> CommandContext<'a> {
             *self.final_pv_injected = true;
         }
     }
+
+    /// Central finalize: choose final bestmove via core and emit once, with minimal guards
+    /// Returns true if emission occurred.
+    pub fn finalize_emit_if_possible(
+        &mut self,
+        path: &str,
+        stop_info: Option<StopInfo>,
+    ) -> Result<bool> {
+        // Flags snapshot
+        let (emitter_present, finalized, terminated) =
+            if let Some(ref em) = self.current_bestmove_emitter {
+                (true, em.is_finalized(), em.is_terminated())
+            } else {
+                (false, false, false)
+            };
+        let ponder = *self.current_search_is_ponder;
+        // Log attempt with flags
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "finalize_attempt"),
+            ("search_id", &self.current_search_id.to_string()),
+            ("path", path),
+            ("finalized", if finalized { "1" } else { "0" }),
+            ("emitter_present", if emitter_present { "1" } else { "0" }),
+            ("ponder", if ponder { "1" } else { "0" }),
+            ("state", &format!("{:?}", *self.search_state)),
+        ]));
+
+        // Minimal guard: only block if already finalized or terminated
+        if finalized || terminated {
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "finalize_guard_blocked"),
+                ("search_id", &self.current_search_id.to_string()),
+                ("finalized", if finalized { "1" } else { "0" }),
+                ("terminated", if terminated { "1" } else { "0" }),
+            ]));
+            return Ok(false);
+        }
+
+        // Decide bestmove via core
+        let adapter = crate::worker::lock_or_recover_adapter(self.engine);
+        if let Some((bm, pv, src)) =
+            adapter.choose_final_bestmove_core(self.current_committed.as_ref())
+        {
+            let info = crate::usi::output::SearchInfo {
+                multipv: Some(1),
+                pv,
+                ..Default::default()
+            };
+            self.inject_final_pv(info, "central_finalize");
+            let meta = crate::emit_utils::build_meta(
+                crate::types::BestmoveSource::CoreFinalize,
+                0,
+                None,
+                Some(format!("string core_src={src}")),
+                stop_info,
+            );
+            self.emit_and_finalize(bm, None, meta, &format!("CentralFinalize:{path}"))?;
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "finalize_source"),
+                ("search_id", &self.current_search_id.to_string()),
+                ("source", &src),
+            ]));
+            return Ok(true);
+        }
+
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "finalize_guard_blocked"),
+            ("reason", "engine_or_position_missing"),
+            ("search_id", &self.current_search_id.to_string()),
+        ]));
+        Ok(false)
+    }
     /// Try to emit bestmove from a committed iteration
     pub(crate) fn emit_best_from_committed(
         &mut self,
