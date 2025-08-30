@@ -365,6 +365,10 @@ static WRITER_THREAD: Lazy<JoinHandle<()>> = Lazy::new(|| {
 });
 
 /// Send USI response with error handling and retry logic
+/// Flush any buffered output immediately (non-blocking request)
+pub fn flush_now() {
+    let _ = OUTPUT_CHAN.0.send(OutputMsg::Flush);
+}
 /// Deprecated retry path removed in single-writer model
 /// Error types for stdout operations
 #[derive(Debug, thiserror::Error)]

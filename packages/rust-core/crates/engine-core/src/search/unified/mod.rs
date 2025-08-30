@@ -22,6 +22,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
+        config,
         constants::SEARCH_INF,
         history::{CounterMoveHistory, History},
         parallel::shared::DuplicationStats,
@@ -428,6 +429,33 @@ where
                         elapsed: self.context.elapsed(),
                     };
                     iter_cb(&committed);
+                }
+
+                // Early stop on proven mate with stability guard (distance-based)
+                // Apply only when enabled and not in ponder/infinite modes
+                let tc = self.context.limits().time_control.clone();
+                let is_ponder = matches!(tc, crate::time_management::TimeControl::Ponder(_));
+                let is_infinite = matches!(tc, crate::time_management::TimeControl::Infinite);
+                let allow_mate_early =
+                    config::mate_early_stop_enabled() && !is_ponder && !is_infinite;
+                if allow_mate_early && crate::search::common::is_mate_score(best_score) {
+                    if let Some(d) = crate::search::common::get_mate_distance(best_score) {
+                        // Threshold: 2.5*d + 2 (rounded down)
+                        let thr = ((d * 5) / 2 + 2).max(1) as u8;
+                        // Stability: PV head unchanged from previous iteration
+                        let stable = !self.previous_pv.is_empty()
+                            && !self.stats.pv.is_empty()
+                            && self.previous_pv[0] == self.stats.pv[0];
+                        if stable && self.stats.depth >= thr {
+                            log::debug!(
+                                "[MateEarlyStop] depth={} thr={} d={} pv_head_stable=true",
+                                self.stats.depth,
+                                thr,
+                                d
+                            );
+                            break;
+                        }
+                    }
                 }
 
                 // Phase 1: advise rounded stop near hard if we've already spent opt

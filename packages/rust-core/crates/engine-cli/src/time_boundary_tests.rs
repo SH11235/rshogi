@@ -48,6 +48,8 @@ fn setup_ctx() -> (
     static mut LAST_BESTMOVE_SENT_AT: Option<Instant> = None;
     static mut LAST_GO_BEGIN_AT: Option<Instant> = None;
     static mut FINAL_PV_INJECTED: bool = false;
+    static mut HARD_DEADLINE_TAKEN: bool = false;
+    static mut ROOT_LEGAL_MOVES: Option<Vec<String>> = None;
 
     let ctx = unsafe {
         CommandContext {
@@ -69,9 +71,10 @@ fn setup_ctx() -> (
             position_state: &mut POSITION_STATE,
             program_start: Instant::now(),
             last_partial_result: &mut LAST_PARTIAL_RESULT,
+            root_legal_moves: &mut ROOT_LEGAL_MOVES,
+            hard_deadline_taken: &mut HARD_DEADLINE_TAKEN,
             pre_session_fallback: &mut PRE_SESSION_FALLBACK,
             pre_session_fallback_hash: &mut PRE_SESSION_FALLBACK_HASH,
-            current_committed: &mut CURRENT_COMMITTED,
             last_bestmove_sent_at: &mut LAST_BESTMOVE_SENT_AT,
             last_go_begin_at: &mut LAST_GO_BEGIN_AT,
             final_pv_injected: &mut FINAL_PV_INJECTED,
@@ -202,4 +205,3 @@ fn test_time_boundary_near_hard_emits() {
         infos
     );
 }
-

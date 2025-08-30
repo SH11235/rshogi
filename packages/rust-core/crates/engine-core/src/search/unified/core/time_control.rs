@@ -106,6 +106,11 @@ where
             let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
             if elapsed_ms < hard {
                 let remain = hard - elapsed_ms;
+                // Strengthen polling when within 2*NetworkDelay2
+                let nd2 = tm.network_delay2_ms();
+                if nd2 > 0 && remain <= nd2.saturating_mul(2) {
+                    return masks::EVERY_NODE; // ultra-responsive near IO boundary
+                }
                 // Ramp up responsiveness as we approach hard limit (strictly inside thresholds)
                 match remain {
                     0..=50 => return EVERY_NODE,  // ultra-critical: every node

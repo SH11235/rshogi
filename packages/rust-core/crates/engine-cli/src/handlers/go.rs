@@ -24,6 +24,9 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     log::debug!("NewSearchStart: go received at {go_received_time:?}");
     // Reset per-search final PV injection guard
     *ctx.final_pv_injected = false;
+    // Reset hard deadline backstop guard and legal-move snapshot
+    *ctx.hard_deadline_taken = false;
+    *ctx.root_legal_moves = None;
 
     // USI-visible diagnostic: go handler entry
     let now = Instant::now();
