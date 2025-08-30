@@ -1058,36 +1058,10 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     ]));
                     return Ok(());
                 }
-                // Send bestmove immediately if not ponder (Core finalize)
+                // Send bestmove immediately if not ponder (Central finalize)
                 if !*ctx.current_search_is_ponder {
-                    if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                        let adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
-                        if let Some((bm, pv, src)) =
-                            adapter.choose_final_bestmove_core(ctx.current_committed.as_ref())
-                        {
-                            let info = crate::usi::output::SearchInfo {
-                                multipv: Some(1),
-                                pv,
-                                ..Default::default()
-                            };
-                            ctx.inject_final_pv(info, "searchfinished_core_finalize");
-                            let meta = build_meta(
-                                BestmoveSource::CoreFinalize,
-                                0,
-                                None,
-                                Some(format!("string core_src={src}")),
-                                stop_info,
-                            );
-                            ctx.emit_and_finalize(bm, None, meta, "SearchFinishedCoreFinalize")?;
-                            return Ok(());
-                        } else {
-                            log::warn!("Core finalize selection unavailable at SearchFinished; emitter present but engine/position missing");
-                            return Ok(());
-                        }
-                    } else {
-                        log::debug!("SearchFinished: emitter not available; ignoring direct send (likely already emitted)");
-                        return Ok(());
-                    }
+                    let _ = ctx.finalize_emit_if_possible("search_finished", stop_info)?;
+                    return Ok(());
                 } else {
                     log::debug!("Ponder search finished, not sending bestmove");
                     // Finalize ponder search to ensure proper cleanup
@@ -1155,28 +1129,11 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     "Worker Finished without SearchFinished (from_guard: {from_guard}), emitting fallback"
                 );
 
-                // Try core finalize first (book→committed→TT→legal/resign)
-                if !*ctx.current_search_is_ponder {
-                    let adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
-                    if let Some((bm, pv, src)) =
-                        adapter.choose_final_bestmove_core(ctx.current_committed.as_ref())
-                    {
-                        let info = crate::usi::output::SearchInfo {
-                            multipv: Some(1),
-                            pv,
-                            ..Default::default()
-                        };
-                        ctx.inject_final_pv(info, "core_finalize_on_finished");
-                        let meta = build_meta(
-                            BestmoveSource::CoreFinalize,
-                            0,
-                            None,
-                            Some(format!("string core_src={src}")),
-                            None,
-                        );
-                        ctx.emit_and_finalize(bm, None, meta, "CoreFinalizeOnFinished")?;
-                        return Ok(());
-                    }
+                // Try central finalize first
+                if !*ctx.current_search_is_ponder
+                    && ctx.finalize_emit_if_possible("finished", None)?
+                {
+                    return Ok(());
                 }
 
                 // Try committed-based bestmove first

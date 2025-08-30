@@ -45,13 +45,7 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
             return Ok(());
         }
         // 旧分岐を段階撤去するため、中央finalizeが不可能な場合は最小限のresignで確実に送出
-        let meta = build_meta(
-            BestmoveSource::ResignOnFinish,
-            0,
-            None,
-            None,
-            Some(stop_info),
-        );
+        let meta = build_meta(BestmoveSource::ResignOnFinish, 0, None, None, Some(stop_info));
         let info = crate::usi::output::SearchInfo {
             multipv: Some(1),
             pv: vec!["resign".to_string()],
