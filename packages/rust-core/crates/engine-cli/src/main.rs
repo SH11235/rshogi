@@ -146,6 +146,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     // Diagnostics: timestamps for cross-event deltas
     let mut last_bestmove_sent_at: Option<Instant> = None;
     let mut last_go_begin_at: Option<Instant> = None;
+    // Per-search runtime metrics for HardDeadlineFire
+    let mut search_start_time: Option<Instant> = None;
+    let mut latest_nodes: u64 = 0;
+    let mut soft_limit_ms_ctx: u64 = 0;
 
     // Additional per-search guards/state (reset by go handler)
     let mut hard_deadline_taken: bool = false; // exactly-once backstop for HardDeadlineFire
@@ -232,6 +236,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        search_start_time: &mut search_start_time,
+                        latest_nodes: &mut latest_nodes,
+                        soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
                         root_legal_moves: &mut root_legal_moves,
                         hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
@@ -292,6 +299,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        search_start_time: &mut search_start_time,
+                        latest_nodes: &mut latest_nodes,
+                        soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
                         root_legal_moves: &mut root_legal_moves,
                         hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
@@ -341,6 +351,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        search_start_time: &mut search_start_time,
+                        latest_nodes: &mut latest_nodes,
+                        soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
                         root_legal_moves: &mut root_legal_moves,
                         hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
@@ -395,6 +408,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         position_state: &mut position_state,
                         program_start,
                         last_partial_result: &mut last_partial_result,
+                        search_start_time: &mut search_start_time,
+                        latest_nodes: &mut latest_nodes,
+                        soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
                         root_legal_moves: &mut root_legal_moves,
                         hard_deadline_taken: &mut hard_deadline_taken,
                         pre_session_fallback: &mut pre_session_fallback,
@@ -474,6 +490,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             position_state: &mut position_state,
                             program_start,
                             last_partial_result: &mut last_partial_result,
+                            search_start_time: &mut search_start_time,
+                            latest_nodes: &mut latest_nodes,
+                            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
                             root_legal_moves: &mut root_legal_moves,
                             hard_deadline_taken: &mut hard_deadline_taken,
                             pre_session_fallback: &mut pre_session_fallback,
@@ -523,6 +542,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             position_state: &mut position_state,
                             program_start,
                             last_partial_result: &mut last_partial_result,
+                            search_start_time: &mut search_start_time,
+                            latest_nodes: &mut latest_nodes,
+                            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
                             root_legal_moves: &mut root_legal_moves,
                             hard_deadline_taken: &mut hard_deadline_taken,
                             pre_session_fallback: &mut pre_session_fallback,
@@ -683,14 +705,31 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 return Ok(());
             }
 
-            // Build base StopInfo (hard timeout)
+            // Build base StopInfo (hard timeout) with best-known metrics
+            let elapsed_from_start =
+                ctx.search_start_time.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0);
+            let (comm_elapsed, comm_nodes, comm_depth) = ctx
+                .current_committed
+                .as_ref()
+                .map(|c| (c.elapsed.as_millis() as u64, c.nodes, c.depth))
+                .unwrap_or((0, 0, 0));
+            let final_elapsed = if elapsed_from_start > 0 {
+                elapsed_from_start
+            } else {
+                comm_elapsed
+            };
+            let final_nodes = if *ctx.latest_nodes > 0 {
+                *ctx.latest_nodes
+            } else {
+                comm_nodes
+            };
             let base_stop = engine_core::search::types::StopInfo {
                 reason: engine_core::search::types::TerminationReason::TimeLimit,
-                elapsed_ms: 0,
-                nodes: 0,
-                depth_reached: ctx.current_committed.as_ref().map(|c| c.depth).unwrap_or(0),
+                elapsed_ms: final_elapsed,
+                nodes: final_nodes,
+                depth_reached: comm_depth,
                 hard_timeout: true,
-                soft_limit_ms: 0,
+                soft_limit_ms: *ctx.soft_limit_ms_ctx,
                 hard_limit_ms: hard_ms,
             };
 
@@ -855,6 +894,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         "Updated BestmoveEmitter with worker start time for search {search_id}"
                     );
                 }
+                // Record search start time for HardDeadline metrics
+                *ctx.search_start_time = Some(start_time);
                 // USI-visible diagnostic: SearchStarted event and delta from go_begin
                 if let Some(t) = *ctx.last_go_begin_at {
                     let delta = t.elapsed().as_millis() as u64;
@@ -920,6 +961,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 );
                 // Save committed and capture root legal move set (for hard-deadline backstop)
                 *ctx.current_committed = Some(committed);
+                // Update latest nodes snapshot
+                *ctx.latest_nodes = ctx.current_committed.as_ref().map(|c| c.nodes).unwrap_or(0);
                 // Best-effort snapshot (non-blocking try_lock to avoid stalls)
                 if let Ok(adapter) = ctx.engine.try_lock() {
                     if let Some(pos) = adapter.get_position() {
@@ -927,17 +970,19 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         if let Ok(list) = mg.generate_all(pos) {
                             let v: Vec<String> = list.iter().map(move_to_usi).collect();
                             *ctx.root_legal_moves = Some(v);
-                            let _ = send_info_string(log_tsv(&[
-                                ("kind", "committed_root_legal_snapshot"),
-                                (
-                                    "count",
-                                    &ctx.root_legal_moves
-                                        .as_ref()
-                                        .map(|v| v.len())
-                                        .unwrap_or(0)
-                                        .to_string(),
-                                ),
-                            ]));
+                            if std::env::var("LOG_ROOT_LEGAL").as_deref() == Ok("1") {
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "committed_root_legal_snapshot"),
+                                    (
+                                        "count",
+                                        &ctx.root_legal_moves
+                                            .as_ref()
+                                            .map(|v| v.len())
+                                            .unwrap_or(0)
+                                            .to_string(),
+                                    ),
+                                ]));
+                            }
                         }
                     }
                 }

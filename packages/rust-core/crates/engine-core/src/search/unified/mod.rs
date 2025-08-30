@@ -196,10 +196,7 @@ where
 
         while depth <= max_depth && !self.context.should_stop() {
             // Phase 1: advise rounded stop near hard at the start of iteration
-            if let Some(ref tm) = self.time_manager {
-                let elapsed_ms = self.context.elapsed().as_millis() as u64;
-                tm.advise_after_iteration(elapsed_ms);
-            }
+            // Removed: early advise_before_iteration to avoid premature scheduling
             // Clear all PV lines at the start of each iteration
             self.pv_table.clear_all();
 
@@ -209,7 +206,7 @@ where
             // Process events including ponder hit
             self.context.process_events(&self.time_manager);
 
-            // Phase 1: advise again after event processing (elapsed may have progressed)
+            // Advise after event processing (elapsed may have progressed)
             if let Some(ref tm) = self.time_manager {
                 let elapsed_ms = self.context.elapsed().as_millis() as u64;
                 tm.advise_after_iteration(elapsed_ms);
