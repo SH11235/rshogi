@@ -89,16 +89,19 @@ impl<'a> PonderManager<'a> {
         );
 
         // Adjust for time already spent
-        let adjusted_soft = soft_ms.saturating_sub(time_already_spent_ms).max(100);
+        let mut adjusted_soft = soft_ms.saturating_sub(time_already_spent_ms).max(100);
         let adjusted_hard = hard_ms.saturating_sub(time_already_spent_ms).max(200);
 
-        // Ensure soft <= hard invariant with reasonable margin
-        // Use 50% of hard limit for soft limit when extremely time-constrained
-        let adjusted_soft = if adjusted_soft >= adjusted_hard {
-            adjusted_hard / 2
-        } else {
-            adjusted_soft
-        };
+        // Apply MinThinkMs lower bound for soft
+        if params.min_think_ms > 0 && adjusted_soft < params.min_think_ms {
+            adjusted_soft = params.min_think_ms;
+        }
+
+        // Ensure soft <= hard - 50ms (reasonable margin)
+        if adjusted_soft.saturating_add(50) > adjusted_hard {
+            // If extremely constrained, keep at least 50ms difference when possible
+            adjusted_soft = adjusted_hard.saturating_sub(50);
+        }
 
         // Update limits atomically
         self.soft_limit_ms.store(adjusted_soft, Ordering::Release);

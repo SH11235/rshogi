@@ -26,6 +26,7 @@ impl EngineAdapter {
             EngineOption::spin("USI_Hash", 1024, 1, 32768),
             EngineOption::spin("Threads", 1, 1, 256),
             EngineOption::check("USI_Ponder", true),
+            EngineOption::spin("MinThinkMs", 200, 0, 10000),
             EngineOption::combo(
                 "EngineType",
                 "Material".to_string(), // Default to Material for stability
@@ -133,6 +134,12 @@ impl EngineAdapter {
             "USI_Ponder" => {
                 if let Some(val) = value {
                     self.ponder = val.to_lowercase() == "true";
+                }
+            }
+            "MinThinkMs" => {
+                if let Some(val) = value {
+                    let v = Self::parse_u64_in_range("MinThinkMs", val, 0, 10000)?;
+                    self.min_think_ms = v;
                 }
             }
             "EngineType" => {

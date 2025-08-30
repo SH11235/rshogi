@@ -176,6 +176,31 @@ impl TimeManager {
                     }
                 }
             }
+
+            // Apply MinThinkMs to soft limit for finite time controls (not Infinite/FixedNodes/Ponder)
+            // Ensures we allow at least one committed iteration before soft stop, unless budgets are extremely tight.
+            let eligible = matches!(
+                &limits.time_control,
+                TimeControl::Fischer { .. }
+                    | TimeControl::Byoyomi { .. }
+                    | TimeControl::FixedTime { .. }
+            );
+            if eligible {
+                let min_think = params.min_think_ms;
+                if min_think > 0 && soft_ms < min_think {
+                    soft_ms = min_think;
+                    budget_clamped = true;
+                }
+
+                // Enforce margin: soft <= hard - 50ms (δ=50ms)
+                if soft_ms.saturating_add(50) > hard_ms {
+                    let new_soft = hard_ms.saturating_sub(50);
+                    if new_soft != soft_ms {
+                        soft_ms = new_soft;
+                        budget_clamped = true;
+                    }
+                }
+            }
         }
 
         // Initialize byoyomi state if needed

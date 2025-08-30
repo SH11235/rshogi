@@ -13,6 +13,10 @@ pub struct TimeParameters {
     pub overhead_ms: u64, // Default: 50
     /// Worst-case network delay (GUI/IPC), used for byoyomi hard budgeting
     pub network_delay2_ms: u64, // Default: 1000
+    /// Minimum think time to ensure at least one committed iteration (ms)
+    /// Applied as a lower bound to soft limit for finite time controls.
+    /// Default 0 = disabled.
+    pub min_think_ms: u64,
 
     // PV stability
     pub pv_base_threshold_ms: u64, // Default: 80
@@ -41,6 +45,7 @@ impl Default for TimeParameters {
         Self {
             overhead_ms: 50,
             network_delay2_ms: 1000,
+            min_think_ms: 0,
             pv_base_threshold_ms: 80,
             pv_depth_slope_ms: 5,
             critical_fischer_ms: 300,
