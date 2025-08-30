@@ -30,7 +30,23 @@ pub(crate) fn handle_stop_command(ctx: &mut CommandContext) -> Result<()> {
         ctx.pre_session_fallback.is_some(),
     );
 
-    // Early pre_session attempt (both normal and ponder): prioritize known-safe fallback
+    // Central finalize attempt immediately on stop (non-ponder, minimal guard)
+    if !*ctx.current_search_is_ponder {
+        let stop_info = engine_core::search::types::StopInfo {
+            reason: engine_core::search::types::TerminationReason::UserStop,
+            elapsed_ms: 0,
+            nodes: 0,
+            depth_reached: ctx.current_committed.as_ref().map(|c| c.depth).unwrap_or(0),
+            hard_timeout: false,
+            soft_limit_ms: 0,
+            hard_limit_ms: 0,
+        };
+        if ctx.finalize_emit_if_possible("stop", Some(stop_info))? {
+            return Ok(());
+        }
+    }
+
+    // Early pre_session attempt (both normal and ponder): prioritize known-safe fallback（段階撤去予定）
     if let Some(saved_move) = ctx.pre_session_fallback.clone() {
         if let Ok(adapter) = ctx.engine.try_lock() {
             let t0 = std::time::Instant::now();

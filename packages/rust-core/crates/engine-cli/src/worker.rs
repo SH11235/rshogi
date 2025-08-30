@@ -52,6 +52,11 @@ pub enum WorkerMessage {
         info: SearchInfo,
         search_id: u64,
     },
+    /// Hard deadline fire (insurance) – based on go_begin + hard_ms
+    HardDeadlineFire {
+        search_id: u64,
+        hard_ms: u64,
+    },
     /// Watchdog fired (time budget elapsed). Main must emit immediately.
     WatchdogFired {
         search_id: u64,
@@ -790,6 +795,32 @@ pub fn search_worker(
         });
     }
 
+    // Phase: Add hard-deadline insurance timer (single-shot)
+    if !params.ponder {
+        if let Some((_, hard_ms, _)) = budgets {
+            let tx_deadline2 = tx.clone();
+            let finalized_for_hard = finalized_flag.clone();
+            let search_id_for_hard = search_id;
+            std::thread::spawn(move || {
+                // Sleep relative to go_begin baseline
+                let since_go = go_begin_at.elapsed().as_millis() as u64;
+                let wait_ms = hard_ms.saturating_sub(since_go);
+                if wait_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                }
+                if let Some(flag) = &finalized_for_hard {
+                    if flag.load(Ordering::Acquire) {
+                        return;
+                    }
+                }
+                let _ = tx_deadline2.send(WorkerMessage::HardDeadlineFire {
+                    search_id: search_id_for_hard,
+                    hard_ms,
+                });
+            });
+        }
+    }
+
     // Create search session
     // legacy session removed
 
@@ -1083,6 +1114,10 @@ pub fn wait_for_worker_with_timeout(
                         } else {
                             log::trace!("Ignoring duplicate Finished message #{finished_count} (from_guard: {from_guard})");
                         }
+                    }
+                    Ok(WorkerMessage::HardDeadlineFire { .. }) => {
+                        // ignore in shutdown wait loop
+                        log::trace!("HardDeadlineFire during shutdown - ignoring");
                     }
                     Ok(WorkerMessage::Info { info, search_id }) => {
                         // Info messages during shutdown can be ignored
