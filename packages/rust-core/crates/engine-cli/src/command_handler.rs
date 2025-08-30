@@ -114,9 +114,52 @@ impl<'a> CommandContext<'a> {
 
         // Decide bestmove via core
         let adapter = crate::worker::lock_or_recover_adapter(self.engine);
-        if let Some((bm, pv, src)) =
+        if let Some((bm0, pv0, src0)) =
             adapter.choose_final_bestmove_core(self.current_committed.as_ref())
         {
+            // Defensive legality guard before emit: verify chosen move is legal in current position.
+            // If not, pick the first move that passes Position::is_legal_move(), else resign.
+            let mut bm = bm0;
+            let mut pv = pv0;
+            let mut src = src0;
+
+            if let Some(pos) = adapter.get_position() {
+                if let Ok(parsed) = engine_core::usi::parse_usi_move(&bm) {
+                    if !pos.is_legal_move(parsed) {
+                        // Attempt to find a guaranteed legal move by filtering movegen output
+                        let mg = engine_core::movegen::MoveGenerator::new();
+                        let mut replaced = false;
+                        if let Ok(list) = mg.generate_all(pos) {
+                            if let Some(mv) =
+                                list.as_slice().iter().copied().find(|&m| pos.is_legal_move(m))
+                            {
+                                let usi = engine_core::usi::move_to_usi(&mv);
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "finalize_illegal_move_guard"),
+                                    ("old", &bm),
+                                    ("new", &usi),
+                                ]));
+                                bm = usi.clone();
+                                pv = vec![usi];
+                                src = "illegal_guard".to_string();
+                                replaced = true;
+                            }
+                        }
+                        if !replaced {
+                            let _ = send_info_string(log_tsv(&[
+                                ("kind", "finalize_illegal_move_guard"),
+                                ("old", &bm),
+                                ("new", "resign"),
+                            ]));
+                            bm = "resign".to_string();
+                            pv = vec!["resign".to_string()];
+                            src = "illegal_guard_resign".to_string();
+                        }
+                    }
+                }
+            }
+
+            // Inject final PV then emit
             let info = crate::usi::output::SearchInfo {
                 multipv: Some(1),
                 pv,
@@ -130,7 +173,7 @@ impl<'a> CommandContext<'a> {
                 Some(format!("string core_src={src}")),
                 stop_info,
             );
-            self.emit_and_finalize(bm, None, meta, &format!("CentralFinalize:{path}"))?;
+            self.emit_and_finalize(bm.clone(), None, meta, &format!("CentralFinalize:{path}"))?;
             let _ = send_info_string(log_tsv(&[
                 ("kind", "finalize_source"),
                 ("search_id", &self.current_search_id.to_string()),
