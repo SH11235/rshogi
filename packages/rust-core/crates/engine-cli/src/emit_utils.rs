@@ -37,7 +37,8 @@ pub fn build_meta(
             // Normal completion cases -> Completed
             BestmoveSource::EmergencyFallback
             | BestmoveSource::EmergencyFallbackOnFinish
-            | BestmoveSource::SessionInSearchFinished => TerminationReason::Completed,
+            | BestmoveSource::SessionInSearchFinished
+            | BestmoveSource::CoreFinalize => TerminationReason::Completed,
             // User stop cases -> UserStop
             BestmoveSource::SessionOnStop => TerminationReason::UserStop,
             // Error cases -> Error

@@ -16,6 +16,23 @@ use crate::{
 
 use crate::game_phase::{detect_game_phase, GamePhase, Profile};
 
+/// The source used for final bestmove decision
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalBestSource {
+    Book,
+    Committed,
+    TT,
+    LegalFallback,
+    Resign,
+}
+
+/// Result of final bestmove decision
+pub struct FinalBest {
+    pub best_move: Option<crate::shogi::Move>,
+    pub pv: Vec<crate::shogi::Move>,
+    pub source: FinalBestSource,
+}
+
 // Game phase detection is now handled by the game_phase module
 // See docs/game-phase-module-guide.md for details
 
@@ -798,6 +815,119 @@ impl Engine {
         }
 
         info!("Transposition table cleared and searchers recreated");
+    }
+
+    /// Reconstruct a PV from the current root position using the available TT
+    fn reconstruct_root_pv_from_tt(
+        &self,
+        pos: &Position,
+        max_depth: u8,
+    ) -> Vec<crate::shogi::Move> {
+        // Choose TT source consistent with get_ponder_from_tt
+        let tt_opt: Option<std::sync::Arc<TranspositionTable>> = if self.use_parallel {
+            Some(self.shared_tt.clone())
+        } else {
+            match self.engine_type {
+                EngineType::Material => self
+                    .material_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::Nnue => self
+                    .nnue_basic_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::Enhanced => self
+                    .material_enhanced_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+                EngineType::EnhancedNnue => self
+                    .nnue_enhanced_searcher
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|s| s.tt_handle())),
+            }
+        };
+
+        if let Some(tt) = tt_opt {
+            let mut tmp = pos.clone();
+            struct TtWrap<'a> {
+                tt: &'a TranspositionTable,
+            }
+            impl<'a> crate::search::tt::TTProbe for TtWrap<'a> {
+                fn probe(&self, hash: u64) -> Option<crate::search::tt::TTEntry> {
+                    self.tt.probe(hash)
+                }
+            }
+            let wrap = TtWrap { tt: &tt };
+            return crate::search::tt::reconstruct_pv_generic(&wrap, &mut tmp, max_depth);
+        }
+        Vec::new()
+    }
+
+    /// Choose final bestmove from book/committed/TT/legal
+    /// - Must be lock-free and return in a few milliseconds
+    /// - Ensures returned move is legal in the given position
+    pub fn choose_final_bestmove(
+        &self,
+        pos: &Position,
+        committed: Option<&crate::search::CommittedIteration>,
+    ) -> FinalBest {
+        use crate::movegen::MoveGenerator;
+
+        // 1) Opening book (not integrated yet) — skipped for now
+
+        // 2) Committed iteration PV head
+        if let Some(ci) = committed {
+            if let Some(&mv) = ci.pv.first() {
+                if pos.is_legal_move(mv) {
+                    return FinalBest {
+                        best_move: Some(mv),
+                        pv: ci.pv.clone(),
+                        source: FinalBestSource::Committed,
+                    };
+                }
+            }
+        }
+
+        // 3) TT root PV reconstruction
+        // Limit reconstruction depth conservatively to keep latency within a few ms
+        let tt_pv = self.reconstruct_root_pv_from_tt(pos, 24);
+        if let Some(&head) = tt_pv.first() {
+            if pos.is_legal_move(head) {
+                return FinalBest {
+                    best_move: Some(head),
+                    pv: tt_pv,
+                    source: FinalBestSource::TT,
+                };
+            }
+        }
+
+        // 4) Legal fallback or resign
+        let gen = MoveGenerator::new();
+        match gen.generate_all(pos) {
+            Ok(moves) => {
+                if let Some(&mv) = moves.as_slice().first() {
+                    return FinalBest {
+                        best_move: Some(mv),
+                        pv: vec![mv],
+                        source: FinalBestSource::LegalFallback,
+                    };
+                }
+                FinalBest {
+                    best_move: None,
+                    pv: Vec::new(),
+                    source: FinalBestSource::Resign,
+                }
+            }
+            Err(_) => FinalBest {
+                best_move: None,
+                pv: Vec::new(),
+                source: FinalBestSource::Resign,
+            },
+        }
     }
 }
 
