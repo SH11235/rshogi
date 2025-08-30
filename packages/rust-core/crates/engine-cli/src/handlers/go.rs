@@ -31,6 +31,22 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         ("kind", "go_begin"),
         ("ponder", if params.ponder { "1" } else { "0" }),
     ]));
+    // Record accept gate (finalized/idle) for diagnostics
+    let gate = if ctx.search_state.is_searching() {
+        "searching"
+    } else {
+        "idle"
+    };
+    let finalized_flag = ctx
+        .current_finalized_flag
+        .as_ref()
+        .map(|f| f.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(false);
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "cmd_accept_gate"),
+        ("gate", gate),
+        ("finalized", if finalized_flag { "1" } else { "0" }),
+    ]));
     // Track go-begin timestamp for SearchStarted delta measurement
     *ctx.last_go_begin_at = Some(now);
     // Reset worker watchdog threshold on new search begin

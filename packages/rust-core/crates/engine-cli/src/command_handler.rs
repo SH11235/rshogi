@@ -318,11 +318,12 @@ impl<'a> CommandContext<'a> {
                         ("kind", "bestmove_sent_logged"),
                         ("search_id", &self.current_search_id.to_string()),
                     ]));
-                    self.finalize_search(finalize_label);
+                    // Emit finalize_end before transitioning Idle
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_end"),
                         ("path", "emitter"),
                     ]));
+                    self.finalize_search(finalize_label);
                     // Latency from finalize_begin to finalize_end
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_latency"),
@@ -399,11 +400,11 @@ impl<'a> CommandContext<'a> {
                         ("kind", "bestmove_sent_logged"),
                         ("search_id", &self.current_search_id.to_string()),
                     ]));
-                    self.finalize_search(finalize_label);
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_end"),
                         ("path", "emitter_fallback"),
                     ]));
+                    self.finalize_search(finalize_label);
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_finalize_latency"),
                         ("ms", &finalize_start.elapsed().as_millis().to_string()),
@@ -470,6 +471,10 @@ impl<'a> CommandContext<'a> {
             let _ = send_info_string(crate::emit_utils::log_tsv(&[
                 ("kind", "bestmove_sent_logged"),
                 ("search_id", &self.current_search_id.to_string()),
+            ]));
+            let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                ("kind", "bestmove_finalize_end"),
+                ("path", "direct"),
             ]));
             self.finalize_search(finalize_label);
             let _ = send_info_string(crate::emit_utils::log_tsv(&[
