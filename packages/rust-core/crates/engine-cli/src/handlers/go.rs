@@ -27,6 +27,10 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     // Reset hard deadline backstop guard and legal-move snapshot
     *ctx.hard_deadline_taken = false;
     *ctx.root_legal_moves = None;
+    // Reset per-search metrics
+    *ctx.search_start_time = None;
+    *ctx.latest_nodes = 0;
+    *ctx.soft_limit_ms_ctx = 0;
 
     // USI-visible diagnostic: go handler entry
     let now = Instant::now();

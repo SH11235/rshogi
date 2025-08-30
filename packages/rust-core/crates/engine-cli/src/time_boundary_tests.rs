@@ -50,6 +50,9 @@ fn setup_ctx() -> (
     static mut FINAL_PV_INJECTED: bool = false;
     static mut HARD_DEADLINE_TAKEN: bool = false;
     static mut ROOT_LEGAL_MOVES: Option<Vec<String>> = None;
+    static mut SEARCH_START_TIME: Option<Instant> = None;
+    static mut LATEST_NODES: u64 = 0;
+    static mut SOFT_LIMIT_MS_CTX: u64 = 0;
 
     let ctx = unsafe {
         CommandContext {
@@ -71,6 +74,9 @@ fn setup_ctx() -> (
             position_state: &mut POSITION_STATE,
             program_start: Instant::now(),
             last_partial_result: &mut LAST_PARTIAL_RESULT,
+            search_start_time: &mut SEARCH_START_TIME,
+            latest_nodes: &mut LATEST_NODES,
+            soft_limit_ms_ctx: &mut SOFT_LIMIT_MS_CTX,
             root_legal_moves: &mut ROOT_LEGAL_MOVES,
             hard_deadline_taken: &mut HARD_DEADLINE_TAKEN,
             pre_session_fallback: &mut PRE_SESSION_FALLBACK,

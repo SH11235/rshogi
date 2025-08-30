@@ -40,6 +40,12 @@ pub struct CommandContext<'a> {
     pub program_start: Instant, // Program start time for elapsed calculations
     /// Last received partial result (move, depth, score) for current search
     pub last_partial_result: &'a mut Option<(String, u8, i32)>,
+    /// Search start time for current search (worker reported)
+    pub search_start_time: &'a mut Option<std::time::Instant>,
+    /// Latest global nodes snapshot (from committed iteration)
+    pub latest_nodes: &'a mut u64,
+    /// Soft limit ms (best-effort; may be refined when budgets are available)
+    pub soft_limit_ms_ctx: &'a mut u64,
     /// Root legal move set snapshot captured from latest committed iteration
     pub root_legal_moves: &'a mut Option<Vec<String>>,
     /// Guard to ensure HardDeadlineFire backstop emits exactly-once per search
@@ -787,6 +793,15 @@ mod tests {
         let mut final_pv_injected_flag = false;
         let mut hard_deadline_taken = false;
         let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -805,6 +820,9 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
             root_legal_moves: &mut root_legal_moves,
             hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
@@ -873,6 +891,9 @@ mod tests {
         let mut final_pv_injected_flag = false;
         let mut hard_deadline_taken = false;
         let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -891,6 +912,9 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
             root_legal_moves: &mut root_legal_moves,
             hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
@@ -967,6 +991,9 @@ mod tests {
         let mut final_pv_injected_flag = false;
         let mut hard_deadline_taken = false;
         let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -985,6 +1012,9 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
             root_legal_moves: &mut root_legal_moves,
             hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
@@ -1044,6 +1074,9 @@ mod tests {
         let mut final_pv_injected_flag = false;
         let mut hard_deadline_taken = false;
         let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1062,6 +1095,9 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
             root_legal_moves: &mut root_legal_moves,
             hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
@@ -1120,6 +1156,9 @@ mod tests {
         let mut final_pv_injected_flag = false;
         let mut hard_deadline_taken = false;
         let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1138,6 +1177,9 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
             root_legal_moves: &mut root_legal_moves,
             hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
@@ -1197,6 +1239,9 @@ mod tests {
         let mut final_pv_injected_flag = false;
         let mut hard_deadline_taken = false;
         let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut search_start_time: Option<Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
 
         // Invoke GameOver
         let mut ctx = CommandContext {
@@ -1217,6 +1262,9 @@ mod tests {
             position_state: &mut position_state,
             program_start,
             last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
             root_legal_moves: &mut root_legal_moves,
             hard_deadline_taken: &mut hard_deadline_taken,
             pre_session_fallback: &mut pre_session_fallback,
