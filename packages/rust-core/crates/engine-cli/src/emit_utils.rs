@@ -35,10 +35,9 @@ pub fn build_meta(
             | BestmoveSource::EmergencyFallbackTimeout
             | BestmoveSource::PartialResultTimeout => TerminationReason::TimeLimit,
             // Normal completion cases -> Completed
-            BestmoveSource::EmergencyFallback
-            | BestmoveSource::EmergencyFallbackOnFinish
-            | BestmoveSource::SessionInSearchFinished
-            | BestmoveSource::CoreFinalize => TerminationReason::Completed,
+            BestmoveSource::EmergencyFallbackOnFinish | BestmoveSource::CoreFinalize => {
+                TerminationReason::Completed
+            }
             // User stop cases -> UserStop
             BestmoveSource::SessionOnStop => TerminationReason::UserStop,
             // Error cases -> Error

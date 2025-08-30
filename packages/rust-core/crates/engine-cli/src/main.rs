@@ -534,7 +534,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
             default(Duration::from_millis(1)) => {
                 // Small idle to prevent busy loop
-                // Wall-clock watchdog: default有効（Byoyomi前提）。環境変数で上書き可能。
+                // Wall-clock watchdog: 既定は無効。環境変数で有効化かつ閾値上書き可能。
+                // Set env WALL_WATCHDOG_MS>0 to enable. Example: 4400 for 6s byoyomi guard.
                 let wall_thr_ms = std::env::var("WALL_WATCHDOG_MS")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())

@@ -44,16 +44,12 @@ impl fmt::Display for ResignReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BestmoveSource {
-    /// Emergency fallback when search fails
-    EmergencyFallback,
     /// Resign due to no legal moves
     Resign,
     /// Session result on stop command
     SessionOnStop,
     /// Resign due to timeout
     ResignTimeout,
-    /// Session result in search finished handler
-    SessionInSearchFinished,
     /// Resign in search finished handler
     ResignOnFinish,
     /// Partial result on timeout
@@ -73,11 +69,9 @@ impl fmt::Display for BestmoveSource {
         // This ensures proper string representation for logging and debugging.
         // The compiler will enforce this due to exhaustive matching.
         let s = match self {
-            Self::EmergencyFallback => "emergency_fallback",
             Self::Resign => "resign",
             Self::SessionOnStop => "session_on_stop",
             Self::ResignTimeout => "resign_timeout",
-            Self::SessionInSearchFinished => "session_in_search_finished",
             Self::ResignOnFinish => "resign_on_finish",
             Self::PartialResultTimeout => "partial_result_timeout",
             Self::EmergencyFallbackTimeout => "emergency_fallback_timeout",
@@ -173,12 +167,12 @@ mod tests {
     #[test]
     fn test_bestmove_source_display() {
         // Test a few important variants
-        assert_eq!(BestmoveSource::EmergencyFallback.to_string(), "emergency_fallback");
         assert_eq!(BestmoveSource::Resign.to_string(), "resign");
         assert_eq!(BestmoveSource::SessionOnStop.to_string(), "session_on_stop");
         assert_eq!(
-            BestmoveSource::SessionInSearchFinished.to_string(),
-            "session_in_search_finished"
+            BestmoveSource::EmergencyFallbackOnFinish.to_string(),
+            "emergency_fallback_on_finish"
         );
+        assert_eq!(BestmoveSource::CoreFinalize.to_string(), "core_finalize");
     }
 }

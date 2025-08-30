@@ -99,3 +99,29 @@ fn test_new_api_with_various_time_controls() {
     let tm2 = TimeManager::new(&fixed_limits, Color::Black, 0, GamePhase::MiddleGame);
     tm2.update_after_move(500, TimeState::NonByoyomi); // Should work fine
 }
+
+#[test]
+fn test_pv_stability_threshold_updates() {
+    // Build a simple TimeManager
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 1000 },
+        ..Default::default()
+    };
+    let tm = TimeManager::new(&limits, Color::White, 0, GamePhase::MiddleGame);
+
+    // Access state checker (test-only API)
+    let checker = tm.state_checker();
+
+    // Initially, with elapsed=0, PV is not stable (0 > threshold=false)
+    assert!(!checker.is_pv_stable(0));
+
+    // Simulate PV change at depth 10
+    tm.on_pv_change(10);
+    let params = crate::time_management::TimeParameters::default();
+    let thr = params.pv_base_threshold_ms + (10u64 * params.pv_depth_slope_ms);
+
+    // Before threshold elapsed, not stable
+    assert!(!checker.is_pv_stable(thr));
+    // After threshold elapsed, stable
+    assert!(checker.is_pv_stable(thr + 1));
+}
