@@ -48,8 +48,6 @@ pub struct CommandContext<'a> {
     pub last_bestmove_sent_at: &'a mut Option<std::time::Instant>,
     /// Timestamp when the latest go handler started
     pub last_go_begin_at: &'a mut Option<std::time::Instant>,
-    /// Threshold armed by worker watchdog (None when not armed)
-    pub current_worker_watchdog_threshold: &'a mut Option<u64>,
     /// Guard to ensure final PV is injected exactly once per search
     pub final_pv_injected: &'a mut bool,
 }
@@ -692,11 +690,7 @@ mod tests {
         use crate::types::BestmoveSource as S;
 
         // Timeout sources map to TimeLimit and hard_timeout true only for explicit timeout variants
-        let timeout_sources = [
-            S::ResignTimeout,
-            S::EmergencyFallbackTimeout,
-            S::PartialResultTimeout,
-        ];
+        let timeout_sources = [S::EmergencyFallbackTimeout, S::PartialResultTimeout];
         for &src in &timeout_sources {
             let m = build_meta(src, 7, Some(9), Some("cp 10".into()), None);
             assert_eq!(m.stop_info.reason, TerminationReason::TimeLimit);
@@ -782,7 +776,6 @@ mod tests {
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
         let mut pre_session_fallback_hash: Option<u64> = Some(root_hash);
-        let mut worker_watchdog_threshold: Option<u64> = None;
 
         // Clear test hooks
         let start_idx = test_info_len();
@@ -811,7 +804,6 @@ mod tests {
             current_committed: &mut None,
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
-            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
             final_pv_injected: &mut final_pv_injected_flag,
         };
 
@@ -866,7 +858,6 @@ mod tests {
         let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
         let mut pre_session_fallback_hash: Option<u64> = Some(0); // Intentional mismatch
         let mut current_committed: Option<CommittedIteration> = None;
-        let mut worker_watchdog_threshold: Option<u64> = None;
 
         // Clear test hooks
         let start_idx = test_info_len();
@@ -895,7 +886,6 @@ mod tests {
             current_committed: &mut current_committed,
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
-            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
             final_pv_injected: &mut final_pv_injected_flag,
         };
 
@@ -959,7 +949,6 @@ mod tests {
         let mut pre_session_fallback: Option<String> = None;
         let mut pre_session_fallback_hash: Option<u64> = None;
         let mut current_committed: Option<CommittedIteration> = Some(committed_iter);
-        let mut worker_watchdog_threshold: Option<u64> = None;
 
         let start_idx = test_info_len();
 
@@ -987,7 +976,6 @@ mod tests {
             current_committed: &mut current_committed,
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
-            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
             final_pv_injected: &mut final_pv_injected_flag,
         };
 
@@ -1034,7 +1022,6 @@ mod tests {
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = Some("7g7f".to_string());
         let mut pre_session_fallback_hash: Option<u64> = Some(root_hash);
-        let mut worker_watchdog_threshold: Option<u64> = None;
 
         let start_idx = test_info_len();
 
@@ -1062,7 +1049,6 @@ mod tests {
             current_committed: &mut None,
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
-            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
             final_pv_injected: &mut final_pv_injected_flag,
         };
 
@@ -1108,7 +1094,6 @@ mod tests {
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = None;
         let mut pre_session_fallback_hash: Option<u64> = None;
-        let mut worker_watchdog_threshold: Option<u64> = None;
 
         let start_idx = test_info_len();
 
@@ -1136,7 +1121,6 @@ mod tests {
             current_committed: &mut None,
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
-            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
             final_pv_injected: &mut final_pv_injected_flag,
         };
 
@@ -1182,7 +1166,6 @@ mod tests {
         let mut last_partial_result: Option<(String, u8, i32)> = None;
         let mut pre_session_fallback: Option<String> = None;
         let mut pre_session_fallback_hash: Option<u64> = None;
-        let mut worker_watchdog_threshold: Option<u64> = None;
 
         let start_idx = test_info_len();
 
@@ -1213,7 +1196,6 @@ mod tests {
             current_committed: &mut None,
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
-            current_worker_watchdog_threshold: &mut worker_watchdog_threshold,
             final_pv_injected: &mut final_pv_injected_flag,
         };
 

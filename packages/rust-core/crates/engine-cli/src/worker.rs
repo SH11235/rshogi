@@ -57,12 +57,6 @@ pub enum WorkerMessage {
         search_id: u64,
         hard_ms: u64,
     },
-    /// Watchdog fired (time budget elapsed). Main must emit immediately.
-    WatchdogFired {
-        search_id: u64,
-        soft_ms: u64,
-        hard_ms: u64,
-    },
 
     /// Search has started
     SearchStarted {
@@ -674,199 +668,7 @@ pub fn search_worker(
         });
     }
     // Re-extract overhead/safety/nd2/min_think for watchdog logging (out-of-scope above)
-    let (ov_ms, saf_ms, nd2_ms, min_think_param) = match &limits.time_parameters {
-        Some(tp) => (
-            tp.overhead_ms,
-            tp.byoyomi_hard_limit_reduction_ms,
-            tp.network_delay2_ms,
-            tp.min_think_ms,
-        ),
-        None => (0, 0, 0, 0),
-    };
-
-    // Phase: Add a conservative watchdog (single insurance) only when budgets are valid
-    // Allow disabling worker watchdog via env (default OFF when not explicitly enabled)
-    let worker_wd_enabled = std::env::var("WORKER_WATCHDOG_ENABLED")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if worker_wd_enabled && !params.ponder {
-        let tx_deadline = tx.clone();
-        let stop_for_watchdog = stop_flag.clone();
-        let search_id_for_watchdog = search_id;
-        let root_hash_for_watchdog = position.zobrist_hash();
-        let finalized_for_watchdog = finalized_flag.clone();
-        std::thread::spawn(move || {
-            if let Some(flag) = &finalized_for_watchdog {
-                if flag.load(Ordering::Acquire) {
-                    // Already finalized before watchdog start
-                    return;
-                }
-            }
-            if let Some((soft_ms, hard_ms, _)) = budgets {
-                // threshold_ms = min(hard, max(soft+50, min_think_ms))
-                let min_think_ms = min_think_param;
-                let threshold_ms = hard_ms.min(soft_ms.saturating_add(50).max(min_think_ms));
-
-                // Suppress arming when threshold is too short (search not yet warmed up)
-                if threshold_ms < 50 {
-                    let _ = tx_deadline.send(WorkerMessage::Info {
-                        info: SearchInfo {
-                            string: Some(log_tsv(&[
-                                ("kind", "watchdog_suppress"),
-                                ("search_id", &search_id_for_watchdog.to_string()),
-                                ("reason", "too_short"),
-                                ("threshold_ms", &threshold_ms.to_string()),
-                            ])),
-                            ..Default::default()
-                        },
-                        search_id: search_id_for_watchdog,
-                    });
-                    return;
-                }
-
-                // Log watchdog arm with threshold and baseline
-                let _ = tx_deadline.send(WorkerMessage::Info {
-                    info: SearchInfo {
-                        string: Some(log_tsv(&[
-                            ("kind", "watchdog_start"),
-                            ("search_id", &search_id_for_watchdog.to_string()),
-                            ("soft_ms", &soft_ms.to_string()),
-                            ("hard_ms", &hard_ms.to_string()),
-                            ("threshold_ms", &threshold_ms.to_string()),
-                            ("baseline", "go_begin"),
-                            ("threads", &threads_for_log.to_string()),
-                            ("overhead_ms", &ov_ms.to_string()),
-                            ("safety_ms", &saf_ms.to_string()),
-                            ("nd2_ms", &nd2_ms.to_string()),
-                            ("min_think_ms", &min_think_param.to_string()),
-                        ])),
-                        ..Default::default()
-                    },
-                    search_id: search_id_for_watchdog,
-                });
-
-                // Sleep relative to go_begin baseline
-                let now_since_go = go_begin_at.elapsed().as_millis() as u64;
-                let wait_ms = threshold_ms.saturating_sub(now_since_go);
-                // Thread-level diagnostics: arm
-                let _ = tx_deadline.send(WorkerMessage::Info {
-                    info: SearchInfo {
-                        string: Some(log_tsv(&[
-                            ("kind", "watchdog_thread_arm"),
-                            ("search_id", &search_id_for_watchdog.to_string()),
-                            ("threshold_ms", &threshold_ms.to_string()),
-                            ("now_ms", &now_since_go.to_string()),
-                        ])),
-                        ..Default::default()
-                    },
-                    search_id: search_id_for_watchdog,
-                });
-                if wait_ms > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                }
-            } else {
-                // Budgets not available: do not arm watchdog, record reason
-                let _ = tx_deadline.send(WorkerMessage::Info {
-                    info: SearchInfo {
-                        string: Some(log_tsv(&[
-                            ("kind", "watchdog_suppress"),
-                            ("search_id", &search_id_for_watchdog.to_string()),
-                            ("reason", "no_budget"),
-                        ])),
-                        ..Default::default()
-                    },
-                    search_id: search_id_for_watchdog,
-                });
-                return;
-            }
-            // If not already stopped, set stop and notify main loop
-            if !stop_for_watchdog.load(std::sync::atomic::Ordering::Acquire) {
-                // Thread-level diagnostics: wake
-                let _ = tx_deadline.send(WorkerMessage::Info {
-                    info: SearchInfo {
-                        string: Some(log_tsv(&[
-                            ("kind", "watchdog_thread_wake"),
-                            ("search_id", &search_id_for_watchdog.to_string()),
-                        ])),
-                        ..Default::default()
-                    },
-                    search_id: search_id_for_watchdog,
-                });
-                if let Some(flag) = &finalized_for_watchdog {
-                    if flag.load(Ordering::Acquire) {
-                        // Already finalized; skip watchdog notifications
-                        return;
-                    }
-                }
-                // New explicit watchdog event（メインはこれで即emit）
-                if let Some((soft_ms, hard_ms, _)) = budgets {
-                    let _ = tx_deadline.send(WorkerMessage::Info {
-                        info: SearchInfo {
-                            string: Some(log_tsv(&[
-                                ("kind", "watchdog_thread_fire_send"),
-                                ("search_id", &search_id_for_watchdog.to_string()),
-                            ])),
-                            ..Default::default()
-                        },
-                        search_id: search_id_for_watchdog,
-                    });
-                    let _ = tx_deadline.send(WorkerMessage::WatchdogFired {
-                        search_id: search_id_for_watchdog,
-                        soft_ms,
-                        hard_ms,
-                    });
-                }
-                // 互換: 情報ログ（Writer一元化でメイン経由）
-                let _ = tx_deadline.send(WorkerMessage::Info {
-                    info: SearchInfo {
-                        string: Some(log_tsv(&[
-                            ("kind", "watchdog_fire"),
-                            ("search_id", &search_id_for_watchdog.to_string()),
-                        ])),
-                        ..Default::default()
-                    },
-                    search_id: search_id_for_watchdog,
-                });
-                // 停止フラグ
-                stop_for_watchdog.store(true, std::sync::atomic::Ordering::Release);
-                let _ = tx_deadline.send(WorkerMessage::Info {
-                    info: SearchInfo {
-                        string: Some(log_tsv(&[
-                            ("kind", "watchdog_thread_fire_set_stop"),
-                            ("search_id", &search_id_for_watchdog.to_string()),
-                        ])),
-                        ..Default::default()
-                    },
-                    search_id: search_id_for_watchdog,
-                });
-                // 補助: SearchFinished も投げておく
-                let (s, h, _) = budgets.unwrap_or((0, 0, false));
-                let _ = tx_deadline.send(WorkerMessage::SearchFinished {
-                    root_hash: root_hash_for_watchdog,
-                    search_id: search_id_for_watchdog,
-                    stop_info: Some(engine_core::search::types::StopInfo {
-                        reason: engine_core::search::types::TerminationReason::TimeLimit,
-                        elapsed_ms: 0,
-                        nodes: 0,
-                        depth_reached: 0,
-                        hard_timeout: false,
-                        soft_limit_ms: s,
-                        hard_limit_ms: h,
-                    }),
-                });
-                // 冗長: 少し遅延して Finished も送る
-                let tx_finished = tx_deadline.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    let _ = tx_finished.send(WorkerMessage::Finished {
-                        from_guard: false,
-                        search_id: search_id_for_watchdog,
-                    });
-                });
-            }
-        });
-    }
+    // Worker watchdog removed: rely on core polling and optional hard deadline only.
 
     // Phase: Add hard-deadline insurance timer (single-shot)
     if !params.ponder {
@@ -1219,10 +1021,7 @@ pub fn wait_for_worker_with_timeout(
                         // Search started during shutdown can be ignored
                         log::trace!("SearchStarted during shutdown - ignoring");
                     }
-                    Ok(WorkerMessage::WatchdogFired { .. }) => {
-                        // Watchdog events during shutdown can be ignored
-                        log::trace!("WatchdogFired during shutdown - ignoring");
-                    }
+
                     Err(_) => {
                         log::error!("Worker channel closed unexpectedly");
                         break;
