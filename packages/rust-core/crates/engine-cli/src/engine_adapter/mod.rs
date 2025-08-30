@@ -71,6 +71,8 @@ pub struct EngineAdapter {
     byoyomi_overhead_ms: u64,
     /// Byoyomi hard limit additional safety margin in milliseconds
     byoyomi_safety_ms: u64,
+    /// Minimum think time lower bound (ms)
+    min_think_ms: u64,
     /// Whether the last search was using byoyomi time control
     last_search_is_byoyomi: bool,
 }
@@ -108,6 +110,7 @@ impl EngineAdapter {
             overhead_ms: DEFAULT_OVERHEAD_MS,
             byoyomi_overhead_ms: DEFAULT_BYOYOMI_OVERHEAD_MS,
             byoyomi_safety_ms: DEFAULT_BYOYOMI_SAFETY_MS,
+            min_think_ms: 200, // Phase1 default to reduce "即指し"
             last_search_is_byoyomi: false,
         };
 
@@ -126,6 +129,11 @@ impl EngineAdapter {
             self.pv_stability_base,
             self.pv_stability_slope,
         )
+    }
+
+    /// Get MinThinkMs
+    pub fn min_think_ms(&self) -> u64 {
+        self.min_think_ms
     }
 
     /// Set snapshot of search start state (for diagnostics/consistency)

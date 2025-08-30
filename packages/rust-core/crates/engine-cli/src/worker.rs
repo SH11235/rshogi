@@ -412,6 +412,8 @@ pub fn search_worker(
                 });
                 // Capture threads for logging before dropping adapter
                 let threads_for_log = adapter.threads();
+                // Capture MinThinkMs before dropping adapter
+                let min_think_ms_val = adapter.min_think_ms() as u32;
                 drop(adapter); // release adapter lock early
 
                 // Compute effective byoyomi status without holding adapter lock
@@ -447,6 +449,7 @@ pub fn search_worker(
                     byoyomi_early_finish_ratio,
                     pv_base,
                     pv_slope,
+                    min_think_ms_val,
                 );
                 let limits = match limits_res {
                     Ok(l) => l,
@@ -611,9 +614,14 @@ pub fn search_worker(
         };
         let mtg = limits.moves_to_go.unwrap_or(0);
         // Extract overhead/safety/nd2 from limits' time parameters for observability
-        let (ov_ms, saf_ms, nd2_ms) = match &limits.time_parameters {
-            Some(tp) => (tp.overhead_ms, tp.byoyomi_hard_limit_reduction_ms, tp.network_delay2_ms),
-            None => (0, 0, 0),
+        let (ov_ms, saf_ms, nd2_ms, min_think_param) = match &limits.time_parameters {
+            Some(tp) => (
+                tp.overhead_ms,
+                tp.byoyomi_hard_limit_reduction_ms,
+                tp.network_delay2_ms,
+                tp.min_think_ms,
+            ),
+            None => (0, 0, 0, 0),
         };
         let _ = tx.send(WorkerMessage::Info {
             info: SearchInfo {
@@ -629,12 +637,24 @@ pub fn search_worker(
                     ("overhead_ms", &ov_ms.to_string()),
                     ("safety_ms", &saf_ms.to_string()),
                     ("nd2_ms", &nd2_ms.to_string()),
+                    ("min_think_ms", &min_think_param.to_string()),
                 ])),
                 ..Default::default()
             },
             search_id,
         });
     }
+    // Re-extract overhead/safety/nd2/min_think for watchdog logging (out-of-scope above)
+    let (ov_ms, saf_ms, nd2_ms, min_think_param) = match &limits.time_parameters {
+        Some(tp) => (
+            tp.overhead_ms,
+            tp.byoyomi_hard_limit_reduction_ms,
+            tp.network_delay2_ms,
+            tp.min_think_ms,
+        ),
+        None => (0, 0, 0, 0),
+    };
+
     // Phase: Add a conservative watchdog (single insurance) only when budgets are valid
     if !params.ponder {
         let tx_deadline = tx.clone();
@@ -650,18 +670,12 @@ pub fn search_worker(
                 }
             }
             if let Some((soft_ms, hard_ms, _)) = budgets {
-                // threshold = min(max(soft + δ, MIN_THINK_MS), hard)
-                // δ=+50ms (micro margin). MIN_THINK_MS is optional safeguard.
-                let min_think_ms = std::env::var("MIN_THINK_MS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(0);
-                // Base threshold without double subtraction
-                let base = soft_ms.saturating_add(50).min(hard_ms);
-                let threshold_ms = base.max(min_think_ms).min(hard_ms);
+                // threshold_ms = min(hard, max(soft+50, min_think_ms))
+                let min_think_ms = min_think_param;
+                let threshold_ms = hard_ms.min(soft_ms.saturating_add(50).max(min_think_ms));
 
                 // Suppress arming when threshold is too short (search not yet warmed up)
-                if threshold_ms <= 200 {
+                if threshold_ms < 50 {
                     let _ = tx_deadline.send(WorkerMessage::Info {
                         info: SearchInfo {
                             string: Some(log_tsv(&[
@@ -688,6 +702,10 @@ pub fn search_worker(
                             ("threshold_ms", &threshold_ms.to_string()),
                             ("baseline", "go_begin"),
                             ("threads", &threads_for_log.to_string()),
+                            ("overhead_ms", &ov_ms.to_string()),
+                            ("safety_ms", &saf_ms.to_string()),
+                            ("nd2_ms", &nd2_ms.to_string()),
+                            ("min_think_ms", &min_think_param.to_string()),
                         ])),
                         ..Default::default()
                     },
