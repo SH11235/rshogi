@@ -17,6 +17,7 @@ use crate::usi::{output::SearchInfo, GameResult};
 use crate::utils::to_usi_score;
 
 // Use engine-core's canonical callback type
+use engine_core::search::types::{StopInfo, TerminationReason};
 use engine_core::search::{InfoCallback, NodeType};
 
 impl EngineAdapter {
@@ -105,6 +106,48 @@ impl EngineAdapter {
             }
         } else {
             info!("stop_flag_attached: false");
+        }
+
+        // Check legal moves count before search (for debugging depth=0 issue)
+        {
+            use engine_core::movegen::MoveGenerator;
+            let movegen = MoveGenerator::new();
+            match movegen.generate_all(&position) {
+                Ok(moves) => {
+                    info!("Legal moves at search start: {} moves", moves.len());
+                    if moves.is_empty() {
+                        // Early exit: no legal moves — emit resign immediately.
+                        // Reason is Mate if in check, otherwise Completed (terminal position).
+                        let reason = if position.is_in_check() {
+                            TerminationReason::Mate
+                        } else {
+                            TerminationReason::Completed
+                        };
+                        let stop_info = StopInfo {
+                            reason,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: 0,
+                            hard_timeout: false,
+                            soft_limit_ms: 0,
+                            hard_limit_ms: 0,
+                        };
+                        return Ok(ExtendedSearchResult {
+                            best_move: "resign".to_string(),
+                            ponder_move: None,
+                            depth: 0,
+                            stop_info: Some(stop_info),
+                            pv_owner_mismatches: None,
+                            pv_owner_checks: None,
+                            pv_trim_cuts: None,
+                            pv_trim_checks: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to generate legal moves at search start: {}", e);
+                }
+            }
         }
 
         // Execute search

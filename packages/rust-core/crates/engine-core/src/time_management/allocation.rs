@@ -395,4 +395,96 @@ mod tests {
         // soft は hard より小さい
         assert!(soft < hard);
     }
+
+    #[test]
+    fn test_fixed_time_slowmover_scales_soft() {
+        // ms_per_move = 1000, base soft = 900, slowmover 150% => 1350, overhead (min 10) => 1340
+        let mut params = TimeParameters::default();
+        params.slow_mover_pct = 150;
+        let (soft, hard) = calculate_time_allocation(
+            &TimeControl::FixedTime { ms_per_move: 1000 },
+            Color::Black,
+            0,
+            None,
+            GamePhase::Opening,
+            &params,
+        );
+        assert_eq!(soft, 1340);
+        assert_eq!(hard, 990);
+    }
+
+    #[test]
+    fn test_fixed_time_max_time_ratio_clamps_hard() {
+        // With small ratio, hard should be clamped to soft * ratio
+        let mut params = TimeParameters::default();
+        params.max_time_ratio = 1.1; // 110%
+        let (soft, hard) = calculate_time_allocation(
+            &TimeControl::FixedTime { ms_per_move: 1000 },
+            Color::Black,
+            0,
+            None,
+            GamePhase::Opening,
+            &params,
+        );
+        // soft_out = 900 - 10 = 890; clamp uses pre-overhead soft (900)
+        assert_eq!(soft, 890);
+        let pre_soft = (1000 * 9) / 10; // 900
+        let expected_hard = (((pre_soft as f64) * params.max_time_ratio) + 0.5) as u64 - 10; // subtract overhead
+        assert_eq!(hard, expected_hard);
+    }
+
+    #[test]
+    fn test_fischer_move_horizon_guard_reduces_hard() {
+        // Compare with and without move horizon guard in sudden-death (inc=0)
+        let base_params = TimeParameters::default();
+        // Guard disabled
+        let (soft0, hard0) = calculate_time_allocation(
+            &TimeControl::Fischer {
+                white_ms: 2000,
+                black_ms: 2000,
+                increment_ms: 0,
+            },
+            Color::Black,
+            40,
+            None,
+            GamePhase::MiddleGame,
+            &base_params,
+        );
+
+        // Enable guard with trigger above remain and min_moves positive
+        let mut guard_params = base_params;
+        guard_params.move_horizon_trigger_ms = 5000;
+        guard_params.move_horizon_min_moves = 10;
+        let (_soft1, hard1) = calculate_time_allocation(
+            &TimeControl::Fischer {
+                white_ms: 2000,
+                black_ms: 2000,
+                increment_ms: 0,
+            },
+            Color::Black,
+            40,
+            None,
+            GamePhase::MiddleGame,
+            &guard_params,
+        );
+
+        // Hard with guard should be <= hard without guard
+        assert!(hard1 <= hard0, "move horizon should not increase hard: {} <= {}", hard1, hard0);
+
+        // Soft should be unaffected by guard
+        let _ = soft0; // suppress unused warning by asserting equal with recomputation
+        let (soft1_re, _) = calculate_time_allocation(
+            &TimeControl::Fischer {
+                white_ms: 2000,
+                black_ms: 2000,
+                increment_ms: 0,
+            },
+            Color::Black,
+            40,
+            None,
+            GamePhase::MiddleGame,
+            &guard_params,
+        );
+        assert_eq!(soft1_re, soft0, "guard must not affect soft");
+    }
 }
