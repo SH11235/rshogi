@@ -713,6 +713,21 @@ pub fn search_worker(
             log::trace!("Iteration callback: stop flag set, skipping commit");
             return;
         }
+        // Log IterationCommitted for visibility
+        let _ = tx_for_iteration.send(WorkerMessage::Info {
+            info: SearchInfo {
+                string: Some(log_tsv(&[
+                    ("kind", "iteration_committed"),
+                    ("depth", &iter.depth.to_string()),
+                    ("score", &format!("{:?}", iter.score)),
+                    ("nodes", &iter.nodes.to_string()),
+                    ("elapsed_ms", &iter.elapsed.as_millis().to_string()),
+                    ("search_id", &search_id.to_string()),
+                ])),
+                ..Default::default()
+            },
+            search_id,
+        });
         let _ = tx_for_iteration.send(WorkerMessage::IterationCommitted {
             committed: iter.clone(),
             search_id,

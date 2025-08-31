@@ -959,6 +959,15 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     search_id,
                     committed.depth
                 );
+                // Log IterationCommitted received for visibility
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "iteration_committed_received"),
+                    ("search_id", &search_id.to_string()),
+                    ("depth", &committed.depth.to_string()),
+                    ("score", &format!("{:?}", committed.score)),
+                    ("nodes", &committed.nodes.to_string()),
+                    ("elapsed_ms", &committed.elapsed.as_millis().to_string()),
+                ]));
                 // Save committed and capture root legal move set (for hard-deadline backstop)
                 *ctx.current_committed = Some(committed);
                 // Update latest nodes snapshot
