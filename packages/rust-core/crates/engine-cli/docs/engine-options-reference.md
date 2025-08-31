@@ -104,6 +104,37 @@
 - **説明**: PV安定性のための探索深さ当たりの追加時間。深い探索ほど安定化のための時間が長くなります。
 - **例**: `setoption name PVStabilitySlope value 8`
 
+### 9. OverheadMs / ByoyomiOverheadMs / ByoyomiSafetyMs
+- **タイプ**: spin (数値)
+- **デフォルト**: OverheadMs=50, ByoyomiOverheadMs=1000, ByoyomiSafetyMs=500
+- **単位**: ミリ秒
+- **説明**:
+  - `OverheadMs`: 通信/GUIの平均遅延（丸め停止時に控除）
+  - `ByoyomiOverheadMs`: 秒読み時の最悪遅延（ハード上限の安全側に反映）
+  - `ByoyomiSafetyMs`: 秒読みハード上限の追加安全マージン
+
+### 10. SlowMover
+- **タイプ**: spin (数値)
+- **デフォルト**: 100
+- **範囲**: 50-200（%）
+- **説明**: 最適時間（soft）を倍率で増減（100=1.0x）。序盤を厚く・終盤を薄くなどの大まかな配分調整に使用します。
+- **例**: `setoption name SlowMover value 120`
+
+### 11. MaxTimeRatioPct
+- **タイプ**: spin (数値)
+- **デフォルト**: 500
+- **範囲**: 100-800（%=1.00-8.00倍）
+- **説明**: `hard <= soft * (pct/100)` の上限を設定。極端に長い思考を抑制する安全弁です。
+- **例**: `setoption name MaxTimeRatioPct value 300`（3.00倍）
+
+### 12. MoveHorizonTriggerMs / MoveHorizonMinMoves
+- **タイプ**: spin (数値)
+- **デフォルト**: 0（無効）/ 0（無効）
+- **範囲**: Trigger=0-600000(ms), MinMoves=0-200
+- **説明**: Sudden-death（Fischerでinc=0）時の切れ負けガード。
+  - `remain <= Trigger` で発動し、`hard <= remain / MinMoves` に抑制します。
+  - 小さな値から試し、感触を見ながら調整してください。
+
 ## 使用例
 
 ### 大会用の設定:
@@ -153,3 +184,24 @@ setoption name USI_Ponder value false
 - **PVStabilityBase + PVStabilitySlope**: 最善手が不確定な場合に追加の思考時間を許可します
 
 これらのパラメータは、正確な時間管理が重要な秒読み時間制御において特に重要です。
+
+## 追加の使用例（時間ポリシー）
+
+### より長めに考える（解析向き）
+```
+setoption name SlowMover value 120
+setoption name MaxTimeRatioPct value 300
+```
+
+### 切れ負け対策（サドンデス想定）
+```
+setoption name MoveHorizonTriggerMs value 30000
+setoption name MoveHorizonMinMoves value 15
+```
+
+### ストキャスティック・ポンダー（試験的）
+```
+setoption name Stochastic_Ponder value true
+```
+- **説明**: `ponderhit` 時に、通常探索へ再始動する前提の特別動作を有効化します。
+- 備考: 本実装では `ponderhit` 受領時に時間起点と配分を再初期化して継続（再始動同等）します。
