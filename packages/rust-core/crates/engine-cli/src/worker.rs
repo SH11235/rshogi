@@ -862,6 +862,17 @@ pub fn search_worker(
         }
         Err(e) => {
             log::error!("Search error: {e}");
+            let _ = tx.send(WorkerMessage::Info {
+                info: SearchInfo {
+                    string: Some(log_tsv(&[
+                        ("kind", "execute_search_error"),
+                        ("search_id", &search_id.to_string()),
+                        ("error", &e.to_string()),
+                    ])),
+                    ..Default::default()
+                },
+                search_id,
+            });
             // Engine will be returned automatically by EngineReturnGuard::drop
 
             // Clean up ponder state if needed
