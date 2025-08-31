@@ -125,3 +125,46 @@ fn test_pv_stability_threshold_updates() {
     // After threshold elapsed, stable
     assert!(checker.is_pv_stable(thr + 1));
 }
+
+#[test]
+fn test_should_stop_schedules_and_stops_at_search_end() {
+    // Use small fixed time to complete quickly
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 200 },
+        ..Default::default()
+    };
+    let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::Opening);
+
+    // Make PV stable by waiting over base threshold
+    tm.on_pv_change(0); // mark change at elapsed=0
+    std::thread::sleep(std::time::Duration::from_millis(90)); // base 80ms + margin
+
+    // Wait until past soft limit
+    let soft = tm.soft_limit_ms();
+    loop {
+        if tm.elapsed_ms() >= soft {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    // First should_stop schedules rounded stop (search_end), not immediate stop
+    let stop_now = tm.should_stop(0);
+    assert!(!stop_now, "should not stop immediately at soft with PV stable");
+    let scheduled = tm.scheduled_end_ms();
+    assert!(scheduled != u64::MAX, "scheduled_end must be set after soft+stable");
+
+    // Before scheduled end, should_stop must remain false
+    if tm.elapsed_ms() < scheduled {
+        assert!(!tm.should_stop(0));
+    }
+
+    // Wait until scheduled end passes, then should_stop becomes true
+    loop {
+        if tm.elapsed_ms() >= scheduled {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(tm.should_stop(0), "should stop at or after scheduled_end");
+}

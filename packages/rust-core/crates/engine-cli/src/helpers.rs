@@ -3,7 +3,9 @@ use crate::engine_adapter::{EngineAdapter, EngineError};
 use crate::state::SearchState;
 use crate::types::PositionState;
 use crate::usi::send_info_string;
-use crate::worker::{lock_or_recover_adapter, wait_for_worker_with_timeout, WorkerMessage};
+use crate::worker::{
+    lock_or_recover_adapter, wait_for_worker_sync, wait_for_worker_with_timeout, WorkerMessage,
+};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
 use engine_core::usi::position_to_sfen;
@@ -15,8 +17,7 @@ use std::time::Duration;
 // Constants for timeout and channel management
 // Long timeout used only for shutdown paths
 pub const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
-// Short timeout for normal go-path interruption to avoid wasting byoyomi
-pub const GO_JOIN_TIMEOUT: Duration = Duration::from_millis(200);
+// NOTE: GO path now uses full synchronous wait (no timeout). Keep only MIN_JOIN_TIMEOUT for shutdown.
 
 /// Perform fallback move generation with graduated strategy
 ///
@@ -199,10 +200,9 @@ pub fn wait_for_search_completion(
             log::debug!("wait_for_search_completion: set per-search stop flag to true");
         }
 
-        // Wait for worker with short timeout to preserve move time
-        log::debug!("Waiting up to {:?} for worker to finish (go-path)", GO_JOIN_TIMEOUT);
-        let wait_result =
-            wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, GO_JOIN_TIMEOUT);
+        // Wait synchronously for worker to finish (no timeout)
+        log::debug!("Waiting synchronously for worker to finish (go-path)");
+        let wait_result = wait_for_worker_sync(worker_handle, worker_rx, search_state);
 
         let stop_duration = stop_start.elapsed();
         log::info!("wait_for_search_completion: completed in {stop_duration:?}");
