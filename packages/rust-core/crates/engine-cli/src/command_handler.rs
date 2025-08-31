@@ -688,6 +688,8 @@ pub fn handle_command(command: UsiCommand, ctx: &mut CommandContext) -> Result<(
 mod tests {
     use super::*;
     use crate::engine_adapter::EngineAdapter;
+    use crate::handlers::go::handle_go_command;
+    use crate::handlers::ponder::handle_ponder_hit;
     use crate::usi::output::{test_info_from, test_info_len};
     use crossbeam_channel::unbounded;
     use engine_core::search::{types::TerminationReason, CommittedIteration, NodeType};
@@ -793,12 +795,6 @@ mod tests {
         let mut final_pv_injected_flag = false;
         let mut hard_deadline_taken = false;
         let mut root_legal_moves: Option<Vec<String>> = None;
-        let mut search_start_time: Option<Instant> = None;
-        let mut latest_nodes: u64 = 0;
-        let mut soft_limit_ms_ctx: u64 = 0;
-        let mut search_start_time: Option<Instant> = None;
-        let mut latest_nodes: u64 = 0;
-        let mut soft_limit_ms_ctx: u64 = 0;
         let mut search_start_time: Option<Instant> = None;
         let mut latest_nodes: u64 = 0;
         let mut soft_limit_ms_ctx: u64 = 0;
@@ -1293,5 +1289,493 @@ mod tests {
         // Ensure search finalized to idle
         assert_eq!(*ctx.search_state, SearchState::Idle);
         assert!(ctx.current_bestmove_emitter.is_none());
+    }
+
+    // (old wait_for_bestmove_sent_since removed; pump_until_bestmove drives the loop)
+
+    // Helper: pump worker messages and drive finalization similar to main loop
+    fn pump_until_bestmove(
+        ctx: &mut CommandContext,
+        timeout_ms: u64,
+        start_idx: usize,
+    ) -> Vec<String> {
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() as u64 <= timeout_ms {
+            // Check if bestmove was already sent
+            let infos = test_info_from(start_idx);
+            if infos
+                .iter()
+                .any(|s| s.contains("kind=bestmove_sent") && s.contains("bestmove="))
+            {
+                return infos;
+            }
+
+            // Try to receive a message from worker
+            match ctx.worker_rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                Ok(crate::worker::WorkerMessage::SearchFinished {
+                    root_hash: _,
+                    search_id,
+                    stop_info,
+                }) => {
+                    if search_id == *ctx.current_search_id {
+                        // Non-ponder path: finalize
+                        let _ = ctx.finalize_emit_if_possible("search_finished", stop_info);
+                    }
+                }
+                Ok(crate::worker::WorkerMessage::HardDeadlineFire { search_id, hard_ms }) => {
+                    if search_id == *ctx.current_search_id {
+                        // Build minimal StopInfo (hard timeout)
+                        let base_stop = engine_core::search::types::StopInfo {
+                            reason: engine_core::search::types::TerminationReason::TimeLimit,
+                            elapsed_ms: 0,
+                            nodes: 0,
+                            depth_reached: 0,
+                            hard_timeout: true,
+                            soft_limit_ms: *ctx.soft_limit_ms_ctx,
+                            hard_limit_ms: hard_ms,
+                        };
+                        // Try committed path first
+                        if let Some(committed) = ctx.current_committed.clone() {
+                            let _ = ctx.emit_best_from_committed(
+                                &committed,
+                                crate::types::BestmoveSource::EmergencyFallbackTimeout,
+                                Some(base_stop.clone()),
+                                "HardCommittedTest",
+                            );
+                        } else {
+                            // Fallback: emergency
+                            if let Ok((move_str, _)) = crate::helpers::generate_fallback_move(
+                                ctx.engine, None, false, true,
+                            ) {
+                                let meta = crate::emit_utils::build_meta(
+                                    crate::types::BestmoveSource::EmergencyFallbackTimeout,
+                                    0,
+                                    None,
+                                    None,
+                                    Some(base_stop),
+                                );
+                                let _ = ctx.emit_and_finalize(
+                                    move_str,
+                                    None,
+                                    meta,
+                                    "HardEmergencyTest",
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(crate::worker::WorkerMessage::IterationCommitted {
+                    committed,
+                    search_id,
+                }) => {
+                    if search_id == *ctx.current_search_id {
+                        // Cache latest committed (used by finalize)
+                        *ctx.current_committed = Some(committed);
+                    }
+                }
+                Ok(crate::worker::WorkerMessage::PartialResult { .. }) => {
+                    // Not needed for this test
+                }
+                Ok(crate::worker::WorkerMessage::SearchStarted { start_time, .. }) => {
+                    *ctx.search_start_time = Some(start_time);
+                }
+                Ok(crate::worker::WorkerMessage::Finished { .. }) => {
+                    // Done
+                }
+                Ok(crate::worker::WorkerMessage::Info { info, .. }) => {
+                    // Mirror main loop behavior by forwarding info lines
+                    if let Some(s) = info.string {
+                        let _ = crate::usi::send_info_string(s);
+                    }
+                }
+                Ok(crate::worker::WorkerMessage::Error { message, .. }) => {
+                    let _ =
+                        crate::usi::send_info_string(format!("kind=worker_error\tmsg={}", message));
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    // continue loop
+                }
+                Err(_) => break,
+            }
+        }
+        test_info_from(start_idx)
+    }
+
+    #[test]
+    fn test_go_fixedtime_emits_time_limit() {
+        // Avoid actual stdout writes; capture info strings in-memory
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        // Engine and startpos
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Channels and flags
+        let (tx, rx) = unbounded::<WorkerMessage>();
+        let global_stop = Arc::new(AtomicBool::new(false));
+
+        // Context fields
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Idle;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 0u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<()> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = None;
+        let mut current_finalized_flag: Option<Arc<AtomicBool>> = None;
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = None;
+        let mut position_state: Option<crate::types::PositionState> = None;
+        let program_start = std::time::Instant::now();
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut search_start_time: Option<std::time::Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut hard_deadline_taken = false;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
+        let mut last_go_begin_at: Option<std::time::Instant> = None;
+        let mut final_pv_injected = false;
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &global_stop,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_committed: &mut None,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+            last_go_begin_at: &mut last_go_begin_at,
+            final_pv_injected: &mut final_pv_injected,
+        };
+
+        // Start fixed-time search
+        let params = crate::usi::GoParams {
+            movetime: Some(100), // 100ms
+            ..Default::default()
+        };
+        let start_idx = test_info_len();
+        handle_go_command(params, &mut ctx).unwrap();
+
+        // Pump events until bestmove is emitted
+        let infos = pump_until_bestmove(&mut ctx, 5000, start_idx);
+        assert!(
+            infos
+                .iter()
+                .any(|s| s.contains("kind=bestmove_sent") && s.contains("stop_reason=time_limit")),
+            "bestmove_sent with time_limit not found. Infos: {:?}",
+            infos
+        );
+    }
+
+    #[test]
+    fn test_go_byoyomi_emits_time_limit() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let (tx, rx) = unbounded::<WorkerMessage>();
+        let global_stop = Arc::new(AtomicBool::new(false));
+
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Idle;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 0u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<()> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = None;
+        let mut current_finalized_flag: Option<Arc<AtomicBool>> = None;
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = None;
+        let mut position_state: Option<crate::types::PositionState> = None;
+        let program_start = std::time::Instant::now();
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut search_start_time: Option<std::time::Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut hard_deadline_taken = false;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
+        let mut last_go_begin_at: Option<std::time::Instant> = None;
+        let mut final_pv_injected = false;
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &global_stop,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_committed: &mut None,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+            last_go_begin_at: &mut last_go_begin_at,
+            final_pv_injected: &mut final_pv_injected,
+        };
+
+        // In-byoyomi for side to move
+        let params = crate::usi::GoParams {
+            btime: Some(0),
+            wtime: Some(0),
+            byoyomi: Some(300),
+            periods: Some(1),
+            ..Default::default()
+        };
+        let start_idx = test_info_len();
+        handle_go_command(params, &mut ctx).unwrap();
+
+        let infos = pump_until_bestmove(&mut ctx, 7000, start_idx);
+        assert!(
+            infos
+                .iter()
+                .any(|s| s.contains("kind=bestmove_sent") && s.contains("stop_reason=time_limit")),
+            "bestmove_sent with time_limit not found (byoyomi). Infos: {:?}",
+            infos
+        );
+    }
+
+    #[test]
+    fn test_ponderhit_converts_and_emits() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        // Engine and startpos
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Channels and flags
+        let (tx, rx) = unbounded::<WorkerMessage>();
+        let global_stop = Arc::new(AtomicBool::new(false));
+
+        // Context fields
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Idle;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 0u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<()> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = None;
+        let mut current_finalized_flag: Option<Arc<AtomicBool>> = None;
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = None;
+        let mut position_state: Option<crate::types::PositionState> = None;
+        let program_start = std::time::Instant::now();
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut search_start_time: Option<std::time::Instant> = None;
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut hard_deadline_taken = false;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
+        let mut last_go_begin_at: Option<std::time::Instant> = None;
+        let mut final_pv_injected = false;
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &global_stop,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_committed: &mut None,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+            last_go_begin_at: &mut last_go_begin_at,
+            final_pv_injected: &mut final_pv_injected,
+        };
+
+        // Start ponder search with inner fixed-time
+        let params = crate::usi::GoParams {
+            ponder: true,
+            movetime: Some(400),
+            ..Default::default()
+        };
+        let start_idx = test_info_len();
+        handle_go_command(params, &mut ctx).unwrap();
+
+        // Ensure no bestmove is sent during ponder (short wait)
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let infos_mid = test_info_from(start_idx);
+        assert!(
+            !infos_mid.iter().any(|s| s.contains("kind=bestmove_sent")),
+            "bestmove should not be sent during ponder: {:?}",
+            infos_mid
+        );
+
+        // Trigger ponderhit (convert in-place)
+        handle_ponder_hit(&mut ctx).unwrap();
+
+        // Now bestmove should be sent within time
+        let infos = pump_until_bestmove(&mut ctx, 7000, start_idx);
+        assert!(
+            infos.iter().any(|s| s.contains("kind=bestmove_sent")),
+            "bestmove_sent not found after ponderhit. Infos: {:?}",
+            infos
+        );
+    }
+
+    #[test]
+    fn test_hard_deadline_emits_from_committed() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        // Engine and startpos
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        // Channels and flags
+        let (tx, rx) = unbounded::<WorkerMessage>();
+        let global_stop = Arc::new(AtomicBool::new(false));
+
+        // Context fields
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching; // simulate active search
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 1u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<()> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(1));
+        let mut current_finalized_flag: Option<Arc<AtomicBool>> = None;
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = None;
+        let mut position_state: Option<crate::types::PositionState> = None;
+        let program_start = std::time::Instant::now();
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut search_start_time: Option<std::time::Instant> = Some(std::time::Instant::now());
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        let mut root_legal_moves: Option<Vec<String>> = None;
+        let mut hard_deadline_taken = false;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
+        let mut last_go_begin_at: Option<std::time::Instant> = None;
+        let mut final_pv_injected = false;
+
+        // Build a committed iteration with a legal move from startpos (e.g., 7g7f)
+        let pv_head = engine_core::usi::parse_usi_move("7g7f").unwrap();
+        let committed = CommittedIteration {
+            depth: 5,
+            seldepth: Some(7),
+            score: 20,
+            pv: vec![pv_head],
+            node_type: NodeType::Exact,
+            nodes: 10_000,
+            elapsed: std::time::Duration::from_millis(50),
+        };
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &global_stop,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_committed: &mut Some(committed.clone()),
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+            last_go_begin_at: &mut last_go_begin_at,
+            final_pv_injected: &mut final_pv_injected,
+        };
+
+        let start_idx = test_info_len();
+        // Inject a HardDeadlineFire message for the current search
+        tx.send(WorkerMessage::HardDeadlineFire {
+            search_id: 1,
+            hard_ms: 1000,
+        })
+        .unwrap();
+
+        let infos = pump_until_bestmove(&mut ctx, 3000, start_idx);
+        assert!(
+            infos.iter().any(|s| s.contains("kind=bestmove_sent")
+                && s.contains("stop_reason=time_limit")
+                && s.contains("hard_timeout=true")),
+            "bestmove_sent with time_limit hard_timeout=true not found. Infos: {:?}",
+            infos
+        );
     }
 }
