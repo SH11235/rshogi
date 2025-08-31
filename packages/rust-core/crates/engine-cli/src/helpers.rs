@@ -202,7 +202,7 @@ pub fn wait_for_search_completion(
 
         // Wait synchronously for worker to finish (no timeout)
         log::debug!("Waiting synchronously for worker to finish (go-path)");
-        let wait_result = wait_for_worker_sync(worker_handle, worker_rx, search_state);
+        let wait_result = wait_for_worker_sync(worker_handle, worker_rx, search_state, _engine);
 
         let stop_duration = stop_start.elapsed();
         log::info!("wait_for_search_completion: completed in {stop_duration:?}");
@@ -238,12 +238,19 @@ pub fn wait_for_search_completion(
         stop_flag.store(false, Ordering::Release);
         log::debug!("wait_for_search_completion: reset stop_flag to false after stopping search");
     } else {
-        log::debug!("wait_for_search_completion: no search in progress");
-        // Ensure stop flag is false even if no search was running
-        let was_true = stop_flag.load(Ordering::Acquire);
-        stop_flag.store(false, Ordering::Release);
-        if was_true {
-            log::warn!("wait_for_search_completion: stop_flag was true even though no search was running, reset to false");
+        log::debug!("wait_for_search_completion: no active search state");
+        // Even if state is Idle, there might still be a worker finalizing (post-finalize join not done).
+        if worker_handle.is_some() {
+            log::info!("wait_for_search_completion: waiting for post-finalize worker join (sync)");
+            // Do NOT touch stop flags here; just wait for clean completion and engine return.
+            wait_for_worker_sync(worker_handle, worker_rx, search_state, _engine)?;
+        } else {
+            // Ensure stop flag is false even if no search was running
+            let was_true = stop_flag.load(Ordering::Acquire);
+            stop_flag.store(false, Ordering::Release);
+            if was_true {
+                log::warn!("wait_for_search_completion: stop_flag was true even though no search was running, reset to false");
+            }
         }
     }
     Ok(())
@@ -278,8 +285,13 @@ pub fn wait_for_search_completion_with_timeout(
             );
         }
         log::debug!("Waiting up to {:?} for worker to finish (custom)", timeout);
-        let wait_result =
-            wait_for_worker_with_timeout(worker_handle, worker_rx, search_state, timeout);
+        let wait_result = wait_for_worker_with_timeout(
+            worker_handle,
+            worker_rx,
+            search_state,
+            timeout,
+            Some(_engine),
+        );
         let stop_duration = stop_start.elapsed();
         log::info!("wait_for_search_completion_with_timeout: completed in {stop_duration:?}");
         let _ = send_info_string(log_tsv(&[

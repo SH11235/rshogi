@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use crate::bestmove_emitter::{BestmoveEmitter, BestmoveMeta};
 use crate::emit_utils::{build_meta, log_tsv};
+use engine_core::engine::controller::Engine;
 use engine_core::search::{types::StopInfo, CommittedIteration};
 use engine_core::usi::move_to_usi;
 
@@ -60,6 +61,10 @@ pub struct CommandContext<'a> {
     pub last_go_begin_at: &'a mut Option<std::time::Instant>,
     /// Guard to ensure final PV is injected exactly once per search
     pub final_pv_injected: &'a mut bool,
+    /// Pending StopInfo from SearchFinished to be used after join
+    pub pending_stop_info: &'a mut Option<StopInfo>,
+    /// Pending Engine returned by worker guard, to be returned to adapter after join
+    pub pending_returned_engine: &'a mut Option<Engine>,
 }
 
 impl<'a> CommandContext<'a> {

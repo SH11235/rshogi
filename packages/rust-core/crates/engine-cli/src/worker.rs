@@ -48,6 +48,11 @@ fn derive_budgets_via_core(
 
 /// Messages from worker thread to main thread
 pub enum WorkerMessage {
+    /// Engine instance to be returned by USI thread (engine return unification)
+    ReturnEngine {
+        engine: Engine,
+        search_id: u64,
+    },
     Info {
         info: SearchInfo,
         search_id: u64,
@@ -132,21 +137,14 @@ fn mate_moves_to_pseudo_cp(mate: i32) -> Option<i32> {
 /// Guard to ensure engine is returned on drop (for panic safety)
 pub struct EngineReturnGuard {
     engine: Option<Engine>,
-    adapter: Arc<Mutex<EngineAdapter>>,
     tx: Sender<WorkerMessage>,
     search_id: u64,
 }
 
 impl EngineReturnGuard {
-    pub fn new(
-        engine: Engine,
-        adapter: Arc<Mutex<EngineAdapter>>,
-        tx: Sender<WorkerMessage>,
-        search_id: u64,
-    ) -> Self {
+    pub fn new(engine: Engine, tx: Sender<WorkerMessage>, search_id: u64) -> Self {
         Self {
             engine: Some(engine),
-            adapter,
             tx,
             search_id,
         }
@@ -170,20 +168,14 @@ impl std::ops::DerefMut for EngineReturnGuard {
 impl Drop for EngineReturnGuard {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.take() {
-            log::debug!("EngineReturnGuard: returning engine directly to adapter");
-
-            // Return engine directly to adapter
-            let mut adapter = lock_or_recover_adapter(&self.adapter);
-            adapter.return_engine(engine);
-            log::debug!("Engine returned successfully to adapter");
-
-            // Send finished notification
-            if let Err(e) = self.tx.send(WorkerMessage::Finished {
-                from_guard: true,
+            log::debug!("EngineReturnGuard: transferring engine to USI thread via ReturnEngine");
+            // Transfer engine ownership to USI thread; do NOT lock adapter here
+            // to avoid cross-thread lock ordering. USI thread will return it after join.
+            if let Err(e) = self.tx.send(WorkerMessage::ReturnEngine {
+                engine,
                 search_id: self.search_id,
             }) {
-                log::warn!("Failed to send Finished message from guard: {e}");
-                // This is OK - channel might be closed during shutdown
+                log::error!("Failed to send ReturnEngine from guard: {e}");
             }
         }
     }
@@ -372,8 +364,7 @@ pub fn search_worker(
                     search_id,
                 });
                 // Create guard immediately so any panic/early return still returns engine
-                let guard =
-                    EngineReturnGuard::new(engine, engine_adapter.clone(), tx.clone(), search_id);
+                let guard = EngineReturnGuard::new(engine, tx.clone(), search_id);
 
                 // Snapshot minimal adapter state needed for limit computation, then drop lock
                 let pos_snapshot = match adapter.get_position() {
@@ -987,6 +978,7 @@ pub fn wait_for_worker_with_timeout(
     worker_rx: &Receiver<WorkerMessage>,
     search_state: &mut SearchState,
     timeout: Duration,
+    engine_adapter: Option<&Arc<Mutex<EngineAdapter>>>,
 ) -> Result<()> {
     use crossbeam_channel::select;
     const SELECT_TIMEOUT: Duration = Duration::from_millis(50);
@@ -998,6 +990,7 @@ pub fn wait_for_worker_with_timeout(
     // Shutdown paths should pass MIN_JOIN_TIMEOUT explicitly.
     let deadline = Instant::now() + timeout;
     let mut finished = false;
+    let mut pending_engine: Option<Engine> = None;
     let mut finished_count = 0u32;
 
     // Wait for Finished message or timeout
@@ -1021,6 +1014,11 @@ pub fn wait_for_worker_with_timeout(
                         log::debug!("Worker reported SearchFinished during shutdown wait");
                         finished = true;
                         break;
+                    }
+                    Ok(WorkerMessage::ReturnEngine { engine, .. }) => {
+                        // Hold engine until join, then return from USI thread
+                        log::debug!("wait_with_timeout: captured ReturnEngine for later return");
+                        pending_engine = Some(engine);
                     }
                     Ok(WorkerMessage::HardDeadlineFire { .. }) => {
                         // ignore in shutdown wait loop
@@ -1102,6 +1100,13 @@ pub fn wait_for_worker_with_timeout(
         }
     }
 
+    // If engine has been transferred, return it now from USI thread
+    if let (Some(engine), Some(adapter_mutex)) = (pending_engine.take(), engine_adapter) {
+        log::debug!("wait_with_timeout: returning engine from USI thread after join");
+        let mut adapter = lock_or_recover_adapter(adapter_mutex);
+        adapter.return_engine(engine);
+    }
+
     let total_wait_duration = wait_start.elapsed();
     log::info!(
         "wait_for_worker_with_timeout: completed in {total_wait_duration:?}, finished={finished}"
@@ -1126,10 +1131,12 @@ pub fn wait_for_worker_sync(
     worker_handle: &mut Option<JoinHandle<()>>,
     worker_rx: &Receiver<WorkerMessage>,
     search_state: &mut SearchState,
+    engine_adapter: &Arc<Mutex<EngineAdapter>>,
 ) -> Result<()> {
     log::info!("wait_for_worker_sync: started (no timeout)");
 
-    // Block until we get Finished (ignore other messages)
+    // Block until we get Finished (collect ReturnEngine if arrives)
+    let mut pending_engine: Option<Engine> = None;
     loop {
         match worker_rx.recv() {
             Ok(WorkerMessage::Finished { from_guard, .. }) => {
@@ -1139,6 +1146,12 @@ pub fn wait_for_worker_sync(
             Ok(WorkerMessage::SearchFinished { .. }) => {
                 // Keep waiting for Finished to ensure guard drop/engine return completed
                 log::debug!("wait_for_worker_sync: observed SearchFinished; waiting for Finished");
+            }
+            Ok(WorkerMessage::ReturnEngine { engine, .. }) => {
+                log::debug!(
+                    "wait_for_worker_sync: captured ReturnEngine for later USI-side return"
+                );
+                pending_engine = Some(engine);
             }
             Ok(WorkerMessage::HardDeadlineFire { .. }) => {
                 // Ignore during shutdown/sync wait
@@ -1173,16 +1186,52 @@ pub fn wait_for_worker_sync(
         log::trace!("wait_for_worker_sync: no worker handle to join");
     }
 
+    // Return engine now from USI thread if transferred
+    if let Some(engine) = pending_engine.take() {
+        log::debug!("wait_for_worker_sync: returning engine to adapter after join");
+        let mut adapter = lock_or_recover_adapter(engine_adapter);
+        adapter.return_engine(engine);
+        log::debug!("wait_for_worker_sync: engine returned");
+    }
+
     // Set state idle
     *search_state = SearchState::Idle;
 
-    // Drain remaining messages from worker_rx
-    let mut drained = 0usize;
-    while worker_rx.try_recv().is_ok() {
-        drained += 1;
+    // Drain remaining non-structural messages from worker_rx (Info-like only)
+    let mut drained_info = 0usize;
+    loop {
+        match worker_rx.try_recv() {
+            Ok(WorkerMessage::Info { .. })
+            | Ok(WorkerMessage::IterationCommitted { .. })
+            | Ok(WorkerMessage::PartialResult { .. })
+            | Ok(WorkerMessage::HardDeadlineFire { .. }) => {
+                drained_info += 1;
+            }
+            Ok(WorkerMessage::ReturnEngine { .. }) => {
+                // Engine should have been handled earlier in wait_for_worker_sync path.
+                log::trace!("wait_for_worker_sync: late ReturnEngine dropped (already joined)");
+            }
+            Ok(WorkerMessage::SearchStarted { .. }) => {
+                // Late SearchStarted should not happen; log and drop
+                log::trace!("wait_for_worker_sync: late SearchStarted dropped");
+            }
+            Ok(WorkerMessage::SearchFinished { .. }) => {
+                // Structural message after Finished/join; drop with trace
+                log::trace!("wait_for_worker_sync: late SearchFinished dropped");
+            }
+            Ok(WorkerMessage::Finished { .. }) => {
+                // Structural duplicate; drop
+                log::trace!("wait_for_worker_sync: late Finished dropped");
+            }
+            Ok(WorkerMessage::Error { .. }) => {
+                // Error after join — log and drop
+                log::trace!("wait_for_worker_sync: late Error dropped");
+            }
+            Err(_) => break,
+        }
     }
-    if drained > 0 {
-        log::trace!("wait_for_worker_sync: drained {drained} leftover messages");
+    if drained_info > 0 {
+        log::trace!("wait_for_worker_sync: drained {drained_info} leftover info messages");
     }
 
     Ok(())
