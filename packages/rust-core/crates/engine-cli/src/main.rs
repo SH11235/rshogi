@@ -142,6 +142,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
     let mut current_finalized_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None; // Share finalize with worker
                                                                                                   // Guard: ensure final PV injection exactly once per search
     let mut final_pv_injected: bool = false;
+    // Store StopInfo until worker thread finishes and is joined
+    let mut pending_stop_info: Option<engine_core::search::types::StopInfo> = None;
+    // Store returned Engine instance until join, to return from USI thread
+    let mut pending_returned_engine: Option<engine_core::engine::controller::Engine> = None;
 
     // Diagnostics: timestamps for cross-event deltas
     let mut last_bestmove_sent_at: Option<Instant> = None;
@@ -247,6 +251,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         final_pv_injected: &mut final_pv_injected,
+                        pending_stop_info: &mut pending_stop_info,
+                        pending_returned_engine: &mut pending_returned_engine,
                     };
                     match handle_command(cmd, &mut ctx) {
                         Ok(()) => {}
@@ -310,6 +316,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         final_pv_injected: &mut final_pv_injected,
+                        pending_stop_info: &mut pending_stop_info,
+                        pending_returned_engine: &mut pending_returned_engine,
                     };
                     match handle_command(cmd, &mut ctx) {
                         Ok(()) => {}
@@ -362,6 +370,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         final_pv_injected: &mut final_pv_injected,
+                        pending_stop_info: &mut pending_stop_info,
+                        pending_returned_engine: &mut pending_returned_engine,
                     };
                     handle_worker_message(msg, &mut ctx)?;
                     processed_worker += 1;
@@ -419,6 +429,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                         last_bestmove_sent_at: &mut last_bestmove_sent_at,
                         last_go_begin_at: &mut last_go_begin_at,
                         final_pv_injected: &mut final_pv_injected,
+                        pending_stop_info: &mut pending_stop_info,
+                        pending_returned_engine: &mut pending_returned_engine,
                     };
                     match handle_command(cmd, &mut ctx) { Ok(()) => {}, Err(e) => { log::error!("[MAIN] ctrl handle_command error: {}", e); return Err(e); } }
                     continue;
@@ -501,7 +513,9 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
                             final_pv_injected: &mut final_pv_injected,
-                        };
+                        pending_stop_info: &mut pending_stop_info,
+                        pending_returned_engine: &mut pending_returned_engine,
+                    };
                         match handle_command(cmd, &mut ctx) {
                             Ok(()) => {},
                             Err(e) => {
@@ -552,8 +566,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             current_committed: &mut current_committed,
                             last_bestmove_sent_at: &mut last_bestmove_sent_at,
                             last_go_begin_at: &mut last_go_begin_at,
-                            final_pv_injected: &mut final_pv_injected,
-                        };
+                        final_pv_injected: &mut final_pv_injected,
+                        pending_stop_info: &mut pending_stop_info,
+                        pending_returned_engine: &mut pending_returned_engine,
+                    };
                         handle_worker_message(msg, &mut ctx)?;
                     }
                     Err(_) => {
@@ -579,6 +595,7 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
             &worker_rx,
             &mut search_state,
             helpers::MIN_JOIN_TIMEOUT,
+            Some(&engine),
         )?;
     }
 
@@ -626,6 +643,9 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
         WorkerMessage::Finished { .. } => {
             // Never drop Finished — allow cleanup/join logic to observe it later if needed.
         }
+        WorkerMessage::ReturnEngine { .. } => {
+            // Never drop ReturnEngine — USI thread must return engine to adapter.
+        }
         _ if drop_after_finalize => {
             // Drop only if message is from current search; otherwise let normal path handle it
             let current_id = *ctx.current_search_id;
@@ -638,6 +658,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 WorkerMessage::Finished { search_id, .. } => *search_id, // already excluded above
                 WorkerMessage::Error { search_id, .. } => *search_id,
                 WorkerMessage::HardDeadlineFire { search_id, .. } => *search_id,
+                WorkerMessage::ReturnEngine { search_id, .. } => *search_id,
             };
             if id == current_id {
                 // Log and drop
@@ -650,6 +671,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     WorkerMessage::Error { .. } => "error",
                     WorkerMessage::Finished { .. } => "finished", // unreachable here
                     WorkerMessage::HardDeadlineFire { .. } => "hard_deadline",
+                    WorkerMessage::ReturnEngine { .. } => "return_engine",
                 };
                 log_drop(tag, &[("search_id", id.to_string())]);
                 return Ok(());
@@ -879,6 +901,29 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 }
             }
         }
+        WorkerMessage::ReturnEngine { engine, search_id } => {
+            // Store engine for USI-side return after join if for current search; otherwise return immediately
+            if search_id == *ctx.current_search_id {
+                *ctx.pending_returned_engine = Some(engine);
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "return_engine_stashed"),
+                    ("search_id", &search_id.to_string()),
+                ]));
+            } else {
+                // Old search_id: return immediately
+                if let Ok(mut adapter) = ctx.engine.try_lock() {
+                    adapter.return_engine(engine);
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "return_engine_immediate"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
+                } else {
+                    log::warn!("ReturnEngine for old search id but adapter lock busy; forcing recovery lock");
+                    let mut adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
+                    adapter.return_engine(engine);
+                }
+            }
+        }
         WorkerMessage::Info { info, search_id } => {
             // Forward info messages only from current search
             if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
@@ -1060,14 +1105,17 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     ]));
                     return Ok(());
                 }
-                // Send bestmove immediately if not ponder (Central finalize)
+
+                // Defer bestmove emission until Finished (join) for strict ordering
                 if !*ctx.current_search_is_ponder {
-                    let _ = ctx.finalize_emit_if_possible("search_finished", stop_info)?;
+                    *ctx.pending_stop_info = stop_info;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "searchfinished_deferred"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
                     return Ok(());
                 } else {
                     log::debug!("Ponder search finished, not sending bestmove");
-                    // Finalize ponder search to ensure proper cleanup
-                    // (normally ponder ends via stop/ponderhit, but handle natural termination)
                     ctx.finalize_search("PonderFinished");
                 }
             }
@@ -1127,77 +1175,153 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             }
 
             if search_id == *ctx.current_search_id {
-                log::warn!(
-                    "Worker Finished without SearchFinished (from_guard: {from_guard}), emitting fallback"
-                );
-
-                // Try central finalize first
-                if !*ctx.current_search_is_ponder
-                    && ctx.finalize_emit_if_possible("finished", None)?
-                {
+                // Ignore guard's Finished (we rely on worker-end Finished)
+                if from_guard {
                     return Ok(());
                 }
 
-                // Try committed-based bestmove first
-                if let Some(committed) = ctx.current_committed.clone() {
-                    if let Some(ref _emitter) = ctx.current_bestmove_emitter {
-                        if ctx.emit_best_from_committed(
-                            &committed,
-                            BestmoveSource::EmergencyFallbackOnFinish,
-                            None,
-                            "FinishedCommittedFallback",
-                        )? {
-                            return Ok(());
+                // Join worker thread now to enforce strict ordering before bestmove
+                if let Some(handle) = ctx.worker_handle.take() {
+                    match handle.join() {
+                        Ok(()) => log::debug!("Worker thread joined in Finished handler"),
+                        Err(_) => log::error!("Worker thread panicked on join in Finished handler"),
+                    }
+                }
+
+                // Ensure engine is returned now (USI-side unification)
+                if let Some(engine) = ctx.pending_returned_engine.take() {
+                    let mut adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
+                    adapter.return_engine(engine);
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "return_engine_after_join"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
+                } else {
+                    // If not already stashed, block until we receive ReturnEngine for this search id
+                    loop {
+                        match ctx.worker_rx.recv() {
+                            Ok(WorkerMessage::ReturnEngine {
+                                engine,
+                                search_id: sid,
+                            }) if sid == *ctx.current_search_id => {
+                                let mut adapter =
+                                    crate::worker::lock_or_recover_adapter(ctx.engine);
+                                adapter.return_engine(engine);
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "return_engine_blocked_after_join"),
+                                    ("search_id", &sid.to_string()),
+                                ]));
+                                break;
+                            }
+                            Ok(other) => {
+                                // Drop or log non-engine messages during finalization
+                                let tag = match &other {
+                                    WorkerMessage::Info { .. } => "info",
+                                    WorkerMessage::SearchStarted { .. } => "started",
+                                    WorkerMessage::IterationCommitted { .. } => "committed",
+                                    WorkerMessage::SearchFinished { .. } => "finished",
+                                    WorkerMessage::PartialResult { .. } => "partial",
+                                    WorkerMessage::Finished { .. } => "finished",
+                                    WorkerMessage::Error { .. } => "error",
+                                    WorkerMessage::HardDeadlineFire { .. } => "hard_deadline",
+                                    WorkerMessage::ReturnEngine { .. } => "return_engine_other",
+                                };
+                                let _ = send_info_string(log_tsv(&[
+                                    ("kind", "post_join_drop"),
+                                    ("tag", tag),
+                                ]));
+                                continue;
+                            }
+                            Err(_) => {
+                                log::error!(
+                                    "Worker channel closed unexpectedly while waiting ReturnEngine"
+                                );
+                                break;
+                            }
                         }
                     }
                 }
 
-                // Session path removed
+                // Prefer central finalize using pending StopInfo captured at SearchFinished
+                if !*ctx.current_search_is_ponder {
+                    let stop_info = ctx.pending_stop_info.take();
+                    if ctx.finalize_emit_if_possible("joined", stop_info)? {
+                        return Ok(());
+                    }
 
-                // Fallback: use cached partial result if available
-                if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
-                    match generate_fallback_move(ctx.engine, Some((mv, d, s)), false, false) {
+                    // Fallbacks when central finalize not possible
+                    if let Some(committed) = ctx.current_committed.clone() {
+                        if let Some(ref _emitter) = ctx.current_bestmove_emitter {
+                            if ctx.emit_best_from_committed(
+                                &committed,
+                                BestmoveSource::EmergencyFallbackOnFinish,
+                                None,
+                                "FinishedCommittedFallback",
+                            )? {
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    if let Some((mv, d, s)) = ctx.last_partial_result.clone() {
+                        match generate_fallback_move(ctx.engine, Some((mv, d, s)), false, false) {
+                            Ok((move_str, _)) => {
+                                let info = crate::usi::output::SearchInfo {
+                                    depth: Some(d as u32),
+                                    score: Some(crate::utils::to_usi_score(s)),
+                                    pv: vec![move_str.clone()],
+                                    ..Default::default()
+                                };
+                                let _ =
+                                    crate::usi::send_response(crate::usi::UsiResponse::Info(info));
+                                let meta = build_meta(
+                                    BestmoveSource::EmergencyFallbackOnFinish,
+                                    d,
+                                    None,
+                                    Some(format!("cp {s}")),
+                                    None,
+                                );
+                                ctx.emit_and_finalize(
+                                    move_str,
+                                    None,
+                                    meta,
+                                    "FinishedPartialFallback",
+                                )?;
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                log::warn!("Finished: partial fallback failed: {e}");
+                            }
+                        }
+                    }
+
+                    match generate_fallback_move(ctx.engine, None, false, false) {
                         Ok((move_str, _)) => {
-                            // Emit a final info pv based on the partial result to align with bestmove
-                            let info = crate::usi::output::SearchInfo {
-                                depth: Some(d as u32),
-                                score: Some(crate::utils::to_usi_score(s)),
-                                pv: vec![move_str.clone()],
-                                ..Default::default()
-                            };
-                            let _ = crate::usi::send_response(crate::usi::UsiResponse::Info(info));
                             let meta = build_meta(
                                 BestmoveSource::EmergencyFallbackOnFinish,
-                                d,
+                                0,
                                 None,
-                                Some(format!("cp {s}")),
+                                None,
                                 None,
                             );
-                            ctx.emit_and_finalize(move_str, None, meta, "FinishedPartialFallback")?;
-                            return Ok(());
+                            ctx.emit_and_finalize(
+                                move_str,
+                                None,
+                                meta,
+                                "FinishedEmergencyFallback",
+                            )?;
                         }
                         Err(e) => {
-                            log::warn!("Finished: partial fallback failed: {e}");
+                            log::error!("Finished: emergency fallback failed: {e}");
+                            let meta =
+                                build_meta(BestmoveSource::ResignOnFinish, 0, None, None, None);
+                            ctx.emit_and_finalize(
+                                "resign".to_string(),
+                                None,
+                                meta,
+                                "FinishedResign",
+                            )?;
                         }
-                    }
-                }
-
-                // Emergency last resort
-                match generate_fallback_move(ctx.engine, None, false, false) {
-                    Ok((move_str, _)) => {
-                        let meta = build_meta(
-                            BestmoveSource::EmergencyFallbackOnFinish,
-                            0,
-                            None,
-                            None,
-                            None,
-                        );
-                        ctx.emit_and_finalize(move_str, None, meta, "FinishedEmergencyFallback")?;
-                    }
-                    Err(e) => {
-                        log::error!("Finished: emergency fallback failed: {e}");
-                        let meta = build_meta(BestmoveSource::ResignOnFinish, 0, None, None, None);
-                        ctx.emit_and_finalize("resign".to_string(), None, meta, "FinishedResign")?;
                     }
                 }
             }
