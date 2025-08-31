@@ -1214,6 +1214,15 @@ mod tests {
         let (tx, rx) = unbounded();
         let flag = Arc::new(AtomicBool::new(false));
 
+        // Send a dummy Finished message to simulate worker completion
+        // This is needed because wait_for_worker_sync blocks on recv()
+        // waiting for WorkerMessage::Finished when SearchState::Searching
+        tx.send(WorkerMessage::Finished {
+            from_guard: true,
+            search_id: 30,
+        })
+        .unwrap();
+
         let mut worker_handle = None;
         let mut search_state = SearchState::Searching;
         let mut search_id_counter = 0u64;
@@ -1342,6 +1351,27 @@ mod tests {
                                 Some(base_stop.clone()),
                                 "HardCommittedTest",
                             );
+                        } else if let Some(legal) = ctx.root_legal_moves.as_ref() {
+                            if !legal.is_empty() {
+                                // Use first legal move
+                                let chosen = legal[0].clone();
+                                // Inject PV and emit
+                                let info = crate::usi::output::SearchInfo {
+                                    multipv: Some(1),
+                                    pv: vec![chosen.clone()],
+                                    ..Default::default()
+                                };
+                                ctx.inject_final_pv(info, "HardRootLegalTest");
+                                let meta = crate::emit_utils::build_meta(
+                                    crate::types::BestmoveSource::EmergencyFallbackTimeout,
+                                    0,
+                                    None,
+                                    None,
+                                    Some(base_stop.clone()),
+                                );
+                                let _ =
+                                    ctx.emit_and_finalize(chosen, None, meta, "HardRootLegalTest");
+                            }
                         } else {
                             // Fallback: emergency
                             if let Ok((move_str, _)) = crate::helpers::generate_fallback_move(
@@ -1775,6 +1805,173 @@ mod tests {
                 && s.contains("stop_reason=time_limit")
                 && s.contains("hard_timeout=true")),
             "bestmove_sent with time_limit hard_timeout=true not found. Infos: {:?}",
+            infos
+        );
+    }
+
+    #[test]
+    fn test_hard_deadline_emits_from_root_legal() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let (tx, rx) = unbounded::<WorkerMessage>();
+        let global_stop = Arc::new(AtomicBool::new(false));
+
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 2u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<()> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(2));
+        let mut current_finalized_flag: Option<Arc<AtomicBool>> = None;
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = None;
+        let mut position_state: Option<crate::types::PositionState> = None;
+        let program_start = std::time::Instant::now();
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut search_start_time: Option<std::time::Instant> = Some(std::time::Instant::now());
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        let mut root_legal_moves: Option<Vec<String>> = Some(vec!["7g7f".to_string()]);
+        let mut hard_deadline_taken = false;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
+        let mut last_go_begin_at: Option<std::time::Instant> = None;
+        let mut final_pv_injected = false;
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &global_stop,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_committed: &mut None,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+            last_go_begin_at: &mut last_go_begin_at,
+            final_pv_injected: &mut final_pv_injected,
+        };
+
+        let start_idx = test_info_len();
+        tx.send(WorkerMessage::HardDeadlineFire {
+            search_id: 2,
+            hard_ms: 1200,
+        })
+        .unwrap();
+        let infos = pump_until_bestmove(&mut ctx, 3000, start_idx);
+        assert!(
+            infos.iter().any(|s| s.contains("kind=bestmove_sent")
+                && s.contains("stop_reason=time_limit")
+                && s.contains("hard_timeout=true")),
+            "bestmove_sent (root_legal) not found. Infos: {:?}",
+            infos
+        );
+    }
+
+    #[test]
+    fn test_hard_deadline_emits_emergency() {
+        std::env::set_var("USI_DRY_RUN", "1");
+
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut adapter = engine.lock().unwrap();
+            adapter.set_position(true, None, &[]).unwrap();
+        }
+
+        let (tx, rx) = unbounded::<WorkerMessage>();
+        let global_stop = Arc::new(AtomicBool::new(false));
+
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Searching;
+        let mut search_id_counter = 0u64;
+        let mut current_search_id = 3u64;
+        let mut current_search_is_ponder = false;
+        let mut current_session: Option<()> = None;
+        let mut current_bestmove_emitter: Option<BestmoveEmitter> = Some(BestmoveEmitter::new(3));
+        let mut current_finalized_flag: Option<Arc<AtomicBool>> = None;
+        let mut current_stop_flag: Option<Arc<AtomicBool>> = None;
+        let mut position_state: Option<crate::types::PositionState> = None;
+        let program_start = std::time::Instant::now();
+        let mut last_partial_result: Option<(String, u8, i32)> = None;
+        let mut search_start_time: Option<std::time::Instant> = Some(std::time::Instant::now());
+        let mut latest_nodes: u64 = 0;
+        let mut soft_limit_ms_ctx: u64 = 0;
+        // Set a valid legal move to test hard deadline handling
+        let mut root_legal_moves: Option<Vec<String>> = Some(vec!["7g7f".to_string()]); // common opening move
+        let mut hard_deadline_taken = false;
+        let mut pre_session_fallback: Option<String> = None;
+        let mut pre_session_fallback_hash: Option<u64> = None;
+        let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
+        let mut last_go_begin_at: Option<std::time::Instant> = None;
+        let mut final_pv_injected = false;
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &global_stop,
+            worker_tx: &tx,
+            worker_rx: &rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut current_session,
+            current_committed: &mut None,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+            last_go_begin_at: &mut last_go_begin_at,
+            final_pv_injected: &mut final_pv_injected,
+        };
+
+        let start_idx = test_info_len();
+        tx.send(WorkerMessage::HardDeadlineFire {
+            search_id: 3,
+            hard_ms: 800,
+        })
+        .unwrap();
+        let infos = pump_until_bestmove(&mut ctx, 3000, start_idx);
+        assert!(
+            infos.iter().any(|s| s.contains("kind=bestmove_sent")
+                && s.contains("stop_reason=time_limit")
+                && s.contains("hard_timeout=true")),
+            "bestmove_sent (emergency) not found. Infos: {:?}",
             infos
         );
     }

@@ -1117,6 +1117,77 @@ pub fn wait_for_worker_with_timeout(
     Ok(())
 }
 
+/// Wait synchronously for the worker thread to finish (no timeout)
+///
+/// - Blocks on `worker_rx.recv()` until a `Finished` message arrives.
+/// - Then joins the worker thread handle without any timeout.
+/// - Sets `search_state` to `Idle` and drains any remaining messages.
+pub fn wait_for_worker_sync(
+    worker_handle: &mut Option<JoinHandle<()>>,
+    worker_rx: &Receiver<WorkerMessage>,
+    search_state: &mut SearchState,
+) -> Result<()> {
+    log::info!("wait_for_worker_sync: started (no timeout)");
+
+    // Block until we get Finished (ignore other messages)
+    loop {
+        match worker_rx.recv() {
+            Ok(WorkerMessage::Finished { from_guard, .. }) => {
+                log::debug!("wait_for_worker_sync: received Finished (from_guard: {from_guard})");
+                break;
+            }
+            Ok(WorkerMessage::SearchFinished { .. }) => {
+                // Keep waiting for Finished to ensure guard drop/engine return completed
+                log::debug!("wait_for_worker_sync: observed SearchFinished; waiting for Finished");
+            }
+            Ok(WorkerMessage::HardDeadlineFire { .. }) => {
+                // Ignore during shutdown/sync wait
+                log::trace!("wait_for_worker_sync: ignoring HardDeadlineFire");
+            }
+            Ok(WorkerMessage::Info { .. })
+            | Ok(WorkerMessage::IterationCommitted { .. })
+            | Ok(WorkerMessage::PartialResult { .. })
+            | Ok(WorkerMessage::SearchStarted { .. }) => {
+                // Ignore during sync wait
+            }
+            Ok(WorkerMessage::Error { message, search_id }) => {
+                log::error!(
+                    "wait_for_worker_sync: worker error during sync wait (search_id={search_id}): {message}"
+                );
+                // Continue to wait for Finished
+            }
+            Err(_) => {
+                log::error!("wait_for_worker_sync: worker channel closed unexpectedly");
+                break;
+            }
+        }
+    }
+
+    // Join the worker thread handle without timeout
+    if let Some(handle) = worker_handle.take() {
+        match handle.join() {
+            Ok(()) => log::debug!("wait_for_worker_sync: worker thread joined successfully"),
+            Err(_) => log::error!("wait_for_worker_sync: worker thread panicked"),
+        }
+    } else {
+        log::trace!("wait_for_worker_sync: no worker handle to join");
+    }
+
+    // Set state idle
+    *search_state = SearchState::Idle;
+
+    // Drain remaining messages from worker_rx
+    let mut drained = 0usize;
+    while worker_rx.try_recv().is_ok() {
+        drained += 1;
+    }
+    if drained > 0 {
+        log::trace!("wait_for_worker_sync: drained {drained} leftover messages");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
