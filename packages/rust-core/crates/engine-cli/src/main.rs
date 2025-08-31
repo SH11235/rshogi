@@ -735,6 +735,12 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
             // 1) Try committed iteration path first
             if let Some(committed) = ctx.current_committed.clone() {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "hard_deadline_has_committed"),
+                    ("depth", &committed.depth.to_string()),
+                    ("nodes", &committed.nodes.to_string()),
+                    ("search_id", &search_id.to_string()),
+                ]));
                 if ctx.emit_best_from_committed(
                     &committed,
                     BestmoveSource::EmergencyFallbackTimeout,
@@ -749,6 +755,11 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     ]));
                     return Ok(());
                 }
+            } else {
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "hard_deadline_no_committed"),
+                    ("search_id", &search_id.to_string()),
+                ]));
             }
 
             // 2) Use cached partial result if available
@@ -1008,6 +1019,15 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             search_id,
             stop_info,
         } => {
+            // Log SearchFinished received
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "search_finished_received"),
+                ("search_id", &search_id.to_string()),
+                ("stop_reason", &format!("{:?}", stop_info.as_ref().map(|s| &s.reason))),
+                ("depth", &stop_info.as_ref().map(|s| s.depth_reached).unwrap_or(0).to_string()),
+                ("nodes", &stop_info.as_ref().map(|s| s.nodes).unwrap_or(0).to_string()),
+            ]));
+
             // Handle search completion for current search（state非依存: emitter未finalizeなら許可）
             if search_id != *ctx.current_search_id {
                 let _ = send_info_string(log_tsv(&[
