@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
-use engine_core::shogi::{Color, Position};
+use engine_core::shogi::{Color, Move as ShogiMove, PieceType, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
 use engine_core::usi::{move_to_usi, parse_sfen, parse_usi_move};
 use log::info;
@@ -218,6 +218,27 @@ fn usi_println(s: &str) {
     let mut out = io::stdout();
     writeln!(out, "{}", s).ok();
     out.flush().ok();
+}
+
+#[inline]
+fn info_string<S: AsRef<str>>(s: S) {
+    usi_println(&format!("info string {}", s.as_ref()));
+}
+
+#[inline]
+fn fmt_hash(h: u64) -> String {
+    format!("{:016x}", h)
+}
+
+#[inline]
+fn move_piece_type_in_pos(mv: &ShogiMove, pos: &Position) -> Option<PieceType> {
+    if let Some(pt) = mv.piece_type() {
+        return Some(pt);
+    }
+    if mv.is_drop() {
+        return Some(mv.drop_piece_type());
+    }
+    mv.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type))
 }
 
 fn send_id_and_options(opts: &UsiOptions) {
@@ -584,13 +605,37 @@ fn main() -> Result<()> {
                                 })
                                 .unwrap_or(false);
 
+                            // Diagnostics: finalize snapshot
+                            info_string(format!(
+                                "finalize root={} gui={} stale={} core_best={}",
+                                fmt_hash(state.current_root_hash.unwrap_or(0)),
+                                fmt_hash(state.position.zobrist_hash()),
+                                if stale { 1 } else { 0 },
+                                result
+                                    .best_move
+                                    .map(|m| move_to_usi(&m))
+                                    .unwrap_or_else(|| "-".to_string())
+                            ));
+
                             let final_usi = if mate_flag {
                                 "resign".to_string()
                             } else if stale {
                                 // ステール（GUI局面更新済み）なら安全フォールバック
                                 let mg = engine_core::movegen::MoveGenerator::new();
                                 if let Ok(list) = mg.generate_all(&state.position) {
+                                    let legal_count = list.len();
                                     if let Some(first) = list.as_slice().first() {
+                                        // Diagnostics: fallback details
+                                        let king = move_piece_type_in_pos(first, &state.position)
+                                            .map(|pt| matches!(pt, PieceType::King))
+                                            .unwrap_or(false);
+                                        info_string(format!(
+                                            "fallback reason=stale chosen={} legal_count={} in_check={} king_move={}",
+                                            move_to_usi(first),
+                                            legal_count,
+                                            if state.position.is_in_check() { 1 } else { 0 },
+                                            if king { 1 } else { 0 }
+                                        ));
                                         move_to_usi(first)
                                     } else {
                                         "resign".to_string()
@@ -606,7 +651,21 @@ fn main() -> Result<()> {
                                     // Fallback: choose first legal, else resign
                                     let mg = engine_core::movegen::MoveGenerator::new();
                                     if let Ok(list) = mg.generate_all(&state.position) {
+                                        let legal_count = list.len();
                                         if let Some(first) = list.as_slice().first() {
+                                            // Diagnostics: fallback details
+                                            let king =
+                                                move_piece_type_in_pos(first, &state.position)
+                                                    .map(|pt| matches!(pt, PieceType::King))
+                                                    .unwrap_or(false);
+                                            info_string(format!(
+                                                "fallback reason=illegal core={} chosen={} legal_count={} in_check={} king_move={}",
+                                                move_to_usi(&mv),
+                                                move_to_usi(first),
+                                                legal_count,
+                                                if state.position.is_in_check() { 1 } else { 0 },
+                                                if king { 1 } else { 0 }
+                                            ));
                                             move_to_usi(first)
                                         } else {
                                             "resign".to_string()
@@ -953,6 +1012,14 @@ fn main() -> Result<()> {
                 state.result_rx = Some(rx);
                 state.current_is_stochastic_ponder = current_is_stochastic_ponder;
                 state.current_root_hash = Some(search_position.zobrist_hash());
+                // Diagnostics: mark search start and show hashes
+                info_string(format!(
+                    "search_started root={} gui={} ponder={} stoch={}",
+                    fmt_hash(search_position.zobrist_hash()),
+                    fmt_hash(state.position.zobrist_hash()),
+                    gp.ponder,
+                    state.current_is_stochastic_ponder
+                ));
                 continue;
             }
 
@@ -982,8 +1049,18 @@ fn main() -> Result<()> {
                                 state.searching = false;
                                 state.stop_flag = None;
                                 state.ponder_hit_flag = None;
-                                let bm = emergency_fallback_move(&state.position)
-                                    .unwrap_or_else(|| "resign".to_string());
+                                let bm = match emergency_fallback_move(&state.position) {
+                                    Some(m) => {
+                                        // Diagnostics: emergency fallback (timeout)
+                                        info_string(format!(
+                                            "fallback reason=stop_timeout chosen={} in_check={}",
+                                            m,
+                                            if state.position.is_in_check() { 1 } else { 0 }
+                                        ));
+                                        m
+                                    }
+                                    None => "resign".to_string(),
+                                };
                                 usi_println(&format!("bestmove {}", bm));
                             }
                         }
