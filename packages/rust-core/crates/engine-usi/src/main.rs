@@ -6,7 +6,7 @@ use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBu
 use engine_core::usi::{move_to_usi, parse_sfen, parse_usi_move};
 use log::info;
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -118,7 +118,7 @@ struct EngineState {
     // Reaper: background joiner for detached worker threads
     reaper_tx: Option<mpsc::Sender<std::thread::JoinHandle<()>>>,
     reaper_handle: Option<std::thread::JoinHandle<()>>,
-    reaper_detach_count: u64,
+    reaper_queue_len: Arc<AtomicUsize>,
 }
 
 impl EngineState {
@@ -151,7 +151,7 @@ impl EngineState {
             current_search_id: 0,
             reaper_tx: None,
             reaper_handle: None,
-            reaper_detach_count: 0,
+            reaper_queue_len: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -256,6 +256,90 @@ fn source_to_str(src: FinalBestSource) -> &'static str {
         FinalBestSource::LegalFallback => "legal",
         FinalBestSource::Resign => "resign",
     }
+}
+
+/// Centralized finalize + bestmove emission
+/// - label: "finalize" | "stop_finalize" | "stop_timeout_finalize"
+/// - result: Some(&SearchResult) when available to build committed PV and log soft/hard
+/// - stale: whether root hash mismatched
+/// - mate_flag: force resign when true (normal finalizeのみで使用)
+fn finalize_and_send(
+    state: &mut EngineState,
+    label: &str,
+    result: Option<&engine_core::search::SearchResult>,
+    stale: bool,
+    mate_flag: bool,
+) {
+    // Build committed when applicable
+    let committed = if let Some(res) = result {
+        if !stale {
+            Some(engine_core::search::CommittedIteration {
+                depth: res.stats.depth,
+                seldepth: res.stats.seldepth,
+                score: res.score,
+                pv: res.stats.pv.clone(),
+                node_type: res.node_type,
+                nodes: res.stats.nodes,
+                elapsed: res.stats.elapsed,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let final_best = if mate_flag {
+        engine_core::engine::controller::FinalBest {
+            best_move: None,
+            pv: Vec::new(),
+            source: engine_core::engine::controller::FinalBestSource::Resign,
+        }
+    } else {
+        let eng = state.engine.lock().unwrap();
+        eng.choose_final_bestmove(&state.position, committed.as_ref())
+    };
+
+    // Optional soft/hard for logging
+    let (soft_ms, hard_ms) = result
+        .and_then(|r| r.stop_info.as_ref())
+        .map(|si| (si.soft_limit_ms, si.hard_limit_ms))
+        .unwrap_or((0, 0));
+
+    // Log selection
+    info_string(format!(
+        "{}_select source={} move={} stale={} soft_ms={} hard_ms={}",
+        label,
+        source_to_str(final_best.source),
+        final_best
+            .best_move
+            .map(|m| move_to_usi(&m))
+            .unwrap_or_else(|| "resign".to_string()),
+        if stale { 1 } else { 0 },
+        soft_ms,
+        hard_ms
+    ));
+
+    // Emit bestmove (+ ponder)
+    let final_usi = if mate_flag {
+        "resign".to_string()
+    } else {
+        final_best
+            .best_move
+            .map(|m| move_to_usi(&m))
+            .unwrap_or_else(|| "resign".to_string())
+    };
+    let ponder_mv = if state.opts.ponder {
+        final_best.pv.get(1).map(move_to_usi)
+    } else {
+        None
+    };
+    if let Some(p) = ponder_mv {
+        usi_println(&format!("bestmove {} ponder {}", final_usi, p));
+    } else {
+        usi_println(&format!("bestmove {}", final_usi));
+    }
+    state.current_root_hash = None;
 }
 
 fn send_id_and_options(opts: &UsiOptions) {
@@ -540,15 +624,24 @@ fn main() -> Result<()> {
 
     // Start background reaper thread to join detached workers
     let (reaper_tx, reaper_rx) = mpsc::channel::<thread::JoinHandle<()>>();
+    let reaper_queue_len = Arc::clone(&state.reaper_queue_len);
     let reaper_handle = thread::Builder::new()
         .name("usi-reaper".to_string())
         .spawn(move || {
+            let mut cum_ms: u128 = 0;
             for h in reaper_rx {
                 let start = Instant::now();
                 let _ = h.join();
                 let dur = start.elapsed().as_millis();
+                // Decrement queue length
+                reaper_queue_len.fetch_sub(1, Ordering::SeqCst);
                 if dur > 50 {
                     usi_println(&format!("info string reaper_join_ms={}", dur));
+                }
+                cum_ms += dur;
+                if cum_ms >= 1000 {
+                    usi_println(&format!("info string reaper_cum_join_ms={}", cum_ms));
+                    cum_ms = 0;
                 }
             }
         })
@@ -1095,66 +1188,32 @@ fn main() -> Result<()> {
                 if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
                     flag.store(true, Ordering::SeqCst);
                     info_string("stop_requested");
-                    // Try to get result promptly; if not, finalize immediately via choose_final_bestmove
+                    // Try to get result promptly using a small-slice loop; otherwise finalize immediately
                     if let Some(rx) = state.result_rx.take() {
-                        match rx.recv_timeout(Duration::from_millis(state.opts.stop_wait_ms)) {
-                            Ok((sid, result)) => {
-                                if sid != state.current_search_id {
-                                    // Stale result: finalize immediately via timeout path semantics
-                                    info_string(format!(
-                                        "ignore_result stale_sid={} current_sid={}",
-                                        sid, state.current_search_id
-                                    ));
-                                    if let Some(h) = state.worker.take() {
-                                        if let Some(tx) = &state.reaper_tx {
-                                            let _ = tx.send(h);
-                                        }
-                                        state.reaper_detach_count = state.reaper_detach_count.saturating_add(1);
+                        let deadline =
+                            Instant::now() + Duration::from_millis(state.opts.stop_wait_ms);
+                        let mut finalized = false;
+                        while Instant::now() < deadline && !finalized {
+                            let now = Instant::now();
+                            let remain = if deadline > now {
+                                deadline - now
+                            } else {
+                                Duration::from_millis(0)
+                            };
+                            let slice = if remain > Duration::from_millis(20) {
+                                Duration::from_millis(20)
+                            } else {
+                                remain
+                            };
+                            match rx.recv_timeout(slice) {
+                                Ok((sid, result)) => {
+                                    if sid != state.current_search_id {
                                         info_string(format!(
-                                            "reaper_detach count={}",
-                                            state.reaper_detach_count
+                                            "ignore_result stale_sid={} current_sid={}",
+                                            sid, state.current_search_id
                                         ));
+                                        continue; // keep waiting within remaining time
                                     }
-                                    state.searching = false;
-                                    state.stop_flag = None;
-                                    state.ponder_hit_flag = None;
-
-                                    let stale = state
-                                        .current_root_hash
-                                        .map(|h| h != state.position.zobrist_hash())
-                                        .unwrap_or(false);
-                                    let final_best = {
-                                        let eng = state.engine.lock().unwrap();
-                                        eng.choose_final_bestmove(&state.position, None)
-                                    };
-                                    info_string(format!(
-                                        "stop_timeout_finalize source={} move={} stale={}",
-                                        source_to_str(final_best.source),
-                                        final_best
-                                            .best_move
-                                            .map(|m| move_to_usi(&m))
-                                            .unwrap_or_else(|| "resign".to_string()),
-                                        if stale { 1 } else { 0 }
-                                    ));
-                                    let final_usi = final_best
-                                        .best_move
-                                        .map(|m| move_to_usi(&m))
-                                        .unwrap_or_else(|| "resign".to_string());
-                                    let ponder_mv = if state.opts.ponder {
-                                        final_best.pv.get(1).map(move_to_usi)
-                                    } else {
-                                        None
-                                    };
-                                    if let Some(p) = ponder_mv {
-                                        usi_println(&format!(
-                                            "bestmove {} ponder {}",
-                                            final_usi, p
-                                        ));
-                                    } else {
-                                        usi_println(&format!("bestmove {}", final_usi));
-                                    }
-                                    state.current_root_hash = None;
-                                } else {
                                     if let Some(h) = state.worker.take() {
                                         let _ = h.join();
                                     }
@@ -1167,7 +1226,7 @@ fn main() -> Result<()> {
                                         .current_root_hash
                                         .map(|h| h != state.position.zobrist_hash())
                                         .unwrap_or(false);
-                                    let committed = if !stale {
+                                    let _committed = if !stale {
                                         Some(engine_core::search::CommittedIteration {
                                             depth: result.stats.depth,
                                             seldepth: result.stats.seldepth,
@@ -1180,94 +1239,50 @@ fn main() -> Result<()> {
                                     } else {
                                         None
                                     };
-                                    let final_best = {
-                                        let eng = state.engine.lock().unwrap();
-                                        eng.choose_final_bestmove(
-                                            &state.position,
-                                            committed.as_ref(),
-                                        )
-                                    };
-                                    let (soft_ms, hard_ms) = result
-                                        .stop_info
-                                        .as_ref()
-                                        .map(|si| (si.soft_limit_ms, si.hard_limit_ms))
-                                        .unwrap_or((0, 0));
-                                    info_string(format!(
-                                    "stop_finalize source={} move={} stale={} soft_ms={} hard_ms={}",
-                                    source_to_str(final_best.source),
-                                    final_best
-                                        .best_move
-                                        .map(|m| move_to_usi(&m))
-                                        .unwrap_or_else(|| "resign".to_string()),
-                                    if stale { 1 } else { 0 },
-                                    soft_ms,
-                                    hard_ms
-                                ));
-                                    let final_usi = final_best
-                                        .best_move
-                                        .map(|m| move_to_usi(&m))
-                                        .unwrap_or_else(|| "resign".to_string());
-                                    let ponder_mv = if state.opts.ponder {
-                                        final_best.pv.get(1).map(move_to_usi)
+                                    finalize_and_send(
+                                        &mut state,
+                                        "stop_finalize",
+                                        Some(&result),
+                                        stale,
+                                        false,
+                                    );
+                                    finalized = true;
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => { /* continue */ }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        if !finalized {
+                            // Timeout waiting for result; detach worker and finalize immediately
+                            if let Some(h) = state.worker.take() {
+                                if let Some(tx) = &state.reaper_tx {
+                                    // Increment queue length and send with soft bound logging
+                                    let q =
+                                        state.reaper_queue_len.fetch_add(1, Ordering::SeqCst) + 1;
+                                    let _ = tx.send(h);
+                                    const REAPER_QUEUE_SOFT_MAX: usize = 128;
+                                    if q > REAPER_QUEUE_SOFT_MAX {
+                                        info_string(format!("reaper_queue_len_high len={}", q));
                                     } else {
-                                        None
-                                    };
-                                    if let Some(p) = ponder_mv {
-                                        usi_println(&format!(
-                                            "bestmove {} ponder {}",
-                                            final_usi, p
-                                        ));
-                                    } else {
-                                        usi_println(&format!("bestmove {}", final_usi));
+                                        info_string(format!("reaper_detach queued len={}", q));
                                     }
-                                    state.current_root_hash = None;
-                                    continue; // processed
                                 }
                             }
-                            Err(_) => {
-                                // Timeout waiting for result; detach worker and finalize immediately
-                                if let Some(h) = state.worker.take() {
-                                    if let Some(tx) = &state.reaper_tx {
-                                        let _ = tx.send(h);
-                                    }
-                                }
-                                state.searching = false;
-                                state.stop_flag = None;
-                                state.ponder_hit_flag = None;
+                            state.searching = false;
+                            state.stop_flag = None;
+                            state.ponder_hit_flag = None;
 
-                                let stale = state
-                                    .current_root_hash
-                                    .map(|h| h != state.position.zobrist_hash())
-                                    .unwrap_or(false);
-                                let final_best = {
-                                    let eng = state.engine.lock().unwrap();
-                                    eng.choose_final_bestmove(&state.position, None)
-                                };
-                                info_string(format!(
-                                    "stop_timeout_finalize source={} move={} stale={}",
-                                    source_to_str(final_best.source),
-                                    final_best
-                                        .best_move
-                                        .map(|m| move_to_usi(&m))
-                                        .unwrap_or_else(|| "resign".to_string()),
-                                    if stale { 1 } else { 0 }
-                                ));
-                                let final_usi = final_best
-                                    .best_move
-                                    .map(|m| move_to_usi(&m))
-                                    .unwrap_or_else(|| "resign".to_string());
-                                let ponder_mv = if state.opts.ponder {
-                                    final_best.pv.get(1).map(move_to_usi)
-                                } else {
-                                    None
-                                };
-                                if let Some(p) = ponder_mv {
-                                    usi_println(&format!("bestmove {} ponder {}", final_usi, p));
-                                } else {
-                                    usi_println(&format!("bestmove {}", final_usi));
-                                }
-                                state.current_root_hash = None;
-                            }
+                            let stale = state
+                                .current_root_hash
+                                .map(|h| h != state.position.zobrist_hash())
+                                .unwrap_or(false);
+                            finalize_and_send(
+                                &mut state,
+                                "stop_timeout_finalize",
+                                None,
+                                stale,
+                                false,
+                            );
                         }
                     }
                 }
