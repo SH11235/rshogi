@@ -32,6 +32,8 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     *ctx.search_start_time = None;
     *ctx.latest_nodes = 0;
     *ctx.soft_limit_ms_ctx = 0;
+    // Clear any pending stop info from previous search
+    *ctx.pending_stop_info = None;
 
     // USI-visible diagnostic: go handler entry
     let now = Instant::now();
@@ -94,11 +96,53 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
 
     // Clear any pending messages from previous search to prevent interference
     let mut cleared_messages = 0;
-    while let Ok(_msg) = ctx.worker_rx.try_recv() {
+    let mut important_messages = Vec::new();
+    while let Ok(msg) = ctx.worker_rx.try_recv() {
         cleared_messages += 1;
+        // Check if it's a critical message that needs handling
+        match &msg {
+            crate::worker::WorkerMessage::ReturnEngine {
+                engine: _,
+                search_id,
+            } => {
+                log::debug!(
+                    "Found pending ReturnEngine message during cleanup (search_id: {search_id})"
+                );
+                important_messages.push(msg);
+            }
+            _ => {
+                // Log what we're dropping for debugging
+                let msg_type = match &msg {
+                    crate::worker::WorkerMessage::Info { .. } => "Info",
+                    crate::worker::WorkerMessage::SearchStarted { .. } => "SearchStarted",
+                    crate::worker::WorkerMessage::IterationCommitted { .. } => "IterationCommitted",
+                    crate::worker::WorkerMessage::SearchFinished { .. } => "SearchFinished",
+                    crate::worker::WorkerMessage::PartialResult { .. } => "PartialResult",
+                    crate::worker::WorkerMessage::Finished { .. } => "Finished",
+                    crate::worker::WorkerMessage::Error { .. } => "Error",
+                    crate::worker::WorkerMessage::HardDeadlineFire { .. } => "HardDeadlineFire",
+                    crate::worker::WorkerMessage::ReturnEngine { .. } => "ReturnEngine",
+                };
+                log::trace!("Dropping old message: {msg_type}");
+            }
+        }
     }
+
+    // Process any important messages we found
+    for msg in important_messages {
+        if let crate::worker::WorkerMessage::ReturnEngine { engine, .. } = msg {
+            let mut adapter = lock_or_recover_adapter(ctx.engine);
+            adapter.return_engine(engine);
+            let _ = send_info_string(log_tsv(&[("kind", "return_engine_during_cleanup")]));
+        }
+    }
+
     if cleared_messages > 0 {
         log::debug!("Cleared {cleared_messages} old messages from worker queue");
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "go_cleared_old_messages"),
+            ("count", &cleared_messages.to_string()),
+        ]));
     }
 
     // Check engine availability before proceeding
