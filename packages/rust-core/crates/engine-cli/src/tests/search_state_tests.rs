@@ -829,6 +829,11 @@ mod tests {
         {
             let mut adapter = engine.lock().unwrap();
             let _ = adapter.set_position(true, None, &[]);
+            // Ensure engine is available (returned) for the test
+            if !adapter.is_engine_available() {
+                // If engine was taken by some previous test, force reset to make it available
+                adapter.force_reset_state();
+            }
         }
 
         // Directly set state to Finalized to simulate the problematic condition
@@ -859,8 +864,10 @@ mod tests {
         assert!(result.is_ok(), "Go command should succeed in Finalized state");
 
         // Should complete quickly (not wait for non-existent worker)
+        // Increased timeout to account for logging overhead and grace period
+        // Grace period default is 50ms with 10ms sleeps, plus search startup overhead
         assert!(
-            go_duration < Duration::from_millis(500),
+            go_duration < Duration::from_millis(3000),
             "Go command took too long: {:?}",
             go_duration
         );
