@@ -564,11 +564,22 @@ fn main() -> Result<()> {
                         } else if was_ponder {
                             // Ponder完了結果は送出しない（USI仕様）。GUIのponderhit/stopに従う。
                         } else {
-                            // Normal finalize and emit bestmove
-                            let bm = result
-                                .best_move
-                                .map(|m| move_to_usi(&m))
-                                .unwrap_or_else(|| "resign".to_string());
+                            // Normal finalize and emit bestmove（Mateは投了優先）
+                            let mut bm_opt: Option<String> = None;
+                            if let Some(si) = &result.stop_info {
+                                if matches!(
+                                    si.reason,
+                                    engine_core::search::types::TerminationReason::Mate
+                                ) {
+                                    bm_opt = Some("resign".to_string());
+                                }
+                            }
+                            let bm = bm_opt.unwrap_or_else(|| {
+                                result
+                                    .best_move
+                                    .map(|m| move_to_usi(&m))
+                                    .unwrap_or_else(|| "resign".to_string())
+                            });
                             let ponder_mv = if state.opts.ponder {
                                 result.stats.pv.get(1).map(move_to_usi)
                             } else {
@@ -863,6 +874,20 @@ fn main() -> Result<()> {
                         }
                     } else {
                         info!("Stochastic Ponder: no previous move; using current position");
+                    }
+                }
+                // 入り口判定（通常goのみ）: 合法手0→投了 / 合法手1→即指し
+                if !gp.ponder {
+                    let mg = engine_core::movegen::MoveGenerator::new();
+                    if let Ok(list) = mg.generate_all(&state.position) {
+                        let slice = list.as_slice();
+                        if slice.is_empty() {
+                            usi_println("bestmove resign");
+                            continue;
+                        } else if slice.len() == 1 {
+                            usi_println(&format!("bestmove {}", move_to_usi(&slice[0])));
+                            continue;
+                        }
                     }
                 }
                 let limits = limits_from_go(
