@@ -564,31 +564,45 @@ fn main() -> Result<()> {
                         } else if was_ponder {
                             // Ponder完了結果は送出しない（USI仕様）。GUIのponderhit/stopに従う。
                         } else {
-                            // Normal finalize and emit bestmove（Mateは投了優先）
-                            let mut bm_opt: Option<String> = None;
-                            if let Some(si) = &result.stop_info {
-                                if matches!(
-                                    si.reason,
-                                    engine_core::search::types::TerminationReason::Mate
-                                ) {
-                                    bm_opt = Some("resign".to_string());
+                            // Normal finalize and emit bestmove（Mateは投了優先、合法性ガード）
+                            let mate_flag = result
+                                .stop_info
+                                .as_ref()
+                                .map(|si| matches!(si.reason, engine_core::search::types::TerminationReason::Mate))
+                                .unwrap_or(false);
+
+                            let final_usi = if mate_flag {
+                                "resign".to_string()
+                            } else if let Some(mv) = result.best_move {
+                                // Legality guard in current GUI position
+                                if state.position.is_legal_move(mv) {
+                                    move_to_usi(&mv)
+                                } else {
+                                    // Fallback: choose first legal, else resign
+                                    let mg = engine_core::movegen::MoveGenerator::new();
+                                    if let Ok(list) = mg.generate_all(&state.position) {
+                                        if let Some(first) = list.as_slice().first() {
+                                            move_to_usi(first)
+                                        } else {
+                                            "resign".to_string()
+                                        }
+                                    } else {
+                                        "resign".to_string()
+                                    }
                                 }
-                            }
-                            let bm = bm_opt.unwrap_or_else(|| {
-                                result
-                                    .best_move
-                                    .map(|m| move_to_usi(&m))
-                                    .unwrap_or_else(|| "resign".to_string())
-                            });
+                            } else {
+                                "resign".to_string()
+                            };
+
                             let ponder_mv = if state.opts.ponder {
                                 result.stats.pv.get(1).map(move_to_usi)
                             } else {
                                 None
                             };
                             if let Some(p) = ponder_mv {
-                                usi_println(&format!("bestmove {} ponder {}", bm, p));
+                                usi_println(&format!("bestmove {} ponder {}", final_usi, p));
                             } else {
-                                usi_println(&format!("bestmove {}", bm));
+                                usi_println(&format!("bestmove {}", final_usi));
                             }
                         }
                     }
