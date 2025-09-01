@@ -21,6 +21,11 @@ use std::time::Instant;
 
 pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> Result<()> {
     log::debug!("Received go command with params: {params:?}");
+    log::debug!(
+        "Global stop flag ptr: {:p}, value: {}",
+        ctx.stop_flag.as_ref(),
+        ctx.stop_flag.load(std::sync::atomic::Ordering::Acquire)
+    );
     let go_received_time = Instant::now();
     log::debug!("NewSearchStart: go received at {go_received_time:?}");
     // Reset per-search final PV injection guard
@@ -78,10 +83,11 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     if *ctx.search_state == SearchState::Finalized {
         log::info!("Go command received in Finalized state, waiting for worker join");
         let wait_start = Instant::now();
+        // Don't pass current_stop_flag as it's from the previous search and may be stale
         wait_for_search_completion(
             ctx.search_state,
             ctx.stop_flag,
-            ctx.current_stop_flag.as_ref(),
+            None, // Pass None since we're cleaning up a finalized search
             ctx.worker_handle,
             ctx.worker_rx,
             ctx.engine,
@@ -482,14 +488,32 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     }
 
     // Clean up old stop flag before creating new one
-    if let Some(_old_flag) = ctx.current_stop_flag.take() {
-        log::debug!("Cleaned up old stop flag before creating new one");
+    if let Some(old_flag) = ctx.current_stop_flag.take() {
+        let old_value = old_flag.load(std::sync::atomic::Ordering::Acquire);
+        // Ensure the old flag is reset to false before dropping it
+        old_flag.store(false, std::sync::atomic::Ordering::Release);
+        log::debug!(
+            "Cleaned up old stop flag (was: {}, ptr: {:p}) and reset it to false",
+            old_value,
+            old_flag.as_ref()
+        );
     }
 
     // Create new per-search stop flag (after all validation passes)
     let search_stop_flag = Arc::new(AtomicBool::new(false));
+
+    // Verify the new flag is actually false
+    let initial_value = search_stop_flag.load(std::sync::atomic::Ordering::Acquire);
+    if initial_value {
+        log::error!("BUG: Newly created stop flag has value true! This should never happen.");
+    }
+
+    log::debug!(
+        "Created new per-search stop flag (ptr: {:p}, initial_value: {}) for upcoming search",
+        search_stop_flag.as_ref(),
+        initial_value
+    );
     *ctx.current_stop_flag = Some(search_stop_flag.clone());
-    log::debug!("Created new per-search stop flag for upcoming search");
 
     // Increment search ID for new search
     *ctx.search_id_counter += 1;
@@ -516,6 +540,15 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     // Clone necessary data for worker thread
     let engine_clone = Arc::clone(ctx.engine);
     let stop_clone = search_stop_flag.clone();
+
+    // Double-check the stop flag value right before passing to worker
+    let pre_spawn_value = stop_clone.load(std::sync::atomic::Ordering::Acquire);
+    log::debug!(
+        "Stop flag value right before spawning worker: {} (ptr: {:p})",
+        pre_spawn_value,
+        stop_clone.as_ref()
+    );
+
     let tx_clone: Sender<WorkerMessage> = ctx.worker_tx.clone();
     let finalized_flag = ctx.current_finalized_flag.as_ref().cloned();
     log::debug!("Using per-search stop flag for search_id={search_id}");
@@ -532,6 +565,14 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         let mut adapter = lock_or_recover_adapter(ctx.engine);
         adapter.set_last_go_params(&params);
     }
+
+    // Clear global stop flag right before spawning worker
+    // This ensures no race condition with quit command
+    ctx.stop_flag.store(false, std::sync::atomic::Ordering::Release);
+    log::debug!(
+        "Cleared global stop flag before spawning worker (ptr: {:p})",
+        ctx.stop_flag.as_ref()
+    );
 
     // Spawn worker thread for search with panic safety
     let handle = thread::spawn(move || {

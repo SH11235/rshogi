@@ -284,6 +284,13 @@ impl<'a> CommandContext<'a> {
     #[inline]
     pub fn finalize_search(&mut self, where_: &str) {
         log::debug!("Finalize search {} ({})", *self.current_search_id, where_);
+
+        // Guard against multiple finalization
+        if *self.search_state == SearchState::Finalized {
+            log::debug!("Search already finalized, skipping finalize_search from {}", where_);
+            return;
+        }
+
         self.search_state.set_finalized();
         *self.current_search_is_ponder = false;
         *self.current_bestmove_emitter = None;

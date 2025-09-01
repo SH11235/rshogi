@@ -214,9 +214,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             emitter.terminate();
                         }
                         stop_flag.store(true, Ordering::Release);
-                        if let Some(ref search_stop_flag) = current_stop_flag {
-                            search_stop_flag.store(true, Ordering::Release);
-                        }
+                        // Note: We do NOT set the per-search stop flag here to avoid race conditions
+                        // with newly spawned workers
                         pending_quit = true;
                         break 'drain_cmds; // proceed to shutdown via outer flow
                     }
@@ -281,9 +280,8 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                             emitter.terminate();
                         }
                         stop_flag.store(true, Ordering::Release);
-                        if let Some(ref search_stop_flag) = current_stop_flag {
-                            search_stop_flag.store(true, Ordering::Release);
-                        }
+                        // Note: We do NOT set the per-search stop flag here to avoid race conditions
+                        // with newly spawned workers
                         pending_quit = true; // allow normal shutdown path after loop
                         break 'drain_ctrl;
                     }
@@ -395,9 +393,13 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                 if let Ok(cmd) = ctrl {
                     log::info!("[MAIN] Ctrl command received: {:?}", cmd);
                     if matches!(cmd, UsiCommand::Quit) {
+                        log::info!("Quit command received, initiating shutdown");
                         if let Some(ref emitter) = current_bestmove_emitter { emitter.terminate(); }
+                        // Only set the global stop flag during quit
+                        // The per-search stop flag should not be touched as it might be for a new search
                         stop_flag.store(true, Ordering::Release);
-                        if let Some(ref search_stop_flag) = current_stop_flag { search_stop_flag.store(true, Ordering::Release); }
+                        // Note: We do NOT set the per-search stop flag here to avoid race conditions
+                        // with newly spawned workers
                         break;
                     }
                     let mut _legacy_session_c: Option<()> = None;
@@ -474,12 +476,10 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
                                 emitter.terminate();
                                 log::debug!("Terminated bestmove emitter for quit");
                             }
-                            // Handle quit
+                            // Handle quit - only set global stop flag
                             stop_flag.store(true, Ordering::Release);
-                            // Also set per-search stop flag if available
-                            if let Some(ref search_stop_flag) = current_stop_flag {
-                                search_stop_flag.store(true, Ordering::Release);
-                            }
+                            // Note: We do NOT set the per-search stop flag here to avoid race conditions
+                            // with newly spawned workers
                             break;
                         }
 
@@ -724,6 +724,15 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
     match msg {
         WorkerMessage::HardDeadlineFire { search_id, hard_ms } => {
+            // Only process if this is for the current search
+            if search_id != *ctx.current_search_id {
+                log::debug!(
+                    "Ignoring HardDeadlineFire from old search {} (current: {})",
+                    search_id,
+                    ctx.current_search_id
+                );
+                return Ok(());
+            }
             // Insurance: hard deadline single-shot
             let _ = send_info_string(log_tsv(&[
                 ("kind", "hard_deadline_fire"),
