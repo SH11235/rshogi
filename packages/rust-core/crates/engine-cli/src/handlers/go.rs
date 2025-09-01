@@ -540,6 +540,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     // Clone necessary data for worker thread
     let engine_clone = Arc::clone(ctx.engine);
     let stop_clone = search_stop_flag.clone();
+    let global_stop_clone = Arc::clone(ctx.stop_flag);
 
     // Double-check the stop flag value right before passing to worker
     let pre_spawn_value = stop_clone.load(std::sync::atomic::Ordering::Acquire);
@@ -582,6 +583,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                 engine_clone,
                 params,
                 stop_clone,
+                global_stop_clone,
                 tx_clone.clone(),
                 search_id,
                 finalized_flag,
