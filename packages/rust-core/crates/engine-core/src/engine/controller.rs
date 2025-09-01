@@ -882,7 +882,8 @@ impl Engine {
         // 2) Committed iteration PV head
         if let Some(ci) = committed {
             if let Some(&mv) = ci.pv.first() {
-                if pos.is_legal_move(mv) {
+                // Double-check: pseudo-legal then fully legal (robust against stale/TT issues)
+                if pos.is_pseudo_legal(mv) && pos.is_legal_move(mv) {
                     return FinalBest {
                         best_move: Some(mv),
                         pv: ci.pv.clone(),
@@ -896,7 +897,7 @@ impl Engine {
         // Limit reconstruction depth conservatively to keep latency within a few ms
         let tt_pv = self.reconstruct_root_pv_from_tt(pos, 24);
         if let Some(&head) = tt_pv.first() {
-            if pos.is_legal_move(head) {
+            if pos.is_pseudo_legal(head) && pos.is_legal_move(head) {
                 return FinalBest {
                     best_move: Some(head),
                     pv: tt_pv,
@@ -911,11 +912,42 @@ impl Engine {
         let gen = MoveGenerator::new();
         match gen.generate_all(pos) {
             Ok(moves) => {
-                // Find the first move that passes an independent legality check
-                if let Some(mv) = moves.as_slice().iter().copied().find(|&m| pos.is_legal_move(m)) {
+                // Build a small preference: avoid king moves when not in check; prefer captures/drops
+                let in_check = pos.is_in_check();
+                let slice = moves.as_slice();
+                // Helper closures
+                let is_king_move = |m: &crate::shogi::Move| {
+                    m.piece_type()
+                        .or_else(|| {
+                            m.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type))
+                        })
+                        .map(|pt| matches!(pt, crate::shogi::PieceType::King))
+                        .unwrap_or(false)
+                };
+                let is_capture_or_drop =
+                    |m: &crate::shogi::Move| m.is_drop() || m.is_capture_hint();
+
+                // Legal filter
+                let legal_moves: Vec<crate::shogi::Move> =
+                    slice.iter().copied().filter(|&m| pos.is_legal_move(m)).collect();
+
+                if !legal_moves.is_empty() {
+                    // If not in check, try to avoid king moves, preferring captures/drops first
+                    let chosen = if !in_check {
+                        legal_moves
+                            .iter()
+                            .find(|m| is_capture_or_drop(m) && !is_king_move(m))
+                            .copied()
+                            .or_else(|| legal_moves.iter().find(|m| !is_king_move(m)).copied())
+                            .unwrap_or_else(|| legal_moves[0])
+                    } else {
+                        // In check: any legal evasion is fine; keep first
+                        legal_moves[0]
+                    };
+
                     return FinalBest {
-                        best_move: Some(mv),
-                        pv: vec![mv],
+                        best_move: Some(chosen),
+                        pv: vec![chosen],
                         source: FinalBestSource::LegalFallback,
                     };
                 }
