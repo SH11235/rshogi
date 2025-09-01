@@ -62,6 +62,8 @@ where
     if moves.is_empty() {
         // No legal moves - checkmate or stalemate
         if pos.is_in_check() {
+            // Root position is checkmate - update mate distance
+            searcher.context.update_mate_distance(0);
             return (mate_score(0, false), pv); // Getting mated at root
         } else {
             return (0, pv); // Stalemate
@@ -181,6 +183,14 @@ where
         // Update best move
         if score > best_score {
             best_score = score;
+
+            // Check if this is a mate score and update mate distance
+            if crate::search::common::is_mate_score(score) {
+                if let Some(distance) = crate::search::common::extract_mate_distance(score) {
+                    searcher.context.update_mate_distance(distance);
+                }
+            }
+
             pv.clear();
             pv.push(mv);
 

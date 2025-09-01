@@ -145,6 +145,7 @@ fn test_qnodes_token_return_on_stop() {
         info_callback: None,
         iteration_callback: None,
         ponder_hit_flag: None,
+        immediate_eval_at_depth_zero: false,
     });
 
     // Create position
@@ -198,6 +199,7 @@ fn test_qnodes_token_return_on_limit_exceeded() {
         info_callback: None,
         iteration_callback: None,
         ponder_hit_flag: None,
+        immediate_eval_at_depth_zero: false,
     });
 
     // Create position with captures available
