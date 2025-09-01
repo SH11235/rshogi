@@ -112,4 +112,184 @@ mod tests {
             WorkerMessage::Finished { .. } | WorkerMessage::ReturnEngine { .. }
         );
     }
+
+    #[test]
+    fn test_finalized_state_transitions_to_idle_when_no_worker() {
+        use crate::engine_adapter::EngineAdapter;
+        use crate::helpers::wait_for_search_completion;
+        use crossbeam_channel::unbounded;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+
+        // Create test context
+        let mut search_state = SearchState::Finalized;
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut worker_handle = None; // No worker handle
+        let (_tx, rx) = unbounded();
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+
+        // Call wait_for_search_completion with Finalized state and no worker
+        let result = wait_for_search_completion(
+            &mut search_state,
+            &stop_flag,
+            None,
+            &mut worker_handle,
+            &rx,
+            &engine,
+        );
+
+        // Should succeed and transition to Idle
+        assert!(result.is_ok());
+        assert_eq!(search_state, SearchState::Idle);
+    }
+
+    /*
+    #[test]
+    fn test_global_stop_flag_cleared_before_new_search() {
+        use crate::command_handler::CommandContext;
+        use crate::engine_adapter::EngineAdapter;
+        use crate::handlers::go::handle_go_command;
+        use crate::usi::GoParams;
+        use crossbeam_channel::unbounded;
+        use engine_core::time_management::TimeControl;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+
+        // Create test context
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let stop_flag = Arc::new(AtomicBool::new(true)); // Start with true to test clearing
+        let (worker_tx, worker_rx) = unbounded();
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Idle;
+        let mut search_id_counter = 0;
+        let mut current_search_id = 0;
+        let mut current_search_is_ponder = false;
+        let mut current_bestmove_emitter = None;
+        let mut current_finalized_flag = None;
+        let mut current_stop_flag = None;
+        let mut pre_session_fallback = None;
+        let mut current_committed = vec![];
+        let allow_null_move = true;
+        let mut position_state = crate::types::PositionState::default();
+        let program_start = std::time::Instant::now();
+        let mut last_partial_result = None;
+
+        // Setup test position
+        {
+            let mut adapter = engine.lock().unwrap();
+            let _ = adapter.take_engine(); // Get engine ownership
+            let result = adapter.set_position_with_sfen("startpos", &[]);
+            if let Ok(mut core_engine) = result {
+                adapter.return_engine(core_engine);
+            }
+        }
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &worker_tx,
+            worker_rx: &worker_rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut None,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            pre_session_fallback: &mut pre_session_fallback,
+            current_committed: &mut current_committed,
+            allow_null_move: &allow_null_move,
+            position_state: &mut position_state,
+            program_start: &program_start,
+            last_partial_result: &mut last_partial_result,
+        };
+
+        // Create go params for test
+        let params = GoParams {
+            time_control: TimeControl::FixedTime { ms_per_move: 100 },
+            ponder: false,
+        };
+
+        // Global stop flag should start as true
+        assert!(stop_flag.load(std::sync::atomic::Ordering::Acquire));
+
+        // Handle go command - this should clear the global stop flag
+        let result = handle_go_command(params, &mut ctx);
+        assert!(result.is_ok());
+
+        // Verify global stop flag was cleared
+        assert!(!stop_flag.load(std::sync::atomic::Ordering::Acquire));
+
+        // Clean up - send stop to terminate the worker
+        stop_flag.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(ref flag) = current_stop_flag {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        // Wait for worker to finish
+        if let Some(handle) = worker_handle {
+            let _ = handle.join();
+        }
+    }
+    */
+
+    #[test]
+    fn test_quit_during_various_states() {
+        use crate::engine_adapter::EngineAdapter;
+        use crate::helpers::wait_for_search_completion;
+        use crossbeam_channel::unbounded;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+
+        // Test quit during Idle state
+        {
+            let mut search_state = SearchState::Idle;
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let mut worker_handle = None;
+            let (_tx, rx) = unbounded();
+            let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+
+            // Simulate quit
+            stop_flag.store(true, std::sync::atomic::Ordering::Release);
+
+            let result = wait_for_search_completion(
+                &mut search_state,
+                &stop_flag,
+                None,
+                &mut worker_handle,
+                &rx,
+                &engine,
+            );
+
+            assert!(result.is_ok());
+            assert_eq!(search_state, SearchState::Idle);
+        }
+
+        // Test quit during Finalized state
+        {
+            let mut search_state = SearchState::Finalized;
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let mut worker_handle = None;
+            let (_tx, rx) = unbounded();
+            let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+
+            // Simulate quit
+            stop_flag.store(true, std::sync::atomic::Ordering::Release);
+
+            let result = wait_for_search_completion(
+                &mut search_state,
+                &stop_flag,
+                None,
+                &mut worker_handle,
+                &rx,
+                &engine,
+            );
+
+            assert!(result.is_ok());
+            // Should transition to Idle from Finalized
+            assert_eq!(search_state, SearchState::Idle);
+        }
+    }
 }

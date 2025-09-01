@@ -14,6 +14,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+/// Helper function to transition from Finalized to Idle if needed
+pub fn transition_to_idle_if_finalized(search_state: &mut SearchState, context: &str) {
+    if *search_state == SearchState::Finalized {
+        log::info!("{}: state is Finalized, transitioning to Idle", context);
+        *search_state = SearchState::Idle;
+    }
+}
+
 // Constants for timeout and channel management
 // Long timeout used only for shutdown paths
 pub const MIN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -245,11 +253,21 @@ pub fn wait_for_search_completion(
             // Do NOT touch stop flags here; just wait for clean completion and engine return.
             wait_for_worker_sync(worker_handle, worker_rx, search_state, _engine)?;
         } else {
+            // Transition to Idle if Finalized
+            transition_to_idle_if_finalized(search_state, "wait_for_search_completion");
             // Ensure stop flag is false even if no search was running
             let was_true = stop_flag.load(Ordering::Acquire);
             stop_flag.store(false, Ordering::Release);
             if was_true {
                 log::warn!("wait_for_search_completion: stop_flag was true even though no search was running, reset to false");
+            }
+            // Also reset the per-search stop flag if provided
+            if let Some(search_flag) = current_stop_flag {
+                let was_true = search_flag.load(Ordering::Acquire);
+                search_flag.store(false, Ordering::Release);
+                if was_true {
+                    log::warn!("wait_for_search_completion: per-search stop_flag was true even though no search was running, reset to false");
+                }
             }
         }
     }
@@ -314,6 +332,9 @@ pub fn wait_for_search_completion_with_timeout(
         stop_flag.store(false, Ordering::Release);
         log::debug!("wait_for_search_completion_with_timeout: reset stop_flag to false after stopping search");
     } else {
+        log::debug!("wait_for_search_completion_with_timeout: no active search state");
+        // Transition to Idle if Finalized
+        transition_to_idle_if_finalized(search_state, "wait_for_search_completion_with_timeout");
         let _ =
             send_info_string(log_tsv(&[("kind", "state_idle_after_finalize"), ("search_id", "0")]));
     }

@@ -57,8 +57,10 @@ pub(crate) fn handle_position_command(
         ("elapsed_ms", &wait_ms.to_string()),
     ]));
 
-    // Clean up any remaining search state
-    ctx.finalize_search("Position");
+    // Clean up any remaining search state only if a search was actually running
+    if *ctx.current_search_id > 0 {
+        ctx.finalize_search("Position");
+    }
 
     // Clear pre-session fallback as position has changed
     *ctx.pre_session_fallback = None;

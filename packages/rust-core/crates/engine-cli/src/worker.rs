@@ -216,7 +216,23 @@ pub fn search_worker(
     finalized_flag: Option<Arc<AtomicBool>>,
     go_begin_at: Instant,
 ) {
+    // Note: Global stop flag is passed from main.rs, not available in adapter
+    // The worker will check the per-search stop_flag parameter instead
+    // For quit handling, the main thread sets the per-search flag directly
     log::debug!("Search worker thread started with params: {params:?}");
+
+    // Immediately check stop flag value
+    let immediate_stop_value = stop_flag.load(Ordering::SeqCst);
+    log::debug!(
+        "Worker immediate stop flag check: {} (ptr: {:p})",
+        immediate_stop_value,
+        stop_flag.as_ref()
+    );
+
+    // Add delay to check if this is a race condition (only in debug builds)
+    #[cfg(debug_assertions)]
+    std::thread::sleep(std::time::Duration::from_micros(1));
+
     let initial_stop_value = stop_flag.load(Ordering::SeqCst);
     log::info!(
         "Worker: search_id={search_id}, ponder={}, stop_flag_ptr={:p}, stop_flag_value={}",
