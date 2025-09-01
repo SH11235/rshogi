@@ -149,6 +149,11 @@ pub mod constants {
     // Validation ranges
     pub const MIN_OVERHEAD_MS: u64 = 0;
     pub const MAX_OVERHEAD_MS: u64 = 5000;
+    pub const MIN_NETWORK_DELAY_MS: u64 = 0;
+    pub const MAX_NETWORK_DELAY_MS: u64 = 2000; // Reasonable range for network delays (0-2000ms)
+                                                // Note: In extreme environments (virtualization, high-latency networks),
+                                                // this may need adjustment. Consider warning + clamping instead of
+                                                // hard error for production flexibility.
     pub const MIN_BYOYOMI_SAFETY_MS: u64 = 0;
     pub const MAX_BYOYOMI_SAFETY_MS: u64 = 2000;
     pub const MIN_BYOYOMI_EARLY_FINISH_RATIO: u8 = 50;
@@ -186,14 +191,14 @@ impl TimeParametersBuilder {
         Ok(self)
     }
 
-    /// Set worst-case network delay (NetworkDelay2)
     /// Set average network delay for search_end rounding
+    /// Reasonable range: 0-2000ms (typically 120-400ms depending on GUI/network environment)
     pub fn network_delay_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
-        if ms > constants::MAX_OVERHEAD_MS {
+        if ms > constants::MAX_NETWORK_DELAY_MS {
             return Err(TimeParameterError::Overhead {
                 value: ms,
-                min: constants::MIN_OVERHEAD_MS,
-                max: constants::MAX_OVERHEAD_MS,
+                min: constants::MIN_NETWORK_DELAY_MS,
+                max: constants::MAX_NETWORK_DELAY_MS,
             });
         }
         self.params.network_delay_ms = ms;
@@ -201,12 +206,13 @@ impl TimeParametersBuilder {
     }
 
     /// Set worst-case network delay for remain upper bounds and hard limits
+    /// Typically network_delay_ms + 600-1000ms to handle worst-case scenarios
     pub fn network_delay2_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
-        if ms > constants::MAX_OVERHEAD_MS {
+        if ms > constants::MAX_NETWORK_DELAY_MS {
             return Err(TimeParameterError::Overhead {
                 value: ms,
-                min: constants::MIN_OVERHEAD_MS,
-                max: constants::MAX_OVERHEAD_MS,
+                min: constants::MIN_NETWORK_DELAY_MS,
+                max: constants::MAX_NETWORK_DELAY_MS,
             });
         }
         self.params.network_delay2_ms = ms;
@@ -344,7 +350,16 @@ impl TimeParametersBuilder {
     }
 
     /// Build the final TimeParameters
-    pub fn build(self) -> TimeParameters {
+    pub fn build(mut self) -> TimeParameters {
+        // Ensure network_delay2_ms >= network_delay_ms (logical consistency)
+        if self.params.network_delay2_ms < self.params.network_delay_ms {
+            log::warn!(
+                "network_delay2_ms ({}) < network_delay_ms ({}), adjusting to match",
+                self.params.network_delay2_ms,
+                self.params.network_delay_ms
+            );
+            self.params.network_delay2_ms = self.params.network_delay_ms;
+        }
         self.params
     }
 }
@@ -487,5 +502,31 @@ mod tests {
             max: 200,
         };
         assert_eq!(err.to_string(), "PV stability base must be between 10 and 200, got 5");
+    }
+
+    #[test]
+    fn test_network_delay_consistency() {
+        // Test that network_delay2_ms is adjusted if less than network_delay_ms
+        let params = TimeParametersBuilder::new()
+            .network_delay_ms(500)
+            .unwrap()
+            .network_delay2_ms(300) // Less than network_delay_ms
+            .unwrap()
+            .build();
+
+        // Should be adjusted to match network_delay_ms
+        assert_eq!(params.network_delay_ms, 500);
+        assert_eq!(params.network_delay2_ms, 500);
+
+        // Test normal case where network_delay2_ms > network_delay_ms
+        let params2 = TimeParametersBuilder::new()
+            .network_delay_ms(200)
+            .unwrap()
+            .network_delay2_ms(1000)
+            .unwrap()
+            .build();
+
+        assert_eq!(params2.network_delay_ms, 200);
+        assert_eq!(params2.network_delay2_ms, 1000);
     }
 }
