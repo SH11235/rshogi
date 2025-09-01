@@ -134,7 +134,7 @@ fn mate_moves_to_pseudo_cp(mate: i32) -> Option<i32> {
     }
 }
 
-/// Guard to ensure engine is returned on drop (for panic safety)
+/// Guard to hold engine during search (no automatic return on drop)
 pub struct EngineReturnGuard {
     engine: Option<Engine>,
     tx: Sender<WorkerMessage>,
@@ -147,6 +147,19 @@ impl EngineReturnGuard {
             engine: Some(engine),
             tx,
             search_id,
+        }
+    }
+
+    /// Explicitly return the engine via ReturnEngine message
+    pub fn return_engine(mut self) {
+        if let Some(engine) = self.engine.take() {
+            log::debug!("EngineReturnGuard: explicitly returning engine to USI thread");
+            if let Err(e) = self.tx.send(WorkerMessage::ReturnEngine {
+                engine,
+                search_id: self.search_id,
+            }) {
+                log::error!("Failed to send ReturnEngine: {e}");
+            }
         }
     }
 }
@@ -167,16 +180,9 @@ impl std::ops::DerefMut for EngineReturnGuard {
 
 impl Drop for EngineReturnGuard {
     fn drop(&mut self) {
-        if let Some(engine) = self.engine.take() {
-            log::debug!("EngineReturnGuard: transferring engine to USI thread via ReturnEngine");
-            // Transfer engine ownership to USI thread; do NOT lock adapter here
-            // to avoid cross-thread lock ordering. USI thread will return it after join.
-            if let Err(e) = self.tx.send(WorkerMessage::ReturnEngine {
-                engine,
-                search_id: self.search_id,
-            }) {
-                log::error!("Failed to send ReturnEngine from guard: {e}");
-            }
+        if self.engine.is_some() {
+            log::error!("EngineReturnGuard dropped without explicit return! This is a bug.");
+            // Do NOT automatically return - this violates the USI-side return principle
         }
     }
 }
@@ -332,7 +338,7 @@ pub fn search_worker(
     let was_ponder = params.ponder;
     log::debug!("Attempting to take engine from adapter");
     let engine_take_start = Instant::now();
-    let (mut engine_guard, position, limits, ponder_hit_flag, threads_for_log) = {
+    let (mut guard, pos_snapshot, limits, ponder_hit_flag, threads_for_log) = {
         let mut adapter = lock_or_recover_adapter(&engine_adapter);
         log::debug!("Adapter lock acquired, calling take_engine");
         let _ = tx.send(WorkerMessage::Info {
@@ -363,7 +369,7 @@ pub fn search_worker(
                     },
                     search_id,
                 });
-                // Create guard immediately so any panic/early return still returns engine
+                // Create guard to hold engine during search
                 let guard = EngineReturnGuard::new(engine, tx.clone(), search_id);
 
                 // Snapshot minimal adapter state needed for limit computation, then drop lock
@@ -371,7 +377,8 @@ pub fn search_worker(
                     Some(p) => p.clone(),
                     None => {
                         log::error!("Position not set at prepare time");
-                        // Engine will be returned by guard's Drop here
+                        // Explicitly return engine before early return
+                        guard.return_engine();
                         let _ = tx.send(WorkerMessage::Error {
                             message: "Position not set".to_string(),
                             search_id,
@@ -470,6 +477,7 @@ pub fn search_worker(
                     Err(e) => {
                         // Engine will be returned by guard's Drop here
                         log::error!("Search preparation (limits) error: {e}");
+                        guard.return_engine();
                         let _ = tx.send(WorkerMessage::Error {
                             message: e.to_string(),
                             search_id,
@@ -608,7 +616,7 @@ pub fn search_worker(
     drop(ponder_hit_flag);
 
     // Pre-compute budgets via core before moving into the engine
-    let budgets = derive_budgets_via_core(&position, &limits);
+    let budgets = derive_budgets_via_core(&pos_snapshot, &limits);
     // Emit go_received_detail with budgets and time control summary
     {
         let (soft_log, hard_log, note) = match budgets {
@@ -741,8 +749,8 @@ pub fn search_worker(
         search_id,
     });
     let result = EngineAdapter::execute_search_static(
-        &mut engine_guard,
-        position.clone(),
+        &mut guard,
+        pos_snapshot.clone(),
         limits,
         Box::new(enhanced_info_callback),
         Some(iteration_callback),
@@ -841,7 +849,7 @@ pub fn search_worker(
                 }
                 // Send SearchFinished to indicate we're done
                 if let Err(e) = tx.send(WorkerMessage::SearchFinished {
-                    root_hash: position.zobrist_hash(),
+                    root_hash: pos_snapshot.zobrist_hash(),
                     search_id,
                     stop_info: extended_result.stop_info,
                 }) {
@@ -888,7 +896,7 @@ pub fn search_worker(
                 // Stopped by user - finalize if not ponder or after ponderhit
                 if !was_ponder || ponder_hit_occurred {
                     if let Err(e) = tx.send(WorkerMessage::SearchFinished {
-                        root_hash: position.zobrist_hash(),
+                        root_hash: pos_snapshot.zobrist_hash(),
                         search_id,
                         stop_info: Some(StopInfo {
                             reason: TerminationReason::UserStop,
@@ -902,6 +910,7 @@ pub fn search_worker(
                     }) {
                         log::error!("Failed to send search finished: {e}");
                     }
+                    guard.return_engine();
                     return;
                 } else {
                     // Ponder search that was stopped (not ponderhit) - don't send bestmove
@@ -929,11 +938,12 @@ pub fn search_worker(
                     if let Some(flag) = &finalized_flag {
                         if flag.load(Ordering::Acquire) {
                             // Already finalized; skip SearchFinished
+                            guard.return_engine();
                             return;
                         }
                     }
                     if let Err(e) = tx.send(WorkerMessage::SearchFinished {
-                        root_hash: position.zobrist_hash(),
+                        root_hash: pos_snapshot.zobrist_hash(),
                         search_id,
                         stop_info: Some(StopInfo {
                             reason: TerminationReason::Error,
@@ -1240,7 +1250,9 @@ pub fn wait_for_worker_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine_adapter::EngineAdapter;
     use engine_core::time_management::{TimeControl, TimeParameters};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_mate_moves_to_pseudo_cp() {
@@ -1309,5 +1321,46 @@ mod tests {
         let limits = engine_core::search::SearchLimits::builder().fixed_nodes(100_000).build();
         let pos = engine_core::shogi::Position::startpos();
         assert!(derive_budgets_via_core(&pos, &limits).is_none());
+    }
+
+    #[test]
+    fn test_return_engine_unified_on_sync_wait() {
+        // Prepare adapter with no engine (simulate taken engine)
+        let adapter = Arc::new(Mutex::new(EngineAdapter::new()));
+        {
+            let mut ad = adapter.lock().unwrap();
+            // Take the engine out to simulate worker owning it
+            let _ = ad.take_engine().expect("engine available");
+            assert!(!ad.is_engine_available());
+        }
+
+        // Channel to simulate worker messages
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkerMessage>();
+
+        // Send ReturnEngine followed by Finished (from worker, not guard)
+        let engine = engine_core::engine::controller::Engine::new(
+            engine_core::engine::controller::EngineType::Material,
+        );
+        tx.send(WorkerMessage::ReturnEngine {
+            engine,
+            search_id: 1,
+        })
+        .unwrap();
+        tx.send(WorkerMessage::Finished {
+            from_guard: false,
+            search_id: 1,
+        })
+        .unwrap();
+
+        // Call sync wait with no worker handle
+        let mut handle: Option<std::thread::JoinHandle<()>> = None;
+        let mut state = crate::state::SearchState::StopRequested;
+        let r = wait_for_worker_sync(&mut handle, &rx, &mut state, &adapter);
+        assert!(r.is_ok());
+        assert_eq!(state, crate::state::SearchState::Idle);
+
+        // Engine should have been returned to adapter by USI thread path
+        let ad = adapter.lock().unwrap();
+        assert!(ad.is_engine_available());
     }
 }

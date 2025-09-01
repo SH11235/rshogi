@@ -803,6 +803,9 @@ mod tests {
         let mut search_start_time: Option<Instant> = None;
         let mut latest_nodes: u64 = 0;
         let mut soft_limit_ms_ctx: u64 = 0;
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -832,6 +835,8 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             final_pv_injected: &mut final_pv_injected_flag,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         // Execute stop
@@ -895,6 +900,9 @@ mod tests {
         let mut search_start_time: Option<Instant> = None;
         let mut latest_nodes: u64 = 0;
         let mut soft_limit_ms_ctx: u64 = 0;
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -924,6 +932,8 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             final_pv_injected: &mut final_pv_injected_flag,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         // Execute stop
@@ -995,6 +1005,9 @@ mod tests {
         let mut search_start_time: Option<Instant> = None;
         let mut latest_nodes: u64 = 0;
         let mut soft_limit_ms_ctx: u64 = 0;
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1024,6 +1037,8 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             final_pv_injected: &mut final_pv_injected_flag,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -1078,6 +1093,9 @@ mod tests {
         let mut search_start_time: Option<Instant> = None;
         let mut latest_nodes: u64 = 0;
         let mut soft_limit_ms_ctx: u64 = 0;
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1107,6 +1125,8 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             final_pv_injected: &mut final_pv_injected_flag,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -1160,6 +1180,9 @@ mod tests {
         let mut search_start_time: Option<Instant> = None;
         let mut latest_nodes: u64 = 0;
         let mut soft_limit_ms_ctx: u64 = 0;
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1189,6 +1212,8 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             final_pv_injected: &mut final_pv_injected_flag,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         handle_stop_command(&mut ctx).unwrap();
@@ -1254,6 +1279,9 @@ mod tests {
         let mut soft_limit_ms_ctx: u64 = 0;
 
         // Invoke GameOver
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &Arc::new(AtomicBool::new(false)),
@@ -1283,6 +1311,8 @@ mod tests {
             last_bestmove_sent_at: &mut None,
             last_go_begin_at: &mut None,
             final_pv_injected: &mut final_pv_injected_flag,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         handle_command(
@@ -1414,8 +1444,19 @@ mod tests {
                 Ok(crate::worker::WorkerMessage::SearchStarted { start_time, .. }) => {
                     *ctx.search_start_time = Some(start_time);
                 }
-                Ok(crate::worker::WorkerMessage::Finished { .. }) => {
-                    // Done
+                Ok(crate::worker::WorkerMessage::Finished {
+                    from_guard,
+                    search_id,
+                }) => {
+                    if search_id == *ctx.current_search_id && !from_guard {
+                        // Emulate main loop: ensure engine is returned, then finalize
+                        if let Some(engine) = ctx.pending_returned_engine.take() {
+                            let mut adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
+                            adapter.return_engine(engine);
+                        }
+                        let si = ctx.pending_stop_info.take();
+                        let _ = ctx.finalize_emit_if_possible("finished_pump", si);
+                    }
                 }
                 Ok(crate::worker::WorkerMessage::Info { info, .. }) => {
                     // Mirror main loop behavior by forwarding info lines
@@ -1429,6 +1470,16 @@ mod tests {
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     // continue loop
+                }
+                Ok(crate::worker::WorkerMessage::ReturnEngine { engine, search_id }) => {
+                    if search_id == *ctx.current_search_id {
+                        *ctx.pending_returned_engine = Some(engine);
+                    } else if let Ok(mut adapter) = ctx.engine.try_lock() {
+                        adapter.return_engine(engine);
+                    } else {
+                        let mut adapter = crate::worker::lock_or_recover_adapter(ctx.engine);
+                        adapter.return_engine(engine);
+                    }
                 }
                 Err(_) => break,
             }
@@ -1475,6 +1526,8 @@ mod tests {
         let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
         let mut last_go_begin_at: Option<std::time::Instant> = None;
         let mut final_pv_injected = false;
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -1505,6 +1558,8 @@ mod tests {
             last_bestmove_sent_at: &mut last_bestmove_sent_at,
             last_go_begin_at: &mut last_go_begin_at,
             final_pv_injected: &mut final_pv_injected,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         // Start fixed-time search
@@ -1561,6 +1616,8 @@ mod tests {
         let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
         let mut last_go_begin_at: Option<std::time::Instant> = None;
         let mut final_pv_injected = false;
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -1591,6 +1648,8 @@ mod tests {
             last_bestmove_sent_at: &mut last_bestmove_sent_at,
             last_go_begin_at: &mut last_go_begin_at,
             final_pv_injected: &mut final_pv_injected,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         // In-byoyomi for side to move
@@ -1652,6 +1711,8 @@ mod tests {
         let mut last_bestmove_sent_at: Option<std::time::Instant> = None;
         let mut last_go_begin_at: Option<std::time::Instant> = None;
         let mut final_pv_injected = false;
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
 
         let mut ctx = CommandContext {
             engine: &engine,
@@ -1682,6 +1743,8 @@ mod tests {
             last_bestmove_sent_at: &mut last_bestmove_sent_at,
             last_go_begin_at: &mut last_go_begin_at,
             final_pv_injected: &mut final_pv_injected,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         // Start ponder search with inner fixed-time
@@ -1704,6 +1767,21 @@ mod tests {
 
         // Trigger ponderhit (convert in-place)
         handle_ponder_hit(&mut ctx).unwrap();
+
+        // Simulate worker completion messages under new unified finalize model
+        let eng = engine_core::engine::controller::Engine::new(
+            engine_core::engine::controller::EngineType::Material,
+        );
+        tx.send(WorkerMessage::ReturnEngine {
+            engine: eng,
+            search_id: 1,
+        })
+        .unwrap();
+        tx.send(WorkerMessage::Finished {
+            from_guard: false,
+            search_id: 1,
+        })
+        .unwrap();
 
         // Now bestmove should be sent within time
         let infos = pump_until_bestmove(&mut ctx, 7000, start_idx);
@@ -1765,6 +1843,9 @@ mod tests {
             elapsed: std::time::Duration::from_millis(50),
         };
 
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &global_stop,
@@ -1794,6 +1875,8 @@ mod tests {
             last_bestmove_sent_at: &mut last_bestmove_sent_at,
             last_go_begin_at: &mut last_go_begin_at,
             final_pv_injected: &mut final_pv_injected,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         let start_idx = test_info_len();
@@ -1850,6 +1933,9 @@ mod tests {
         let mut last_go_begin_at: Option<std::time::Instant> = None;
         let mut final_pv_injected = false;
 
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &global_stop,
@@ -1879,6 +1965,8 @@ mod tests {
             last_bestmove_sent_at: &mut last_bestmove_sent_at,
             last_go_begin_at: &mut last_go_begin_at,
             final_pv_injected: &mut final_pv_injected,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         let start_idx = test_info_len();
@@ -1934,6 +2022,9 @@ mod tests {
         let mut last_go_begin_at: Option<std::time::Instant> = None;
         let mut final_pv_injected = false;
 
+        // Pending fields for unified finalize
+        let mut pending_stop_info: Option<StopInfo> = None;
+        let mut pending_returned_engine: Option<Engine> = None;
         let mut ctx = CommandContext {
             engine: &engine,
             stop_flag: &global_stop,
@@ -1963,6 +2054,8 @@ mod tests {
             last_bestmove_sent_at: &mut last_bestmove_sent_at,
             last_go_begin_at: &mut last_go_begin_at,
             final_pv_injected: &mut final_pv_injected,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
         };
 
         let start_idx = test_info_len();
