@@ -1176,6 +1176,91 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "Cannot load NNUE weights for non-NNUE engine");
     }
 
+    #[test]
+    fn test_choose_final_bestmove_prefers_non_king_when_not_in_check() {
+        // Black to move, both a king move and a capture by a silver are legal.
+        // Expect: choose_final_bestmove picks non-king capture (LegalFallback heuristic).
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // Black silver can capture a pawn
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'h').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'g').unwrap(),
+            Piece::new(PieceType::Pawn, Color::White),
+        ); // target for capture 4h-5g
+        pos.side_to_move = Color::Black;
+
+        // Ensure non-zero hash to avoid TT probe panic in tests
+        pos.hash = 1;
+        pos.zobrist_hash = 1;
+        let eng = Engine::new(EngineType::Material);
+        let res = eng.choose_final_bestmove(&pos, None);
+        assert!(res.best_move.is_some());
+        let mv = res.best_move.unwrap();
+        // The move should not be a king move when a capture exists
+        let is_king = mv
+            .piece_type()
+            .or_else(|| mv.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type)))
+            .map(|pt| matches!(pt, PieceType::King))
+            .unwrap_or(false);
+        assert!(
+            !is_king,
+            "Should avoid king move when not in check; got {}",
+            crate::usi::move_to_usi(&mv)
+        );
+    }
+
+    #[test]
+    fn test_choose_final_bestmove_skips_illegal_committed() {
+        // Committed PV contains an illegal move; engine should ignore and fallback to legal.
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // One simple legal move: Black pawn can advance 7g7f
+        pos.board.put_piece(
+            Square::from_usi_chars('7', 'g').unwrap(),
+            Piece::new(PieceType::Pawn, Color::Black),
+        );
+        pos.side_to_move = Color::Black;
+
+        // Illegal committed move (move from empty square)
+        let illegal = crate::usi::parse_usi_move("3a3b").unwrap();
+        let committed = crate::search::CommittedIteration {
+            depth: 1,
+            seldepth: None,
+            score: 0,
+            pv: vec![illegal],
+            node_type: crate::search::NodeType::Exact,
+            nodes: 0,
+            elapsed: std::time::Duration::from_millis(0),
+        };
+
+        pos.hash = 1;
+        pos.zobrist_hash = 1;
+        let eng = Engine::new(EngineType::Material);
+        let res = eng.choose_final_bestmove(&pos, Some(&committed));
+        assert!(res.best_move.is_some());
+        assert_ne!(res.best_move.unwrap().to_u16(), illegal.to_u16());
+    }
+
     // TODO: Fix this test after making Engine mutable
     /*
     #[test]
