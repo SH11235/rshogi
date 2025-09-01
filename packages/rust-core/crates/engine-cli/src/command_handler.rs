@@ -304,6 +304,20 @@ impl<'a> CommandContext<'a> {
         ]));
     }
 
+    /// Transition from Finalized to Idle state if currently Finalized
+    /// This helper ensures consistent state transition with logging
+    pub fn transition_to_idle_if_finalized(&mut self, reason: &str) {
+        if *self.search_state == SearchState::Finalized {
+            *self.search_state = SearchState::Idle;
+            let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                ("kind", "state_idle_after_finished"),
+                ("search_id", &self.current_search_id.to_string()),
+                ("reason", reason),
+            ]));
+            log::debug!("Transitioned to Idle from Finalized ({})", reason);
+        }
+    }
+
     /// Emit bestmove and always finalize search, even on error
     ///
     /// This ensures finalize_search is called even if emit fails.
