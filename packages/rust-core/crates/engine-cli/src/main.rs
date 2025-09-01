@@ -10,6 +10,7 @@ mod helpers;
 // mod search_session; // removed after migrating to core committed iterations
 mod state;
 mod stdin_reader;
+mod tests;
 mod types;
 mod usi;
 mod utils;
@@ -617,6 +618,47 @@ fn run_engine(allow_null_move: bool) -> Result<()> {
 
 /// Handle worker messages during normal operation
 fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result<()> {
+    // Extract search_id from message for validation
+    let msg_search_id = match &msg {
+        WorkerMessage::Info { search_id, .. } => *search_id,
+        WorkerMessage::SearchStarted { search_id, .. } => *search_id,
+        WorkerMessage::IterationCommitted { search_id, .. } => *search_id,
+        WorkerMessage::SearchFinished { search_id, .. } => *search_id,
+        WorkerMessage::PartialResult { search_id, .. } => *search_id,
+        WorkerMessage::Finished { search_id, .. } => *search_id,
+        WorkerMessage::Error { search_id, .. } => *search_id,
+        WorkerMessage::HardDeadlineFire { search_id, .. } => *search_id,
+        WorkerMessage::ReturnEngine { search_id, .. } => *search_id,
+    };
+
+    // Drop messages from old searches (except Finished and ReturnEngine for cleanup)
+    if msg_search_id != *ctx.current_search_id {
+        match &msg {
+            WorkerMessage::Finished { .. } | WorkerMessage::ReturnEngine { .. } => {
+                // Allow these through for proper cleanup even from old searches
+                log::debug!(
+                    "Allowing cleanup message from old search {} (current: {})",
+                    msg_search_id,
+                    ctx.current_search_id
+                );
+            }
+            _ => {
+                log::trace!(
+                    "Dropping message from old search {} (current: {})",
+                    msg_search_id,
+                    ctx.current_search_id
+                );
+                let _ = send_info_string(log_tsv(&[
+                    ("kind", "worker_message_dropped"),
+                    ("reason", "old_search_id"),
+                    ("msg_search_id", &msg_search_id.to_string()),
+                    ("current_search_id", &ctx.current_search_id.to_string()),
+                ]));
+                return Ok(());
+            }
+        }
+    }
+
     // If bestmove has already been finalized for the current search, drop non-critical
     // worker messages for this search_id to avoid backlog starving cmd_rx.
     // Keep Finished so that join/waits can still complete cleanly.
@@ -688,9 +730,6 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 ("search_id", &search_id.to_string()),
                 ("hard_ms", &hard_ms.to_string()),
             ]));
-            if search_id != *ctx.current_search_id {
-                return Ok(());
-            }
 
             // Check option: ForceTerminateOnHardDeadline
             if let Ok(adapter) = ctx.engine.try_lock() {

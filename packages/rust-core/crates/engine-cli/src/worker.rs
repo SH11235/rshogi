@@ -1122,6 +1122,7 @@ pub fn wait_for_worker_with_timeout(
         "wait_for_worker_with_timeout: completed in {total_wait_duration:?}, finished={finished}"
     );
 
+    // Set state idle after worker join
     *search_state = SearchState::Idle;
 
     // Drain any remaining messages in worker_rx
@@ -1204,7 +1205,7 @@ pub fn wait_for_worker_sync(
         log::debug!("wait_for_worker_sync: engine returned");
     }
 
-    // Set state idle
+    // Set state idle after worker join
     *search_state = SearchState::Idle;
 
     // Drain remaining non-structural messages from worker_rx (Info-like only)
