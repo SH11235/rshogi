@@ -964,12 +964,21 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
             }
         }
         WorkerMessage::Info { info, search_id } => {
-            // Forward info messages only from current search
+            // Forward info messages only from current search and when not finalized
             if search_id == *ctx.current_search_id && ctx.search_state.is_searching() {
                 send_response(UsiResponse::Info(info))?;
             } else {
+                // Log reason for suppression
+                let reason = if search_id != *ctx.current_search_id {
+                    "old_search_id"
+                } else if *ctx.search_state == SearchState::Finalized {
+                    "finalized_state"
+                } else {
+                    "not_searching"
+                };
                 log::trace!(
-                    "Suppressed Info message - search_id: {} (current: {}), state: {:?}",
+                    "Suppressed Info message - reason: {}, search_id: {} (current: {}), state: {:?}",
+                    reason,
                     search_id,
                     *ctx.current_search_id,
                     *ctx.search_state
@@ -1182,8 +1191,17 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 log::trace!("PartialResult: move={current_best}, depth={depth}, score={score}");
                 *ctx.last_partial_result = Some((current_best, depth, score));
             } else {
+                // Log reason for ignoring
+                let reason = if search_id != *ctx.current_search_id {
+                    "old_search_id"
+                } else if *ctx.search_state == SearchState::Finalized {
+                    "finalized_state"
+                } else {
+                    "not_searching"
+                };
                 log::trace!(
-                    "Ignored PartialResult from search_id={}, current={}, state={:?}",
+                    "Ignored PartialResult - reason: {}, search_id={}, current={}, state={:?}",
+                    reason,
                     search_id,
                     *ctx.current_search_id,
                     *ctx.search_state
@@ -1298,6 +1316,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                         ("kind", "finished_already_finalized"),
                         ("search_id", &search_id.to_string()),
                     ]));
+                    // Ensure transition to Idle before returning
+                    ctx.transition_to_idle_if_finalized("already_finalized");
                     return Ok(());
                 }
 
@@ -1305,6 +1325,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 if !*ctx.current_search_is_ponder {
                     let stop_info = ctx.pending_stop_info.take();
                     if ctx.finalize_emit_if_possible("joined", stop_info)? {
+                        // Ensure transition to Idle before returning
+                        ctx.transition_to_idle_if_finalized("central_finalize");
                         return Ok(());
                     }
 
@@ -1317,6 +1339,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                                 None,
                                 "FinishedCommittedFallback",
                             )? {
+                                // Ensure transition to Idle before returning
+                                ctx.transition_to_idle_if_finalized("committed_fallback");
                                 return Ok(());
                             }
                         }
@@ -1346,6 +1370,8 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                                     meta,
                                     "FinishedPartialFallback",
                                 )?;
+                                // Ensure transition to Idle before returning
+                                ctx.transition_to_idle_if_finalized("partial_fallback");
                                 return Ok(());
                             }
                             Err(e) => {
@@ -1386,13 +1412,7 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
 
                 // Ensure state transitions to Idle after Finished message is fully processed
                 // This is critical for YaneuraOu compatibility
-                if *ctx.search_state == SearchState::Finalized {
-                    *ctx.search_state = SearchState::Idle;
-                    let _ = send_info_string(log_tsv(&[
-                        ("kind", "state_idle_after_finished"),
-                        ("search_id", &search_id.to_string()),
-                    ]));
-                }
+                ctx.transition_to_idle_if_finalized("finished_handler_end");
             }
         }
 

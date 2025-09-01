@@ -94,62 +94,34 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         ]));
     }
 
-    // Clear any pending messages from previous search to prevent interference
-    let mut cleared_messages = 0;
-    let mut important_messages = Vec::new();
-    while let Ok(msg) = ctx.worker_rx.try_recv() {
-        cleared_messages += 1;
-        // Check if it's a critical message that needs handling
-        match &msg {
-            crate::worker::WorkerMessage::ReturnEngine {
-                engine: _,
-                search_id,
-            } => {
-                log::debug!(
-                    "Found pending ReturnEngine message during cleanup (search_id: {search_id})"
-                );
-                important_messages.push(msg);
+    // Note: Message processing is now done before engine availability check
+    // This ensures all pending messages are handled properly without dropping any
+
+    // Process any pending worker messages before checking engine availability
+    // This ensures SearchFinished/Finished messages are handled promptly
+    {
+        let mut processed_count = 0;
+        while let Ok(msg) = ctx.worker_rx.try_recv() {
+            processed_count += 1;
+            // Handle all messages through the central handler
+            if let Err(e) = crate::handle_worker_message(msg, ctx) {
+                log::error!("Error handling worker message during pre-go cleanup: {e}");
             }
-            _ => {
-                // Log what we're dropping for debugging
-                let msg_type = match &msg {
-                    crate::worker::WorkerMessage::Info { .. } => "Info",
-                    crate::worker::WorkerMessage::SearchStarted { .. } => "SearchStarted",
-                    crate::worker::WorkerMessage::IterationCommitted { .. } => "IterationCommitted",
-                    crate::worker::WorkerMessage::SearchFinished { .. } => "SearchFinished",
-                    crate::worker::WorkerMessage::PartialResult { .. } => "PartialResult",
-                    crate::worker::WorkerMessage::Finished { .. } => "Finished",
-                    crate::worker::WorkerMessage::Error { .. } => "Error",
-                    crate::worker::WorkerMessage::HardDeadlineFire { .. } => "HardDeadlineFire",
-                    crate::worker::WorkerMessage::ReturnEngine { .. } => "ReturnEngine",
-                };
-                log::trace!("Dropping old message: {msg_type}");
-            }
+        }
+        if processed_count > 0 {
+            log::debug!("Processed {processed_count} pending worker messages before go");
+            let _ = send_info_string(log_tsv(&[
+                ("kind", "go_pre_pump_messages"),
+                ("count", &processed_count.to_string()),
+            ]));
         }
     }
 
-    // Process any important messages we found
-    for msg in important_messages {
-        if let crate::worker::WorkerMessage::ReturnEngine { engine, .. } = msg {
-            let mut adapter = lock_or_recover_adapter(ctx.engine);
-            adapter.return_engine(engine);
-            let _ = send_info_string(log_tsv(&[("kind", "return_engine_during_cleanup")]));
-        }
-    }
-
-    if cleared_messages > 0 {
-        log::debug!("Cleared {cleared_messages} old messages from worker queue");
-        let _ = send_info_string(log_tsv(&[
-            ("kind", "go_cleared_old_messages"),
-            ("count", &cleared_messages.to_string()),
-        ]));
-    }
-
-    // Check engine availability before proceeding
+    // Check engine availability after processing messages
     {
         let mut adapter = lock_or_recover_adapter(ctx.engine);
         let mut engine_available = adapter.is_engine_available();
-        log::debug!("Engine availability after wait: {engine_available}");
+        log::debug!("Engine availability after message processing: {engine_available}");
         if !engine_available {
             // Short grace period: the previous worker may be returning the engine via guard drop
             let grace_ms = std::env::var("ENGINE_RECOVERY_GRACE_MS")
@@ -164,14 +136,32 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                     ("ms", &grace_ms.to_string()),
                 ]));
                 while start.elapsed().as_millis() as u64 <= grace_ms {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    let a = lock_or_recover_adapter(ctx.engine);
-                    engine_available = a.is_engine_available();
-                    if engine_available {
-                        break;
+                    // Continue processing messages during grace period
+                    if let Ok(msg) = ctx.worker_rx.try_recv() {
+                        // Handle ALL messages through the central handler
+                        if let Err(e) = crate::handle_worker_message(msg, ctx) {
+                            log::error!("Error handling worker message during grace period: {e}");
+                        }
+                        // Check if engine became available after processing
+                        let a = lock_or_recover_adapter(ctx.engine);
+                        if a.is_engine_available() {
+                            // Engine is now available, exit grace period
+                            engine_available = true;
+                            drop(a);
+                            break;
+                        }
+                    } else {
+                        // No message available, sleep briefly
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
-                adapter = lock_or_recover_adapter(ctx.engine);
+                // Re-check engine availability after grace period
+                if !engine_available {
+                    adapter = lock_or_recover_adapter(ctx.engine);
+                    engine_available = adapter.is_engine_available();
+                } else {
+                    adapter = lock_or_recover_adapter(ctx.engine);
+                }
             }
 
             if !engine_available {
