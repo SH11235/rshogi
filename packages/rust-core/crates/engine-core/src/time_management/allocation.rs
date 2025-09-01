@@ -149,19 +149,44 @@ fn calculate_byoyomi_time(
     params: &TimeParameters,
 ) -> (u64, u64) {
     if main_time_ms > 0 {
-        // Still in main time - treat like Fischer without increment
-        // Conservative allocation: 20% soft, 50% hard
-        let mut soft = main_time_ms / 5; // 20% = 1/5
-        let mut hard = main_time_ms / 2; // 50% = 1/2
-                                         // Apply SlowMover and ratio clamp
-        soft = ((soft as u128 * params.slow_mover_pct as u128 + 50) / 100) as u64;
-        if params.max_time_ratio > 0.0 {
-            let max_hard = ((soft as f64 * params.max_time_ratio) + 0.5) as u64;
-            if hard > max_hard {
-                hard = max_hard;
+        // YaneuraOu-style FinalPush detection
+        // Activate FinalPush when remaining time < 1.2 * byoyomi period
+        let final_push_threshold = (byoyomi_ms as f64 * 1.2) as u64;
+
+        if byoyomi_ms > 0 && main_time_ms < final_push_threshold {
+            // FinalPush mode: use all available time (main_time + byoyomi)
+            // This follows YaneuraOu's design: minimum = optimum = maximum = time + byoyomi
+            let total_available = main_time_ms + byoyomi_ms;
+
+            // Apply minimal safety margins for network delay
+            let overhead = params.overhead_ms;
+            let network_delay = params.network_delay2_ms;
+
+            // Both soft and hard limits are set to use maximum available time
+            // with only essential safety margins
+            let target = total_available.saturating_sub(overhead).saturating_sub(network_delay);
+
+            // Ensure we have at least some time to make a move
+            let final_time = target.max(params.critical_byoyomi_ms);
+
+            // In FinalPush, soft and hard are nearly equal (small delta for safety)
+            (final_time.saturating_sub(50), final_time)
+        } else {
+            // Normal main time allocation
+            // Conservative allocation: 20% soft, 50% hard
+            let mut soft = main_time_ms / 5; // 20% = 1/5
+            let mut hard = main_time_ms / 2; // 50% = 1/2
+
+            // Apply SlowMover and ratio clamp
+            soft = ((soft as u128 * params.slow_mover_pct as u128 + 50) / 100) as u64;
+            if params.max_time_ratio > 0.0 {
+                let max_hard = ((soft as f64 * params.max_time_ratio) + 0.5) as u64;
+                if hard > max_hard {
+                    hard = max_hard;
+                }
             }
+            (soft, hard)
         }
-        (soft, hard)
     } else {
         // In byoyomi period
         // Incorporate GUI/IPC delay (network_delay2_ms) into budgeting.
@@ -279,7 +304,7 @@ mod tests {
         let params = TimeParameters::default();
         let (soft, hard) = calculate_time_allocation(
             &TimeControl::Byoyomi {
-                main_time_ms: 10000, // 10 seconds main time
+                main_time_ms: 50000, // 50 seconds main time (> 1.2 * 30000 = 36000)
                 byoyomi_ms: 30000,   // 30 seconds per period
                 periods: 3,
             },
@@ -290,9 +315,9 @@ mod tests {
             &params,
         );
 
-        // Conservative allocation during main time
-        assert_eq!(soft, 2000); // 20% of 10000
-        assert_eq!(hard, 5000); // 50% of 10000
+        // Conservative allocation during main time (not in FinalPush)
+        assert_eq!(soft, 10000); // 20% of 50000
+        assert_eq!(hard, 25000); // 50% of 50000
     }
 
     #[test]
@@ -312,15 +337,11 @@ mod tests {
         );
 
         // Should use 80% of period as soft limit minus overhead and half of network_delay2
-        assert_eq!(soft, 24000 - params.overhead_ms - params.network_delay2_ms / 2);
-        // Hard limit should subtract overhead, byoyomi safety, and full network_delay2
-        assert_eq!(
-            hard,
-            30000
-                - params.overhead_ms
-                - params.byoyomi_hard_limit_reduction_ms
-                - params.network_delay2_ms
-        );
+        // 30000 * 0.8 = 24000, minus overhead (50) and half network_delay2 (400) = 23550
+        assert_eq!(soft, 23550);
+        // Hard limit should subtract overhead (50), byoyomi safety (100), and full network_delay2 (800)
+        // 30000 - 50 - 100 - 800 = 29050
+        assert_eq!(hard, 29050);
     }
 
     #[test]
@@ -486,5 +507,95 @@ mod tests {
             &guard_params,
         );
         assert_eq!(soft1_re, soft0, "guard must not affect soft");
+    }
+
+    #[test]
+    fn test_byoyomi_final_push_activation() {
+        let params = TimeParameters::default();
+
+        // Test 1: FinalPush should activate when main_time < 1.2 * byoyomi
+        // byoyomi = 10s, threshold = 12s, main_time = 11s
+        let (soft1, hard1) = calculate_time_allocation(
+            &TimeControl::Byoyomi {
+                main_time_ms: 11000, // 11 seconds (< 12s threshold)
+                byoyomi_ms: 10000,   // 10 seconds
+                periods: 3,
+            },
+            Color::Black,
+            50,
+            None,
+            GamePhase::MiddleGame,
+            &params,
+        );
+
+        // In FinalPush, we should use nearly all available time (11s + 10s = 21s)
+        // minus overhead and network delay
+        let expected_total = 21000 - params.overhead_ms - params.network_delay2_ms;
+        let expected_soft = expected_total.saturating_sub(50);
+        let expected_hard = expected_total;
+
+        // Allow small tolerance for safety margins
+        assert!(
+            soft1 >= expected_soft - 100 && soft1 <= expected_soft + 100,
+            "FinalPush soft limit should be close to {}, got {}",
+            expected_soft,
+            soft1
+        );
+        assert!(
+            hard1 >= expected_hard - 100 && hard1 <= expected_hard + 100,
+            "FinalPush hard limit should be close to {}, got {}",
+            expected_hard,
+            hard1
+        );
+
+        // Test 2: FinalPush should NOT activate when main_time >= 1.2 * byoyomi
+        // byoyomi = 10s, threshold = 12s, main_time = 15s
+        let (soft2, hard2) = calculate_time_allocation(
+            &TimeControl::Byoyomi {
+                main_time_ms: 15000, // 15 seconds (> 12s threshold)
+                byoyomi_ms: 10000,   // 10 seconds
+                periods: 3,
+            },
+            Color::Black,
+            50,
+            None,
+            GamePhase::MiddleGame,
+            &params,
+        );
+
+        // Should use normal conservative allocation
+        assert_eq!(soft2, 3000); // 20% of 15000
+        assert_eq!(hard2, 7500); // 50% of 15000
+    }
+
+    #[test]
+    fn test_byoyomi_final_push_already_in_byoyomi() {
+        let params = TimeParameters::default();
+
+        // When already in byoyomi (main_time = 0), should use byoyomi period
+        let (soft, hard) = calculate_time_allocation(
+            &TimeControl::Byoyomi {
+                main_time_ms: 0,   // Already in byoyomi
+                byoyomi_ms: 10000, // 10 seconds
+                periods: 2,
+            },
+            Color::White,
+            100,
+            None,
+            GamePhase::EndGame,
+            &params,
+        );
+
+        // Should use byoyomi allocation with safety margins
+        let expected_soft = (10000.0 * params.byoyomi_soft_ratio) as u64
+            - params.overhead_ms
+            - params.network_delay2_ms / 2;
+        let expected_hard = 10000
+            - params.overhead_ms
+            - params.byoyomi_hard_limit_reduction_ms
+            - params.network_delay2_ms;
+
+        assert_eq!(soft, expected_soft);
+        assert_eq!(hard, expected_hard);
     }
 }

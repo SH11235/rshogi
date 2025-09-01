@@ -67,17 +67,17 @@ fn test_set_search_end_respects_remain_upper_in_byoyomi() {
     let phase = GamePhase::MiddleGame;
     let tm = TimeManager::new(&limits, Color::Black, 40, phase);
 
-    // Remain-upper bound: byoyomi - nd2(1000) - overhead(50) = 1950
-    // Hard is conservative: byoyomi - overhead - safety(500) - nd2 = 1450
+    // Remain-upper bound: byoyomi - nd2(800) - overhead(50) = 2150
+    // Hard is conservative: byoyomi - overhead(50) - safety(100) - nd2(800) = 2050
     let hard = tm.hard_limit_ms();
-    assert!(hard > 0 && hard < 1950);
+    assert!(hard > 0 && hard <= 2050);
 
-    // Request scheduling very early; final schedule should be <= remain_upper (<= 1950) and <= hard
+    // Request scheduling very early; final schedule should be <= remain_upper (<= 2150) and <= hard
     tm.set_search_end(100);
     let scheduled = tm.scheduled_end_ms();
     assert!(
-        scheduled <= 1950,
-        "scheduled_end should not exceed remain_upper (1950), got {scheduled}"
+        scheduled <= 2150,
+        "scheduled_end should not exceed remain_upper (2150), got {scheduled}"
     );
     assert!(
         scheduled <= hard,

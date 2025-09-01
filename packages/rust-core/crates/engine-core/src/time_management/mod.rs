@@ -248,29 +248,50 @@ impl TimeManager {
 
         let tm = Self { inner };
 
-        // Final push activation (strict): enable when already in byoyomi (main_time == 0)
+        // YaneuraOu-style FinalPush activation
         if let TimeControl::Byoyomi {
             main_time_ms,
             byoyomi_ms,
             ..
         } = &limits.time_control
         {
-            if *main_time_ms == 0 {
+            let final_push_threshold = (*byoyomi_ms as f64 * 1.2) as u64;
+
+            // Activate FinalPush when:
+            // 1. Already in byoyomi (main_time == 0), OR
+            // 2. Main time < 1.2 * byoyomi period
+            if *main_time_ms == 0 || (*byoyomi_ms > 0 && *main_time_ms < final_push_threshold) {
                 let worst = tm.inner.params.network_delay2_ms;
                 let avg = tm.inner.params.overhead_ms;
-                let min_ms = byoyomi_ms.saturating_sub(worst).saturating_sub(avg);
+
+                // Calculate minimum time based on whether we're in main time or byoyomi
+                let available_time = if *main_time_ms > 0 {
+                    // In main time FinalPush: can use main_time + byoyomi
+                    main_time_ms + byoyomi_ms
+                } else {
+                    // Already in byoyomi: can only use byoyomi period
+                    *byoyomi_ms
+                };
+
+                let min_ms = available_time.saturating_sub(worst).saturating_sub(avg);
                 tm.inner.final_push_active.store(true, Ordering::Relaxed);
                 tm.inner.final_push_min_ms.store(min_ms, Ordering::Relaxed);
-                // Ensure opt covers minimum but never above hard
-                let hard = tm.inner.hard_limit_ms.load(Ordering::Relaxed);
-                let target_opt = min_ms.min(hard);
-                let _ = tm.inner.opt_limit_ms.fetch_max(target_opt, Ordering::Relaxed);
+
+                // In FinalPush, set opt_limit to match the calculated budgets
+                // This ensures we use the full available time
+                let current_hard = tm.inner.hard_limit_ms.load(Ordering::Relaxed);
+
+                // Set opt_limit to be close to hard limit in FinalPush mode
+                let target_opt = current_hard.saturating_sub(50); // Small margin for safety
+                tm.inner.opt_limit_ms.store(target_opt, Ordering::Relaxed);
+
                 log::debug!(
-                    "[FinalPush] active (in byoyomi): period={}ms, min_ms={}ms (worst={}, avg={})",
+                    "[FinalPush] active: main_time={}ms, byoyomi={}ms, threshold={}ms, available={}ms, min_ms={}ms",
+                    main_time_ms,
                     byoyomi_ms,
-                    min_ms,
-                    worst,
-                    avg
+                    final_push_threshold,
+                    available_time,
+                    min_ms
                 );
             }
         }
@@ -392,6 +413,11 @@ impl TimeManager {
         let opt_limit = self.inner.opt_limit_ms.load(Ordering::Relaxed);
         if planned == u64::MAX && elapsed >= opt_limit {
             // Schedule rounded stop time
+            log::debug!(
+                "[TimeBudget] Exceeded opt_limit ({}ms) at {}ms, scheduling rounded stop",
+                opt_limit,
+                elapsed
+            );
             self.set_search_end(elapsed);
             // Don't stop immediately - continue until scheduled time
             return false;
@@ -454,21 +480,30 @@ impl TimeManager {
         self.inner.search_end_ms.load(Ordering::Relaxed)
     }
 
-    /// Compute a rounded stop target: next second boundary minus average overhead
+    /// Compute a rounded stop target following YaneuraOu design
+    /// Round up to next second boundary, then subtract average overhead
     fn round_up(&self, elapsed_ms: u64) -> u64 {
+        // YaneuraOu style: round to next second boundary
         let next_sec = ((elapsed_ms / 1000).saturating_add(1)).saturating_mul(1000);
-        let overhead = self.inner.params.overhead_ms;
-        // Ensure rounding does not go backwards
-        let mut target = next_sec.saturating_sub(overhead);
+
+        // Use minimal overhead for rounding (similar to YaneuraOu's 100ms default)
+        let rounding_overhead = self.inner.params.overhead_ms.min(100);
+
+        // Calculate target with overhead
+        let mut target = next_sec.saturating_sub(rounding_overhead);
+
+        // Ensure we don't go backwards
         if target <= elapsed_ms {
-            // If rounding would go backwards after subtracting overhead, schedule one full second ahead
-            target = elapsed_ms.saturating_add(1000);
+            // Schedule at least 500ms ahead to allow iteration completion
+            target = elapsed_ms.saturating_add(500);
         }
+
         // Never exceed hard limit
         let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
         if hard != u64::MAX && target > hard {
             target = hard;
         }
+
         target
     }
 
