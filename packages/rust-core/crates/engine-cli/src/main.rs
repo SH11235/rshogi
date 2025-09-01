@@ -1145,14 +1145,25 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     return Ok(());
                 }
 
-                // Defer bestmove emission until Finished (join) for strict ordering
+                // Emit bestmove immediately for non-ponder searches
                 if !*ctx.current_search_is_ponder {
-                    *ctx.pending_stop_info = stop_info;
                     let _ = send_info_string(log_tsv(&[
-                        ("kind", "searchfinished_deferred"),
+                        ("kind", "searchfinished_immediate_emit"),
                         ("search_id", &search_id.to_string()),
                     ]));
-                    return Ok(());
+
+                    // Try to emit bestmove immediately using the stop_info
+                    if ctx.finalize_emit_if_possible("searchfinished", stop_info.clone())? {
+                        // Successfully emitted and finalized
+                        return Ok(());
+                    }
+
+                    // If central finalize failed, store stop_info for later fallback attempts
+                    *ctx.pending_stop_info = stop_info;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "searchfinished_emit_failed_defer"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
                 } else {
                     log::debug!("Ponder search finished, not sending bestmove");
                     ctx.finalize_search("PonderFinished");
@@ -1281,6 +1292,15 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                     }
                 }
 
+                // Check if already finalized (bestmove was sent in SearchFinished)
+                if *ctx.search_state == SearchState::Finalized {
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "finished_already_finalized"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
+                    return Ok(());
+                }
+
                 // Prefer central finalize using pending StopInfo captured at SearchFinished
                 if !*ctx.current_search_is_ponder {
                     let stop_info = ctx.pending_stop_info.take();
@@ -1362,6 +1382,16 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                             )?;
                         }
                     }
+                }
+
+                // Ensure state transitions to Idle after Finished message is fully processed
+                // This is critical for YaneuraOu compatibility
+                if *ctx.search_state == SearchState::Finalized {
+                    *ctx.search_state = SearchState::Idle;
+                    let _ = send_info_string(log_tsv(&[
+                        ("kind", "state_idle_after_finished"),
+                        ("search_id", &search_id.to_string()),
+                    ]));
                 }
             }
         }

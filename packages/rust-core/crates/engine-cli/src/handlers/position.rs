@@ -28,16 +28,30 @@ pub(crate) fn handle_position_command(
     let cmd_canonical = canonicalize_position_cmd(startpos, sfen.as_deref(), &moves);
 
     // Wait for any ongoing search to complete before updating position
-    let wait_start = Instant::now();
-    wait_for_search_completion(
-        ctx.search_state,
-        ctx.stop_flag,
-        ctx.current_stop_flag.as_ref(),
-        ctx.worker_handle,
-        ctx.worker_rx,
-        ctx.engine,
-    )?;
-    let wait_ms = wait_start.elapsed().as_millis();
+    // IMPORTANT: Skip waiting if state is Finalized - the go handler will handle it
+    let wait_ms = if ctx.search_state.is_searching() {
+        let wait_start = Instant::now();
+        wait_for_search_completion(
+            ctx.search_state,
+            ctx.stop_flag,
+            ctx.current_stop_flag.as_ref(),
+            ctx.worker_handle,
+            ctx.worker_rx,
+            ctx.engine,
+        )?;
+        wait_start.elapsed().as_millis()
+    } else {
+        // For Finalized or Idle state, don't wait - let go handler deal with it
+        log::debug!(
+            "Skipping wait_for_search_completion in position handler - state: {:?}",
+            ctx.search_state
+        );
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "position_wait_skipped"),
+            ("state", &format!("{:?}", ctx.search_state)),
+        ]));
+        0
+    };
     let _ = send_info_string(log_tsv(&[
         ("kind", "position_wait_done"),
         ("elapsed_ms", &wait_ms.to_string()),
