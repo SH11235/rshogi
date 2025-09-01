@@ -6,7 +6,7 @@ use crate::emit_utils::{
     log_position_restore_success, log_position_restore_try,
 };
 use crate::handlers::common::resign_on_position_restore_fail;
-use crate::helpers::wait_for_search_completion;
+use crate::helpers::{transition_to_idle_if_finalized, wait_for_search_completion};
 use crate::state::SearchState;
 use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
@@ -79,32 +79,8 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
         return Ok(()); // Silently reject - don't send error to GUI
     }
 
-    // If we're in Finalized state, wait for worker to finish joining
-    if *ctx.search_state == SearchState::Finalized {
-        log::info!("Go command received in Finalized state, waiting for worker join");
-        let wait_start = Instant::now();
-        // Don't pass current_stop_flag as it's from the previous search and may be stale
-        wait_for_search_completion(
-            ctx.search_state,
-            ctx.stop_flag,
-            None, // Pass None since we're cleaning up a finalized search
-            ctx.worker_handle,
-            ctx.worker_rx,
-            ctx.engine,
-        )?;
-        let wait_duration = wait_start.elapsed();
-        log::debug!("Wait for finalized search cleanup took: {wait_duration:?}");
-        let _ = send_info_string(log_tsv(&[
-            ("kind", "go_finalized_wait_done"),
-            ("elapsed_ms", &wait_duration.as_millis().to_string()),
-        ]));
-    }
-
-    // Note: Message processing is now done before engine availability check
-    // This ensures all pending messages are handled properly without dropping any
-
-    // Process any pending worker messages before checking engine availability
-    // This ensures SearchFinished/Finished messages are handled promptly
+    // Process any pending worker messages FIRST to handle Finished/ReturnEngine
+    // This ensures Finalized->Idle transition happens before state checks
     {
         let mut processed_count = 0;
         while let Ok(msg) = ctx.worker_rx.try_recv() {
@@ -121,6 +97,37 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                 ("count", &processed_count.to_string()),
             ]));
         }
+    }
+
+    // After processing messages, handle Finalized state if needed
+    if *ctx.search_state == SearchState::Finalized {
+        log::info!("Go command received in Finalized state, transitioning to Idle");
+        // Transition directly to Idle without waiting
+        transition_to_idle_if_finalized(ctx.search_state, "go_handler");
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "go_finalized_to_idle"),
+            ("search_id", &ctx.current_search_id.to_string()),
+        ]));
+    }
+
+    // If still searching after message pump, wait for completion
+    if ctx.search_state.is_searching() {
+        log::info!("Go command received while searching, waiting for completion");
+        let wait_start = Instant::now();
+        wait_for_search_completion(
+            ctx.search_state,
+            ctx.stop_flag,
+            ctx.current_stop_flag.as_ref(),
+            ctx.worker_handle,
+            ctx.worker_rx,
+            ctx.engine,
+        )?;
+        let wait_duration = wait_start.elapsed();
+        log::debug!("Wait for search completion took: {wait_duration:?}");
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "go_wait_for_search_done"),
+            ("elapsed_ms", &wait_duration.as_millis().to_string()),
+        ]));
     }
 
     // Check engine availability after processing messages

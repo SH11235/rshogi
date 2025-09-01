@@ -196,6 +196,22 @@ pub fn wait_for_search_completion(
         ("kind", "wait_for_search_begin"),
         ("state", &format!("{:?}", *search_state)),
     ]));
+
+    // If already Finalized, just transition to Idle and return immediately
+    if *search_state == SearchState::Finalized {
+        log::info!(
+            "wait_for_search_completion: state is Finalized, transitioning to Idle immediately"
+        );
+        transition_to_idle_if_finalized(search_state, "wait_for_search_completion_early");
+        // Reset flags
+        stop_flag.store(false, Ordering::Release);
+        if let Some(search_flag) = current_stop_flag {
+            search_flag.store(false, Ordering::Release);
+        }
+        let _ = send_info_string(log_tsv(&[("kind", "wait_for_search_finalized_skip")]));
+        return Ok(());
+    }
+
     if search_state.is_searching() {
         log::info!("wait_for_search_completion: stopping ongoing search, state={:?}", search_state);
         let stop_start = std::time::Instant::now();
