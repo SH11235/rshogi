@@ -245,7 +245,10 @@ impl<'a> MoveGenImpl<'a> {
                     piece.piece_type,
                     captured_type,
                 );
-                moves.push(mv);
+                // Safety net: validate with full legality (accounts for discovered attacks after moving king)
+                if self.pos.is_legal_move(mv) {
+                    moves.push(mv);
+                }
             }
         }
     }
@@ -395,7 +398,9 @@ impl<'a> MoveGenImpl<'a> {
                     piece.piece_type,
                     Some(captured_piece.piece_type),
                 );
-                moves.push(mv);
+                if self.pos.is_legal_move(mv) {
+                    moves.push(mv);
+                }
             }
         }
     }
@@ -410,7 +415,9 @@ impl<'a> MoveGenImpl<'a> {
                 let piece = self.pos.board.piece_on(self.king_sq).unwrap();
                 let mv =
                     Move::normal_with_piece(self.king_sq, to_sq, false, piece.piece_type, None);
-                moves.push(mv);
+                if self.pos.is_legal_move(mv) {
+                    moves.push(mv);
+                }
             }
         }
     }
