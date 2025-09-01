@@ -145,7 +145,7 @@ impl TimeManager {
         let params = limits.time_parameters.unwrap_or_default();
 
         // Log time control details at initialization
-        log::debug!(
+        log::info!(
             "[TimeManager::new] Starting initialization - time_control: {:?}, side: {:?}, ply: {}, game_phase: {:?}",
             limits.time_control,
             side,
@@ -173,7 +173,7 @@ impl TimeManager {
         );
 
         // Log calculated raw values
-        log::debug!(
+        log::info!(
             "[TimeManager::new] calculate_time_allocation returned - raw_soft: {}ms, raw_hard: {}ms",
             raw_soft,
             raw_hard
@@ -253,7 +253,7 @@ impl TimeManager {
         };
 
         // Log final budget values after clamping
-        log::debug!(
+        log::info!(
             "[TimeManager::new] After clamping - soft_ms: {}ms, hard_ms: {}ms, opt_limit: {}ms, budget_clamped: {}",
             soft_ms,
             hard_ms,
@@ -359,7 +359,7 @@ impl TimeManager {
         }
 
         // Log final stored values
-        log::debug!(
+        log::info!(
             "[TimeManager::new] Final stored values - soft: {}ms, hard: {}ms, opt: {}ms, final_push_active: {}",
             tm.inner.soft_limit_ms.load(Ordering::Relaxed),
             tm.inner.hard_limit_ms.load(Ordering::Relaxed),

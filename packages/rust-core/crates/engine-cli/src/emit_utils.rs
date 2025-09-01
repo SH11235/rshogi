@@ -53,11 +53,9 @@ pub fn log_bestmove_sent(
         ("nodes", &stop_info.nodes.to_string()),
     ]));
 
-    // Additional debug log
-    log::debug!(
-        "[BESTMOVE] stop details - from: {}, reason: {}, elapsed: {}ms, soft: {}ms, hard: {}ms",
-        from,
-        stop_reason,
+    // Additional info log
+    log::info!(
+        "[BESTMOVE] stop details - from: {from}, reason: {stop_reason}, elapsed: {}ms, soft: {}ms, hard: {}ms",
         stop_info.elapsed_ms,
         stop_info.soft_limit_ms,
         stop_info.hard_limit_ms
