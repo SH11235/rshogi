@@ -59,8 +59,8 @@ src/                         # Legacy WASM modules
 ### Quick Start
 ```bash
 # Build and run the USI engine
-cargo build --release --bin engine-cli
-./target/release/engine-cli
+cargo build --release --bin engine-usi
+./target/release/engine-usi
 
 # Set to strongest mode (EnhancedNnue)
 setoption name EngineType value EnhancedNnue
