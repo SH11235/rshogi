@@ -105,6 +105,7 @@ struct EngineState {
     result_rx: Option<mpsc::Receiver<engine_core::search::SearchResult>>,
     // Stochastic Ponder control
     current_is_stochastic_ponder: bool,
+    current_is_ponder: bool,
     stoch_suppress_result: bool,
     pending_research_after_ponderhit: bool,
     last_go_params: Option<GoParams>,
@@ -132,6 +133,7 @@ impl EngineState {
             worker: None,
             result_rx: None,
             current_is_stochastic_ponder: false,
+            current_is_ponder: false,
             stoch_suppress_result: false,
             pending_research_after_ponderhit: false,
             last_go_params: None,
@@ -168,7 +170,7 @@ fn print_time_policy_options(opts: &UsiOptions) {
         "option name OverheadMs type spin default {} min 0 max 5000",
         opts.overhead_ms
     ));
-    usi_println(&"option name ByoyomiOverheadMs type spin default 200 min 0 max 5000".to_string());
+    usi_println("option name ByoyomiOverheadMs type spin default 200 min 0 max 5000");
     usi_println(&format!(
         "option name ByoyomiSafetyMs type spin default {} min 0 max 2000",
         opts.byoyomi_safety_ms
@@ -216,8 +218,8 @@ fn usi_println(s: &str) {
 }
 
 fn send_id_and_options(opts: &UsiOptions) {
-    usi_println(&"id name RustShogi USI (core)".to_string());
-    usi_println(&"id author RustShogi Team".to_string());
+    usi_println("id name RustShogi USI (core)");
+    usi_println("id author RustShogi Team");
 
     // Options we support in this thin USI
     usi_println(&format!(
@@ -520,6 +522,10 @@ fn main() -> Result<()> {
                         state.ponder_hit_flag = None;
                         state.result_rx = None;
 
+                        // Remember ponder status and clear it for next cycle
+                        let was_ponder = state.current_is_ponder;
+                        state.current_is_ponder = false;
+
                         if state.stoch_suppress_result {
                             // Suppress emission for stochastic ponder cancel
                             state.stoch_suppress_result = false;
@@ -555,6 +561,8 @@ fn main() -> Result<()> {
                                     state.pending_research_after_ponderhit = false;
                                 }
                             }
+                        } else if was_ponder {
+                            // Ponder完了結果は送出しない（USI仕様）。GUIのponderhit/stopに従う。
                         } else {
                             // Normal finalize and emit bestmove
                             let bm = result
@@ -846,7 +854,7 @@ fn main() -> Result<()> {
                         if let Ok(prev) = engine_core::usi::create_position(
                             state.pos_from_startpos,
                             state.pos_sfen.as_deref(),
-                            &prev_moves.to_vec(),
+                            prev_moves,
                         ) {
                             search_position = prev;
                             info!("Stochastic Ponder: using previous position for pondering");
@@ -935,6 +943,8 @@ fn main() -> Result<()> {
                     if let Some(flag) = &state.ponder_hit_flag {
                         flag.store(true, Ordering::SeqCst);
                     }
+                    // 通常探索へ移行したので、結果送出を許可
+                    state.current_is_ponder = false;
                 }
                 continue;
             }
