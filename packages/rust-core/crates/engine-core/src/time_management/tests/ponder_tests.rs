@@ -48,7 +48,7 @@ fn test_ponder_to_byoyomi() {
     // Create pending limits with Byoyomi
     let pending_limits = TimeLimits {
         time_control: TimeControl::Byoyomi {
-            main_time_ms: 10000, // 10 seconds main time
+            main_time_ms: 50000, // 50 seconds main time (avoid FinalPush)
             byoyomi_ms: 30000,   // 30 seconds per period
             periods: 3,
         },
@@ -67,7 +67,7 @@ fn test_ponder_to_byoyomi() {
     // Should have conservative allocation from remaining main time
     let info = tm.get_time_info();
     assert!(info.soft_limit_ms > 0);
-    assert!(info.soft_limit_ms < 10000 - 3000); // Less than remaining main time
+    assert!(info.soft_limit_ms < (50000 - 3000) / 2); // Less than half of remaining main time
 }
 
 #[test]

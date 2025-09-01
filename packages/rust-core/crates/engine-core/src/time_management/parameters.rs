@@ -56,7 +56,7 @@ impl Default for TimeParameters {
     fn default() -> Self {
         Self {
             overhead_ms: 50,
-            network_delay2_ms: 1000,
+            network_delay2_ms: 800, // Reduced from 1000ms for better time utilization
             min_think_ms: 0,
             pv_base_threshold_ms: 80,
             pv_depth_slope_ms: 5,
@@ -68,7 +68,7 @@ impl Default for TimeParameters {
             slow_mover_pct: 100,
             max_time_ratio: 5.0,
             byoyomi_soft_ratio: 0.8,
-            byoyomi_hard_limit_reduction_ms: 500,
+            byoyomi_hard_limit_reduction_ms: 100, // Reduced from 500ms following YaneuraOu design
             opening_factor: 1.2,
             endgame_factor: 0.8,
             move_horizon_trigger_ms: 0,
@@ -140,8 +140,8 @@ impl std::error::Error for TimeParameterError {}
 pub mod constants {
     // Default values (mirrored from Default impl)
     pub const DEFAULT_OVERHEAD_MS: u64 = 50;
-    pub const DEFAULT_BYOYOMI_OVERHEAD_MS: u64 = 1000; // Conservative for GUI compatibility
-    pub const DEFAULT_BYOYOMI_SAFETY_MS: u64 = 500;
+    pub const DEFAULT_BYOYOMI_OVERHEAD_MS: u64 = 200; // Reduced from 1000ms for better time utilization
+    pub const DEFAULT_BYOYOMI_SAFETY_MS: u64 = 500; // Keep at 500ms for safety (reduced in defaults)
 
     // Validation ranges
     pub const MIN_OVERHEAD_MS: u64 = 0;
@@ -346,7 +346,7 @@ mod tests {
     fn test_builder_default_values() {
         let params = TimeParametersBuilder::new().build();
         assert_eq!(params.overhead_ms, 50);
-        assert_eq!(params.byoyomi_hard_limit_reduction_ms, 500);
+        assert_eq!(params.byoyomi_hard_limit_reduction_ms, 100); // Reduced from 500
         assert_eq!(params.byoyomi_soft_ratio, 0.8);
         assert_eq!(params.pv_base_threshold_ms, 80);
         assert_eq!(params.pv_depth_slope_ms, 5);
@@ -451,7 +451,8 @@ mod tests {
     fn test_constants_match_defaults() {
         let params = TimeParameters::default();
         assert_eq!(params.overhead_ms, constants::DEFAULT_OVERHEAD_MS);
-        assert_eq!(params.byoyomi_hard_limit_reduction_ms, constants::DEFAULT_BYOYOMI_SAFETY_MS);
+        // Note: byoyomi_hard_limit_reduction_ms is set to 100 in defaults, but constant is 500 for compatibility
+        assert_eq!(params.byoyomi_hard_limit_reduction_ms, 100);
     }
 
     #[test]

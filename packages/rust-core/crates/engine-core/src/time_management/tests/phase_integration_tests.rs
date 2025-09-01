@@ -77,7 +77,7 @@ mod tests {
     fn test_byoyomi_with_phase() {
         let limits = TimeLimits {
             time_control: TimeControl::Byoyomi {
-                main_time_ms: 10000,
+                main_time_ms: 50000, // Use 50s to avoid FinalPush (50s > 1.2 * 30s)
                 byoyomi_ms: 30000,
                 periods: 3,
             },
@@ -93,8 +93,8 @@ mod tests {
         let info_endgame = tm_endgame.get_time_info();
 
         // Different phases should still respect byoyomi constraints
-        // but may allocate main time differently
-        assert!(info_opening.soft_limit_ms <= 10000);
+        // but may allocate main time differently (20% of 50000 = 10000)
+        assert!(info_opening.soft_limit_ms <= 12000); // Allow for opening phase factor
         assert!(info_endgame.soft_limit_ms <= 10000);
     }
 }

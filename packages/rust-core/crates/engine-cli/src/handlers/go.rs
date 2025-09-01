@@ -108,6 +108,13 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
             ("kind", "go_finalized_to_idle"),
             ("search_id", &ctx.current_search_id.to_string()),
         ]));
+
+        // Do one more quick pump after Idle transition to catch any late ReturnEngine
+        while let Ok(msg) = ctx.worker_rx.try_recv() {
+            if let Err(e) = crate::handle_worker_message(msg, ctx) {
+                log::error!("Error handling worker message after Finalized->Idle transition: {e}");
+            }
+        }
     }
 
     // If still searching after message pump, wait for completion
@@ -140,7 +147,7 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
             let grace_ms = std::env::var("ENGINE_RECOVERY_GRACE_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(300);
+                .unwrap_or(50); // Reduced from 300ms to minimize startup delay
             if grace_ms > 0 {
                 let start = std::time::Instant::now();
                 drop(adapter); // avoid holding lock while waiting
