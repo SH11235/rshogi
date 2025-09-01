@@ -28,7 +28,7 @@ crates/
 │   ├── search/             # Search algorithms (basic & enhanced)
 │   ├── evaluation/         # Evaluation functions (material & NNUE)
 │   └── time_management/    # Time control
-├── engine-cli/              # USI protocol command-line interface
+├── engine-usi/              # USI protocol command-line interface
 └── webrtc-p2p/             # WebRTC communication
 
 src/                         # Legacy WASM modules
