@@ -109,6 +109,8 @@ struct EngineState {
     stoch_suppress_result: bool,
     pending_research_after_ponderhit: bool,
     last_go_params: Option<GoParams>,
+    // Session root hash for stale-result guard
+    current_root_hash: Option<u64>,
 }
 
 impl EngineState {
@@ -137,6 +139,7 @@ impl EngineState {
             stoch_suppress_result: false,
             pending_research_after_ponderhit: false,
             last_go_params: None,
+            current_root_hash: None,
         }
     }
 
@@ -565,14 +568,36 @@ fn main() -> Result<()> {
                             // Ponder完了結果は送出しない（USI仕様）。GUIのponderhit/stopに従う。
                         } else {
                             // Normal finalize and emit bestmove（Mateは投了優先、合法性ガード）
+                            // まずステール結果のガード（rootハッシュ比較）
+                            let stale = state
+                                .current_root_hash
+                                .map(|h| h != state.position.zobrist_hash())
+                                .unwrap_or(false);
                             let mate_flag = result
                                 .stop_info
                                 .as_ref()
-                                .map(|si| matches!(si.reason, engine_core::search::types::TerminationReason::Mate))
+                                .map(|si| {
+                                    matches!(
+                                        si.reason,
+                                        engine_core::search::types::TerminationReason::Mate
+                                    )
+                                })
                                 .unwrap_or(false);
 
                             let final_usi = if mate_flag {
                                 "resign".to_string()
+                            } else if stale {
+                                // ステール（GUI局面更新済み）なら安全フォールバック
+                                let mg = engine_core::movegen::MoveGenerator::new();
+                                if let Ok(list) = mg.generate_all(&state.position) {
+                                    if let Some(first) = list.as_slice().first() {
+                                        move_to_usi(first)
+                                    } else {
+                                        "resign".to_string()
+                                    }
+                                } else {
+                                    "resign".to_string()
+                                }
                             } else if let Some(mv) = result.best_move {
                                 // Legality guard in current GUI position
                                 if state.position.is_legal_move(mv) {
@@ -604,6 +629,7 @@ fn main() -> Result<()> {
                             } else {
                                 usi_println(&format!("bestmove {}", final_usi));
                             }
+                            state.current_root_hash = None;
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
@@ -926,6 +952,7 @@ fn main() -> Result<()> {
                 state.worker = Some(handle);
                 state.result_rx = Some(rx);
                 state.current_is_stochastic_ponder = current_is_stochastic_ponder;
+                state.current_root_hash = Some(search_position.zobrist_hash());
                 continue;
             }
 
