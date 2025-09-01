@@ -1004,9 +1004,110 @@ fn main() -> Result<()> {
 
             if cmd == "stop" {
                 if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
-                    // Request stop and let unified finalize path emit bestmove exactly-once
                     flag.store(true, Ordering::SeqCst);
                     info_string("stop_requested");
+                    // Try to get result promptly; if not, finalize immediately via choose_final_bestmove
+                    if let Some(rx) = state.result_rx.take() {
+                        match rx.recv_timeout(Duration::from_millis(200)) {
+                            Ok(result) => {
+                                if let Some(h) = state.worker.take() {
+                                    let _ = h.join();
+                                }
+                                state.searching = false;
+                                state.stop_flag = None;
+                                state.ponder_hit_flag = None;
+
+                                // Finalize centrally using choose_final_bestmove
+                                let stale = state
+                                    .current_root_hash
+                                    .map(|h| h != state.position.zobrist_hash())
+                                    .unwrap_or(false);
+                                let committed = if !stale {
+                                    Some(engine_core::search::CommittedIteration {
+                                        depth: result.stats.depth,
+                                        seldepth: result.stats.seldepth,
+                                        score: result.score,
+                                        pv: result.stats.pv.clone(),
+                                        node_type: result.node_type,
+                                        nodes: result.stats.nodes,
+                                        elapsed: result.stats.elapsed,
+                                    })
+                                } else {
+                                    None
+                                };
+                                let final_best = {
+                                    let eng = state.engine.lock().unwrap();
+                                    eng.choose_final_bestmove(&state.position, committed.as_ref())
+                                };
+                                info_string(format!(
+                                    "stop_finalize source={} move={} stale={}",
+                                    source_to_str(final_best.source),
+                                    final_best
+                                        .best_move
+                                        .map(|m| move_to_usi(&m))
+                                        .unwrap_or_else(|| "resign".to_string()),
+                                    if stale { 1 } else { 0 }
+                                ));
+                                let final_usi = final_best
+                                    .best_move
+                                    .map(|m| move_to_usi(&m))
+                                    .unwrap_or_else(|| "resign".to_string());
+                                let ponder_mv = if state.opts.ponder {
+                                    final_best.pv.get(1).map(move_to_usi)
+                                } else {
+                                    None
+                                };
+                                if let Some(p) = ponder_mv {
+                                    usi_println(&format!("bestmove {} ponder {}", final_usi, p));
+                                } else {
+                                    usi_println(&format!("bestmove {}", final_usi));
+                                }
+                                state.current_root_hash = None;
+                            }
+                            Err(_) => {
+                                // Timeout waiting for result; detach worker and finalize immediately
+                                if let Some(_h) = state.worker.take() {
+                                    // Drop handle to detach; worker will exit on stop flag
+                                }
+                                state.searching = false;
+                                state.stop_flag = None;
+                                state.ponder_hit_flag = None;
+
+                                let stale = state
+                                    .current_root_hash
+                                    .map(|h| h != state.position.zobrist_hash())
+                                    .unwrap_or(false);
+                                let final_best = {
+                                    let eng = state.engine.lock().unwrap();
+                                    eng.choose_final_bestmove(&state.position, None)
+                                };
+                                info_string(format!(
+                                    "stop_timeout_finalize source={} move={} stale={}",
+                                    source_to_str(final_best.source),
+                                    final_best
+                                        .best_move
+                                        .map(|m| move_to_usi(&m))
+                                        .unwrap_or_else(|| "resign".to_string()),
+                                    if stale { 1 } else { 0 }
+                                ));
+                                let final_usi = final_best
+                                    .best_move
+                                    .map(|m| move_to_usi(&m))
+                                    .unwrap_or_else(|| "resign".to_string());
+                                let ponder_mv = if state.opts.ponder {
+                                    final_best.pv.get(1).map(move_to_usi)
+                                } else {
+                                    None
+                                };
+                                if let Some(p) = ponder_mv {
+                                    usi_println(&format!("bestmove {} ponder {}", final_usi, p));
+                                } else {
+                                    usi_println(&format!("bestmove {}", final_usi));
+                                }
+                                state.current_root_hash = None;
+                            }
+                        }
+                    }
                 }
                 continue;
             }
