@@ -57,31 +57,6 @@ cargo test -p engine-cli
 
 詳細は[統合テストのドキュメント](docs/integration-testing-notes.md)を参照してください。
 
-## パフォーマンスベンチマーク
-
-### バッファリング性能測定
-
-エンジンの出力バッファリング性能を測定するベンチマークです：
-
-```bash
-# buffered-ioフィーチャーを有効にしてベンチマークを実行（推奨）
-cargo bench --bench buffering_benchmark --features buffered-io
-
-# フィーチャーなしで実行（警告が表示されます）
-cargo bench --bench buffering_benchmark
-```
-
-**重要**: `--features buffered-io`なしでベンチマークを実行すると、バッファリングの効果が見られない可能性があります。
-
-ベンチマークには以下の環境変数が設定されます：
-- `USI_BENCH_MODE=1` - 0msフラッシュ遅延を許可（即時フラッシュのテスト用）
-
-### ベンチマーク結果の見方
-
-Criterionによる詳細なレポートが`target/criterion/`に生成されます：
-- HTMLレポート: `target/criterion/buffered_io/report/index.html`
-- 統計データ: `target/criterion/buffered_io/*/base/estimates.json`
-
 ## USIコマンド
 
 サポートされているUSIコマンド：

@@ -33,9 +33,6 @@ jobs:
   lint:
     name: Clippy Lint
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        features: ['', '--features buffered-io']
     steps:
       - uses: actions/checkout@v4
       - name: Install mold linker
@@ -51,14 +48,11 @@ jobs:
         with:
           workspaces: packages/rust-core
       - name: Run Clippy
-        run: cargo clippy ${{ matrix.features }} -- -D warnings
+        run: cargo clippy -- -D warnings
 
   test:
     name: Test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        features: ['', '--features buffered-io']
     steps:
       - uses: actions/checkout@v4
       - name: Install mold linker
@@ -72,7 +66,7 @@ jobs:
         with:
           workspaces: packages/rust-core
       - name: Run tests
-        run: cargo test --release ${{ matrix.features }}
+        run: cargo test --release
 
   test-large-stack:
     name: Test (Large Stack) - Release Mode

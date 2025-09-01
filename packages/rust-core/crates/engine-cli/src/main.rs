@@ -1333,19 +1333,21 @@ fn handle_worker_message(msg: WorkerMessage, ctx: &mut CommandContext) -> Result
                 // Prefer central finalize using pending StopInfo captured at SearchFinished
                 if !*ctx.current_search_is_ponder {
                     let stop_info = ctx.pending_stop_info.take();
-                    if ctx.finalize_emit_if_possible("joined", stop_info)? {
+                    if ctx.finalize_emit_if_possible("joined", stop_info.clone())? {
                         // Ensure transition to Idle before returning
                         ctx.transition_to_idle_if_finalized("central_finalize");
                         return Ok(());
                     }
 
                     // Fallbacks when central finalize not possible
+                    // Reuse the stop_info we already took above
+                    let fallback_stop_info = stop_info;
                     if let Some(committed) = ctx.current_committed.clone() {
                         if let Some(ref _emitter) = ctx.current_bestmove_emitter {
                             if ctx.emit_best_from_committed(
                                 &committed,
                                 BestmoveSource::EmergencyFallbackOnFinish,
-                                None,
+                                fallback_stop_info.clone(),
                                 "FinishedCommittedFallback",
                             )? {
                                 // Ensure transition to Idle before returning

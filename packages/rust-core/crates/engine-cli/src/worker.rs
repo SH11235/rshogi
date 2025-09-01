@@ -914,6 +914,7 @@ pub fn search_worker(
                 if let Some(flag) = &finalized_flag {
                     if flag.load(Ordering::Acquire) {
                         // Already finalized; skip SearchFinished
+                        guard.return_engine();
                         return;
                     }
                 }
@@ -925,8 +926,12 @@ pub fn search_worker(
                 }) {
                     log::error!("Failed to send search finished: {e}");
                 }
+                // Return engine to USI thread after successful search
+                guard.return_engine();
             } else {
                 log::info!("Ponder search without ponderhit, not sending bestmove (USI protocol)");
+                // Still need to return engine even for ponder without ponderhit
+                guard.return_engine();
             }
         }
         Err(e) => {

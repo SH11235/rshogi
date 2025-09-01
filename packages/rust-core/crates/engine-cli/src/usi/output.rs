@@ -8,8 +8,6 @@ use std::fmt;
 use std::io::{BufWriter, Write};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-#[cfg(feature = "buffered-io")]
-use std::time::Instant;
 
 #[cfg(test)]
 static INFO_MESSAGES: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -248,42 +246,6 @@ impl fmt::Display for SearchInfo {
 // Note: AtomicU32 is used for future thread-safety, though currently only main thread calls this
 // Deprecated error counters/retry constants removed in single-writer model
 
-// Buffering configuration
-#[cfg(feature = "buffered-io")]
-const DEFAULT_FLUSH_INTERVAL_MS: u64 = 100;
-#[cfg(feature = "buffered-io")]
-const DEFAULT_FLUSH_MESSAGE_COUNT: u32 = 10;
-
-/// Get flush interval from environment variable (for testing)
-#[cfg(feature = "buffered-io")]
-fn get_flush_interval_ms() -> u64 {
-    const MAX_FLUSH_INTERVAL: u64 = 10_000; // 10秒
-
-    std::env::var("USI_FLUSH_DELAY_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|v| {
-            if v == 0 && (cfg!(test) || std::env::var("USI_BENCH_MODE").is_ok()) {
-                v
-            } else {
-                v.clamp(1, MAX_FLUSH_INTERVAL) // 上限値も設定
-            }
-        })
-        .unwrap_or(DEFAULT_FLUSH_INTERVAL_MS)
-}
-
-/// Get flush message count from environment variable (for testing)
-#[cfg(feature = "buffered-io")]
-fn get_flush_message_count() -> u32 {
-    const MAX_FLUSH_MESSAGE_COUNT: u32 = 1000; // 1000メッセージ
-
-    std::env::var("USI_FLUSH_MESSAGE_COUNT")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .map(|v| v.clamp(1, MAX_FLUSH_MESSAGE_COUNT)) // 1以上、上限値以下
-        .unwrap_or(DEFAULT_FLUSH_MESSAGE_COUNT)
-}
-
 // Flush strategy for messages (deprecated in single-writer model)
 
 /// USI output writer with buffering capabilities
@@ -293,20 +255,12 @@ fn get_flush_message_count() -> u32 {
 /// The performance difference is minimal as stdout() caches the handle internally.
 struct UsiWriter {
     inner: Mutex<BufWriter<std::io::Stdout>>,
-    #[cfg(feature = "buffered-io")]
-    last_flush: Mutex<Instant>,
-    #[cfg(feature = "buffered-io")]
-    message_count: AtomicU32,
 }
 
 impl UsiWriter {
     fn new() -> Self {
         Self {
             inner: Mutex::new(BufWriter::with_capacity(8192, std::io::stdout())),
-            #[cfg(feature = "buffered-io")]
-            last_flush: Mutex::new(Instant::now()),
-            #[cfg(feature = "buffered-io")]
-            message_count: AtomicU32::new(0),
         }
     }
 
