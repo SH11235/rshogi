@@ -1,0 +1,15 @@
+[package]
+name = "engine-usi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+engine-core = { path = "../engine-core" }
+
