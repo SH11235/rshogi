@@ -413,6 +413,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-usi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "engine-core",
+ "env_logger",
+ "log",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "env_filter"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
