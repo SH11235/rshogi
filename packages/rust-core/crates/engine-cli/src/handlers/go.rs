@@ -199,6 +199,36 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
                     // Emit bestmove resign and finalize immediately
                     ctx.emit_and_finalize("resign".to_string(), None, meta, "GoNoLegalMoves")?;
                     return Ok(());
+                } else if legal.as_slice().len() == 1 {
+                    // Special one-move case: return immediately without search
+                    let only_move = &legal.as_slice()[0];
+                    let move_str = engine_core::usi::move_to_usi(only_move);
+
+                    let _ = send_info_string(crate::emit_utils::log_tsv(&[
+                        ("kind", "go_only_one_move"),
+                        ("move", &move_str),
+                    ]));
+
+                    let meta = crate::emit_utils::build_meta(
+                        crate::types::BestmoveSource::OnlyMove,
+                        0,
+                        None,
+                        None,
+                        None,
+                    );
+
+                    // Inject final PV for the only move
+                    let info = crate::usi::output::SearchInfo {
+                        multipv: Some(1),
+                        depth: Some(1),
+                        pv: vec![move_str.clone()],
+                        ..Default::default()
+                    };
+                    ctx.inject_final_pv(info, "go_only_one_move");
+
+                    // Emit bestmove and finalize immediately
+                    ctx.emit_and_finalize(move_str, None, meta, "GoOnlyOneMove")?;
+                    return Ok(());
                 }
             }
         }

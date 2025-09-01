@@ -29,6 +29,10 @@ pub struct SearchContext {
 
     /// Flag to log time stop only once
     time_stop_logged: bool,
+
+    /// Minimum mate distance found so far (for pruning deeper searches)
+    /// When a mate is found, we can limit search depth based on this
+    best_mate_distance: Option<u8>,
 }
 
 impl Default for SearchContext {
@@ -48,6 +52,7 @@ impl SearchContext {
             ponder_converted: false,
             current_depth: 0,
             time_stop_logged: false,
+            best_mate_distance: None,
         }
     }
 
@@ -59,6 +64,7 @@ impl SearchContext {
         self.ponder_converted = false;
         self.current_depth = 0;
         self.time_stop_logged = false;
+        self.best_mate_distance = None;
     }
 
     /// Set search limits
@@ -133,8 +139,51 @@ impl SearchContext {
     }
 
     /// Get maximum search depth
+    ///
+    /// Returns the effective maximum search depth, which may be reduced based on
+    /// mate distance if a mate has been found. This implements YaneuraOu's mate
+    /// distance pruning strategy.
     pub fn max_depth(&self) -> u8 {
-        self.limits.depth.unwrap_or(127)
+        let base_depth = self.limits.depth.unwrap_or(127);
+
+        // If we found a mate, limit depth based on mate distance
+        if let Some(mate_dist) = self.best_mate_distance {
+            // Allow searching 2.5x mate distance + 5 plies (YaneuraOu formula)
+            // This gives enough room to potentially find shorter mates while
+            // avoiding excessive deep searches after mate is found
+            let mate_limited_depth =
+                ((mate_dist as u32 * 25) / 10 + 5).min(base_depth as u32) as u8;
+            base_depth.min(mate_limited_depth)
+        } else {
+            base_depth
+        }
+    }
+
+    /// Update best mate distance found
+    ///
+    /// This method should be called whenever a mate score is discovered during search.
+    /// It tracks the shortest mate distance found so far, which is used to limit
+    /// future search depths through the max_depth() method.
+    ///
+    /// # Arguments
+    /// * `distance` - The mate distance in plies from the root position
+    pub fn update_mate_distance(&mut self, distance: u8) {
+        match self.best_mate_distance {
+            None => self.best_mate_distance = Some(distance),
+            Some(current) => {
+                if distance < current {
+                    self.best_mate_distance = Some(distance);
+                }
+            }
+        }
+    }
+
+    /// Get best mate distance if found
+    ///
+    /// Returns the shortest mate distance discovered so far in the search,
+    /// or None if no mate has been found yet.
+    pub fn get_mate_distance(&self) -> Option<u8> {
+        self.best_mate_distance
     }
 
     /// Signal internal stop

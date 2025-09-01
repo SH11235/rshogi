@@ -128,7 +128,10 @@ where
     if moves.is_empty() {
         // No legal moves
         if in_check {
-            return crate::search::common::mate_score(ply as u8, false); // Getting mated
+            let mate_score = crate::search::common::mate_score(ply as u8, false);
+            // Update mate distance in context (accounting for ply)
+            searcher.context.update_mate_distance(ply as u8);
+            return mate_score; // Getting mated
         } else {
             return 0; // Stalemate
         }

@@ -183,7 +183,8 @@ where
         }
 
         // Get actual depth limit from limits (not from context which defaults to 127)
-        let max_depth = limits.depth.unwrap_or(127);
+        // Unused variable - removed to fix clippy warning
+        // let max_depth = limits.depth.unwrap_or(127);
 
         // Initialize search context with limits
         self.context.set_limits(limits);
@@ -194,7 +195,7 @@ where
         let mut best_node_type = NodeType::Exact;
         let mut depth = 1;
 
-        while depth <= max_depth && !self.context.should_stop() {
+        while depth <= self.context.max_depth() && !self.context.should_stop() {
             // Phase 1: advise rounded stop near hard at the start of iteration
             // Removed: early advise_before_iteration to avoid premature scheduling
             // Clear all PV lines at the start of each iteration
@@ -314,6 +315,15 @@ where
                 best_score = score;
                 best_move = Some(pv[0]);
                 best_node_type = final_node_type;
+
+                // Check if we found a mate and update context
+                if crate::search::common::is_mate_score(score) {
+                    if let Some(distance) = crate::search::common::extract_mate_distance(score) {
+                        self.context.update_mate_distance(distance);
+                        log::debug!("Found mate in {} moves at depth {}", distance, depth);
+                    }
+                }
+
                 // Legacy triangular PVTable is not used for core PV assembly.
                 // Keep update for backwards compatibility where tests may read it.
                 self.pv_table.update_from_line(&pv);

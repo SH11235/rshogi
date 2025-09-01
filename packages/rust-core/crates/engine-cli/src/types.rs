@@ -46,6 +46,8 @@ impl fmt::Display for ResignReason {
 pub enum BestmoveSource {
     /// Resign due to no legal moves
     Resign,
+    /// Only one legal move available
+    OnlyMove,
     /// Session result on stop command
     SessionOnStop,
     /// Resign in search finished handler
@@ -68,6 +70,7 @@ impl fmt::Display for BestmoveSource {
         // The compiler will enforce this due to exhaustive matching.
         let s = match self {
             Self::Resign => "resign",
+            Self::OnlyMove => "only_move",
             Self::SessionOnStop => "session_on_stop",
             Self::ResignOnFinish => "resign_on_finish",
             Self::PartialResultTimeout => "partial_result_timeout",

@@ -154,6 +154,18 @@ where
                         tt_score as i32,
                         ply as u8,
                     );
+
+                    // If TT entry contains a mate score, update mate distance
+                    if crate::search::common::is_mate_score(adjusted_score) {
+                        if let Some(distance) =
+                            crate::search::common::extract_mate_distance(adjusted_score)
+                        {
+                            // Adjust distance for current ply
+                            let root_distance = distance.saturating_add(ply as u8);
+                            searcher.context.update_mate_distance(root_distance);
+                        }
+                    }
+
                     match tt_entry.node_type() {
                         // EXACT entries contain the true score for this position
                         crate::search::NodeType::Exact => return adjusted_score,
@@ -191,6 +203,19 @@ where
 
     // Quiescence search at leaf nodes
     if depth == 0 {
+        // Check if immediate evaluation is requested
+        if searcher.context.limits().immediate_eval_at_depth_zero {
+            // Return static evaluation immediately
+            if pos.is_in_check() {
+                // In check: return alpha (same as quiescence search behavior)
+                return alpha;
+            } else {
+                // Not in check: return clamped evaluation
+                let eval = searcher.evaluator.evaluate(pos);
+                return eval.clamp(alpha, beta);
+            }
+        }
+
         // Check QNodes budget before entering quiescence search
         if let Some(limit) = searcher.context.limits().qnodes_limit {
             let exceeded = if let Some(ref counter) = searcher.context.limits().qnodes_counter {
