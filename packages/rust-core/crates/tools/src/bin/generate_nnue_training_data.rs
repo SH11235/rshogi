@@ -20,6 +20,20 @@ struct Opts {
     time_limit_override_ms: Option<u64>,
     hash_mb: usize,
 }
+
+#[derive(Clone)]
+struct GenShared {
+    error_count: Arc<AtomicUsize>,
+    skipped_count: Arc<AtomicUsize>,
+    skipped_file: Arc<Mutex<File>>,
+}
+
+struct ProcEnv<'a> {
+    depth: u8,
+    time_limit_ms: u64,
+    opts: &'a Opts,
+    shared: &'a GenShared,
+}
 use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -93,7 +107,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hash_mb: 16,
     };
 
-    let mut i = 6; // flags start after positional args
+    // Flags start after positional args (2 mandatory + up to 3 optional numerics)
+    // Be robust to missing optional numerics by scanning for the first `--*` token from index 3
+    let mut i = 3;
+    while i < args.len() && !args[i].starts_with('-') {
+        i += 1;
+    }
     while i < args.len() {
         match args[i].as_str() {
             "--engine" => {
@@ -319,6 +338,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skipped_count = Arc::new(AtomicUsize::new(0));
     let total_attempted = Arc::new(AtomicUsize::new(actual_progress));
 
+    let shared = GenShared {
+        error_count: error_count.clone(),
+        skipped_count: skipped_count.clone(),
+        skipped_file: skipped_file.clone(),
+    };
+
+    let env = ProcEnv {
+        depth: search_depth,
+        time_limit_ms,
+        opts: &opts,
+        shared: &shared,
+    };
+
     // Process in batches
     for (batch_idx, chunk) in sfen_positions.chunks(batch_size).enumerate() {
         let batch_start = std::time::Instant::now();
@@ -330,21 +362,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chunk.len()
         );
 
-        let batch_results: Vec<_> = chunk
-            .par_iter()
-            .map(|(idx, sfen)| {
-                process_position(
-                    *idx,
-                    sfen,
-                    search_depth,
-                    time_limit_ms,
-                    &opts,
-                    &error_count,
-                    &skipped_count,
-                    &skipped_file,
-                )
-            })
-            .collect();
+        let batch_results: Vec<_> =
+            chunk.par_iter().map(|(idx, sfen)| process_position(*idx, sfen, &env)).collect();
 
         // Separate successful results from skipped ones
         let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
@@ -418,34 +437,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn process_position(
-    idx: usize,
-    sfen: &str,
-    depth: u8,
-    time_limit_ms: u64,
-    opts: &Opts,
-    error_count: &Arc<AtomicUsize>,
-    skipped_count: &Arc<AtomicUsize>,
-    skipped_file: &Arc<Mutex<File>>,
-) -> Option<String> {
+fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String> {
     let position = match Position::from_sfen(sfen) {
         Ok(pos) => pos,
         Err(e) => {
             if idx < 10 || (idx + 1) % 1000 == 0 {
                 eprintln!("Error parsing position {}: {}", idx + 1, e);
             }
-            error_count.fetch_add(1, Ordering::Relaxed);
+            env.shared.error_count.fetch_add(1, Ordering::Relaxed);
             return None;
         }
     };
 
     // Create engine according to options
-    let mut engine = Engine::new(opts.engine);
+    let mut engine = Engine::new(env.opts.engine);
     // Reduce TT to avoid high memory usage with parallel batches
-    engine.set_hash_size(opts.hash_mb);
+    engine.set_hash_size(env.opts.hash_mb);
     // Load NNUE weights if requested
-    if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
-        if let Some(ref path) = opts.nnue_weights {
+    if matches!(env.opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
+        if let Some(ref path) = env.opts.nnue_weights {
             if let Err(e) = engine.load_nnue_weights(path) {
                 if idx < 10 {
                     eprintln!("Failed to load NNUE weights ({}): {}", path, e);
@@ -458,8 +468,8 @@ fn process_position(
 
     // Simple timeout without complex threading
     let limits = SearchLimits::builder()
-        .depth(depth)
-        .fixed_time_ms(time_limit_ms)
+        .depth(env.depth)
+        .fixed_time_ms(env.time_limit_ms)
         .stop_flag(stop_flag.clone())
         .build();
 
@@ -469,7 +479,7 @@ fn process_position(
     let elapsed = start.elapsed();
 
     // Check if we exceeded time limit significantly
-    if elapsed.as_millis() > (time_limit_ms * 2) as u128 {
+    if elapsed.as_millis() > (env.time_limit_ms * 2) as u128 {
         if idx < 10 || (idx + 1) % 100 == 0 {
             eprintln!(
                 "Position {} took too long ({:.1}s), skipping",
@@ -477,10 +487,10 @@ fn process_position(
                 elapsed.as_secs_f32()
             );
         }
-        skipped_count.fetch_add(1, Ordering::Relaxed);
+        env.shared.skipped_count.fetch_add(1, Ordering::Relaxed);
 
         // Write to skipped file with reason
-        if let Ok(mut file) = skipped_file.lock() {
+        if let Ok(mut file) = env.shared.skipped_file.lock() {
             writeln!(
                 file,
                 "sfen {} # position {} timeout {:.1}s depth_reached {}",
@@ -500,13 +510,13 @@ fn process_position(
     let depth_reached = result.stats.depth;
 
     // Compute labels
-    let (label_kind, wdl_prob_opt) = match opts.label {
+    let (label_kind, wdl_prob_opt) = match env.opts.label {
         LabelKind::Cp => ("cp", None),
-        LabelKind::Wdl => ("wdl", Some(cp_to_wdl(eval, opts.wdl_scale))),
+        LabelKind::Wdl => ("wdl", Some(cp_to_wdl(eval, env.opts.wdl_scale))),
         LabelKind::Hybrid => {
-            let use_wdl = position.ply as u32 <= opts.hybrid_ply_cutoff;
+            let use_wdl = position.ply as u32 <= env.opts.hybrid_ply_cutoff;
             if use_wdl {
-                ("wdl", Some(cp_to_wdl(eval, opts.wdl_scale)))
+                ("wdl", Some(cp_to_wdl(eval, env.opts.wdl_scale)))
             } else {
                 ("cp", None)
             }
@@ -514,7 +524,7 @@ fn process_position(
     };
 
     // Metadata for quality tracking
-    let mut meta = if elapsed.as_millis() > time_limit_ms as u128 {
+    let mut meta = if elapsed.as_millis() > env.time_limit_ms as u128 {
         format!(" # timeout_d{depth_reached}")
     } else {
         format!(" # d{depth_reached}")
