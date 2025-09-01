@@ -481,21 +481,28 @@ impl TimeManager {
     }
 
     /// Compute a rounded stop target following YaneuraOu design
-    /// Round up to next second boundary, then subtract average overhead
+    /// Round up to next second boundary, then subtract average network delay
     fn round_up(&self, elapsed_ms: u64) -> u64 {
         // YaneuraOu style: round to next second boundary
         let next_sec = ((elapsed_ms / 1000).saturating_add(1)).saturating_mul(1000);
 
-        // Use minimal overhead for rounding (similar to YaneuraOu's 100ms default)
-        let rounding_overhead = self.inner.params.overhead_ms.min(100);
+        // Use average NetworkDelay for rounding (YaneuraOu design)
+        // network_delay2_ms is reserved for remain upper bounds and hard limits
+        let network_delay = self.inner.params.network_delay_ms;
 
-        // Calculate target with overhead
-        let mut target = next_sec.saturating_sub(rounding_overhead);
+        // Calculate target with average network delay
+        let mut target = next_sec.saturating_sub(network_delay);
 
-        // Ensure we don't go backwards
-        if target <= elapsed_ms {
-            // Schedule at least 500ms ahead to allow iteration completion
-            target = elapsed_ms.saturating_add(500);
+        // Ensure we don't go backwards - use 1 second increment (YaneuraOu style)
+        if target < elapsed_ms {
+            // Schedule at least 1 second ahead to allow iteration completion
+            target = elapsed_ms.saturating_add(1000);
+        }
+
+        // Apply minimum thinking time (except in critical situations)
+        let min_think = self.inner.params.min_think_ms;
+        if min_think > 0 && target < min_think {
+            target = min_think;
         }
 
         // Never exceed hard limit
@@ -525,6 +532,14 @@ impl TimeManager {
             }
         }
 
+        // Apply minimum thinking time even in set_search_end
+        // This ensures we always have reasonable time for at least one iteration
+        let min_think = self.inner.params.min_think_ms;
+        if min_think > 0 && target < min_think && elapsed_ms < min_think {
+            // Only apply if we haven't already exceeded min_think
+            target = min_think;
+        }
+
         // Remain-time upper clamp (lightweight safety)
         if let Some(rem) = self.remain_upper_ms() {
             if target > rem {
@@ -545,10 +560,11 @@ impl TimeManager {
         if current == u64::MAX || target < current {
             self.inner.search_end_ms.store(target, Ordering::Relaxed);
             log::debug!(
-                "[TimeBudget] schedule stop at {}ms (elapsed={}, hard={})",
+                "[TimeBudget] schedule stop at {}ms (elapsed={}, hard={}, min_think={})",
                 target,
                 elapsed_ms,
-                hard
+                hard,
+                min_think
             );
         }
     }

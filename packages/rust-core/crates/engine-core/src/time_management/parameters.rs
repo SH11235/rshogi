@@ -11,8 +11,10 @@ use std::fmt;
 pub struct TimeParameters {
     // Overhead
     pub overhead_ms: u64, // Default: 50
-    /// Worst-case network delay (GUI/IPC), used for byoyomi hard budgeting
-    pub network_delay2_ms: u64, // Default: 1000
+    /// Average network delay (GUI/IPC), used for search_end rounding
+    pub network_delay_ms: u64, // Default: 120
+    /// Worst-case network delay (GUI/IPC), used for remain upper bounds and hard limits
+    pub network_delay2_ms: u64, // Default: 800
     /// Minimum think time to ensure at least one committed iteration (ms)
     /// Applied as a lower bound to soft limit for finite time controls.
     /// Default 0 = disabled.
@@ -56,6 +58,7 @@ impl Default for TimeParameters {
     fn default() -> Self {
         Self {
             overhead_ms: 50,
+            network_delay_ms: 120, // Average network delay for search_end rounding
             network_delay2_ms: 800, // Reduced from 1000ms for better time utilization
             min_think_ms: 0,
             pv_base_threshold_ms: 80,
@@ -141,7 +144,7 @@ pub mod constants {
     // Default values (mirrored from Default impl)
     pub const DEFAULT_OVERHEAD_MS: u64 = 50;
     pub const DEFAULT_BYOYOMI_OVERHEAD_MS: u64 = 200; // Reduced from 1000ms for better time utilization
-    pub const DEFAULT_BYOYOMI_SAFETY_MS: u64 = 500; // Keep at 500ms for safety (reduced in defaults)
+    pub const DEFAULT_BYOYOMI_SAFETY_MS: u64 = 500; // Validation max, actual default is 100ms via byoyomi_hard_limit_reduction_ms
 
     // Validation ranges
     pub const MIN_OVERHEAD_MS: u64 = 0;
@@ -184,6 +187,20 @@ impl TimeParametersBuilder {
     }
 
     /// Set worst-case network delay (NetworkDelay2)
+    /// Set average network delay for search_end rounding
+    pub fn network_delay_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
+        if ms > constants::MAX_OVERHEAD_MS {
+            return Err(TimeParameterError::Overhead {
+                value: ms,
+                min: constants::MIN_OVERHEAD_MS,
+                max: constants::MAX_OVERHEAD_MS,
+            });
+        }
+        self.params.network_delay_ms = ms;
+        Ok(self)
+    }
+
+    /// Set worst-case network delay for remain upper bounds and hard limits
     pub fn network_delay2_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
         if ms > constants::MAX_OVERHEAD_MS {
             return Err(TimeParameterError::Overhead {
