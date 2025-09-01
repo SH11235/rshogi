@@ -123,6 +123,12 @@ lazy_static! {
 /// Get current monotonic time in milliseconds since process start
 #[inline]
 pub(crate) fn monotonic_ms() -> u64 {
+    #[cfg(test)]
+    {
+        if USE_MOCK_TIME.load(Ordering::Relaxed) {
+            return test_utils::mock_current_ms();
+        }
+    }
     MONO_BASE.elapsed().as_millis() as u64
 }
 
@@ -206,8 +212,17 @@ impl TimeManager {
         // Initialize byoyomi state if needed
         let byoyomi_state = byoyomi::ByoyomiManager::init_state(&limits.time_control);
 
-        // Derive simple optimum budget from soft (Phase 1)
-        let opt_limit = soft_ms;
+        // Phase 4: Set opt_limit as YaneuraOu's maximum() equivalent
+        // This should be between soft and hard limits, typically 1.5x soft
+        let opt_limit = if soft_ms != u64::MAX && hard_ms != u64::MAX {
+            // Use 1.5x soft as maximum, but don't exceed 80% of hard limit
+            let max_from_soft = soft_ms.saturating_mul(3) / 2; // 1.5x
+            let max_from_hard = hard_ms.saturating_mul(8) / 10; // 80% of hard
+                                                                // Ensure opt_limit is at least soft_limit to avoid premature scheduling
+            max_from_soft.min(max_from_hard).max(soft_ms)
+        } else {
+            soft_ms // Fallback for infinite modes
+        };
 
         let inner = Arc::new(TimeManagerInner {
             side_to_move: side,
@@ -372,17 +387,13 @@ impl TimeManager {
             return true;
         }
 
-        // Soft limit with PV stability → schedule rounded stop instead of immediate stop
-        let soft_limit = self.inner.soft_limit_ms.load(Ordering::Relaxed);
-        if elapsed >= soft_limit && self.state_checker().is_pv_stable(elapsed) {
-            // Schedule a rounded stop near the next second boundary
+        // Phase 4: Check if we exceeded maximum (opt_limit_ms) and should schedule stop
+        // This follows YaneuraOu's design where maximum() triggers set_search_end()
+        let opt_limit = self.inner.opt_limit_ms.load(Ordering::Relaxed);
+        if planned == u64::MAX && elapsed >= opt_limit {
+            // Schedule rounded stop time
             self.set_search_end(elapsed);
-
-            // After scheduling, stop only when we reach the scheduled end
-            let scheduled = self.inner.search_end_ms.load(Ordering::Relaxed);
-            if scheduled != u64::MAX && elapsed >= scheduled {
-                return true;
-            }
+            // Don't stop immediately - continue until scheduled time
             return false;
         }
 
@@ -486,15 +497,8 @@ impl TimeManager {
             }
         }
 
-        // Additional near-hard safety: avoid planning beyond (hard - safety)
-        let safety_ms = if hard >= 500 {
-            let three_percent = hard.saturating_mul(3) / 100;
-            three_percent.clamp(200, 800)
-        } else if hard >= 200 {
-            200
-        } else {
-            0
-        };
+        // Phase 4: Use calculate_safety_margin() for consistent safety calculation
+        let safety_ms = self.calculate_safety_margin(hard);
         if hard != u64::MAX {
             let cap = hard.saturating_sub(safety_ms);
             if target > cap {
@@ -634,45 +638,40 @@ impl TimeManager {
         self.state_checker().get_time_info(self.elapsed_ms())
     }
 
-    /// Phase 1: Advise a rounded stop after finishing an iteration
+    /// Phase 4: Simplified advise_after_iteration - only provides additional safety
+    /// The main time management logic is now centralized in should_stop()
     pub fn advise_after_iteration(&self, elapsed_ms: u64) {
-        let opt = self.inner.opt_limit_ms.load(Ordering::Relaxed);
         let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
         if hard == u64::MAX {
             return;
         }
-        if elapsed_ms >= opt {
-            // First, schedule a rounded stop based on next second boundary
-            self.set_search_end(elapsed_ms);
 
-            // Also ensure we don't plan past a conservative near-hard deadline
-            let safety_ms = if hard >= 500 {
-                let three_percent = hard.saturating_mul(3) / 100;
-                three_percent.clamp(120, 400)
-            } else if hard >= 200 {
-                40
-            } else {
-                0
-            };
-            let mut deadline = hard.saturating_sub(safety_ms);
-            // Do not tighten below final-push minimum when active
-            if self.inner.final_push_active.load(Ordering::Relaxed) {
-                let min_ms = self.inner.final_push_min_ms.load(Ordering::Relaxed);
-                if deadline < min_ms {
-                    deadline = min_ms;
+        // Only check if we already have a scheduled stop
+        let current = self.inner.search_end_ms.load(Ordering::Relaxed);
+        if current != u64::MAX {
+            // Additional safety: tighten deadline if approaching hard limit
+            let safety_ms = self.calculate_safety_margin(hard);
+            let tight_deadline = hard.saturating_sub(safety_ms.saturating_mul(2)); // More conservative
+
+            // Only tighten if we're getting close and the new deadline is earlier
+            if tight_deadline < current && elapsed_ms >= tight_deadline.saturating_sub(1000) {
+                // Respect final push minimum
+                let mut adjusted_deadline = tight_deadline;
+                if self.inner.final_push_active.load(Ordering::Relaxed) {
+                    let min_ms = self.inner.final_push_min_ms.load(Ordering::Relaxed);
+                    adjusted_deadline = adjusted_deadline.max(min_ms);
                 }
-            }
-            let current = self.inner.search_end_ms.load(Ordering::Relaxed);
-            if current == u64::MAX || deadline < current {
-                self.inner.search_end_ms.store(deadline, Ordering::Relaxed);
-                log::debug!(
-                    "[TimeBudget] tighten schedule to {}ms (elapsed={}, opt={}, hard={}, safety={})",
-                    deadline,
-                    elapsed_ms,
-                    opt,
-                    hard,
-                    safety_ms
-                );
+
+                if adjusted_deadline < current {
+                    self.inner.search_end_ms.store(adjusted_deadline, Ordering::Relaxed);
+                    log::debug!(
+                        "[Phase4] Tightened search_end: {}ms (was {}ms, hard={}, safety={})",
+                        adjusted_deadline,
+                        current,
+                        hard,
+                        safety_ms
+                    );
+                }
             }
         }
     }
@@ -688,6 +687,23 @@ impl TimeManager {
     pub fn ponder_hit(&self, new_limits: Option<&TimeLimits>, time_already_spent_ms: u64) {
         let manager = self.ponder_manager();
         manager.ponder_hit(new_limits, time_already_spent_ms);
+    }
+
+    /// Phase 4: Calculate safety margin based on NetworkDelay2 (YaneuraOu-style)
+    fn calculate_safety_margin(&self, hard_limit: u64) -> u64 {
+        // Use NetworkDelay2 as base safety margin
+        let network_delay2 = self.inner.params.network_delay2_ms;
+
+        // Apply staged margin based on hard limit
+        if hard_limit >= 5000 {
+            network_delay2
+        } else if hard_limit >= 1000 {
+            network_delay2.min(500)
+        } else if hard_limit >= 500 {
+            network_delay2.min(200)
+        } else {
+            network_delay2.min(100)
+        }
     }
 
     /// Get byoyomi-specific information

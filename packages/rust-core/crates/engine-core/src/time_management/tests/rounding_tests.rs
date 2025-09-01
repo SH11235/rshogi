@@ -39,13 +39,17 @@ fn test_set_search_end_clamped_by_hard_limit_small_budget() {
     let hard = tm.hard_limit_ms();
     assert!(hard < 200, "hard should be <200 to avoid near-hard safety, got {hard}");
 
-    // Elapsed near hard: round_up would overshoot; set_search_end should clamp by remain_upper
-    // For FixedTime, remain_upper ~= ms_per_move - overhead(50) = 120
+    // Phase 4: With hard < 200ms, safety margin is min(network_delay2, 100) = 100ms
+    // So the cap is hard - 100 = 160 - 100 = 60ms
+    // Even though remain_upper = 120ms, the safety margin takes precedence
     tm.set_search_end(155);
     let scheduled = tm.scheduled_end_ms();
+
+    // Phase 4: Expected to be clamped by safety margin, not remain_upper
+    let expected = hard.saturating_sub(100); // safety margin for hard < 500ms
     assert_eq!(
-        scheduled, 120,
-        "scheduled_end should clamp to remain_upper (120), got {scheduled}"
+        scheduled, expected,
+        "scheduled_end should be clamped to {expected} (hard - safety), got {scheduled}"
     );
 }
 
