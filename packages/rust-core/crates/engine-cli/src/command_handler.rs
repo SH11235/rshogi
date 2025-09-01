@@ -339,7 +339,6 @@ impl<'a> CommandContext<'a> {
     ) -> Result<()> {
         let finalize_start = std::time::Instant::now();
         // Note: finalize chain must log finalize_end and transition to Idle.
-        let bm_for_log = best_move.clone();
         // USI-visible diagnostic: finalize entry
         let _ =
             send_info_string(crate::emit_utils::log_tsv(&[("kind", "bestmove_finalize_begin")]));
@@ -351,47 +350,12 @@ impl<'a> CommandContext<'a> {
                 Ok(()) => {
                     // Mark the time when bestmove was sent successfully
                     *self.last_bestmove_sent_at = Some(std::time::Instant::now());
-                    // Emit unified bestmove_sent (centralized here)
-                    let seldepth_str = meta
-                        .stats
-                        .seldepth
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "-".to_string());
-                    let ponder_str = ponder.as_deref().unwrap_or("none");
-                    let info_string = format!(
-                        "kind=bestmove_sent\t\
-                         search_id={}\t\
-                         bestmove_from={}\t\
-                         stop_reason={}\t\
-                         depth={}\t\
-                         seldepth={}\t\
-                         depth_reached={}\t\
-                         score={}\t\
-                         nodes={}\t\
-                         nps={}\t\
-                         elapsed_ms={}\t\
-                         time_soft_ms={}\t\
-                         time_hard_ms={}\t\
-                         hard_timeout={}\t\
-                         bestmove={}\t\
-                         ponder={}",
-                        self.current_search_id,
+                    // Log bestmove_sent details using the new function
+                    let _ = crate::emit_utils::log_bestmove_sent(
+                        *self.current_search_id,
                         meta.from,
-                        meta.stop_info.reason,
-                        meta.stats.depth,
-                        seldepth_str,
-                        meta.stop_info.depth_reached,
-                        meta.stats.score,
-                        meta.stats.nodes,
-                        meta.stats.nps,
-                        meta.stop_info.elapsed_ms,
-                        meta.stop_info.soft_limit_ms,
-                        meta.stop_info.hard_limit_ms,
-                        meta.stop_info.hard_timeout,
-                        bm_for_log.clone(),
-                        ponder_str
+                        &meta.stop_info,
                     );
-                    let _ = send_info_string(info_string);
                     // Additional confirm log for observability
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_sent_logged"),
@@ -433,47 +397,12 @@ impl<'a> CommandContext<'a> {
                     }
                     // Always finalize search after attempting to emit
                     *self.last_bestmove_sent_at = Some(std::time::Instant::now());
-                    // Emit unified bestmove_sent for fallback as well
-                    let seldepth_str = meta
-                        .stats
-                        .seldepth
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "-".to_string());
-                    let ponder_str = "none"; // unknown on fallback failure path
-                    let info_string = format!(
-                        "kind=bestmove_sent\t\
-                         search_id={}\t\
-                         bestmove_from={}\t\
-                         stop_reason={}\t\
-                         depth={}\t\
-                         seldepth={}\t\
-                         depth_reached={}\t\
-                         score={}\t\
-                         nodes={}\t\
-                         nps={}\t\
-                         elapsed_ms={}\t\
-                         time_soft_ms={}\t\
-                         time_hard_ms={}\t\
-                         hard_timeout={}\t\
-                         bestmove={}\t\
-                         ponder={}",
-                        self.current_search_id,
+                    // Log bestmove_sent details for fallback as well
+                    let _ = crate::emit_utils::log_bestmove_sent(
+                        *self.current_search_id,
                         meta.from,
-                        meta.stop_info.reason,
-                        meta.stats.depth,
-                        seldepth_str,
-                        meta.stop_info.depth_reached,
-                        meta.stats.score,
-                        meta.stats.nodes,
-                        meta.stats.nps,
-                        meta.stop_info.elapsed_ms,
-                        meta.stop_info.soft_limit_ms,
-                        meta.stop_info.hard_limit_ms,
-                        meta.stop_info.hard_timeout,
-                        bm_for_log.clone(),
-                        ponder_str
+                        &meta.stop_info,
                     );
-                    let _ = send_info_string(info_string);
                     // Additional confirm log for observability
                     let _ = send_info_string(crate::emit_utils::log_tsv(&[
                         ("kind", "bestmove_sent_logged"),
@@ -508,44 +437,12 @@ impl<'a> CommandContext<'a> {
             }
             // Always finalize search after attempting to emit
             *self.last_bestmove_sent_at = Some(std::time::Instant::now());
-            // Emit unified bestmove_sent for direct path as well
-            let seldepth_str =
-                meta.stats.seldepth.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
-            let ponder_str = "none";
-            let info_string = format!(
-                "kind=bestmove_sent\t\
-                 search_id={}\t\
-                 bestmove_from={}\t\
-                 stop_reason={}\t\
-                 depth={}\t\
-                 seldepth={}\t\
-                 depth_reached={}\t\
-                 score={}\t\
-                 nodes={}\t\
-                 nps={}\t\
-                 elapsed_ms={}\t\
-                 time_soft_ms={}\t\
-                 time_hard_ms={}\t\
-                 hard_timeout={}\t\
-                 bestmove={}\t\
-                 ponder={}",
-                self.current_search_id,
+            // Log bestmove_sent details for direct path as well
+            let _ = crate::emit_utils::log_bestmove_sent(
+                *self.current_search_id,
                 meta.from,
-                meta.stop_info.reason,
-                meta.stats.depth,
-                seldepth_str,
-                meta.stop_info.depth_reached,
-                meta.stats.score,
-                meta.stats.nodes,
-                meta.stats.nps,
-                meta.stop_info.elapsed_ms,
-                meta.stop_info.soft_limit_ms,
-                meta.stop_info.hard_limit_ms,
-                meta.stop_info.hard_timeout,
-                bm_for_log,
-                ponder_str
+                &meta.stop_info,
             );
-            let _ = send_info_string(info_string);
             // Additional confirm log for observability
             let _ = send_info_string(crate::emit_utils::log_tsv(&[
                 ("kind", "bestmove_sent_logged"),

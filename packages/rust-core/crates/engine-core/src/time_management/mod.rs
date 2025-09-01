@@ -101,6 +101,9 @@ struct TimeManagerInner {
 
     // Budget status
     budget_clamped: AtomicBool,
+
+    // Track first check for detailed logging
+    first_check_done: AtomicBool,
 }
 
 lazy_static! {
@@ -141,6 +144,24 @@ impl TimeManager {
     pub fn new(limits: &TimeLimits, side: Color, ply: u32, game_phase: GamePhase) -> Self {
         let params = limits.time_parameters.unwrap_or_default();
 
+        // Log time control details at initialization
+        log::debug!(
+            "[TimeManager::new] Starting initialization - time_control: {:?}, side: {:?}, ply: {}, game_phase: {:?}",
+            limits.time_control,
+            side,
+            ply,
+            game_phase
+        );
+
+        // Log time parameters
+        log::debug!(
+            "[TimeManager::new] Parameters - network_delay_ms: {}, network_delay2_ms: {}, overhead_ms: {}, min_think_ms: {}",
+            params.network_delay_ms,
+            params.network_delay2_ms,
+            params.overhead_ms,
+            params.min_think_ms
+        );
+
         // Calculate initial time allocation
         let (raw_soft, raw_hard) = calculate_time_allocation(
             &limits.time_control,
@@ -149,6 +170,13 @@ impl TimeManager {
             limits.moves_to_go,
             game_phase,
             &params,
+        );
+
+        // Log calculated raw values
+        log::debug!(
+            "[TimeManager::new] calculate_time_allocation returned - raw_soft: {}ms, raw_hard: {}ms",
+            raw_soft,
+            raw_hard
         );
 
         // Apply conservative lower bounds and ordering clamps (small, safe)
@@ -224,6 +252,32 @@ impl TimeManager {
             soft_ms // Fallback for infinite modes
         };
 
+        // Log final budget values after clamping
+        log::debug!(
+            "[TimeManager::new] After clamping - soft_ms: {}ms, hard_ms: {}ms, opt_limit: {}ms, budget_clamped: {}",
+            soft_ms,
+            hard_ms,
+            opt_limit,
+            budget_clamped
+        );
+
+        // FATAL check: opt_limit should never be 0 for finite time controls
+        if opt_limit == 0
+            && matches!(
+                &limits.time_control,
+                TimeControl::Fischer { .. }
+                    | TimeControl::Byoyomi { .. }
+                    | TimeControl::FixedTime { .. }
+            )
+        {
+            log::error!(
+                "[TimeManager::new] FATAL: opt_limit_ms is 0! soft_ms: {}, hard_ms: {}, time_control: {:?}",
+                soft_ms,
+                hard_ms,
+                limits.time_control
+            );
+        }
+
         let inner = Arc::new(TimeManagerInner {
             side_to_move: side,
             start_ply: ply,
@@ -244,6 +298,7 @@ impl TimeManager {
             byoyomi_state: Mutex::new(byoyomi_state),
             is_ponder: AtomicBool::new(matches!(&limits.time_control, TimeControl::Ponder(_))),
             budget_clamped: AtomicBool::new(budget_clamped),
+            first_check_done: AtomicBool::new(false),
         });
 
         let tm = Self { inner };
@@ -293,8 +348,24 @@ impl TimeManager {
                     available_time,
                     min_ms
                 );
+
+                // Log the opt_limit after FinalPush update
+                log::debug!(
+                    "[FinalPush] Updated opt_limit to {}ms (was {}ms)",
+                    target_opt,
+                    opt_limit
+                );
             }
         }
+
+        // Log final stored values
+        log::debug!(
+            "[TimeManager::new] Final stored values - soft: {}ms, hard: {}ms, opt: {}ms, final_push_active: {}",
+            tm.inner.soft_limit_ms.load(Ordering::Relaxed),
+            tm.inner.hard_limit_ms.load(Ordering::Relaxed),
+            tm.inner.opt_limit_ms.load(Ordering::Relaxed),
+            tm.inner.final_push_active.load(Ordering::Relaxed)
+        );
 
         tm
     }
@@ -367,6 +438,14 @@ impl TimeManager {
 
     /// Check if search should stop (called frequently from search loop)
     pub fn should_stop(&self, current_nodes: u64) -> bool {
+        // Track if this is the first check for this TimeManager instance
+        let is_first_check = !self.inner.first_check_done.load(Ordering::Acquire)
+            && self
+                .inner
+                .first_check_done
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+
         // Check force stop flag first (cheapest check)
         if self.inner.stop_flag.load(Ordering::Acquire) {
             return true;
@@ -396,15 +475,33 @@ impl TimeManager {
         // Time-based checks
         let elapsed = self.elapsed_ms();
 
+        // Log detailed info on first check
+        if is_first_check {
+            log::debug!(
+                "[check_time] First check - elapsed: {}ms, opt_limit: {}ms, soft_limit: {}ms, hard_limit: {}ms, search_end: {}ms",
+                elapsed,
+                self.inner.opt_limit_ms.load(Ordering::Relaxed),
+                self.inner.soft_limit_ms.load(Ordering::Relaxed),
+                self.inner.hard_limit_ms.load(Ordering::Relaxed),
+                self.inner.search_end_ms.load(Ordering::Relaxed)
+            );
+        }
+
         // Hard limit always stops
         let hard_limit = self.inner.hard_limit_ms.load(Ordering::Relaxed);
         if elapsed >= hard_limit {
+            if is_first_check {
+                log::debug!("[check_time] Stop reason: hard_limit");
+            }
             return true;
         }
 
         // Planned rounded stop (Phase 1)
         let planned = self.inner.search_end_ms.load(Ordering::Relaxed);
         if planned != u64::MAX && elapsed >= planned {
+            if is_first_check {
+                log::debug!("[check_time] Stop reason: search_end");
+            }
             return true;
         }
 
@@ -425,6 +522,9 @@ impl TimeManager {
 
         // Emergency stop if critically low on time
         if self.state_checker().is_time_critical() {
+            if is_first_check {
+                log::debug!("[check_time] Stop reason: time_critical");
+            }
             return true;
         }
 
@@ -522,7 +622,15 @@ impl TimeManager {
             return;
         }
 
-        let mut target = self.round_up(elapsed_ms);
+        let initial_target = self.round_up(elapsed_ms);
+        let mut target = initial_target;
+
+        log::debug!(
+            "[set_search_end] Called with elapsed={}ms, hard={}ms, initial round_up target={}ms",
+            elapsed_ms,
+            hard,
+            initial_target
+        );
 
         // Respect final push minimum (cannot exceed hard)
         if self.inner.final_push_active.load(Ordering::Relaxed) {
@@ -557,6 +665,16 @@ impl TimeManager {
         }
 
         let current = self.inner.search_end_ms.load(Ordering::Relaxed);
+
+        log::debug!(
+            "[set_search_end] Final values - target: {}ms (was {}ms), remain_upper: {:?}, min_think: {}ms, current scheduled: {}ms",
+            target,
+            initial_target,
+            self.remain_upper_ms(),
+            min_think,
+            if current == u64::MAX { 0 } else { current }
+        );
+
         if current == u64::MAX || target < current {
             self.inner.search_end_ms.store(target, Ordering::Relaxed);
             log::debug!(

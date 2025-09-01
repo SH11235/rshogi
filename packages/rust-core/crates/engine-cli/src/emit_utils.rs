@@ -18,6 +18,54 @@ pub fn log_tsv(pairs: &[(&str, &str)]) -> String {
         .join("\t")
 }
 
+/// Log bestmove emission details for debugging
+pub fn log_bestmove_sent(
+    search_id: u64,
+    from: BestmoveSource,
+    stop_info: &StopInfo,
+) -> anyhow::Result<()> {
+    // Log detailed stop info for time management debugging
+    let stop_reason = match stop_info.reason {
+        TerminationReason::TimeLimit => {
+            if stop_info.hard_timeout {
+                "hard_timeout"
+            } else {
+                "soft_timeout"
+            }
+        }
+        TerminationReason::Completed => "completed",
+        TerminationReason::UserStop => "user_stop",
+        TerminationReason::Error => "error",
+        TerminationReason::Mate => "mate_found",
+        TerminationReason::NodeLimit => "node_limit",
+        TerminationReason::DepthLimit => "depth_limit",
+    };
+
+    let _ = send_info_string(log_tsv(&[
+        ("kind", "bestmove_sent"),
+        ("search_id", &search_id.to_string()),
+        ("bestmove_from", &from.to_string()),
+        ("stop_reason", stop_reason),
+        ("elapsed_ms", &stop_info.elapsed_ms.to_string()),
+        ("time_soft_ms", &stop_info.soft_limit_ms.to_string()),
+        ("time_hard_ms", &stop_info.hard_limit_ms.to_string()),
+        ("depth", &stop_info.depth_reached.to_string()),
+        ("nodes", &stop_info.nodes.to_string()),
+    ]));
+
+    // Additional debug log
+    log::debug!(
+        "[BESTMOVE] stop details - from: {}, reason: {}, elapsed: {}ms, soft: {}ms, hard: {}ms",
+        from,
+        stop_reason,
+        stop_info.elapsed_ms,
+        stop_info.soft_limit_ms,
+        stop_info.hard_limit_ms
+    );
+
+    Ok(())
+}
+
 /// Build BestmoveMeta from common parameters
 /// This reduces duplication of BestmoveMeta construction across the codebase
 pub fn build_meta(
