@@ -207,11 +207,7 @@ where
             // Process events including ponder hit
             self.context.process_events(&self.time_manager);
 
-            // Advise after event processing (elapsed may have progressed)
-            if let Some(ref tm) = self.time_manager {
-                let elapsed_ms = self.context.elapsed().as_millis() as u64;
-                tm.advise_after_iteration(elapsed_ms);
-            }
+            // Time management is handled by should_stop() during search
 
             // Check time limits via TimeManager (skip for depth 1 to ensure at least 1 ply)
             if depth > 1 && self.context.check_time_limit(self.stats.nodes, &self.time_manager) {
@@ -465,11 +461,7 @@ where
                     }
                 }
 
-                // Phase 1: advise rounded stop near hard if we've already spent opt
-                if let Some(ref tm) = self.time_manager {
-                    let elapsed_ms = self.context.elapsed().as_millis() as u64;
-                    tm.advise_after_iteration(elapsed_ms);
-                }
+                // Time management is handled by should_stop() during search
             }
 
             depth += 1;

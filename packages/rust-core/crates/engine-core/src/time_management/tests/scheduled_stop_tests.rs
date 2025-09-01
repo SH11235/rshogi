@@ -308,63 +308,6 @@ fn test_stop_at_scheduled_end() {
 }
 
 #[test]
-fn test_advise_after_iteration_tightening() {
-    // Test that advise_after_iteration can tighten deadline when approaching hard limit
-    mock_set_time(0); // Reset mock time
-    let params = TimeParametersBuilder::new()
-        .overhead_ms(100)
-        .unwrap()
-        .network_delay2_ms(500)
-        .unwrap()
-        .build();
-
-    let limits = TimeLimits {
-        time_control: TimeControl::Fischer {
-            white_ms: 3000,
-            black_ms: 3000,
-            increment_ms: 0,
-        },
-        time_parameters: Some(params),
-        ..Default::default()
-    };
-
-    let tm = TimeManager::new(&limits, Color::Black, 0, GamePhase::MiddleGame);
-
-    // First trigger normal scheduling
-    let opt = tm.opt_limit_ms();
-    let hard = tm.hard_limit_ms();
-    eprintln!("opt: {}, hard: {}", opt, hard);
-
-    // Make sure we don't exceed hard limit
-    if opt + 100 >= hard {
-        mock_set_time(opt + 10);
-    } else {
-        mock_set_time(opt + 100);
-    }
-    tm.should_stop(1000); // This schedules end
-
-    let original_scheduled = tm.scheduled_end_ms();
-    eprintln!("original_scheduled: {}", original_scheduled);
-    assert_ne!(original_scheduled, u64::MAX);
-
-    // Move close to hard limit
-    let close_to_hard = hard.saturating_sub(1500); // Within safety margin * 2
-                                                   // Make sure we're not going backwards in time
-    if close_to_hard <= tm.elapsed_ms() {
-        eprintln!("close_to_hard would go backwards, skipping tightening test");
-        return; // Skip this part of the test if hard limit is too small
-    }
-    mock_set_time(close_to_hard);
-
-    // Call advise_after_iteration
-    tm.advise_after_iteration(close_to_hard);
-
-    // Check if deadline was tightened
-    let new_scheduled = tm.scheduled_end_ms();
-    assert!(new_scheduled < original_scheduled);
-}
-
-#[test]
 fn test_no_premature_stop_before_opt_limit() {
     // Test that search doesn't stop before opt_limit (no more soft+PV stable check)
     mock_set_time(0); // Reset mock time
