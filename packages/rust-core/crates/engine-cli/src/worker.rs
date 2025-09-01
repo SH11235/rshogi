@@ -207,26 +207,28 @@ pub fn lock_or_recover_adapter(mutex: &Mutex<EngineAdapter>) -> MutexGuard<'_, E
 }
 
 /// Worker thread function for search
+#[allow(clippy::too_many_arguments)]
 pub fn search_worker(
     engine_adapter: Arc<Mutex<EngineAdapter>>,
     params: GoParams,
     stop_flag: Arc<AtomicBool>,
+    global_stop_flag: Arc<AtomicBool>,
     tx: Sender<WorkerMessage>,
     search_id: u64,
     finalized_flag: Option<Arc<AtomicBool>>,
     go_begin_at: Instant,
 ) {
-    // Note: Global stop flag is passed from main.rs, not available in adapter
-    // The worker will check the per-search stop_flag parameter instead
-    // For quit handling, the main thread sets the per-search flag directly
     log::debug!("Search worker thread started with params: {params:?}");
 
     // Immediately check stop flag value
     let immediate_stop_value = stop_flag.load(Ordering::SeqCst);
+    let immediate_global_value = global_stop_flag.load(Ordering::SeqCst);
     log::debug!(
-        "Worker immediate stop flag check: {} (ptr: {:p})",
+        "Worker immediate stop flag check: per_search={} (ptr: {:p}), global={} (ptr: {:p})",
         immediate_stop_value,
-        stop_flag.as_ref()
+        stop_flag.as_ref(),
+        immediate_global_value,
+        global_stop_flag.as_ref()
     );
 
     // Add delay to check if this is a race condition (only in debug builds)
@@ -234,16 +236,22 @@ pub fn search_worker(
     std::thread::sleep(std::time::Duration::from_micros(1));
 
     let initial_stop_value = stop_flag.load(Ordering::SeqCst);
+    let initial_global_value = global_stop_flag.load(Ordering::SeqCst);
     log::info!(
-        "Worker: search_id={search_id}, ponder={}, stop_flag_ptr={:p}, stop_flag_value={}",
+        "Worker: search_id={search_id}, ponder={}, stop_flag_ptr={:p}, stop_flag_value={}, global_stop={}",
         params.ponder,
         stop_flag.as_ref(),
-        initial_stop_value
+        initial_stop_value,
+        initial_global_value
     );
 
-    // Early return if stop was already requested
-    if initial_stop_value && !params.ponder {
-        log::warn!("Worker: stop flag already set at start, aborting search");
+    // Early return if stop was already requested (check both flags)
+    if (initial_stop_value || initial_global_value) && !params.ponder {
+        log::warn!(
+            "Worker: stop flag already set at start (per_search={}, global={}), aborting search",
+            initial_stop_value,
+            initial_global_value
+        );
         let _ = tx.send(WorkerMessage::Error {
             message: "initial_stop_flag_true_at_worker_start".to_string(),
             search_id,
@@ -267,6 +275,13 @@ pub fn search_worker(
     });
     log::info!("Worker: SearchStarted message sent");
 
+    // Helper closure to check combined stop condition
+    let should_stop = {
+        let per_search = stop_flag.clone();
+        let global = global_stop_flag.clone();
+        move || per_search.load(Ordering::Acquire) || global.load(Ordering::Acquire)
+    };
+
     // Set up info callback with partial result tracking
     let tx_info = tx.clone();
     let tx_partial = tx.clone();
@@ -278,11 +293,11 @@ pub fn search_worker(
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(100);
-    let stop_flag_for_info = stop_flag.clone();
+    let should_stop_for_info = should_stop.clone();
     let finalized_for_info = finalized_flag.clone();
     let info_callback = move |info: SearchInfo| {
-        // Check stop flag before sending messages
-        if stop_flag_for_info.load(Ordering::SeqCst) {
+        // Check stop flag before sending messages (combined check)
+        if should_stop_for_info() {
             log::trace!("Info callback: stop flag set, skipping message");
             return;
         }
@@ -466,17 +481,56 @@ pub fn search_worker(
                     0
                 };
 
-                // Early cancel check
-                if stop_flag.load(Ordering::Acquire) {
+                // Early cancel check (combined)
+                if should_stop() {
                     log::info!("Stop requested during prepare; skipping limit computation");
                 }
+
+                // Create a synthetic stop flag that combines both per-search and global
+                // This is necessary because engine core only accepts a single stop flag
+                let synthetic_stop_flag = Arc::new(AtomicBool::new(false));
+
+                // Set initial value to avoid initial window where synthetic is false but sources are true
+                let initial_should_stop =
+                    stop_flag.load(Ordering::Acquire) || global_stop_flag.load(Ordering::Acquire);
+                synthetic_stop_flag.store(initial_should_stop, Ordering::Release);
+
+                let synthetic_for_thread = synthetic_stop_flag.clone();
+                let stop_for_thread = stop_flag.clone();
+                let global_for_thread = global_stop_flag.clone();
+                let finalized_for_monitor = finalized_flag.clone();
+
+                // Spawn a thread to monitor both flags and update synthetic
+                // This thread will terminate when either stop is requested or search is finalized
+                let _monitor_handle = std::thread::spawn(move || {
+                    loop {
+                        let should_stop = stop_for_thread.load(Ordering::Acquire)
+                            || global_for_thread.load(Ordering::Acquire);
+                        synthetic_for_thread.store(should_stop, Ordering::Release);
+
+                        if should_stop {
+                            log::debug!("Monitor thread: stopping due to stop flag");
+                            break;
+                        }
+
+                        // Check if search has been finalized (normal termination)
+                        if let Some(ref finalized) = finalized_for_monitor {
+                            if finalized.load(Ordering::Acquire) {
+                                log::debug!("Monitor thread: stopping due to finalized flag");
+                                break;
+                            }
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                });
 
                 // Apply go params to build limits (lock-free)
                 let limits_res = crate::engine_adapter::time_control::apply_go_params(
                     &params,
                     &pos_snapshot,
                     overhead_ms,
-                    Some(stop_flag.clone()),
+                    Some(synthetic_stop_flag),
                     byoyomi_safety_ms,
                     network_delay2_ms,
                     byoyomi_early_finish_ratio,

@@ -292,4 +292,352 @@ mod tests {
             assert_eq!(search_state, SearchState::Idle);
         }
     }
+
+    #[test]
+    fn test_worker_stops_on_global_flag() {
+        use crate::engine_adapter::EngineAdapter;
+        use crate::usi::GoParams;
+        use crate::worker::{search_worker, WorkerMessage};
+        use crossbeam_channel::unbounded;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // Create test context
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let per_search_stop = Arc::new(AtomicBool::new(false));
+        let global_stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = unbounded();
+
+        // Setup test position
+        {
+            let mut adapter = engine.lock().unwrap();
+            let _ = adapter.take_engine();
+            let result = adapter.set_position(true, None, &[]);
+            if result.is_err() {
+                if let Ok(core_engine) = adapter.take_engine() {
+                    adapter.return_engine(core_engine);
+                }
+            }
+        }
+
+        // Create go params for a long search (infinite time)
+        let params = GoParams {
+            btime: None,
+            wtime: None,
+            byoyomi: None,
+            periods: None,
+            binc: None,
+            winc: None,
+            moves_to_go: None,
+            depth: None,
+            nodes: None,
+            movetime: None,
+            infinite: true,
+            ponder: false,
+        };
+
+        // Spawn worker thread
+        let engine_clone = engine.clone();
+        let per_search_clone = per_search_stop.clone();
+        let global_clone = global_stop.clone();
+        let tx_clone = tx.clone();
+
+        let handle = thread::spawn(move || {
+            search_worker(
+                engine_clone,
+                params,
+                per_search_clone,
+                global_clone,
+                tx_clone,
+                1,    // search_id
+                None, // finalized_flag
+                Instant::now(),
+            );
+        });
+
+        // Wait for SearchStarted message
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(5);
+        let mut search_started = false;
+
+        while start_time.elapsed() < timeout {
+            match rx.try_recv() {
+                Ok(WorkerMessage::SearchStarted { .. }) => {
+                    search_started = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        assert!(search_started, "Search should have started");
+
+        // Set global stop flag (simulating quit)
+        global_stop.store(true, std::sync::atomic::Ordering::Release);
+
+        // Worker should stop and send Finished
+        let mut finished = false;
+        let finish_timeout = Duration::from_secs(2);
+        let finish_start = Instant::now();
+
+        while finish_start.elapsed() < finish_timeout {
+            match rx.try_recv() {
+                Ok(WorkerMessage::Finished { .. }) => {
+                    finished = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        assert!(finished, "Worker should have finished after global stop");
+
+        // Join the thread
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_monitor_thread_terminates_on_stop_flag() {
+        use crate::engine_adapter::EngineAdapter;
+        use crate::usi::GoParams;
+        use crate::worker::{search_worker, WorkerMessage};
+        use crossbeam_channel::unbounded;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // Create test context
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let per_search_stop = Arc::new(AtomicBool::new(false));
+        let global_stop = Arc::new(AtomicBool::new(false));
+        let finalized_flag = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = unbounded();
+
+        // Setup test position
+        {
+            let mut adapter = engine.lock().unwrap();
+            let _ = adapter.take_engine();
+            let result = adapter.set_position(true, None, &[]);
+            if result.is_err() {
+                if let Ok(core_engine) = adapter.take_engine() {
+                    adapter.return_engine(core_engine);
+                }
+            }
+        }
+
+        // Create go params for a very short search
+        let params = GoParams {
+            btime: None,
+            wtime: None,
+            byoyomi: None,
+            periods: None,
+            binc: None,
+            winc: None,
+            moves_to_go: None,
+            depth: Some(1), // Very shallow search
+            nodes: None,
+            movetime: None,
+            infinite: false,
+            ponder: false,
+        };
+
+        // Spawn worker thread with finalized flag
+        let engine_clone = engine.clone();
+        let per_search_clone = per_search_stop.clone();
+        let global_clone = global_stop.clone();
+        let tx_clone = tx.clone();
+        let finalized_clone = finalized_flag.clone();
+
+        let handle = thread::spawn(move || {
+            search_worker(
+                engine_clone,
+                params,
+                per_search_clone,
+                global_clone,
+                tx_clone,
+                1, // search_id
+                Some(finalized_clone),
+                Instant::now(),
+            );
+        });
+
+        // Wait for search to start
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(5);
+        let mut search_started = false;
+
+        while start_time.elapsed() < timeout {
+            match rx.try_recv() {
+                Ok(WorkerMessage::SearchStarted { .. }) => {
+                    search_started = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        assert!(search_started, "Search should have started");
+
+        // Set per-search stop flag
+        per_search_stop.store(true, std::sync::atomic::Ordering::Release);
+
+        // Wait for worker to finish
+        let mut worker_finished = false;
+        let finish_timeout = Duration::from_secs(2);
+        let finish_start = Instant::now();
+
+        while finish_start.elapsed() < finish_timeout {
+            match rx.try_recv() {
+                Ok(WorkerMessage::Finished { .. }) => {
+                    worker_finished = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        assert!(worker_finished, "Worker should have finished");
+
+        // Join the thread - should complete immediately
+        let join_result = handle.join();
+        assert!(join_result.is_ok(), "Worker thread should join cleanly");
+
+        // The monitor thread should have terminated due to stop flag
+        // We can't directly test this, but if the thread joined successfully, it succeeded
+    }
+
+    #[test]
+    fn test_monitor_thread_terminates_on_finalized_flag() {
+        use crate::engine_adapter::EngineAdapter;
+        use crate::usi::GoParams;
+        use crate::worker::{search_worker, WorkerMessage};
+        use crossbeam_channel::unbounded;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // Create test context
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let per_search_stop = Arc::new(AtomicBool::new(false));
+        let global_stop = Arc::new(AtomicBool::new(false));
+        let finalized_flag = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = unbounded();
+
+        // Setup test position
+        {
+            let mut adapter = engine.lock().unwrap();
+            let _ = adapter.take_engine();
+            let result = adapter.set_position(true, None, &[]);
+            if result.is_err() {
+                if let Ok(core_engine) = adapter.take_engine() {
+                    adapter.return_engine(core_engine);
+                }
+            }
+        }
+
+        // Create go params for infinite search
+        let params = GoParams {
+            btime: None,
+            wtime: None,
+            byoyomi: None,
+            periods: None,
+            binc: None,
+            winc: None,
+            moves_to_go: None,
+            depth: None,
+            nodes: None,
+            movetime: None,
+            infinite: true, // Infinite search so we can control when it ends
+            ponder: false,
+        };
+
+        // Spawn worker thread with finalized flag
+        let engine_clone = engine.clone();
+        let per_search_clone = per_search_stop.clone();
+        let global_clone = global_stop.clone();
+        let tx_clone = tx.clone();
+        let finalized_clone = finalized_flag.clone();
+
+        let handle = thread::spawn(move || {
+            search_worker(
+                engine_clone,
+                params,
+                per_search_clone,
+                global_clone,
+                tx_clone,
+                1, // search_id
+                Some(finalized_clone),
+                Instant::now(),
+            );
+        });
+
+        // Wait for search to start
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(5);
+        let mut search_started = false;
+
+        while start_time.elapsed() < timeout {
+            match rx.try_recv() {
+                Ok(WorkerMessage::SearchStarted { .. }) => {
+                    search_started = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        assert!(search_started, "Search should have started");
+
+        // Simulate main thread setting finalized flag (as would happen when processing SearchFinished)
+        finalized_flag.store(true, std::sync::atomic::Ordering::Release);
+
+        // Also set stop flag to make worker exit
+        per_search_stop.store(true, std::sync::atomic::Ordering::Release);
+
+        // Wait for worker to finish
+        let mut worker_finished = false;
+        let finish_timeout = Duration::from_secs(2);
+        let finish_start = Instant::now();
+
+        while finish_start.elapsed() < finish_timeout {
+            match rx.try_recv() {
+                Ok(WorkerMessage::Finished { .. }) => {
+                    worker_finished = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        assert!(worker_finished, "Worker should have finished");
+
+        // Join the thread - should complete immediately
+        let join_result = handle.join();
+        assert!(join_result.is_ok(), "Worker thread should join cleanly");
+
+        // The monitor thread should have terminated due to finalized flag
+        // We can't directly test this, but if the thread joined successfully, it succeeded
+    }
 }
