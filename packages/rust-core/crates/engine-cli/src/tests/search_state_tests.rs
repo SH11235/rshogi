@@ -840,6 +840,10 @@ mod tests {
 
         // Clear bestmove emitter to simulate finalized state
         *ctx.current_bestmove_emitter = None;
+        
+        // IMPORTANT: Clear worker handle to avoid wait_for_worker_sync blocking
+        // In a real Finalized state, the worker should have already exited
+        *ctx.worker_handle = None;
 
         // This is the critical test - go should handle Finalized state gracefully
         let go_params = GoParams {
