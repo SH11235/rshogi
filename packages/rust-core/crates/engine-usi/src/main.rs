@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
-use engine_core::engine::controller::{Engine, EngineType};
+use engine_core::engine::controller::{Engine, EngineType, FinalBestSource};
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
-use engine_core::shogi::{Color, Move as ShogiMove, PieceType, Position};
+use engine_core::shogi::{Color, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
 use engine_core::usi::{move_to_usi, parse_sfen, parse_usi_move};
 use log::info;
@@ -231,14 +231,14 @@ fn fmt_hash(h: u64) -> String {
 }
 
 #[inline]
-fn move_piece_type_in_pos(mv: &ShogiMove, pos: &Position) -> Option<PieceType> {
-    if let Some(pt) = mv.piece_type() {
-        return Some(pt);
+fn source_to_str(src: FinalBestSource) -> &'static str {
+    match src {
+        FinalBestSource::Book => "book",
+        FinalBestSource::Committed => "committed",
+        FinalBestSource::TT => "tt",
+        FinalBestSource::LegalFallback => "legal",
+        FinalBestSource::Resign => "resign",
     }
-    if mv.is_drop() {
-        return Some(mv.drop_piece_type());
-    }
-    mv.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type))
 }
 
 fn send_id_and_options(opts: &UsiOptions) {
@@ -617,69 +617,48 @@ fn main() -> Result<()> {
                                     .unwrap_or_else(|| "-".to_string())
                             ));
 
-                            let final_usi = if mate_flag {
-                                "resign".to_string()
-                            } else if stale {
-                                // ステール（GUI局面更新済み）なら安全フォールバック
-                                let mg = engine_core::movegen::MoveGenerator::new();
-                                if let Ok(list) = mg.generate_all(&state.position) {
-                                    let legal_count = list.len();
-                                    if let Some(first) = list.as_slice().first() {
-                                        // Diagnostics: fallback details
-                                        let king = move_piece_type_in_pos(first, &state.position)
-                                            .map(|pt| matches!(pt, PieceType::King))
-                                            .unwrap_or(false);
-                                        info_string(format!(
-                                            "fallback reason=stale chosen={} legal_count={} in_check={} king_move={}",
-                                            move_to_usi(first),
-                                            legal_count,
-                                            if state.position.is_in_check() { 1 } else { 0 },
-                                            if king { 1 } else { 0 }
-                                        ));
-                                        move_to_usi(first)
-                                    } else {
-                                        "resign".to_string()
-                                    }
-                                } else {
-                                    "resign".to_string()
-                                }
-                            } else if let Some(mv) = result.best_move {
-                                // Legality guard in current GUI position
-                                if state.position.is_legal_move(mv) {
-                                    move_to_usi(&mv)
-                                } else {
-                                    // Fallback: choose first legal, else resign
-                                    let mg = engine_core::movegen::MoveGenerator::new();
-                                    if let Ok(list) = mg.generate_all(&state.position) {
-                                        let legal_count = list.len();
-                                        if let Some(first) = list.as_slice().first() {
-                                            // Diagnostics: fallback details
-                                            let king =
-                                                move_piece_type_in_pos(first, &state.position)
-                                                    .map(|pt| matches!(pt, PieceType::King))
-                                                    .unwrap_or(false);
-                                            info_string(format!(
-                                                "fallback reason=illegal core={} chosen={} legal_count={} in_check={} king_move={}",
-                                                move_to_usi(&mv),
-                                                move_to_usi(first),
-                                                legal_count,
-                                                if state.position.is_in_check() { 1 } else { 0 },
-                                                if king { 1 } else { 0 }
-                                            ));
-                                            move_to_usi(first)
-                                        } else {
-                                            "resign".to_string()
-                                        }
-                                    } else {
-                                        "resign".to_string()
-                                    }
-                                }
+                            let (final_usi, final_pv) = if mate_flag {
+                                ("resign".to_string(), Vec::new())
                             } else {
-                                "resign".to_string()
+                                // Centralized finalize using engine-core helper
+                                let committed = if !stale {
+                                    Some(engine_core::search::CommittedIteration {
+                                        depth: result.stats.depth,
+                                        seldepth: result.stats.seldepth,
+                                        score: result.score,
+                                        pv: result.stats.pv.clone(),
+                                        node_type: result.node_type,
+                                        nodes: result.stats.nodes,
+                                        elapsed: result.stats.elapsed,
+                                    })
+                                } else {
+                                    None
+                                };
+                                let final_best = {
+                                    let eng = state.engine.lock().unwrap();
+                                    eng.choose_final_bestmove(&state.position, committed.as_ref())
+                                };
+                                info_string(format!(
+                                    "finalize_select source={} move={} stale={}",
+                                    source_to_str(final_best.source),
+                                    final_best
+                                        .best_move
+                                        .map(|m| move_to_usi(&m))
+                                        .unwrap_or_else(|| "resign".to_string()),
+                                    if stale { 1 } else { 0 }
+                                ));
+                                (
+                                    final_best
+                                        .best_move
+                                        .map(|m| move_to_usi(&m))
+                                        .unwrap_or_else(|| "resign".to_string()),
+                                    final_best.pv,
+                                )
                             };
 
                             let ponder_mv = if state.opts.ponder {
-                                result.stats.pv.get(1).map(move_to_usi)
+                                // Use selected PV for ponder when available
+                                final_pv.get(1).map(move_to_usi)
                             } else {
                                 None
                             };
@@ -1025,46 +1004,9 @@ fn main() -> Result<()> {
 
             if cmd == "stop" {
                 if let (true, Some(flag)) = (state.searching, &state.stop_flag) {
+                    // Request stop and let unified finalize path emit bestmove exactly-once
                     flag.store(true, Ordering::SeqCst);
-                    // Try to get result promptly
-                    if let Some(rx) = state.result_rx.take() {
-                        match rx.recv_timeout(Duration::from_millis(200)) {
-                            Ok(result) => {
-                                if let Some(h) = state.worker.take() {
-                                    let _ = h.join();
-                                }
-                                state.searching = false;
-                                state.stop_flag = None;
-                                state.ponder_hit_flag = None;
-                                let bm = result
-                                    .best_move
-                                    .map(|m| move_to_usi(&m))
-                                    .unwrap_or_else(|| "resign".to_string());
-                                usi_println(&format!("bestmove {}", bm));
-                            }
-                            Err(_) => {
-                                if let Some(h) = state.worker.take() {
-                                    let _ = h.join();
-                                }
-                                state.searching = false;
-                                state.stop_flag = None;
-                                state.ponder_hit_flag = None;
-                                let bm = match emergency_fallback_move(&state.position) {
-                                    Some(m) => {
-                                        // Diagnostics: emergency fallback (timeout)
-                                        info_string(format!(
-                                            "fallback reason=stop_timeout chosen={} in_check={}",
-                                            m,
-                                            if state.position.is_in_check() { 1 } else { 0 }
-                                        ));
-                                        m
-                                    }
-                                    None => "resign".to_string(),
-                                };
-                                usi_println(&format!("bestmove {}", bm));
-                            }
-                        }
-                    }
+                    info_string("stop_requested");
                 }
                 continue;
             }
@@ -1117,13 +1059,4 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn emergency_fallback_move(pos: &Position) -> Option<String> {
-    // Try to generate first legal move quickly
-    let mg = engine_core::movegen::MoveGenerator::new();
-    if let Ok(list) = mg.generate_all(pos) {
-        if let Some(m) = list.as_slice().first() {
-            return Some(move_to_usi(m));
-        }
-    }
-    None
-}
+// emergency_fallback_move: 廃止（stop経路は中央Finalizeへ一元化）
