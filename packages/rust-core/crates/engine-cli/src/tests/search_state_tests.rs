@@ -208,8 +208,9 @@ mod tests {
 
         // Create go params for test
         let params = GoParams {
-            time_control: TimeControl::FixedTime { ms_per_move: 100 },
+            movetime: Some(100), // Fixed time of 100ms
             ponder: false,
+            ..Default::default()
         };
 
         // Global stop flag should start as true
@@ -639,5 +640,115 @@ mod tests {
 
         // The monitor thread should have terminated due to finalized flag
         // We can't directly test this, but if the thread joined successfully, it succeeded
+    }
+
+    #[test]
+    fn test_go_command_accepted_in_finalized_state() {
+        use crate::command_handler::CommandContext;
+        use crate::engine_adapter::EngineAdapter;
+        use crate::handlers::go::handle_go_command;
+        use crate::usi::GoParams;
+        use crossbeam_channel::unbounded;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        // Create test context
+        let engine = Arc::new(Mutex::new(EngineAdapter::new()));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let (worker_tx, worker_rx) = unbounded();
+        let mut worker_handle = None;
+        let mut search_state = SearchState::Finalized; // Start in Finalized state
+        let mut search_id_counter = 1;
+        let mut current_search_id = 1;
+        let mut current_search_is_ponder = false;
+        let mut current_bestmove_emitter = None;
+        let mut current_finalized_flag = Some(Arc::new(AtomicBool::new(false)));
+        let mut current_stop_flag = None;
+        let mut pre_session_fallback = None;
+        let mut pre_session_fallback_hash = None;
+        let mut current_committed = None;
+        let mut position_state = None;
+        let program_start = Instant::now();
+        let mut last_partial_result = None;
+        let mut search_start_time = None;
+        let mut latest_nodes = 0;
+        let mut soft_limit_ms_ctx = 0;
+        let mut root_legal_moves = None;
+        let mut hard_deadline_taken = false;
+        let mut last_bestmove_sent_at = None;
+        let mut last_go_begin_at = None;
+        let mut final_pv_injected = false;
+        let mut pending_stop_info = None;
+        let mut pending_returned_engine = None;
+
+        // Setup test position
+        {
+            let mut adapter = engine.lock().unwrap();
+            let _ = adapter.set_position(true, None, &[]);
+        }
+
+        let mut ctx = CommandContext {
+            engine: &engine,
+            stop_flag: &stop_flag,
+            worker_tx: &worker_tx,
+            worker_rx: &worker_rx,
+            worker_handle: &mut worker_handle,
+            search_state: &mut search_state,
+            search_id_counter: &mut search_id_counter,
+            current_search_id: &mut current_search_id,
+            current_search_is_ponder: &mut current_search_is_ponder,
+            current_session: &mut None,
+            current_bestmove_emitter: &mut current_bestmove_emitter,
+            current_finalized_flag: &mut current_finalized_flag,
+            current_stop_flag: &mut current_stop_flag,
+            pre_session_fallback: &mut pre_session_fallback,
+            pre_session_fallback_hash: &mut pre_session_fallback_hash,
+            current_committed: &mut current_committed,
+            allow_null_move: false,
+            position_state: &mut position_state,
+            program_start,
+            last_partial_result: &mut last_partial_result,
+            search_start_time: &mut search_start_time,
+            latest_nodes: &mut latest_nodes,
+            soft_limit_ms_ctx: &mut soft_limit_ms_ctx,
+            root_legal_moves: &mut root_legal_moves,
+            hard_deadline_taken: &mut hard_deadline_taken,
+            last_bestmove_sent_at: &mut last_bestmove_sent_at,
+            last_go_begin_at: &mut last_go_begin_at,
+            final_pv_injected: &mut final_pv_injected,
+            pending_stop_info: &mut pending_stop_info,
+            pending_returned_engine: &mut pending_returned_engine,
+        };
+
+        // Create go params for test
+        let params = GoParams {
+            movetime: Some(100), // Fixed time of 100ms
+            ponder: false,
+            ..Default::default()
+        };
+
+        // Verify initial state is Finalized
+        assert_eq!(*ctx.search_state, SearchState::Finalized);
+        assert!(
+            ctx.search_state.can_start_search(),
+            "Finalized state should allow starting search"
+        );
+
+        // Handle go command - should not block and should transition state
+        let result = handle_go_command(params, &mut ctx);
+        assert!(result.is_ok(), "Go command should succeed in Finalized state");
+
+        // State should have transitioned to Searching (new search started)
+        assert_eq!(*ctx.search_state, SearchState::Searching, "State should be Searching after go");
+
+        // Clean up - send stop to terminate the worker
+        stop_flag.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(ref flag) = current_stop_flag {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        // Wait for worker to finish
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
