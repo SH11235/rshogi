@@ -7,6 +7,7 @@ use crate::emit_utils::{
 };
 use crate::handlers::common::resign_on_position_restore_fail;
 use crate::helpers::wait_for_search_completion;
+use crate::state::SearchState;
 use crate::usi::{send_info_string, send_response, GoParams, UsiCommand, UsiResponse};
 use crate::worker::{lock_or_recover_adapter, search_worker, WorkerMessage};
 use anyhow::{anyhow, Result};
@@ -57,22 +58,39 @@ pub(crate) fn handle_go_command(params: GoParams, ctx: &mut CommandContext) -> R
     // Track go-begin timestamp for SearchStarted delta measurement
     *ctx.last_go_begin_at = Some(now);
 
-    // Stop any ongoing search and ensure engine is available
-    let wait_start = Instant::now();
-    wait_for_search_completion(
-        ctx.search_state,
-        ctx.stop_flag,
-        ctx.current_stop_flag.as_ref(),
-        ctx.worker_handle,
-        ctx.worker_rx,
-        ctx.engine,
-    )?;
-    let wait_duration = wait_start.elapsed();
-    log::debug!("Wait for search completion took: {wait_duration:?}");
-    let _ = send_info_string(log_tsv(&[
-        ("kind", "go_wait_done"),
-        ("elapsed_ms", &wait_duration.as_millis().to_string()),
-    ]));
+    // Acceptance gate: only accept go when idle or finalized
+    if !ctx.search_state.can_start_search() {
+        log::warn!(
+            "Rejecting go command in state: {:?} (only Idle/Finalized allowed)",
+            ctx.search_state
+        );
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "go_rejected"),
+            ("state", &format!("{:?}", ctx.search_state)),
+            ("reason", "not_idle_or_finalized"),
+        ]));
+        return Ok(()); // Silently reject - don't send error to GUI
+    }
+
+    // If we're in Finalized state, wait for worker to finish joining
+    if *ctx.search_state == SearchState::Finalized {
+        log::info!("Go command received in Finalized state, waiting for worker join");
+        let wait_start = Instant::now();
+        wait_for_search_completion(
+            ctx.search_state,
+            ctx.stop_flag,
+            ctx.current_stop_flag.as_ref(),
+            ctx.worker_handle,
+            ctx.worker_rx,
+            ctx.engine,
+        )?;
+        let wait_duration = wait_start.elapsed();
+        log::debug!("Wait for finalized search cleanup took: {wait_duration:?}");
+        let _ = send_info_string(log_tsv(&[
+            ("kind", "go_finalized_wait_done"),
+            ("elapsed_ms", &wait_duration.as_millis().to_string()),
+        ]));
+    }
 
     // Clear any pending messages from previous search to prevent interference
     let mut cleared_messages = 0;

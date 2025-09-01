@@ -284,7 +284,7 @@ impl<'a> CommandContext<'a> {
     #[inline]
     pub fn finalize_search(&mut self, where_: &str) {
         log::debug!("Finalize search {} ({})", *self.current_search_id, where_);
-        self.search_state.set_idle();
+        self.search_state.set_finalized();
         *self.current_search_is_ponder = false;
         *self.current_bestmove_emitter = None;
         // Mark finalized flag if present for sender-side suppression
@@ -297,9 +297,9 @@ impl<'a> CommandContext<'a> {
         // This prevents race conditions where worker might miss the stop signal
         let _ = self.current_stop_flag.take();
 
-        // USI-visible: state transitioned to Idle immediately after finalize
+        // USI-visible: state transitioned to Finalized immediately after finalize
         let _ = send_info_string(crate::emit_utils::log_tsv(&[
-            ("kind", "state_idle_after_finalize"),
+            ("kind", "state_finalized_after_bestmove"),
             ("search_id", &self.current_search_id.to_string()),
         ]));
     }
@@ -1330,8 +1330,8 @@ mod tests {
             .filter(|s| s.contains("kind=bestmove_sent") && s.contains("search_id=30\t"))
             .count();
         assert_eq!(sent_count, 0, "bestmove_sent should NOT be emitted on gameover: {:?}", infos);
-        // Ensure search finalized to idle
-        assert_eq!(*ctx.search_state, SearchState::Idle);
+        // Ensure search finalized (but not yet idle - worker not joined)
+        assert_eq!(*ctx.search_state, SearchState::Finalized);
         assert!(ctx.current_bestmove_emitter.is_none());
     }
 

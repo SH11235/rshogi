@@ -7,6 +7,8 @@ pub enum SearchState {
     Searching,
     /// Stop has been requested but search is still running
     StopRequested,
+    /// Search has been finalized but worker not yet joined
+    Finalized,
 }
 
 impl SearchState {
@@ -17,7 +19,7 @@ impl SearchState {
 
     /// Check if we can start a new search
     pub fn can_start_search(&self) -> bool {
-        matches!(self, SearchState::Idle)
+        matches!(self, SearchState::Idle | SearchState::Finalized)
     }
 
     /// Transition to searching state if allowed
@@ -41,7 +43,13 @@ impl SearchState {
     }
 
     /// Transition to idle state
+    #[cfg(test)]
     pub fn set_idle(&mut self) {
         *self = SearchState::Idle;
+    }
+
+    /// Transition to finalized state
+    pub fn set_finalized(&mut self) {
+        *self = SearchState::Finalized;
     }
 }
