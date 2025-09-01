@@ -638,44 +638,6 @@ impl TimeManager {
         self.state_checker().get_time_info(self.elapsed_ms())
     }
 
-    /// Phase 4: Simplified advise_after_iteration - only provides additional safety
-    /// The main time management logic is now centralized in should_stop()
-    pub fn advise_after_iteration(&self, elapsed_ms: u64) {
-        let hard = self.inner.hard_limit_ms.load(Ordering::Relaxed);
-        if hard == u64::MAX {
-            return;
-        }
-
-        // Only check if we already have a scheduled stop
-        let current = self.inner.search_end_ms.load(Ordering::Relaxed);
-        if current != u64::MAX {
-            // Additional safety: tighten deadline if approaching hard limit
-            let safety_ms = self.calculate_safety_margin(hard);
-            let tight_deadline = hard.saturating_sub(safety_ms.saturating_mul(2)); // More conservative
-
-            // Only tighten if we're getting close and the new deadline is earlier
-            if tight_deadline < current && elapsed_ms >= tight_deadline.saturating_sub(1000) {
-                // Respect final push minimum
-                let mut adjusted_deadline = tight_deadline;
-                if self.inner.final_push_active.load(Ordering::Relaxed) {
-                    let min_ms = self.inner.final_push_min_ms.load(Ordering::Relaxed);
-                    adjusted_deadline = adjusted_deadline.max(min_ms);
-                }
-
-                if adjusted_deadline < current {
-                    self.inner.search_end_ms.store(adjusted_deadline, Ordering::Relaxed);
-                    log::debug!(
-                        "[Phase4] Tightened search_end: {}ms (was {}ms, hard={}, safety={})",
-                        adjusted_deadline,
-                        current,
-                        hard,
-                        safety_ms
-                    );
-                }
-            }
-        }
-    }
-
     /// Handle ponder hit (convert ponder to normal search)
     ///
     /// This method should be called when a ponder search becomes a real search
