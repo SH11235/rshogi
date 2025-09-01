@@ -13,16 +13,16 @@ fn test_set_search_end_rounds_to_next_second_minus_overhead() {
     let phase = GamePhase::Opening;
     let tm = TimeManager::new(&limits, Color::Black, 0, phase);
 
-    // Elapsed 1450ms -> next second 2000ms -> 2000-50(overhead)=1950
+    // Elapsed 1450ms -> next second 2000ms -> 2000-120(network_delay)=1880
     tm.set_search_end(1450);
     let scheduled = tm.scheduled_end_ms();
-    assert_eq!(scheduled, 1950, "scheduled_end should be 1950, got {scheduled}");
+    assert_eq!(scheduled, 1880, "scheduled_end should be 1880, got {scheduled}");
 
-    // Elapsed 980ms -> 1000-50=950 <= elapsed, so fallback to elapsed+1000=1980
-    // set_search_end only tightens (keeps smaller value), so it should remain 1950
+    // Elapsed 980ms -> 1000-120=880 < 980, so fallback to 980+1000=1980
+    // set_search_end only tightens (keeps smaller value), so it should remain 1880
     tm.set_search_end(980);
     let scheduled2 = tm.scheduled_end_ms();
-    assert_eq!(scheduled2, 1950, "scheduled_end should not expand (tighten-only)");
+    assert_eq!(scheduled2, 1880, "scheduled_end should not expand (tighten-only)");
 }
 
 #[test]
