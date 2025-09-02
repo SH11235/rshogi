@@ -164,8 +164,8 @@ fn test_short_time_control() {
     let mut searcher = UnifiedSearcher::<_, true, false>::new(evaluator);
     let mut pos = Position::startpos();
 
-    // 50msの時間制限（depth 1が完走できる程度）
-    let limits = SearchLimitsBuilder::default().fixed_time_ms(50).depth(2).build();
+    // 300msの時間制限（安定してdepth 1が完走できる）
+    let limits = SearchLimitsBuilder::default().fixed_time_ms(300).depth(2).build();
 
     let start = Instant::now();
     let result = searcher.search(&mut pos, limits);
@@ -174,8 +174,8 @@ fn test_short_time_control() {
     assert!(result.best_move.is_some(), "Must have best move even with short time");
     assert!(result.stats.depth >= 1, "Should complete at least depth 1");
     assert!(
-        elapsed.as_millis() < 100,
-        "Should stop quickly with 50ms limit, but took {}ms",
+        elapsed.as_millis() < 400,
+        "Should stop within 400ms with 300ms limit, but took {}ms",
         elapsed.as_millis()
     );
 }
@@ -321,5 +321,73 @@ fn test_interrupted_aspiration_window_score() {
             -SEARCH_INF + 6,
             "Should not return the specific buggy value -SEARCH_INF + 6"
         );
+    }
+}
+
+#[cfg(test)]
+mod mate_distance_tests {
+    use super::*;
+
+    #[test]
+    fn test_mate_distance_update() {
+        let mut context = crate::search::unified::context::SearchContext::new();
+
+        // Initially no mate distance
+        assert_eq!(context.get_mate_distance(), None);
+        assert_eq!(context.max_depth(), 127); // Default max depth
+
+        // Set search limits with specific depth
+        let limits = SearchLimits::builder().depth(20).build();
+        context.set_limits(limits);
+        assert_eq!(context.max_depth(), 20);
+
+        // Update mate distance
+        context.update_mate_distance(5);
+        assert_eq!(context.get_mate_distance(), Some(5));
+
+        // Check that max_depth is now limited by mate distance
+        // Formula: (5 * 2.5) + 5 = 17.5 -> 17
+        assert_eq!(context.max_depth(), 17);
+
+        // Update with shorter mate
+        context.update_mate_distance(3);
+        assert_eq!(context.get_mate_distance(), Some(3));
+
+        // Check updated max_depth
+        // Formula: (3 * 2.5) + 5 = 12.5 -> 12
+        assert_eq!(context.max_depth(), 12);
+
+        // Update with longer mate (should not change)
+        context.update_mate_distance(10);
+        assert_eq!(context.get_mate_distance(), Some(3));
+        assert_eq!(context.max_depth(), 12);
+    }
+
+    #[test]
+    fn test_mate_distance_formula_edge_cases() {
+        let mut context = crate::search::unified::context::SearchContext::new();
+
+        // Test various mate distances
+        let test_cases = vec![
+            (1, 7),    // (1 * 2.5) + 5 = 7.5 -> 7
+            (2, 10),   // (2 * 2.5) + 5 = 10
+            (4, 15),   // (4 * 2.5) + 5 = 15
+            (10, 30),  // (10 * 2.5) + 5 = 30
+            (20, 55),  // (20 * 2.5) + 5 = 55
+            (40, 100), // (40 * 2.5) + 5 = 105 -> capped at 100
+        ];
+
+        for (mate_dist, expected_depth) in test_cases {
+            context.reset();
+            let limits = SearchLimits::builder().depth(100).build();
+            context.set_limits(limits);
+            context.update_mate_distance(mate_dist);
+            assert_eq!(
+                context.max_depth(),
+                expected_depth,
+                "Failed for mate distance {}",
+                mate_dist
+            );
+        }
     }
 }

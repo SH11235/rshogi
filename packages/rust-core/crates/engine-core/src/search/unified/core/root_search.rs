@@ -62,6 +62,8 @@ where
     if moves.is_empty() {
         // No legal moves - checkmate or stalemate
         if pos.is_in_check() {
+            // Root position is checkmate - update mate distance
+            searcher.context.update_mate_distance(0);
             return (mate_score(0, false), pv); // Getting mated at root
         } else {
             return (0, pv); // Stalemate
@@ -158,11 +160,7 @@ where
         // Process events (including ponder hit) every move at root
         searcher.context.process_events(&searcher.time_manager);
 
-        // Phase 1: advise rounded stop near hard while iterating root moves
-        if let Some(ref tm) = searcher.time_manager {
-            let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
-            tm.advise_after_iteration(elapsed_ms);
-        }
+        // Time management is handled by should_stop() during search
 
         // Also check time manager at root (but ensure at least one move is fully searched)
         if move_idx > 0
@@ -181,6 +179,14 @@ where
         // Update best move
         if score > best_score {
             best_score = score;
+
+            // Check if this is a mate score and update mate distance
+            if crate::search::common::is_mate_score(score) {
+                if let Some(distance) = crate::search::common::extract_mate_distance(score) {
+                    searcher.context.update_mate_distance(distance);
+                }
+            }
+
             pv.clear();
             pv.push(mv);
 

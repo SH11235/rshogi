@@ -28,7 +28,7 @@ crates/
 │   ├── search/             # Search algorithms (basic & enhanced)
 │   ├── evaluation/         # Evaluation functions (material & NNUE)
 │   └── time_management/    # Time control
-├── engine-cli/              # USI protocol command-line interface
+├── engine-usi/              # USI protocol command-line interface
 └── webrtc-p2p/             # WebRTC communication
 
 src/                         # Legacy WASM modules
@@ -59,8 +59,8 @@ src/                         # Legacy WASM modules
 ### Quick Start
 ```bash
 # Build and run the USI engine
-cargo build --release --bin engine-cli
-./target/release/engine-cli
+cargo build --release --bin engine-usi
+./target/release/engine-usi
 
 # Set to strongest mode (EnhancedNnue)
 setoption name EngineType value EnhancedNnue

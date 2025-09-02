@@ -11,8 +11,10 @@ use std::fmt;
 pub struct TimeParameters {
     // Overhead
     pub overhead_ms: u64, // Default: 50
-    /// Worst-case network delay (GUI/IPC), used for byoyomi hard budgeting
-    pub network_delay2_ms: u64, // Default: 1000
+    /// Average network delay (GUI/IPC), used for search_end rounding
+    pub network_delay_ms: u64, // Default: 120
+    /// Worst-case network delay (GUI/IPC), used for remain upper bounds and hard limits
+    pub network_delay2_ms: u64, // Default: 800
     /// Minimum think time to ensure at least one committed iteration (ms)
     /// Applied as a lower bound to soft limit for finite time controls.
     /// Default 0 = disabled.
@@ -31,9 +33,21 @@ pub struct TimeParameters {
     pub hard_multiplier: f64, // Default: 4.0
     pub increment_usage: f64, // Default: 0.8
 
+    // Slow mover (%): scales soft/optimum budget, 100 = 1.0x
+    pub slow_mover_pct: u8, // Default: 100
+
+    // Max time ratio: clamp hard <= soft * max_time_ratio
+    pub max_time_ratio: f64, // Default: 5.0
+
     // Byoyomi specific
     pub byoyomi_soft_ratio: f64, // Default: 0.8 (80% of byoyomi time)
     pub byoyomi_hard_limit_reduction_ms: u64, // Default: 500 (additional safety margin for byoyomi hard limit)
+
+    // Move horizon (sudden-death guard). Disabled by default.
+    /// Apply guard only when remain <= trigger (0 disables).
+    pub move_horizon_trigger_ms: u64, // Default: 0
+    /// Minimum number of moves to guard (0 disables)
+    pub move_horizon_min_moves: u32, // Default: 0
 
     // Game phase factors
     pub opening_factor: f64, // Default: 1.2
@@ -44,7 +58,8 @@ impl Default for TimeParameters {
     fn default() -> Self {
         Self {
             overhead_ms: 50,
-            network_delay2_ms: 1000,
+            network_delay_ms: 120, // Average network delay for search_end rounding
+            network_delay2_ms: 800, // Reduced from 1000ms for better time utilization
             min_think_ms: 0,
             pv_base_threshold_ms: 80,
             pv_depth_slope_ms: 5,
@@ -53,10 +68,14 @@ impl Default for TimeParameters {
             soft_multiplier: 1.0,
             hard_multiplier: 4.0,
             increment_usage: 0.8,
+            slow_mover_pct: 100,
+            max_time_ratio: 5.0,
             byoyomi_soft_ratio: 0.8,
-            byoyomi_hard_limit_reduction_ms: 500,
+            byoyomi_hard_limit_reduction_ms: 100, // Reduced from 500ms following YaneuraOu design
             opening_factor: 1.2,
             endgame_factor: 0.8,
+            move_horizon_trigger_ms: 0,
+            move_horizon_min_moves: 0,
         }
     }
 }
@@ -77,6 +96,8 @@ pub enum TimeParameterError {
     SoftMultiplier { value: f64, min: f64, max: f64 },
     HardMultiplier { value: f64, min: f64, max: f64 },
     IncrementUsage { value: f64, min: f64, max: f64 },
+    SlowMoverPct { value: u8, min: u8, max: u8 },
+    MaxTimeRatio { value: f64, min: f64, max: f64 },
 }
 
 impl fmt::Display for TimeParameterError {
@@ -106,6 +127,12 @@ impl fmt::Display for TimeParameterError {
             Self::IncrementUsage { value, min, max } => {
                 write!(f, "Increment usage must be between {min} and {max}, got {value}")
             }
+            Self::SlowMoverPct { value, min, max } => {
+                write!(f, "Slow mover percent must be between {min} and {max}, got {value}")
+            }
+            Self::MaxTimeRatio { value, min, max } => {
+                write!(f, "Max time ratio must be between {min} and {max}, got {value}")
+            }
         }
     }
 }
@@ -116,12 +143,17 @@ impl std::error::Error for TimeParameterError {}
 pub mod constants {
     // Default values (mirrored from Default impl)
     pub const DEFAULT_OVERHEAD_MS: u64 = 50;
-    pub const DEFAULT_BYOYOMI_OVERHEAD_MS: u64 = 1000; // Conservative for GUI compatibility
-    pub const DEFAULT_BYOYOMI_SAFETY_MS: u64 = 500;
+    pub const DEFAULT_BYOYOMI_OVERHEAD_MS: u64 = 200; // Reduced from 1000ms for better time utilization
+    pub const DEFAULT_BYOYOMI_SAFETY_MS: u64 = 500; // Validation max, actual default is 100ms via byoyomi_hard_limit_reduction_ms
 
     // Validation ranges
     pub const MIN_OVERHEAD_MS: u64 = 0;
     pub const MAX_OVERHEAD_MS: u64 = 5000;
+    pub const MIN_NETWORK_DELAY_MS: u64 = 0;
+    pub const MAX_NETWORK_DELAY_MS: u64 = 2000; // Reasonable range for network delays (0-2000ms)
+                                                // Note: In extreme environments (virtualization, high-latency networks),
+                                                // this may need adjustment. Consider warning + clamping instead of
+                                                // hard error for production flexibility.
     pub const MIN_BYOYOMI_SAFETY_MS: u64 = 0;
     pub const MAX_BYOYOMI_SAFETY_MS: u64 = 2000;
     pub const MIN_BYOYOMI_EARLY_FINISH_RATIO: u8 = 50;
@@ -130,6 +162,12 @@ pub mod constants {
     pub const MAX_PV_STABILITY_BASE: u64 = 200;
     pub const MIN_PV_STABILITY_SLOPE: u64 = 0;
     pub const MAX_PV_STABILITY_SLOPE: u64 = 20;
+
+    // Slow mover and ratio ranges
+    pub const MIN_SLOW_MOVER_PCT: u8 = 50;
+    pub const MAX_SLOW_MOVER_PCT: u8 = 200;
+    pub const MIN_MAX_TIME_RATIO: f64 = 1.0;
+    pub const MAX_MAX_TIME_RATIO: f64 = 8.0;
 }
 
 impl TimeParametersBuilder {
@@ -153,13 +191,28 @@ impl TimeParametersBuilder {
         Ok(self)
     }
 
-    /// Set worst-case network delay (NetworkDelay2)
-    pub fn network_delay2_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
-        if ms > constants::MAX_OVERHEAD_MS {
+    /// Set average network delay for search_end rounding
+    /// Reasonable range: 0-2000ms (typically 120-400ms depending on GUI/network environment)
+    pub fn network_delay_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
+        if ms > constants::MAX_NETWORK_DELAY_MS {
             return Err(TimeParameterError::Overhead {
                 value: ms,
-                min: constants::MIN_OVERHEAD_MS,
-                max: constants::MAX_OVERHEAD_MS,
+                min: constants::MIN_NETWORK_DELAY_MS,
+                max: constants::MAX_NETWORK_DELAY_MS,
+            });
+        }
+        self.params.network_delay_ms = ms;
+        Ok(self)
+    }
+
+    /// Set worst-case network delay for remain upper bounds and hard limits
+    /// Typically network_delay_ms + 600-1000ms to handle worst-case scenarios
+    pub fn network_delay2_ms(mut self, ms: u64) -> Result<Self, TimeParameterError> {
+        if ms > constants::MAX_NETWORK_DELAY_MS {
+            return Err(TimeParameterError::Overhead {
+                value: ms,
+                min: constants::MIN_NETWORK_DELAY_MS,
+                max: constants::MAX_NETWORK_DELAY_MS,
             });
         }
         self.params.network_delay2_ms = ms;
@@ -259,8 +312,54 @@ impl TimeParametersBuilder {
         Ok(self)
     }
 
+    /// Set slow mover percent (50 - 200)
+    pub fn slow_mover_pct(mut self, pct: u8) -> Result<Self, TimeParameterError> {
+        if !(constants::MIN_SLOW_MOVER_PCT..=constants::MAX_SLOW_MOVER_PCT).contains(&pct) {
+            return Err(TimeParameterError::SlowMoverPct {
+                value: pct,
+                min: constants::MIN_SLOW_MOVER_PCT,
+                max: constants::MAX_SLOW_MOVER_PCT,
+            });
+        }
+        self.params.slow_mover_pct = pct;
+        Ok(self)
+    }
+
+    /// Set max time ratio (1.0 - 8.0)
+    pub fn max_time_ratio(mut self, ratio: f64) -> Result<Self, TimeParameterError> {
+        if !(constants::MIN_MAX_TIME_RATIO..=constants::MAX_MAX_TIME_RATIO).contains(&ratio) {
+            return Err(TimeParameterError::MaxTimeRatio {
+                value: ratio,
+                min: constants::MIN_MAX_TIME_RATIO,
+                max: constants::MAX_MAX_TIME_RATIO,
+            });
+        }
+        self.params.max_time_ratio = ratio;
+        Ok(self)
+    }
+
+    /// Enable move horizon guard (trigger_ms=0 disables)
+    pub fn move_horizon_guard(
+        mut self,
+        trigger_ms: u64,
+        min_moves: u32,
+    ) -> Result<Self, TimeParameterError> {
+        self.params.move_horizon_trigger_ms = trigger_ms;
+        self.params.move_horizon_min_moves = min_moves;
+        Ok(self)
+    }
+
     /// Build the final TimeParameters
-    pub fn build(self) -> TimeParameters {
+    pub fn build(mut self) -> TimeParameters {
+        // Ensure network_delay2_ms >= network_delay_ms (logical consistency)
+        if self.params.network_delay2_ms < self.params.network_delay_ms {
+            log::warn!(
+                "network_delay2_ms ({}) < network_delay_ms ({}), adjusting to match",
+                self.params.network_delay2_ms,
+                self.params.network_delay_ms
+            );
+            self.params.network_delay2_ms = self.params.network_delay_ms;
+        }
         self.params
     }
 }
@@ -279,7 +378,7 @@ mod tests {
     fn test_builder_default_values() {
         let params = TimeParametersBuilder::new().build();
         assert_eq!(params.overhead_ms, 50);
-        assert_eq!(params.byoyomi_hard_limit_reduction_ms, 500);
+        assert_eq!(params.byoyomi_hard_limit_reduction_ms, 100); // Reduced from 500
         assert_eq!(params.byoyomi_soft_ratio, 0.8);
         assert_eq!(params.pv_base_threshold_ms, 80);
         assert_eq!(params.pv_depth_slope_ms, 5);
@@ -384,7 +483,8 @@ mod tests {
     fn test_constants_match_defaults() {
         let params = TimeParameters::default();
         assert_eq!(params.overhead_ms, constants::DEFAULT_OVERHEAD_MS);
-        assert_eq!(params.byoyomi_hard_limit_reduction_ms, constants::DEFAULT_BYOYOMI_SAFETY_MS);
+        // Note: byoyomi_hard_limit_reduction_ms is set to 100 in defaults, but constant is 500 for compatibility
+        assert_eq!(params.byoyomi_hard_limit_reduction_ms, 100);
     }
 
     #[test]
@@ -402,5 +502,31 @@ mod tests {
             max: 200,
         };
         assert_eq!(err.to_string(), "PV stability base must be between 10 and 200, got 5");
+    }
+
+    #[test]
+    fn test_network_delay_consistency() {
+        // Test that network_delay2_ms is adjusted if less than network_delay_ms
+        let params = TimeParametersBuilder::new()
+            .network_delay_ms(500)
+            .unwrap()
+            .network_delay2_ms(300) // Less than network_delay_ms
+            .unwrap()
+            .build();
+
+        // Should be adjusted to match network_delay_ms
+        assert_eq!(params.network_delay_ms, 500);
+        assert_eq!(params.network_delay2_ms, 500);
+
+        // Test normal case where network_delay2_ms > network_delay_ms
+        let params2 = TimeParametersBuilder::new()
+            .network_delay_ms(200)
+            .unwrap()
+            .network_delay2_ms(1000)
+            .unwrap()
+            .build();
+
+        assert_eq!(params2.network_delay_ms, 200);
+        assert_eq!(params2.network_delay2_ms, 1000);
     }
 }

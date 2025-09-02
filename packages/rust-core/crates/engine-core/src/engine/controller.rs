@@ -882,7 +882,8 @@ impl Engine {
         // 2) Committed iteration PV head
         if let Some(ci) = committed {
             if let Some(&mv) = ci.pv.first() {
-                if pos.is_legal_move(mv) {
+                // Double-check: pseudo-legal then fully legal (robust against stale/TT issues)
+                if pos.is_pseudo_legal(mv) && pos.is_legal_move(mv) {
                     return FinalBest {
                         best_move: Some(mv),
                         pv: ci.pv.clone(),
@@ -896,7 +897,7 @@ impl Engine {
         // Limit reconstruction depth conservatively to keep latency within a few ms
         let tt_pv = self.reconstruct_root_pv_from_tt(pos, 24);
         if let Some(&head) = tt_pv.first() {
-            if pos.is_legal_move(head) {
+            if pos.is_pseudo_legal(head) && pos.is_legal_move(head) {
                 return FinalBest {
                     best_move: Some(head),
                     pv: tt_pv,
@@ -906,27 +907,65 @@ impl Engine {
         }
 
         // 4) Legal fallback or resign
+        // Be extra defensive: even though generate_all() returns legal moves,
+        // verify with pos.is_legal_move() before emitting to avoid rare race/edge bugs.
         let gen = MoveGenerator::new();
         match gen.generate_all(pos) {
             Ok(moves) => {
-                if let Some(&mv) = moves.as_slice().first() {
+                // Build a small preference: avoid king moves when not in check; prefer captures/drops
+                let in_check = pos.is_in_check();
+                let slice = moves.as_slice();
+                // Helper closures
+                let is_king_move = |m: &crate::shogi::Move| {
+                    m.piece_type()
+                        .or_else(|| {
+                            m.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type))
+                        })
+                        .map(|pt| matches!(pt, crate::shogi::PieceType::King))
+                        .unwrap_or(false)
+                };
+                let is_capture_or_drop =
+                    |m: &crate::shogi::Move| m.is_drop() || m.is_capture_hint();
+
+                // Legal filter
+                let legal_moves: Vec<crate::shogi::Move> =
+                    slice.iter().copied().filter(|&m| pos.is_legal_move(m)).collect();
+
+                if !legal_moves.is_empty() {
+                    // If not in check, try to avoid king moves, preferring captures/drops first
+                    let chosen = if !in_check {
+                        legal_moves
+                            .iter()
+                            .find(|m| is_capture_or_drop(m) && !is_king_move(m))
+                            .copied()
+                            .or_else(|| legal_moves.iter().find(|m| !is_king_move(m)).copied())
+                            .unwrap_or_else(|| legal_moves[0])
+                    } else {
+                        // In check: any legal evasion is fine; keep first
+                        legal_moves[0]
+                    };
+
                     return FinalBest {
-                        best_move: Some(mv),
-                        pv: vec![mv],
+                        best_move: Some(chosen),
+                        pv: vec![chosen],
                         source: FinalBestSource::LegalFallback,
                     };
                 }
+                warn!("generate_all returned no independently legal moves; resigning");
                 FinalBest {
                     best_move: None,
                     pv: Vec::new(),
                     source: FinalBestSource::Resign,
                 }
             }
-            Err(_) => FinalBest {
-                best_move: None,
-                pv: Vec::new(),
-                source: FinalBestSource::Resign,
-            },
+            Err(e) => {
+                warn!("move generation failed in final fallback: {}", e);
+                FinalBest {
+                    best_move: None,
+                    pv: Vec::new(),
+                    source: FinalBestSource::Resign,
+                }
+            }
         }
     }
 }
@@ -1135,6 +1174,91 @@ mod tests {
         let result = engine.load_nnue_weights("dummy.nnue");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Cannot load NNUE weights for non-NNUE engine");
+    }
+
+    #[test]
+    fn test_choose_final_bestmove_prefers_non_king_when_not_in_check() {
+        // Black to move, both a king move and a capture by a silver are legal.
+        // Expect: choose_final_bestmove picks non-king capture (LegalFallback heuristic).
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // Black silver can capture a pawn
+        pos.board.put_piece(
+            Square::from_usi_chars('4', 'h').unwrap(),
+            Piece::new(PieceType::Silver, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'g').unwrap(),
+            Piece::new(PieceType::Pawn, Color::White),
+        ); // target for capture 4h-5g
+        pos.side_to_move = Color::Black;
+
+        // Ensure non-zero hash to avoid TT probe panic in tests
+        pos.hash = 1;
+        pos.zobrist_hash = 1;
+        let eng = Engine::new(EngineType::Material);
+        let res = eng.choose_final_bestmove(&pos, None);
+        assert!(res.best_move.is_some());
+        let mv = res.best_move.unwrap();
+        // The move should not be a king move when a capture exists
+        let is_king = mv
+            .piece_type()
+            .or_else(|| mv.from().and_then(|sq| pos.board.piece_on(sq).map(|p| p.piece_type)))
+            .map(|pt| matches!(pt, PieceType::King))
+            .unwrap_or(false);
+        assert!(
+            !is_king,
+            "Should avoid king move when not in check; got {}",
+            crate::usi::move_to_usi(&mv)
+        );
+    }
+
+    #[test]
+    fn test_choose_final_bestmove_skips_illegal_committed() {
+        // Committed PV contains an illegal move; engine should ignore and fallback to legal.
+        let mut pos = Position::empty();
+        // Kings
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'i').unwrap(),
+            Piece::new(PieceType::King, Color::Black),
+        );
+        pos.board.put_piece(
+            Square::from_usi_chars('5', 'a').unwrap(),
+            Piece::new(PieceType::King, Color::White),
+        );
+        // One simple legal move: Black pawn can advance 7g7f
+        pos.board.put_piece(
+            Square::from_usi_chars('7', 'g').unwrap(),
+            Piece::new(PieceType::Pawn, Color::Black),
+        );
+        pos.side_to_move = Color::Black;
+
+        // Illegal committed move (move from empty square)
+        let illegal = crate::usi::parse_usi_move("3a3b").unwrap();
+        let committed = crate::search::CommittedIteration {
+            depth: 1,
+            seldepth: None,
+            score: 0,
+            pv: vec![illegal],
+            node_type: crate::search::NodeType::Exact,
+            nodes: 0,
+            elapsed: std::time::Duration::from_millis(0),
+        };
+
+        pos.hash = 1;
+        pos.zobrist_hash = 1;
+        let eng = Engine::new(EngineType::Material);
+        let res = eng.choose_final_bestmove(&pos, Some(&committed));
+        assert!(res.best_move.is_some());
+        assert_ne!(res.best_move.unwrap().to_u16(), illegal.to_u16());
     }
 
     // TODO: Fix this test after making Engine mutable
