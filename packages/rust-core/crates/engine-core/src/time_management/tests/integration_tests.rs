@@ -3,7 +3,7 @@
 use crate::time_management::{GamePhase, TimeControl, TimeLimits, TimeManager, TimeState};
 use crate::Color;
 
-use super::mock_set_time;
+use super::{mock_advance_time, mock_set_time};
 
 fn create_test_limits() -> TimeLimits {
     TimeLimits {
@@ -124,4 +124,46 @@ fn test_pv_stability_threshold_updates() {
     assert!(!checker.is_pv_stable(thr));
     // After threshold elapsed, stable
     assert!(checker.is_pv_stable(thr + 1));
+}
+
+#[test]
+fn test_should_stop_schedules_and_stops_at_search_end() {
+    mock_set_time(0);
+
+    // Use a time that allows proper rounding behavior
+    let limits = TimeLimits {
+        time_control: TimeControl::FixedTime { ms_per_move: 2000 },
+        ..Default::default()
+    };
+    let tm = TimeManager::new_with_mock_time(&limits, Color::Black, 0, GamePhase::Opening);
+
+    // Make PV stable by waiting over base threshold
+    tm.on_pv_change(0); // mark change at elapsed=0
+    mock_advance_time(90); // base 80ms + margin
+
+    // Get the opt limit (which triggers scheduling in Phase 4)
+    let opt = tm.opt_limit_ms();
+
+    // Advance to just past opt limit
+    mock_advance_time(opt - 90 + 10); // Total elapsed = opt + 10
+
+    // First should_stop schedules rounded stop (search_end), not immediate stop
+    let stop_now = tm.should_stop(0);
+    assert!(!stop_now, "should not stop immediately at opt_limit");
+
+    let scheduled = tm.scheduled_end_ms();
+    assert!(scheduled != u64::MAX, "scheduled_end must be set after opt_limit");
+
+    // Before scheduled end, should_stop must remain false
+    if tm.elapsed_ms() < scheduled {
+        assert!(!tm.should_stop(0));
+    }
+
+    // Advance to scheduled end
+    let current_elapsed = tm.elapsed_ms();
+    if scheduled > current_elapsed {
+        mock_advance_time(scheduled - current_elapsed);
+    }
+
+    assert!(tm.should_stop(0), "should stop at or after scheduled_end");
 }

@@ -13,7 +13,7 @@
 ### NNUE関連ツール
 - `create_mock_nnue` - テスト用のモックNNUE重み作成
 - `nnue_benchmark` - NNUE評価関数のパフォーマンス測定
-- **`generate_nnue_training_data`** - NNUE学習用データの生成（スキップ・レジューム機能付き）
+- **`generate_nnue_training_data`** - NNUE学習用データの生成（エンジン選択/NNUE重み/CP・WDL・Hybridラベル、スキップ・レジューム対応）
 
 ### ベンチマークツール
 - `shogi_benchmark` - 将棋エンジン全般のベンチマーク
@@ -44,22 +44,38 @@ cargo build --release --bin <ツール名>
 
 ### NNUE学習データの生成
 ```bash
-# 基本的な使用法（深さ2、バッチサイズ50）
-./target/release/generate_nnue_training_data input_positions.sfen output_training.txt
+# 基本（深さ2、バッチ50、Material評価）
+./target/release/generate_nnue_training_data input.sfen out_d2.txt 2 100 --engine material --hash-mb 16
 
-# カスタム設定（深さ3、バッチサイズ100）
-./target/release/generate_nnue_training_data input_positions.sfen output_training.txt 3 100
+# 品質重視（Enhanced、深さ3）
+./target/release/generate_nnue_training_data input.sfen out_enh_d3.txt 3 50 --engine enhanced --hash-mb 16
+
+# NNUE重みを指定してWDLラベル出力
+./target/release/generate_nnue_training_data input.sfen out_nnue_wdl.txt 3 50 \
+  --engine nnue --nnue-weights path/to/weights.nnue \
+  --label wdl --wdl-scale 600
+
+# ハイブリッド（序中盤WDL/終盤CP）
+./target/release/generate_nnue_training_data input.sfen out_hybrid.txt 3 50 \
+  --engine enhanced --label hybrid --hybrid-ply-cutoff 100
 
 # レジューム機能（自動的に続きから処理）
-./target/release/generate_nnue_training_data input_positions.sfen output_training.txt 3 100
+./target/release/generate_nnue_training_data input.sfen out_enh_d3.txt 3 50
 
 # 明示的にレジューム位置を指定
-./target/release/generate_nnue_training_data input_positions.sfen output_training.txt 3 100 5000
+./target/release/generate_nnue_training_data input.sfen out_enh_d3.txt 3 50 5000
 
 # スキップされた局面は自動的に別ファイルに保存される
-# output_training_skipped.txt - スキップされた局面
-# output_training.progress - 進捗追跡ファイル
+# out_enh_d3_skipped.txt - スキップされた局面
+# out_enh_d3.progress      - 進捗追跡ファイル
 ```
+
+主要オプション一覧:
+- `--engine material|enhanced|nnue|enhanced-nnue`（既定: material）
+- `--nnue-weights <path>`（NNUE系選択時に任意）
+- `--label cp|wdl|hybrid`（既定: cp）/ `--wdl-scale <float>` / `--hybrid-ply-cutoff <u32>`
+- `--time-limit-ms <u64>`（深さ既定値の上書き）
+- `--hash-mb <usize>`（TTサイズ、推奨 16）
 
 ### 定跡データの検証
 ```bash

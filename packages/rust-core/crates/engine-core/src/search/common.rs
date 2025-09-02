@@ -204,6 +204,25 @@ pub fn is_mate_score(score: i32) -> bool {
     score.abs() >= MATE_SCORE - MAX_PLY as i32 && score.abs() < SEARCH_INF
 }
 
+/// Extract mate distance from a mate score
+/// Returns Some(distance) if the score is a mate score, None otherwise
+#[inline]
+pub fn extract_mate_distance(score: i32) -> Option<u8> {
+    if !is_mate_score(score) {
+        return None;
+    }
+
+    // For positive scores: MATE_SCORE - distance = score
+    // For negative scores: -MATE_SCORE + distance = score
+    let distance = if score > 0 {
+        (MATE_SCORE - score) as u8
+    } else {
+        (score + MATE_SCORE) as u8
+    };
+
+    Some(distance)
+}
+
 /// Adjust mate score when storing in transposition table
 /// Mate scores are relative to root, not to current position
 ///

@@ -28,6 +28,9 @@ pub struct SearchLimits {
     /// This is set by ParallelSearcher and not exposed in the builder
     #[doc(hidden)]
     pub qnodes_counter: Option<Arc<AtomicU64>>,
+    /// Skip quiescence search at depth 0 and return immediate evaluation
+    /// This is useful for extremely time-constrained situations
+    pub immediate_eval_at_depth_zero: bool,
 }
 
 impl Default for SearchLimits {
@@ -44,6 +47,7 @@ impl Default for SearchLimits {
             iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
+            immediate_eval_at_depth_zero: false,
         }
     }
 }
@@ -109,6 +113,7 @@ pub struct SearchLimitsBuilder {
     info_callback: Option<InfoCallback>,
     iteration_callback: Option<IterationCallback>,
     ponder_hit_flag: Option<Arc<AtomicBool>>,
+    immediate_eval_at_depth_zero: bool,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -124,6 +129,7 @@ impl Default for SearchLimitsBuilder {
             info_callback: None,
             iteration_callback: None,
             ponder_hit_flag: None,
+            immediate_eval_at_depth_zero: false,
         }
     }
 }
@@ -261,6 +267,28 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set immediate evaluation at depth 0
+    ///
+    /// When enabled, the search will return static evaluation immediately at depth 0
+    /// instead of entering quiescence search. This is useful for extremely time-constrained
+    /// situations where even quiescence search might exceed time limits.
+    ///
+    /// ## Recommended Usage Conditions:
+    /// - Time budget is less than 100ms per move
+    /// - Bullet games with less than 10 seconds remaining
+    /// - Emergency situations where any legal move is better than timeout
+    /// - When qnodes_limit is very low (< 1000)
+    ///
+    /// ## Trade-offs:
+    /// - Pros: Guaranteed fast response, avoids timeout in critical situations
+    /// - Cons: May miss tactical shots, reduced playing strength
+    ///
+    /// Note: This should be used sparingly as it significantly impacts move quality.
+    pub fn immediate_eval_at_depth_zero(mut self, enable: bool) -> Self {
+        self.immediate_eval_at_depth_zero = enable;
+        self
+    }
+
     /// Build SearchLimits
     ///
     /// Validates the configuration and builds the SearchLimits.
@@ -294,6 +322,7 @@ impl SearchLimitsBuilder {
             iteration_callback: self.iteration_callback,
             ponder_hit_flag: self.ponder_hit_flag,
             qnodes_counter: None,
+            immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
         }
     }
 }
@@ -320,6 +349,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             iteration_callback: None,
             ponder_hit_flag: None,
             qnodes_counter: None,
+            immediate_eval_at_depth_zero: false,
         }
     }
 }
@@ -365,6 +395,7 @@ impl Clone for SearchLimits {
             iteration_callback: self.iteration_callback.clone(),
             ponder_hit_flag: self.ponder_hit_flag.clone(),
             qnodes_counter: self.qnodes_counter.clone(),
+            immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
         }
     }
 }
@@ -387,6 +418,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("iteration_callback", &self.iteration_callback.is_some())
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
             .field("qnodes_counter", &self.qnodes_counter.is_some())
+            .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
             .finish()
     }
 }

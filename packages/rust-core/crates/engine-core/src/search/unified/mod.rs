@@ -22,6 +22,7 @@ use crate::{
     evaluation::evaluate::Evaluator,
     search::{
         adaptive_prefetcher::AdaptivePrefetcher,
+        config,
         constants::SEARCH_INF,
         history::{CounterMoveHistory, History},
         parallel::shared::DuplicationStats,
@@ -182,7 +183,8 @@ where
         }
 
         // Get actual depth limit from limits (not from context which defaults to 127)
-        let max_depth = limits.depth.unwrap_or(127);
+        // Unused variable - removed to fix clippy warning
+        // let max_depth = limits.depth.unwrap_or(127);
 
         // Initialize search context with limits
         self.context.set_limits(limits);
@@ -193,12 +195,9 @@ where
         let mut best_node_type = NodeType::Exact;
         let mut depth = 1;
 
-        while depth <= max_depth && !self.context.should_stop() {
+        while depth <= self.context.max_depth() && !self.context.should_stop() {
             // Phase 1: advise rounded stop near hard at the start of iteration
-            if let Some(ref tm) = self.time_manager {
-                let elapsed_ms = self.context.elapsed().as_millis() as u64;
-                tm.advise_after_iteration(elapsed_ms);
-            }
+            // Removed: early advise_before_iteration to avoid premature scheduling
             // Clear all PV lines at the start of each iteration
             self.pv_table.clear_all();
 
@@ -208,11 +207,7 @@ where
             // Process events including ponder hit
             self.context.process_events(&self.time_manager);
 
-            // Phase 1: advise again after event processing (elapsed may have progressed)
-            if let Some(ref tm) = self.time_manager {
-                let elapsed_ms = self.context.elapsed().as_millis() as u64;
-                tm.advise_after_iteration(elapsed_ms);
-            }
+            // Time management is handled by should_stop() during search
 
             // Check time limits via TimeManager (skip for depth 1 to ensure at least 1 ply)
             if depth > 1 && self.context.check_time_limit(self.stats.nodes, &self.time_manager) {
@@ -316,6 +311,15 @@ where
                 best_score = score;
                 best_move = Some(pv[0]);
                 best_node_type = final_node_type;
+
+                // Check if we found a mate and update context
+                if crate::search::common::is_mate_score(score) {
+                    if let Some(distance) = crate::search::common::extract_mate_distance(score) {
+                        self.context.update_mate_distance(distance);
+                        log::debug!("Found mate in {} moves at depth {}", distance, depth);
+                    }
+                }
+
                 // Legacy triangular PVTable is not used for core PV assembly.
                 // Keep update for backwards compatibility where tests may read it.
                 self.pv_table.update_from_line(&pv);
@@ -430,11 +434,34 @@ where
                     iter_cb(&committed);
                 }
 
-                // Phase 1: advise rounded stop near hard if we've already spent opt
-                if let Some(ref tm) = self.time_manager {
-                    let elapsed_ms = self.context.elapsed().as_millis() as u64;
-                    tm.advise_after_iteration(elapsed_ms);
+                // Early stop on proven mate with stability guard (distance-based)
+                // Apply only when enabled and not in ponder/infinite modes
+                let tc = self.context.limits().time_control.clone();
+                let is_ponder = matches!(tc, crate::time_management::TimeControl::Ponder(_));
+                let is_infinite = matches!(tc, crate::time_management::TimeControl::Infinite);
+                let allow_mate_early =
+                    config::mate_early_stop_enabled() && !is_ponder && !is_infinite;
+                if allow_mate_early && crate::search::common::is_mate_score(best_score) {
+                    if let Some(d) = crate::search::common::get_mate_distance(best_score) {
+                        // Threshold: 2.5*d + 2 (rounded down)
+                        let thr = ((d * 5) / 2 + 2).max(1) as u8;
+                        // Stability: PV head unchanged from previous iteration
+                        let stable = !self.previous_pv.is_empty()
+                            && !self.stats.pv.is_empty()
+                            && self.previous_pv[0] == self.stats.pv[0];
+                        if stable && self.stats.depth >= thr {
+                            log::debug!(
+                                "[MateEarlyStop] depth={} thr={} d={} pv_head_stable=true",
+                                self.stats.depth,
+                                thr,
+                                d
+                            );
+                            break;
+                        }
+                    }
                 }
+
+                // Time management is handled by should_stop() during search
             }
 
             depth += 1;

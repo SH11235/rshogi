@@ -1,27 +1,29 @@
 # NNUE学習データ生成
 
-このドキュメントでは、NNUE（Efficiently Updatable Neural Network）評価関数用の学習データを生成する方法について説明します。
+このドキュメントでは、NNUE（Efficiently Updatable Neural Network）評価関数用の学習データを生成する方法について説明します。生成ツールはエンジン種別・NNUE重み・ラベル種別（CP/WDL/Hybrid）を指定できるようになりました。
 
 ## 概要
 
-`generate_nnue_training_data`ツールは、SFEN局面ファイルを処理し、各局面に対して探索を実行して評価データを生成します。新しいUnifiedSearcherフレームワークの`Material`エンジンタイプを使用し、効率的なデータ生成のために並列処理を実装しています。
+`generate_nnue_training_data` ツールは、SFEN局面ファイルを処理し、各局面に対して探索を実行して評価データを生成します。UnifiedSearcher フレームワーク上で動作し、以下のエンジンから選択できます：`material` / `enhanced` / `nnue` / `enhanced-nnue`。効率的なデータ生成のために並列処理を実装しています。
 
 ### 主な特徴
 
-- **段階的な探索深度設定**: 初期データ収集では浅い探索（深度2）、品質向上では深い探索（深度4以上）
-- **レジューム機能**: 処理が中断しても、自動的に続きから再開
-- **スキップ局面の保存**: タイムアウトした局面を別ファイルに保存し、後で再処理可能
-- **進捗追跡**: `.progress`ファイルで実際の処理進捗を管理（スキップ分も含む）
-- **並列処理**: Rayonを使用してすべてのCPUコアを活用
+- **エンジン選択**: `--engine material|enhanced|nnue|enhanced-nnue`
+- **NNUE重み読み込み**: `--nnue-weights <path>` でNNUE系に外部重みをロード
+- **ラベル選択**: `--label cp|wdl|hybrid`、WDLスケール `--wdl-scale`、Hybrid切替 `--hybrid-ply-cutoff`
+- **段階的な探索深度設定**: 初期は浅い探索（深度2）、品質向上では深い探索（深度4以上）
+- **時間制限の上書き**: `--time-limit-ms <ms>`
+- **TTサイズの指定**: `--hash-mb <MB>`（バッチ並列時のメモリ制御）
+- **レジューム機能**: 中断しても自動的に続きから再開
+- **スキップ局面の保存**: タイムアウト局面を別ファイルに保存し後で再処理
+- **進捗追跡**: `.progress` で実試行数を管理（スキップ含む）
+- **並列処理**: Rayonで全CPUコアを活用
 
-### なぜMaterialエンジンタイプを使用するのか
+### エンジン選択の指針
 
-学習データ生成には`Material`エンジンタイプが最適です：
-
-1. **高速な評価**: 駒価値のみの評価で、NNUEの読み込みが不要
-2. **一貫性**: すべての局面で同じ評価基準を使用
-3. **効率性**: 大量の局面を短時間で処理可能
-4. **安定性**: シンプルな評価関数のため、エラーが少ない
+- 初回の大量収集には `material` または `enhanced` が高速で安定。
+- 品質重視やWDL/Hybrid用途には `enhanced` か `nnue`/`enhanced-nnue` を推奨（重み指定可）。
+- NNUEを選ぶ場合は `--nnue-weights` で学習済み重みを指定するか、未指定時はゼロ重み（精度は低い）。
 
 ## 前提条件
 
@@ -41,28 +43,39 @@ cargo build --release --bin generate_nnue_training_data
 cd packages/rust-core
 ```
 
-### 基本コマンド
+### 基本コマンドとオプション
 
 ```bash
-./target/release/generate_nnue_training_data <入力SFENファイル> <出力学習データファイル> [深度] [バッチサイズ] [再開位置]
+./target/release/generate_nnue_training_data \
+  <入力SFENファイル> <出力学習データファイル> [深度] [バッチサイズ] [再開位置] \
+  [--engine material|enhanced|nnue|enhanced-nnue] \
+  [--nnue-weights <path>] \
+  [--label cp|wdl|hybrid] [--wdl-scale <float>] [--hybrid-ply-cutoff <u32>] \
+  [--time-limit-ms <u64>] [--hash-mb <usize>]
 ```
 
-パラメータ：
-- `深度`: 探索深度（デフォルト: 2、範囲: 1-10）
+- `深度`: 探索深度（デフォルト: 2、範囲: 1–10）
 - `バッチサイズ`: 並列処理する局面数（デフォルト: 50）
-- `再開位置`: 処理を再開する行番号（デフォルト: 0 = 自動検出）
+- `再開位置`: 行番号で再開（デフォルト: 0 = 自動検出）
+- `--engine`: 使用エンジン（デフォルト: `material`）
+- `--nnue-weights`: NNUE重みファイル（`nnue`/`enhanced-nnue` 選択時に任意）
+- `--label`: ラベル種別（`cp`=評価回帰、`wdl`=勝率、`hybrid`=手数で切替）
+- `--wdl-scale`: CP→WDL写像のスケール（デフォルト: 600.0）
+- `--hybrid-ply-cutoff`: `ply <= cutoff` でWDL、それ以降CP（デフォルト: 100）
+- `--time-limit-ms`: 深度ごとの既定値を上書き
+- `--hash-mb`: TTサイズ（MB、デフォルト: 16）
 
 ### 段階的なデータ生成（推奨）
 
 ```bash
 # Stage 1: 大量の浅い探索データ（深度2）
-./target/release/generate_nnue_training_data input.sfen output_d2.txt 2 100
+./target/release/generate_nnue_training_data input.sfen output_d2.txt 2 100 --engine material --hash-mb 16
 
 # Stage 2: 中程度の探索データ（深度3）
-./target/release/generate_nnue_training_data input.sfen output_d3.txt 3 50
+./target/release/generate_nnue_training_data input.sfen output_d3.txt 3 50 --engine enhanced --hash-mb 16
 
 # Stage 3: 高品質データ（深度4以上は慎重に）
-./target/release/generate_nnue_training_data input.sfen output_d4.txt 4 25
+./target/release/generate_nnue_training_data input.sfen output_d4.txt 4 25 --engine enhanced --hash-mb 16
 ```
 
 ### レジューム機能の使用
@@ -102,13 +115,17 @@ sfen +R1G4nl/1g4+Ss1/1kspp2p1/ppp2pS1p/4n4/P4Gp1P/1P1PP1P2/1+n2K2R1/7NL w G2P2b2
 ### メインの出力ファイル
 評価値付きのSFEN局面が含まれます：
 ```
-+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24 eval -385 # d4
-+R1G4nl/1g4+Ss1/1kspp2p1/ppp2pS1p/4n4/P4Gp1P/1P1PP1P2/1+n2K2R1/7NL w G2P2b2lp 24 eval 160 # d4
+... w ... 24 eval -385 # d4 label:cp
+... w ... 24 eval 160 wdl 0.623451 # d3 label:wdl
+... w ... 24 eval 45 # timeout_d3 label:hybrid
 ```
 
-メタデータ：
-- `# d4` - 正常に深度4まで探索完了
-- `# timeout_d3` - 深度3でタイムアウト
+出力要素:
+- `eval <cp>`: サイド・トゥ・ムーブ視点の評価値（常に出力）
+- `wdl <p>`: WDL確率（`--label wdl|hybrid` の場合のみ）
+- `# d<depth>` / `# timeout_d<depth>`: 到達深さ/タイムアウト深さ
+- `label:<cp|wdl|hybrid>`: ラベル種別のメタ情報
+- `mate:<distance>`: 詰み検出時に距離を付加
 
 ### スキップファイル（_skipped.txt）
 タイムアウトした局面の詳細情報：
@@ -130,6 +147,8 @@ sfen l1s1k2nl/1r1g2g2/2npppsp1/ppp3p1p/9/P1P2P1PP/1PSPPSP2/2G4R1/LN2KG1NL w Bb 2
 - 深度3: 200ms
 - 深度4: 400ms
 - 深度5以上: 800ms
+
+上記は既定値であり、`--time-limit-ms` で上書き可能です。
 
 ### 処理速度の目安
 - 深度2: 約50-100局面/秒
@@ -177,9 +196,10 @@ RUST_LOG=debug ./target/release/generate_nnue_training_data input.sfen output.tx
 ## 技術詳細
 
 ### エンジン設定
-- エンジンタイプ：`Material`（駒価値評価）
-- 探索アルゴリズム：基本的なアルファベータ探索
-- トランスポジションテーブル：8MB
+- エンジンタイプ：`material` / `enhanced` / `nnue` / `enhanced-nnue`
+- NNUE重み：`--nnue-weights <path>`（未指定時はゼロ重み）
+- 探索アルゴリズム：UnifiedSearcher（強化設定はLMR/NullMove/Futility等）
+- トランスポジションテーブル：`--hash-mb` で指定（推奨 16MB）
 
 ### 並列処理
 - Rayonを使用した自動並列化

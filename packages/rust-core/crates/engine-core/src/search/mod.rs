@@ -1,5 +1,6 @@
 pub mod adaptive_prefetcher;
 pub mod common;
+pub mod config;
 pub mod constants;
 pub mod history;
 pub mod limits;
