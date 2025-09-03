@@ -13,6 +13,7 @@ This package contains the WebAssembly (WASM) implementation for advanced Shogi f
 - 🤖 USI protocol engine with multiple search/evaluation modes
 - 🧠 NNUE evaluation function support
 - ⚡ Enhanced search with advanced pruning techniques
+- 📊 NNUE training tools for machine learning
 
 ## Prerequisites
 
@@ -190,6 +191,13 @@ Handles opening book data in binary format:
 - **Move Encoding**: Efficient 16-bit move representation
 - **SFEN Support**: Parse and convert SFEN notation
 - **Database**: Currently supports 100,000+ opening positions
+
+### NNUE Training Tools
+Machine learning tools for NNUE evaluation function:
+- **train_wdl_baseline**: Lightweight WDL (Win/Draw/Loss) trainer for pipeline validation
+- **train_nnue**: Full NNUE trainer with HalfKP features and row-sparse updates
+- **JSONL Support**: Direct training from annotated game data
+- **Feature extraction**: HalfKP feature generation from positions
 
 ## Performance Considerations
 
