@@ -1,6 +1,7 @@
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::search::common::{get_mate_distance, is_mate_score};
 use engine_core::search::limits::SearchLimits;
+use engine_core::search::types::TeacherProfile;
 use engine_core::Position;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +22,17 @@ struct Opts {
     hash_mb: usize,
     multipv: u8,
     nodes: Option<u64>,
+    teacher_profile: TeacherProfile,
+    output_format: OutputFormat,
+    min_depth: Option<u8>,
+    nodes_autocalibrate_ms: Option<u64>,
+    calibrate_sample: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    Text,
+    Jsonl,
 }
 
 #[derive(Clone)]
@@ -109,6 +121,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hash_mb: 16,
         multipv: 1,
         nodes: None,
+        teacher_profile: TeacherProfile::Balanced,
+        output_format: OutputFormat::Text,
+        min_depth: None,
+        nodes_autocalibrate_ms: None,
+        calibrate_sample: 200,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -202,6 +219,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--teacher-profile" => {
+                if let Some(v) = args.get(i + 1) {
+                    match v.to_ascii_lowercase().as_str() {
+                        "safe" => opts.teacher_profile = TeacherProfile::Safe,
+                        "balanced" => opts.teacher_profile = TeacherProfile::Balanced,
+                        "aggressive" => opts.teacher_profile = TeacherProfile::Aggressive,
+                        other => {
+                            eprintln!(
+                                "Error: unknown teacher profile '{}'. Use safe|balanced|aggressive",
+                                other
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --teacher-profile requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--output-format" => {
+                if let Some(v) = args.get(i + 1) {
+                    match v.to_ascii_lowercase().as_str() {
+                        "jsonl" => opts.output_format = OutputFormat::Jsonl,
+                        "text" => opts.output_format = OutputFormat::Text,
+                        other => {
+                            eprintln!("Error: unknown output format '{}'. Use text|jsonl", other);
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --output-format requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--min-depth" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
+                    opts.min_depth = Some(v);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --min-depth requires an integer value");
+                    std::process::exit(1);
+                }
+            }
+            "--nodes-autocalibrate-ms" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                    opts.nodes_autocalibrate_ms = Some(v);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --nodes-autocalibrate-ms requires an integer value");
+                    std::process::exit(1);
+                }
+            }
+            "--calibrate-sample" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                    opts.calibrate_sample = v.max(10);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --calibrate-sample requires an integer value");
+                    std::process::exit(1);
+                }
+            }
             other => {
                 eprintln!("Unknown option: {}", other);
                 std::process::exit(1);
@@ -247,7 +327,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("NNUE Training Data Generator");
     println!("============================");
-    println!("Search depth: {search_depth}");
+    let effective_depth = opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
+    println!("Search depth: {effective_depth}");
     println!("Batch size: {batch_size}");
     println!("Engine: {:?}", opts.engine);
     if let Some(ref w) = opts.nnue_weights {
@@ -262,6 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Hash size (MB): {}", opts.hash_mb);
     println!("MultiPV: {}", opts.multipv);
+    println!("Teacher profile: {:?}", opts.teacher_profile);
     if let Some(n) = opts.nodes {
         println!("Nodes (limit): {}", n);
     }
@@ -272,7 +354,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Skipped positions will be saved to: {}", skipped_path.display());
 
     // Calculate time limit based on depth (used only if --nodes is not set)
-    let time_limit_ms = opts.time_limit_override_ms.unwrap_or(match search_depth {
+    let time_limit_ms = opts.time_limit_override_ms.unwrap_or(match effective_depth {
         1 => 50,
         2 => 100,
         3 => 200,
@@ -325,14 +407,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_positions = sfen_positions.len();
     println!("\nFound {total_positions} positions in input file");
 
+    // Optional: calibrate nodes from NPS if requested and nodes not explicitly set
+    if opts.nodes.is_none() {
+        if let Some(target_ms) = opts.nodes_autocalibrate_ms {
+            println!("Starting nodes auto-calibration: target {} ms", target_ms);
+            let sample_n = opts.calibrate_sample.min(total_positions).max(10);
+            // Prepare a reusable engine for calibration
+            let mut engine = Engine::new(opts.engine);
+            engine.set_hash_size(opts.hash_mb);
+            engine.set_threads(1);
+            engine.set_multipv(opts.multipv);
+            engine.set_teacher_profile(opts.teacher_profile);
+            if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
+                if let Some(ref path) = opts.nnue_weights {
+                    let _ = engine.load_nnue_weights(path);
+                }
+            }
+
+            let mut total_nodes: u64 = 0;
+            let mut total_ms: u64 = 0;
+            for (i, (_idx, sfen)) in sfen_positions.iter().take(sample_n).enumerate() {
+                if i % 25 == 0 {
+                    println!("  calibrating {}/{}", i + 1, sample_n);
+                }
+                // Build position
+                let mut pos = match engine_core::usi::parse_sfen(sfen) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                engine.reset_for_position();
+                // Fixed-time calibration search (use min depth for stability)
+                let depth = opts.min_depth.unwrap_or(2).max(2);
+                let limits = SearchLimits::builder()
+                    .depth(depth)
+                    .fixed_time_ms(200)
+                    .multipv(opts.multipv)
+                    .build();
+                let start = std::time::Instant::now();
+                let result = engine.search(&mut pos, limits);
+                let elapsed = start.elapsed();
+                total_nodes = total_nodes.saturating_add(result.stats.nodes);
+                total_ms = total_ms.saturating_add(elapsed.as_millis() as u64);
+            }
+
+            if total_ms > 0 && total_nodes > 0 {
+                let nps = (total_nodes as f64) / (total_ms as f64 / 1000.0);
+                let target_nodes = (nps * (target_ms as f64) / 1000.0) as u64;
+                opts.nodes = Some(target_nodes.max(10_000));
+                println!(
+                    "Auto-calibration done: NPS≈{:.0}, nodes target={} ({} ms)",
+                    nps, target_nodes, target_ms
+                );
+            } else {
+                println!("Auto-calibration failed (zero ms or nodes). Using time budget.");
+            }
+        }
+    }
+
     // Skip already processed positions
     let skip_count = resume_from.max(existing_lines);
-    let sfen_positions = if skip_count > 0 {
-        println!("Skipping first {skip_count} positions (already processed)");
-        sfen_positions.into_iter().skip(skip_count).collect()
-    } else {
-        sfen_positions
-    };
 
     // Create progress file path for tracking actual progress including skipped
     let progress_path = output_path.with_extension("progress");
@@ -351,10 +484,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         skip_count
     };
 
-    // Skip based on actual progress, not just output lines
-    let sfen_positions = if actual_progress > 0 {
-        println!("Skipping first {actual_progress} positions (already attempted)");
-        sfen_positions.into_iter().skip(actual_progress).collect()
+    // Skip based on the maximum of skip_count and actual_progress to avoid double-skip
+    let positions_to_skip = skip_count.max(actual_progress);
+    let sfen_positions = if positions_to_skip > 0 {
+        println!("Skipping first {positions_to_skip} positions (already attempted)");
+        sfen_positions.into_iter().skip(positions_to_skip).collect()
     } else {
         sfen_positions
     };
@@ -366,7 +500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let processed_count = Arc::new(AtomicUsize::new(skip_count));
     let error_count = Arc::new(AtomicUsize::new(0));
     let skipped_count = Arc::new(AtomicUsize::new(0));
-    let total_attempted = Arc::new(AtomicUsize::new(actual_progress));
+    let total_attempted = Arc::new(AtomicUsize::new(positions_to_skip));
 
     let shared = GenShared {
         error_count: error_count.clone(),
@@ -375,7 +509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let env = ProcEnv {
-        depth: search_depth,
+        depth: effective_depth,
         time_limit_ms,
         opts: &opts,
         shared: &shared,
@@ -485,7 +619,11 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
     engine.set_hash_size(env.opts.hash_mb);
     // Determinism for teacher data
     engine.set_threads(1);
-    engine.set_multipv(env.opts.multipv);
+    // Reset per-position for reproducibility (must come BEFORE setting runtime knobs)
+    engine.reset_for_position();
+    // Apply runtime knobs after reset so they persist (multipv persistent)
+    engine.set_multipv_persistent(env.opts.multipv);
+    engine.set_teacher_profile(env.opts.teacher_profile);
     // Load NNUE weights if requested
     if matches!(env.opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
         if let Some(ref path) = env.opts.nnue_weights {
@@ -500,7 +638,10 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
     let stop_flag = Arc::new(AtomicBool::new(false));
 
     // Build limits: prefer nodes-based budget if provided
-    let mut builder = SearchLimits::builder().depth(env.depth).stop_flag(stop_flag.clone());
+    let mut builder = SearchLimits::builder()
+        .depth(env.depth)
+        .stop_flag(stop_flag.clone())
+        .multipv(env.opts.multipv);
     if let Some(n) = env.opts.nodes {
         // Keep nodes in both time_control and field for consistency (builder validates)
         builder = builder.fixed_nodes(n).nodes(n);
@@ -514,8 +655,8 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
     let result = engine.search(&mut pos_clone, limits);
     let elapsed = start.elapsed();
 
-    // Check if we exceeded time limit significantly
-    if elapsed.as_millis() > (env.time_limit_ms * 2) as u128 {
+    // Check if we exceeded time limit significantly (only when using time-based budget)
+    if env.opts.nodes.is_none() && elapsed.as_millis() > (env.time_limit_ms * 2) as u128 {
         if idx < 10 || (idx + 1) % 100 == 0 {
             eprintln!(
                 "Position {} took too long ({:.1}s), skipping",
@@ -575,7 +716,7 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
     };
 
     // Metadata for quality tracking
-    let mut meta = if elapsed.as_millis() > env.time_limit_ms as u128 {
+    let mut meta = if env.opts.nodes.is_none() && elapsed.as_millis() > env.time_limit_ms as u128 {
         format!(" # timeout_d{depth_reached}")
     } else {
         format!(" # d{depth_reached}")
@@ -591,17 +732,86 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
         }
     }
 
-    // Always emit CP (eval) for compatibility; optionally emit WDL
-    let mut line = format!("{sfen} eval {eval}");
-    if let Some(p) = wdl_prob_opt {
-        line.push_str(&format!(" wdl {:.6}", p));
-    }
-    line.push_str(&meta);
-    if !best2_gap_cp_meta.is_empty() {
-        line.push_str(&best2_gap_cp_meta);
-    }
+    // Output according to selected format
+    match env.opts.output_format {
+        OutputFormat::Text => {
+            let mut line = format!("{sfen} eval {eval}");
+            if let Some(p) = wdl_prob_opt {
+                line.push_str(&format!(" wdl {:.6}", p));
+            }
+            line.push_str(&meta);
+            if !best2_gap_cp_meta.is_empty() {
+                line.push_str(&best2_gap_cp_meta);
+            }
+            Some(line)
+        }
+        OutputFormat::Jsonl => {
+            use serde_json::json;
+            let mut bound1 = None;
+            let mut bound2 = None;
+            let mut gap2: Option<i32> = None;
+            let mut lines_json = Vec::new();
+            if let Some(ref lines) = result.lines {
+                for (i, l) in lines.iter().enumerate() {
+                    if i == 0 {
+                        bound1 = Some(format!("{:?}", l.bound));
+                    }
+                    if i == 1 {
+                        bound2 = Some(format!("{:?}", l.bound));
+                    }
+                    lines_json.push(json!({
+                        "multipv": l.multipv_index,
+                        "move": engine_core::usi::move_to_usi(&l.root_move),
+                        "score_internal": l.score_internal,
+                        "score_cp": l.score_cp,
+                        "bound": format!("{:?}", l.bound),
+                        "depth": l.depth,
+                        "seldepth": l.seldepth,
+                        "pv": l.pv.iter().map(engine_core::usi::move_to_usi).collect::<Vec<_>>(),
+                        "exact_exhausted": l.exact_exhausted,
+                        "exhaust_reason": l.exhaust_reason,
+                        "mate_distance": l.mate_distance,
+                    }));
+                }
+                if lines.len() >= 2 {
+                    let l0 = &lines[0];
+                    let l1 = &lines[1];
+                    gap2 = Some((l0.score_cp - l1.score_cp).abs());
+                }
+            }
 
-    Some(line)
+            let tt_hit_rate = if result.stats.nodes > 0 {
+                result.stats.tt_hits.map(|h| (h as f64) / (result.stats.nodes as f64))
+            } else {
+                None
+            };
+
+            let json_obj = json!({
+                "sfen": sfen,
+                "lines": lines_json,
+                "depth": result.stats.depth,
+                "seldepth": result.stats.seldepth,
+                "nodes": result.stats.nodes,
+                "nodes_q": result.stats.qnodes,
+                "time_ms": result.stats.elapsed.as_millis() as u64,
+                "aspiration_retries": result.stats.re_searches,
+                "pv_changed": result.stats.pv_changed,
+                "best2_gap_cp": gap2,
+                "root_fail_high_count": result.stats.root_fail_high_count,
+                "used_null": result.stats.null_cuts.map(|c| c > 0).unwrap_or(false),
+                "lmr_applied": result.stats.lmr_count.unwrap_or(0),
+                "bound1": bound1,
+                "bound2": bound2,
+                "tt_hit_rate": tt_hit_rate,
+                "root_move_index": 0,
+                "label": label_kind,
+                "eval": eval,
+                "wdl": wdl_prob_opt,
+                "meta": meta.trim(),
+            });
+            Some(json_obj.to_string())
+        }
+    }
 }
 
 #[inline]

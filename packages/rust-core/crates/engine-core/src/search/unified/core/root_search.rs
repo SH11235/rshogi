@@ -129,7 +129,11 @@ where
 
         // Search with null window for moves after the first
         let score = if move_idx == 0 {
-            -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, 1)
+            let s = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, 1);
+            if s >= beta {
+                crate::search::SearchStats::bump(&mut searcher.stats.root_fail_high_count, 1);
+            }
+            s
         } else {
             // Late Move Reduction (if enabled)
             let reduction = if USE_PRUNING && depth >= 3 && move_idx >= 4 && !pos.is_in_check() {
@@ -141,6 +145,9 @@ where
 
             let reduced_depth = (depth - 1).saturating_sub(reduction);
             let score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, 1);
+            if score >= beta {
+                crate::search::SearchStats::bump(&mut searcher.stats.root_fail_high_count, 1);
+            }
 
             // Re-search if score beats alpha
             if score > alpha && score < beta {
@@ -256,6 +263,8 @@ where
             if let Some(ref tm) = searcher.time_manager {
                 tm.on_pv_change(depth as u32);
             }
+            // Count PV head changes
+            searcher.stats.pv_changed = Some(searcher.stats.pv_changed.unwrap_or(0) + 1);
 
             if score > alpha {
                 alpha = score;
@@ -397,13 +406,20 @@ where
             )
         } else {
             let reduction = if USE_PRUNING && depth >= 3 && i >= 4 && !pos.is_in_check() {
-                crate::search::unified::pruning::lmr_reduction(depth, i as u32)
+                let r = crate::search::unified::pruning::lmr_reduction(depth, i as u32);
+                let cap = crate::search::unified::pruning::lmr_cap_for_profile(
+                    searcher.teacher_profile(),
+                );
+                r.min(cap)
             } else {
                 0
             };
             let rd = (depth - 1).saturating_sub(reduction);
             let s0 = -super::alpha_beta(searcher, pos, rd, -alpha - 1, -alpha, 1);
-            if s0 > alpha && s0 < beta {
+            if s0 >= beta {
+                crate::search::SearchStats::bump(&mut searcher.stats.root_fail_high_count, 1);
+            }
+            if (s0 > alpha && s0 < beta) || (reduction > 0 && s0 >= beta) {
                 let s1 = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, 1);
                 (s1, Bound::Exact)
             } else if s0 <= alpha {
@@ -447,7 +463,10 @@ where
         // Periodic event/time checks
         searcher.context.process_events(&searcher.time_manager);
         if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager) {
-            break;
+            // Ensure we evaluate at least one candidate before breaking
+            if !cands.is_empty() {
+                break;
+            }
         }
     }
 
@@ -477,11 +496,71 @@ where
     // Build lines for top-K, re-searching non-Exact with full window when budget allows
     let take = k_usize.min(cands.len());
     let mut lines: SmallVec<[RootLine; 4]> = SmallVec::new();
+    if take == 0 {
+        // Fallback: if no candidates (extreme budget pressure), produce at least one line
+        let gen = MoveGenerator::new();
+        if let Ok(moves) = gen.generate_all(pos) {
+            if let Some(&mv) = moves.as_slice().first() {
+                let undo = pos.do_move(mv);
+                let s = -super::alpha_beta(
+                    searcher,
+                    pos,
+                    depth.saturating_sub(1),
+                    -SEARCH_INF,
+                    SEARCH_INF,
+                    1,
+                );
+                let child_pv: &[Move] = if crate::search::types::SearchStack::is_valid_ply(1) {
+                    &searcher.search_stack[1].pv_line
+                } else {
+                    &[]
+                };
+                let mut pv = SmallVec::<[Move; 32]>::new();
+                pv.push(mv);
+                for &m in child_pv.iter() {
+                    if pv.len() >= 32 {
+                        break;
+                    }
+                    pv.push(m);
+                }
+                pos.undo_move(mv, undo);
+
+                let line = RootLine {
+                    multipv_index: 1,
+                    root_move: mv,
+                    score_internal: s,
+                    score_cp: if crate::search::common::is_mate_score(s) {
+                        s
+                    } else {
+                        s.clamp(-1200, 1200)
+                    },
+                    bound: Bound::Exact,
+                    depth: depth as u32,
+                    seldepth: searcher.stats.seldepth,
+                    pv,
+                    nodes: None,
+                    time_ms: None,
+                    exact_exhausted: true,
+                    exhaust_reason: Some("fallback".to_string()),
+                    mate_distance: if crate::search::common::is_mate_score(s) {
+                        crate::search::common::extract_mate_distance(s).map(|d| d as i32)
+                    } else {
+                        None
+                    },
+                };
+                lines.push(line);
+                return lines;
+            }
+        }
+        return lines;
+    }
     for idx in 0..take {
         let mut score = cands[idx].score;
         let mut bound = cands[idx].bound;
         let mv = cands[idx].mv;
         let mut pv = cands[idx].pv.clone();
+        let mut exact_exhausted = false;
+        let mut exhaust_reason: Option<String> = None;
 
         // Budget guard: re-search only if we have sufficient remaining budget
         if bound != Bound::Exact && has_budget_for_exactify(searcher) {
@@ -511,17 +590,48 @@ where
 
             score = s2;
             bound = Bound::Exact; // Full-window re-search yields exact root score
+        } else if bound != Bound::Exact {
+            // Could not exactify due to budget/time; mark exhaustion
+            exact_exhausted = true;
+            exhaust_reason = Some(if searcher.context.was_time_stopped() {
+                "timeout".to_string()
+            } else if searcher.context.should_stop() {
+                "user_stop".to_string()
+            } else {
+                "budget".to_string()
+            });
         }
+
+        // Prepare dual representation and mate distance
+        let score_internal = score;
+        let mate_distance = if crate::search::common::is_mate_score(score_internal) {
+            crate::search::common::extract_mate_distance(score_internal).map(|d| d as i32)
+        } else {
+            None
+        };
+        let clamp_cp = |s: i32| -> i32 {
+            if crate::search::common::is_mate_score(s) {
+                s // keep internal mate-like score for clarity; cp is still clipped below
+            } else {
+                s.clamp(-1200, 1200)
+            }
+        };
+        let score_cp = clamp_cp(score_internal);
 
         let line = RootLine {
             multipv_index: (idx as u8) + 1,
             root_move: mv,
-            score_cp: score,
+            score_internal,
+            score_cp,
             bound,
             depth: depth as u32,
+            seldepth: searcher.stats.seldepth,
             pv,
             nodes: None,
             time_ms: None,
+            exact_exhausted,
+            exhaust_reason,
+            mate_distance,
         };
         lines.push(line);
     }
@@ -545,7 +655,18 @@ where
             return false;
         }
         let remaining = limit - used;
-        let need = ((limit as f64) * 0.08) as u64; // 8%
+        // Dynamic threshold with floor for smaller budgets
+        let frac = if limit < 10_000 {
+            0.02
+        } else if limit < 50_000 {
+            0.04
+        } else {
+            0.08
+        };
+        let mut need = ((limit as f64) * frac) as u64;
+        if need < 200 {
+            need = 200;
+        }
         if remaining < need {
             return false;
         }
@@ -564,7 +685,11 @@ where
                 return false;
             }
             let remaining = total_ms - elapsed_ms;
-            let need = ((total_ms as f64) * 0.08) as u64; // 8%
+            let frac = if total_ms < 500 { 0.02 } else { 0.08 };
+            let mut need = ((total_ms as f64) * frac) as u64;
+            if need < 10 {
+                need = 10;
+            }
             if remaining < need {
                 return false;
             }

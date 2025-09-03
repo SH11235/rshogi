@@ -100,6 +100,7 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             ponder_hit_flag: None,
                             qnodes_counter: limits.qnodes_counter.clone(),
                             immediate_eval_at_depth_zero: limits.immediate_eval_at_depth_zero,
+                            multipv: limits.multipv,
                         };
 
                         // Convert to TimeLimits

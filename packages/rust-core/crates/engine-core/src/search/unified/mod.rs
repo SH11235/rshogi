@@ -110,6 +110,9 @@ where
 
     /// Number of root lines to produce (MultiPV). 1 = single PV.
     multi_pv: u8,
+
+    /// Teacher profile controlling pruning verification and caps
+    teacher_profile: crate::search::types::TeacherProfile,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool> UnifiedSearcher<E, USE_TT, USE_PRUNING>
@@ -133,6 +136,16 @@ where
     /// Get MultiPV count
     pub fn multi_pv(&self) -> u8 {
         self.multi_pv
+    }
+
+    /// Set teacher profile for pruning policy
+    pub fn set_teacher_profile(&mut self, profile: crate::search::types::TeacherProfile) {
+        self.teacher_profile = profile;
+    }
+
+    /// Get teacher profile
+    pub fn teacher_profile(&self) -> crate::search::types::TeacherProfile {
+        self.teacher_profile
     }
 
     /// Set duplication statistics for parallel search
@@ -173,6 +186,9 @@ where
         }
 
         let start_time = Instant::now();
+
+        // Extract multipv from limits for use throughout the search
+        let effective_multipv = limits.multipv;
 
         // Create TimeManager if needed
         self.time_manager =
@@ -243,7 +259,7 @@ where
 
             loop {
                 // Search at current depth with window (MultiPV-aware)
-                if self.multi_pv > 1 {
+                if effective_multipv > 1 {
                     let previous_pv = self.previous_pv.clone();
                     let lines = core::search_root_multipv(
                         self,
@@ -252,7 +268,7 @@ where
                         alpha,
                         beta,
                         &previous_pv,
-                        self.multi_pv,
+                        effective_multipv,
                     );
                     if let Some(first) = lines.first() {
                         score = first.score_cp;
@@ -592,7 +608,7 @@ where
         );
 
         // Attach last iteration's MultiPV lines if available
-        if self.multi_pv > 1 {
+        if effective_multipv > 1 {
             if let Some(lines) = last_lines {
                 // Attach lines
                 result.lines = Some(lines.clone());
@@ -602,6 +618,52 @@ where
                     result.score = first.score_cp;
                     result.stats.pv = first.pv.iter().copied().collect();
                 }
+            }
+        }
+
+        // Fallback: when MultiPV is requested but lines are absent, synthesize a single line
+        if effective_multipv > 1 && result.lines.is_none() {
+            log::error!(
+                "BUG: MultiPV={} requested but lines empty after search (depth={}, nodes={}); using fallback",
+                effective_multipv,
+                result.stats.depth,
+                result.stats.nodes
+            );
+            if let Some(best_mv) = result.best_move {
+                let mut pv_small = smallvec::SmallVec::<[Move; 32]>::new();
+                pv_small.push(best_mv);
+                for &m in self.stats.pv.iter().skip(1) {
+                    if pv_small.len() >= 32 {
+                        break;
+                    }
+                    pv_small.push(m);
+                }
+                let line = crate::search::types::RootLine {
+                    multipv_index: 1,
+                    root_move: best_mv,
+                    score_internal: result.score,
+                    score_cp: if crate::search::common::is_mate_score(result.score) {
+                        result.score
+                    } else {
+                        result.score.clamp(-1200, 1200)
+                    },
+                    bound: result.node_type,
+                    depth: result.stats.depth as u32,
+                    seldepth: result.stats.seldepth,
+                    pv: pv_small,
+                    nodes: Some(result.stats.nodes),
+                    time_ms: Some(result.stats.elapsed.as_millis() as u64),
+                    exact_exhausted: true,
+                    exhaust_reason: Some("post_fallback".to_string()),
+                    mate_distance: if crate::search::common::is_mate_score(result.score) {
+                        crate::search::common::extract_mate_distance(result.score).map(|d| d as i32)
+                    } else {
+                        None
+                    },
+                };
+                let mut lines = smallvec::SmallVec::<[crate::search::types::RootLine; 4]>::new();
+                lines.push(line);
+                result.lines = Some(lines);
             }
         }
 
@@ -676,6 +738,20 @@ where
         } else {
             CounterMoveHistory::new()
         }
+    }
+
+    /// Reset heuristics and per-search state for reproducibility between positions
+    pub fn reset_history(&mut self) {
+        if let Ok(mut h) = self.history.lock() {
+            h.clear_all();
+        }
+        self.ordering.clear_killers();
+        self.pv_table.clear();
+        self.previous_pv.clear();
+        self.stats = SearchStats::default();
+        self.context.reset();
+        self.aspiration_window.clear();
+        self.time_manager = None;
     }
 }
 

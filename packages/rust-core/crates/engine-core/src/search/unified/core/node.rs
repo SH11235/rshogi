@@ -427,11 +427,19 @@ where
             // Calculate reduced depth for Late Move Reduction (LMR)
             // saturating_sub ensures depth doesn't go negative, transitioning to quiescence search when depth=0
             let search_depth = depth.saturating_add(extension); // Add extension first
+                                                                // Apply teacher-profile LMR cap
+            let lmr_cap =
+                crate::search::unified::pruning::lmr_cap_for_profile(searcher.teacher_profile());
+            let reduction = reduction.min(lmr_cap);
             let reduced_depth = search_depth.saturating_sub(1 + reduction);
+            if reduction > 0 {
+                crate::search::SearchStats::bump(&mut searcher.stats.lmr_count, 1);
+            }
             score = -super::alpha_beta(searcher, pos, reduced_depth, -alpha - 1, -alpha, ply + 1);
 
-            // Re-search if needed
-            if score > alpha && score < beta {
+            // Re-search if needed: either principal improvement in window,
+            // or fail-high on a reduced search (verification without reduction)
+            if (score > alpha && score < beta) || (reduction > 0 && score >= beta) {
                 let full_depth = search_depth.saturating_sub(1);
                 score = -super::alpha_beta(searcher, pos, full_depth, -beta, -alpha, ply + 1);
             }
