@@ -84,7 +84,36 @@ where
         pos.undo_null_move(undo_info);
 
         if score >= beta {
-            return Some(beta);
+            // Null-verify: mandatory verification for Safe/Balanced teacher profiles
+            let must_verify = matches!(
+                searcher.teacher_profile(),
+                crate::search::types::TeacherProfile::Safe
+                    | crate::search::types::TeacherProfile::Balanced
+            );
+
+            if must_verify {
+                // Verify with reduced depth (depth-1) and narrow window
+                let verify = -super::alpha_beta(
+                    searcher,
+                    pos,
+                    depth.saturating_sub(1),
+                    -beta,
+                    -beta + 1,
+                    ply + 1,
+                );
+                if verify >= beta {
+                    // Count null move successful cut for observability
+                    crate::search::SearchStats::bump(&mut searcher.stats.null_cuts, 1);
+                    return Some(beta);
+                } else {
+                    // Verification failed; do not cut by null move
+                    return None;
+                }
+            } else {
+                // Aggressive profile: accept null cut
+                crate::search::SearchStats::bump(&mut searcher.stats.null_cuts, 1);
+                return Some(beta);
+            }
         }
     }
 

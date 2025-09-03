@@ -138,6 +138,8 @@ where
         if let Some(tt_entry) = searcher.probe_tt(hash) {
             // Verify key match before using entry
             if tt_entry.matches(hash) {
+                // Count TT hit for observability
+                crate::search::SearchStats::bump(&mut searcher.stats.tt_hits, 1);
                 // Track duplication stats
                 if let Some(ref stats) = searcher.duplication_stats {
                     // TT hit doesn't necessarily mean duplication

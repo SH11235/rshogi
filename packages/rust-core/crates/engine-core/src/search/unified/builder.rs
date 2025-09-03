@@ -126,6 +126,7 @@ where
             previous_pv: Vec::new(),
             prev_root_hash: None,
             multi_pv: 1,
+            teacher_profile: crate::search::types::TeacherProfile::Balanced,
         }
     }
 
