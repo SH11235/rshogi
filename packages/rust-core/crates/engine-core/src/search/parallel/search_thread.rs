@@ -321,19 +321,21 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
             let search_result = self.searcher.search_with_options(position, depth_limits, false);
 
             // Negate score (we searched from opponent's perspective)
-            SearchResult {
-                score: -search_result.score,
-                stats: search_result.stats,
-                best_move: Some(root_move),
-                node_type: search_result.node_type,
-                stop_info: search_result.stop_info, // Preserve stop info from sub-search
-            }
+            SearchResult::compose(
+                Some(root_move),
+                -search_result.score,
+                search_result.stats,
+                search_result.node_type,
+                search_result.stop_info, // Preserve stop info from sub-search
+                None,
+            )
         } else {
             // At depth 1, just evaluate the position
             let score = -self.searcher.evaluate(position);
-            SearchResult {
+            SearchResult::compose(
+                Some(root_move),
                 score,
-                stats: SearchStats {
+                SearchStats {
                     depth: 1,
                     nodes: 1,
                     qnodes: 0,
@@ -341,10 +343,10 @@ impl<E: Evaluator + Send + Sync + 'static> SearchThread<E> {
                     pv: vec![root_move],
                     ..Default::default()
                 },
-                best_move: Some(root_move),
-                node_type: crate::search::NodeType::Exact, // Depth 1 evaluation is exact
-                stop_info: Some(crate::search::types::StopInfo::default()), // Consistent with other cases
-            }
+                crate::search::NodeType::Exact, // Depth 1 evaluation is exact
+                Some(crate::search::types::StopInfo::default()), // Consistent with other cases
+                None,
+            )
         };
 
         // Unmake the move

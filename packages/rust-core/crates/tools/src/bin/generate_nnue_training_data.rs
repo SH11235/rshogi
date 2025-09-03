@@ -19,6 +19,8 @@ struct Opts {
     hybrid_ply_cutoff: u32,
     time_limit_override_ms: Option<u64>,
     hash_mb: usize,
+    multipv: u8,
+    nodes: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -105,6 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hybrid_ply_cutoff: 100,
         time_limit_override_ms: None,
         hash_mb: 16,
+        multipv: 1,
+        nodes: None,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -180,6 +184,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--multipv" => {
+                if let Some(k) = args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
+                    opts.multipv = k.max(1);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --multipv requires an integer value");
+                    std::process::exit(1);
+                }
+            }
+            "--nodes" => {
+                if let Some(n) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                    opts.nodes = Some(n);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --nodes requires an integer value");
+                    std::process::exit(1);
+                }
+            }
             other => {
                 eprintln!("Unknown option: {}", other);
                 std::process::exit(1);
@@ -239,13 +261,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("Hash size (MB): {}", opts.hash_mb);
+    println!("MultiPV: {}", opts.multipv);
+    if let Some(n) = opts.nodes {
+        println!("Nodes (limit): {}", n);
+    }
     println!("CPU cores: {:?}", std::thread::available_parallelism());
     if resume_from > 0 || existing_lines > 0 {
         println!("Resuming from position: {}", resume_from.max(existing_lines));
     }
     println!("Skipped positions will be saved to: {}", skipped_path.display());
 
-    // Calculate time limit based on depth
+    // Calculate time limit based on depth (used only if --nodes is not set)
     let time_limit_ms = opts.time_limit_override_ms.unwrap_or(match search_depth {
         1 => 50,
         2 => 100,
@@ -253,7 +279,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         4 => 400,
         _ => 800,
     });
-    println!("Time limit per position: {time_limit_ms}ms");
+    if opts.nodes.is_none() {
+        println!("Time limit per position: {time_limit_ms}ms");
+    } else {
+        println!("Nodes-based budget active; time limit ignored for search.");
+    }
 
     // Open files - append mode if resuming
     let output_file = Arc::new(Mutex::new(
@@ -453,6 +483,9 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
     let mut engine = Engine::new(env.opts.engine);
     // Reduce TT to avoid high memory usage with parallel batches
     engine.set_hash_size(env.opts.hash_mb);
+    // Determinism for teacher data
+    engine.set_threads(1);
+    engine.set_multipv(env.opts.multipv);
     // Load NNUE weights if requested
     if matches!(env.opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
         if let Some(ref path) = env.opts.nnue_weights {
@@ -466,12 +499,15 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
     }
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    // Simple timeout without complex threading
-    let limits = SearchLimits::builder()
-        .depth(env.depth)
-        .fixed_time_ms(env.time_limit_ms)
-        .stop_flag(stop_flag.clone())
-        .build();
+    // Build limits: prefer nodes-based budget if provided
+    let mut builder = SearchLimits::builder().depth(env.depth).stop_flag(stop_flag.clone());
+    if let Some(n) = env.opts.nodes {
+        // Keep nodes in both time_control and field for consistency (builder validates)
+        builder = builder.fixed_nodes(n).nodes(n);
+    } else {
+        builder = builder.fixed_time_ms(env.time_limit_ms);
+    }
+    let limits = builder.build();
 
     let start = std::time::Instant::now();
     let mut pos_clone = position.clone();
@@ -508,6 +544,21 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
 
     let eval = result.score;
     let depth_reached = result.stats.depth;
+
+    // Compute best2 gap if MultiPV >= 2 and we have 2 lines
+    let mut best2_gap_cp_meta = String::new();
+    if env.opts.multipv >= 2 {
+        if let Some(ref lines) = result.lines {
+            if lines.len() >= 2 {
+                let l0 = &lines[0];
+                let l1 = &lines[1];
+                // Prefer reporting gap even if non-Exact, but you may filter later
+                let gap = (l0.score_cp - l1.score_cp).abs();
+                best2_gap_cp_meta =
+                    format!(" best2_gap_cp:{} bound0:{:?} bound1:{:?}", gap, l0.bound, l1.bound);
+            }
+        }
+    }
 
     // Compute labels
     let (label_kind, wdl_prob_opt) = match env.opts.label {
@@ -546,6 +597,9 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
         line.push_str(&format!(" wdl {:.6}", p));
     }
     line.push_str(&meta);
+    if !best2_gap_cp_meta.is_empty() {
+        line.push_str(&best2_gap_cp_meta);
+    }
 
     Some(line)
 }

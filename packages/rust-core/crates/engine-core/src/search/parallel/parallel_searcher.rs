@@ -758,25 +758,27 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                         Ok(moves) => moves,
                         Err(_) => {
                             // King not found - should not happen in valid position
-                            return SearchResult {
-                                best_move: None,
-                                score: -SEARCH_INF,
-                                stats: SearchStats::default(),
-                                node_type: NodeType::Exact,
-                                stop_info: Some(StopInfo::default()),
-                            };
+                            return SearchResult::compose(
+                                None,
+                                -SEARCH_INF,
+                                SearchStats::default(),
+                                NodeType::Exact,
+                                Some(StopInfo::default()),
+                                None,
+                            );
                         }
                     };
 
                     if legal_moves.is_empty() {
                         // No legal moves - game over
-                        SearchResult {
-                            score: -i32::MAX / 2,
-                            stats: SearchStats::default(),
-                            best_move: None,
-                            node_type: NodeType::Exact,
-                            stop_info: Some(StopInfo::default()),
-                        }
+                        SearchResult::compose(
+                            None,
+                            -i32::MAX / 2,
+                            SearchStats::default(),
+                            NodeType::Exact,
+                            Some(StopInfo::default()),
+                            None,
+                        )
                     } else {
                         // Convert MoveList to Vec<Move>
                         let legal_moves_vec: Vec<Move> = legal_moves.iter().copied().collect();
@@ -822,13 +824,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
                             let final_move =
                                 Move::from_u16(sp_arc.best_move.load(Ordering::Acquire) as u16);
 
-                            SearchResult {
-                                score: final_score,
-                                stats: pv_result.stats,
-                                best_move: Some(final_move),
-                                node_type: NodeType::Exact,
-                                stop_info: Some(StopInfo::default()),
-                            }
+                            SearchResult::compose(
+                                Some(final_move),
+                                final_score,
+                                pv_result.stats,
+                                NodeType::Exact,
+                                Some(StopInfo::default()),
+                                None,
+                            )
                         } else {
                             // Use PV result if no siblings or beta cutoff
                             pv_result

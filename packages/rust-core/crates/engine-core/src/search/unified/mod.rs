@@ -107,6 +107,9 @@ where
 
     /// Previous root position hash (to detect position changes)
     prev_root_hash: Option<u64>,
+
+    /// Number of root lines to produce (MultiPV). 1 = single PV.
+    multi_pv: u8,
 }
 
 impl<E, const USE_TT: bool, const USE_PRUNING: bool> UnifiedSearcher<E, USE_TT, USE_PRUNING>
@@ -120,6 +123,16 @@ where
     /// Disable prefetching (for benchmarking TTOnly mode)
     pub fn set_disable_prefetch(&mut self, disable: bool) {
         self.disable_prefetch = disable;
+    }
+
+    /// Set MultiPV count (1 = single PV)
+    pub fn set_multi_pv(&mut self, k: u8) {
+        self.multi_pv = k.max(1);
+    }
+
+    /// Get MultiPV count
+    pub fn multi_pv(&self) -> u8 {
+        self.multi_pv
     }
 
     /// Set duplication statistics for parallel search
@@ -195,6 +208,9 @@ where
         let mut best_node_type = NodeType::Exact;
         let mut depth = 1;
 
+        // Keep last iteration's lines for final result when MultiPV > 1
+        let mut last_lines: Option<smallvec::SmallVec<[crate::search::types::RootLine; 4]>> = None;
+
         while depth <= self.context.max_depth() && !self.context.should_stop() {
             // Phase 1: advise rounded stop near hard at the start of iteration
             // Removed: early advise_before_iteration to avoid premature scheduling
@@ -226,10 +242,31 @@ where
             let mut final_node_type = NodeType::Exact; // Default, will be updated in loop
 
             loop {
-                // Search at current depth with window
-                let result = self.search_root_with_window(pos, depth, alpha, beta);
-                score = result.0;
-                pv = result.1;
+                // Search at current depth with window (MultiPV-aware)
+                if self.multi_pv > 1 {
+                    let previous_pv = self.previous_pv.clone();
+                    let lines = core::search_root_multipv(
+                        self,
+                        pos,
+                        depth,
+                        alpha,
+                        beta,
+                        &previous_pv,
+                        self.multi_pv,
+                    );
+                    if let Some(first) = lines.first() {
+                        score = first.score_cp;
+                        pv = first.pv.iter().copied().collect();
+                        last_lines = Some(lines);
+                    } else {
+                        score = -SEARCH_INF;
+                        pv = Vec::new();
+                    }
+                } else {
+                    let result = self.search_root_with_window(pos, depth, alpha, beta);
+                    score = result.0;
+                    pv = result.1;
+                }
 
                 // Check if score is within window
                 if score > alpha && score < beta {
@@ -545,13 +582,30 @@ where
             }
         }
 
-        SearchResult {
-            best_move: final_best_move,
-            score: final_score,
-            stats: self.stats.clone(),
-            node_type: final_node_type,
-            stop_info: final_stop_info,
+        let mut result = SearchResult::compose(
+            final_best_move,
+            final_score,
+            self.stats.clone(),
+            final_node_type,
+            final_stop_info,
+            None,
+        );
+
+        // Attach last iteration's MultiPV lines if available
+        if self.multi_pv > 1 {
+            if let Some(lines) = last_lines {
+                // Attach lines
+                result.lines = Some(lines.clone());
+                // Sync legacy fields with lines[0]
+                if let Some(first) = lines.first() {
+                    result.best_move = Some(first.root_move);
+                    result.score = first.score_cp;
+                    result.stats.pv = first.pv.iter().copied().collect();
+                }
+            }
         }
+
+        result
     }
 
     /// Search from the root position with aspiration window

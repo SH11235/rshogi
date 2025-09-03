@@ -65,6 +65,30 @@ impl SearchStats {
     }
 }
 
+/// Bound kind for root lines (alias to NodeType for clarity)
+pub type Bound = NodeType;
+
+/// Root line representation for MultiPV (index 0 is the best line)
+#[derive(Clone, Debug)]
+pub struct RootLine {
+    /// 1-based MultiPV index (USI compatible)
+    pub multipv_index: u8,
+    /// Root move of this line
+    pub root_move: Move,
+    /// Evaluation score in centipawns (side to move)
+    pub score_cp: i32,
+    /// Bound type (Exact/LowerBound/UpperBound)
+    pub bound: Bound,
+    /// Depth reached for this line
+    pub depth: u32,
+    /// Principal variation for this root move
+    pub pv: SmallVec<[Move; 32]>,
+    /// Optional meta: nodes counted when producing this line
+    pub nodes: Option<u64>,
+    /// Optional meta: time in milliseconds spent on this line
+    pub time_ms: Option<u64>,
+}
+
 /// Search result
 #[derive(Clone, Debug)]
 pub struct SearchResult {
@@ -78,6 +102,8 @@ pub struct SearchResult {
     pub node_type: NodeType,
     /// Information about why the search stopped (None for legacy compatibility)
     pub stop_info: Option<StopInfo>,
+    /// MultiPV lines (index 0 is best). None means unavailable.
+    pub lines: Option<SmallVec<[RootLine; 4]>>,
 }
 
 impl SearchResult {
@@ -89,6 +115,7 @@ impl SearchResult {
             stats,
             node_type: NodeType::Exact, // Default to Exact for backward compatibility
             stop_info: Some(StopInfo::default()), // Default stop info instead of None
+            lines: None,
         }
     }
 
@@ -105,6 +132,7 @@ impl SearchResult {
             stats,
             node_type,
             stop_info: Some(StopInfo::default()), // Default stop info instead of None
+            lines: None,
         }
     }
 
@@ -122,6 +150,7 @@ impl SearchResult {
             stats,
             node_type,
             stop_info: Some(stop_info),
+            lines: None,
         }
     }
 
@@ -155,6 +184,49 @@ impl SearchResult {
                 soft_limit_ms: 0,
                 hard_limit_ms: 0,
             }),
+            lines: None,
+        }
+    }
+
+    /// Create a search result from MultiPV lines (index 0 is best)
+    pub fn from_lines(lines: SmallVec<[RootLine; 4]>, mut stats: SearchStats) -> Self {
+        let (best_move, score, node_type) = if let Some(first) = lines.first() {
+            // Sync legacy fields with the best line
+            let mv = first.pv.first().copied().or(Some(first.root_move));
+            // Publish PV into stats for backward compatibility
+            stats.pv = first.pv.iter().copied().collect();
+            (mv, first.score_cp, first.bound)
+        } else {
+            (None, 0, NodeType::Exact)
+        };
+
+        Self {
+            best_move,
+            score,
+            stats,
+            node_type,
+            stop_info: Some(StopInfo::default()),
+            lines: Some(lines),
+        }
+    }
+
+    /// Compose a SearchResult with all primary fields and optional lines.
+    /// Centralizes initialization to be resilient to future struct changes.
+    pub fn compose(
+        best_move: Option<Move>,
+        score: i32,
+        stats: SearchStats,
+        node_type: NodeType,
+        stop_info: Option<StopInfo>,
+        lines: Option<SmallVec<[RootLine; 4]>>,
+    ) -> Self {
+        Self {
+            best_move,
+            score,
+            stats,
+            node_type,
+            stop_info,
+            lines,
         }
     }
 }
