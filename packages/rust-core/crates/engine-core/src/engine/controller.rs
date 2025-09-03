@@ -211,6 +211,34 @@ impl Engine {
         detect_game_phase(position, position.ply as u32, Profile::Search)
     }
 
+    /// Set MultiPV lines (1 = single PV). Applies to all active searchers.
+    pub fn set_multipv(&self, k: u8) {
+        let k = k.clamp(1, 20);
+        // For each searcher type, set if present
+        if let Ok(mut guard) = self.material_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_multi_pv(k);
+            }
+        }
+        if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_multi_pv(k);
+            }
+        }
+        if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_multi_pv(k);
+            }
+        }
+        if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_multi_pv(k);
+            }
+        }
+
+        // Parallel searchers: MultiPV is not yet supported in parallel mode.
+    }
+
     /// Calculate active threads based on game phase
     #[cfg(test)]
     #[allow(clippy::manual_div_ceil)] // For compatibility with Rust < 1.73
