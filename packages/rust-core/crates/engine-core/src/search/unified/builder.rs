@@ -125,6 +125,7 @@ where
             duplication_stats: self.duplication_stats,
             previous_pv: Vec::new(),
             prev_root_hash: None,
+            multi_pv: 1,
         }
     }
 
