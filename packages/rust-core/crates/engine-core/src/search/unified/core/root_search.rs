@@ -8,10 +8,12 @@ use crate::{
     search::{
         common::mate_score,
         constants::SEARCH_INF,
+        types::{Bound, RootLine},
         unified::{tt_operations::TTOperations, UnifiedSearcher},
     },
     shogi::{Move, Position},
 };
+use smallvec::SmallVec;
 
 /// Search from root position with aspiration window
 pub fn search_root_with_window<E, const USE_TT: bool, const USE_PRUNING: bool>(
@@ -302,4 +304,272 @@ where
     }
 
     (best_score, pv)
+}
+
+/// Experimental: Root search that returns MultiPV lines (skeleton)
+///
+/// For now, this function produces a single line equivalent to the current
+/// search_root_with_window result. Future revisions will enumerate all root
+/// moves and refine the top-K lines to Exact.
+pub fn search_root_multipv<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &mut UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+    pos: &mut Position,
+    depth: u8,
+    initial_alpha: i32,
+    initial_beta: i32,
+    previous_pv: &[Move],
+    k: u8,
+) -> SmallVec<[RootLine; 4]>
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    // Prepare move list
+    let move_gen = MoveGenerator::new();
+    let moves = match move_gen.generate_all(pos) {
+        Ok(moves) => moves,
+        Err(_) => return SmallVec::new(),
+    };
+
+    if moves.is_empty() {
+        return SmallVec::new();
+    }
+
+    // Order root moves using TT and previous PV
+    let tt_move = if USE_TT {
+        searcher
+            .tt
+            .as_ref()
+            .and_then(|tt| tt.probe(pos.zobrist_hash))
+            .and_then(|e| e.get_move())
+    } else {
+        None
+    };
+
+    let ordered: SmallVec<[Move; 128]> = if USE_TT || USE_PRUNING {
+        let v = searcher.ordering.order_moves_at_root(pos, &moves, tt_move, previous_pv);
+        let mut sv = SmallVec::with_capacity(v.len());
+        sv.extend_from_slice(&v);
+        sv
+    } else {
+        let mut sv = SmallVec::with_capacity(moves.len());
+        sv.extend_from_slice(moves.as_slice());
+        sv
+    };
+
+    // Collect candidates: (mv, score, bound, pv)
+    struct Cand {
+        mv: Move,
+        score: i32,
+        bound: Bound,
+        pv: SmallVec<[Move; 32]>,
+    }
+
+    let mut alpha = initial_alpha;
+    let beta = initial_beta;
+    let mut cands: SmallVec<[Cand; 64]> = SmallVec::new();
+
+    for (i, &mv) in ordered.iter().enumerate() {
+        if searcher.context.should_stop() {
+            break;
+        }
+
+        // Make move
+        let undo = pos.do_move(mv);
+
+        // Optional prefetch
+        if USE_TT && !searcher.disable_prefetch {
+            searcher.prefetch_tt(pos.zobrist_hash);
+        }
+
+        // Search pattern like PVS at root
+        let (score, bound) = if i == 0 {
+            let alpha0 = initial_alpha; // capture initial alpha for first move bound classification
+            let s = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha0, 1);
+            (
+                s,
+                if s <= alpha0 {
+                    Bound::UpperBound
+                } else if s >= beta {
+                    Bound::LowerBound
+                } else {
+                    Bound::Exact
+                },
+            )
+        } else {
+            let reduction = if USE_PRUNING && depth >= 3 && i >= 4 && !pos.is_in_check() {
+                crate::search::unified::pruning::lmr_reduction(depth, i as u32)
+            } else {
+                0
+            };
+            let rd = (depth - 1).saturating_sub(reduction);
+            let s0 = -super::alpha_beta(searcher, pos, rd, -alpha - 1, -alpha, 1);
+            if s0 > alpha && s0 < beta {
+                let s1 = -super::alpha_beta(searcher, pos, depth - 1, -beta, -alpha, 1);
+                (s1, Bound::Exact)
+            } else if s0 <= alpha {
+                (s0, Bound::UpperBound)
+            } else {
+                (s0, Bound::LowerBound)
+            }
+        };
+
+        // Snapshot child PV from stack (ply=1)
+        let child_pv: &[Move] = if crate::search::types::SearchStack::is_valid_ply(1) {
+            &searcher.search_stack[1].pv_line
+        } else {
+            &[]
+        };
+        let mut pv_snap: SmallVec<[Move; 32]> = SmallVec::new();
+        pv_snap.push(mv);
+        if !child_pv.is_empty() {
+            for &m in child_pv.iter() {
+                pv_snap.push(m);
+                if pv_snap.len() >= 32 {
+                    break;
+                }
+            }
+        }
+
+        // Undo move
+        pos.undo_move(mv, undo);
+
+        // Update alpha and store candidate
+        if score > alpha {
+            alpha = score;
+        }
+        cands.push(Cand {
+            mv,
+            score,
+            bound,
+            pv: pv_snap,
+        });
+
+        // Periodic event/time checks
+        searcher.context.process_events(&searcher.time_manager);
+        if searcher.context.check_time_limit(searcher.stats.nodes, &searcher.time_manager) {
+            break;
+        }
+    }
+
+    // Select top-K candidates efficiently (partial sort)
+    fn bound_pri(b: Bound) -> i32 {
+        match b {
+            Bound::Exact => 2,
+            Bound::LowerBound => 1,
+            Bound::UpperBound => 0,
+        }
+    }
+    let k_usize = k.max(1) as usize;
+    if cands.len() > k_usize {
+        let (left, _pivot, _right) = cands.select_nth_unstable_by(k_usize - 1, |a, b| {
+            b.score.cmp(&a.score).then_with(|| bound_pri(b.bound).cmp(&bound_pri(a.bound)))
+        });
+        left.sort_unstable_by(|a, b| {
+            b.score.cmp(&a.score).then_with(|| bound_pri(b.bound).cmp(&bound_pri(a.bound)))
+        });
+    } else {
+        cands.sort_unstable_by(|a, b| {
+            b.score.cmp(&a.score).then_with(|| bound_pri(b.bound).cmp(&bound_pri(a.bound)))
+        });
+    }
+    // Note: no full re-sort here; top-K slice already sorted above
+
+    // Build lines for top-K, re-searching non-Exact with full window when budget allows
+    let take = k_usize.min(cands.len());
+    let mut lines: SmallVec<[RootLine; 4]> = SmallVec::new();
+    for idx in 0..take {
+        let mut score = cands[idx].score;
+        let mut bound = cands[idx].bound;
+        let mv = cands[idx].mv;
+        let mut pv = cands[idx].pv.clone();
+
+        // Budget guard: re-search only if we have sufficient remaining budget
+        if bound != Bound::Exact && has_budget_for_exactify(searcher) {
+            let undo = pos.do_move(mv);
+
+            // Re-search with full window for robustness
+            let s2 = -super::alpha_beta(searcher, pos, depth - 1, -SEARCH_INF, SEARCH_INF, 1);
+
+            // Capture PV again after re-search
+            let child_pv: &[Move] = if crate::search::types::SearchStack::is_valid_ply(1) {
+                &searcher.search_stack[1].pv_line
+            } else {
+                &[]
+            };
+            pv.clear();
+            pv.push(mv);
+            if !child_pv.is_empty() {
+                for &m in child_pv.iter() {
+                    pv.push(m);
+                    if pv.len() >= 32 {
+                        break;
+                    }
+                }
+            }
+
+            pos.undo_move(mv, undo);
+
+            score = s2;
+            bound = Bound::Exact; // Full-window re-search yields exact root score
+        }
+
+        let line = RootLine {
+            multipv_index: (idx as u8) + 1,
+            root_move: mv,
+            score_cp: score,
+            bound,
+            depth: depth as u32,
+            pv,
+            nodes: None,
+            time_ms: None,
+        };
+        lines.push(line);
+    }
+
+    lines
+}
+
+/// Determine if there is sufficient remaining budget to perform a full-window
+/// re-search to exactify a non-Exact root line.
+/// Heuristic: require at least ~8% of node or time budget remaining.
+fn has_budget_for_exactify<E, const USE_TT: bool, const USE_PRUNING: bool>(
+    searcher: &UnifiedSearcher<E, USE_TT, USE_PRUNING>,
+) -> bool
+where
+    E: Evaluator + Send + Sync + 'static,
+{
+    // Node-based budget
+    if let Some(limit) = searcher.context.limits().node_limit() {
+        let used = searcher.stats.nodes;
+        if used >= limit {
+            return false;
+        }
+        let remaining = limit - used;
+        let need = ((limit as f64) * 0.08) as u64; // 8%
+        if remaining < need {
+            return false;
+        }
+    }
+
+    // Time-based budget via TimeManager
+    if let Some(ref tm) = searcher.time_manager {
+        let elapsed_ms = searcher.context.elapsed().as_millis() as u64;
+        let total_ms = if tm.hard_limit_ms() > 0 {
+            tm.hard_limit_ms()
+        } else {
+            tm.soft_limit_ms()
+        };
+        if total_ms > 0 {
+            if elapsed_ms >= total_ms {
+                return false;
+            }
+            let remaining = total_ms - elapsed_ms;
+            let need = ((total_ms as f64) * 0.08) as u64; // 8%
+            if remaining < need {
+                return false;
+            }
+        }
+    }
+
+    !searcher.context.should_stop()
 }

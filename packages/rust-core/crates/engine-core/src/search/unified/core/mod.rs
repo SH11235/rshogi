@@ -16,6 +16,7 @@ mod time_control;
 pub use pv::PVTable;
 pub use pv_validation::pv_local_sanity;
 pub use quiescence::quiescence_search;
+pub use root_search::search_root_multipv;
 pub use root_search::search_root_with_window;
 
 use crate::{

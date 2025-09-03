@@ -45,6 +45,8 @@ struct UsiOptions {
     mate_early_stop: bool,
     // Stop bounded wait time
     stop_wait_ms: u64,
+    // MultiPV lines
+    multipv: u8,
 }
 
 impl Default for UsiOptions {
@@ -72,6 +74,7 @@ impl Default for UsiOptions {
             force_terminate_on_hard_deadline: true,
             mate_early_stop: true,
             stop_wait_ms: 200,
+            multipv: 1,
         }
     }
 }
@@ -160,6 +163,7 @@ impl EngineState {
             eng.set_engine_type(self.opts.engine_type);
             eng.set_threads(self.opts.threads);
             eng.set_hash_size(self.opts.hash_mb);
+            eng.set_multipv(self.opts.multipv);
             // NNUE weights
             if matches!(self.opts.engine_type, EngineType::Nnue | EngineType::EnhancedNnue) {
                 if let Some(ref path) = self.opts.eval_file {
@@ -320,6 +324,42 @@ fn finalize_and_send(
         hard_ms
     ));
 
+    // Emit MultiPV info lines (if available and not stale)
+    if let Some(res) = result {
+        if !stale {
+            if let Some(ref lines) = res.lines {
+                if !lines.is_empty() {
+                    for (i, ln) in lines.iter().enumerate() {
+                        // info multipv N depth D time T nodes N score cp X [lowerbound|upperbound] pv ...
+                        let mut s = String::from("info");
+                        s.push_str(&format!(" multipv {}", i + 1));
+                        s.push_str(&format!(" depth {}", res.stats.depth));
+                        s.push_str(&format!(" time {}", res.stats.elapsed.as_millis()));
+                        s.push_str(&format!(" nodes {}", res.stats.nodes));
+                        s.push_str(&format!(" score cp {}", ln.score_cp));
+                        match ln.bound {
+                            engine_core::search::types::NodeType::UpperBound => {
+                                s.push_str(" upperbound")
+                            }
+                            engine_core::search::types::NodeType::LowerBound => {
+                                s.push_str(" lowerbound")
+                            }
+                            _ => {}
+                        }
+                        if !ln.pv.is_empty() {
+                            s.push_str(" pv");
+                            for m in ln.pv.iter() {
+                                s.push(' ');
+                                s.push_str(&move_to_usi(m));
+                            }
+                        }
+                        usi_println(&s);
+                    }
+                }
+            }
+        }
+    }
+
     // Emit bestmove (+ ponder)
     let final_usi = if mate_flag {
         "resign".to_string()
@@ -353,6 +393,7 @@ fn send_id_and_options(opts: &UsiOptions) {
     ));
     usi_println(&format!("option name Threads type spin default {} min 1 max 256", opts.threads));
     usi_println("option name USI_Ponder type check default true");
+    usi_println(&format!("option name MultiPV type spin default {} min 1 max 20", opts.multipv));
     usi_println(&format!(
         "option name MinThinkMs type spin default {} min 0 max 10000",
         opts.min_think_ms
@@ -913,6 +954,13 @@ fn main() -> Result<()> {
                             if let Some(v) = value {
                                 let v = v.to_lowercase();
                                 state.opts.ponder = matches!(v.as_str(), "true" | "1" | "on");
+                            }
+                        }
+                        "MultiPV" => {
+                            if let Some(v) = value {
+                                if let Ok(k) = v.parse::<u8>() {
+                                    state.opts.multipv = k.clamp(1, 20);
+                                }
                             }
                         }
                         "MinThinkMs" => {
