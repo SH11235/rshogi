@@ -380,8 +380,8 @@ impl Default for SharedHistory {
 impl SharedHistory {
     /// Create a new shared history table
     pub fn new() -> Self {
-        // 2 colors * 15 piece types * 81 squares = 2430 entries
-        let size = 2 * 15 * 81;
+        // 2 colors * 15 piece types * board squares entries
+        let size = 2 * 15 * crate::shogi::SHOGI_BOARD_SIZE;
         let mut table = Vec::with_capacity(size);
         for _ in 0..size {
             table.push(PaddedAtomicU32::new(AtomicU32::new(0)));
@@ -396,7 +396,9 @@ impl SharedHistory {
         let piece_idx = piece_type as usize;
         let square_idx = to.index();
 
-        color_idx * 15 * 81 + piece_idx * 81 + square_idx
+        color_idx * 15 * crate::shogi::SHOGI_BOARD_SIZE
+            + piece_idx * crate::shogi::SHOGI_BOARD_SIZE
+            + square_idx
     }
 
     /// Get history score

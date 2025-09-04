@@ -3,6 +3,7 @@
 //! Pre-computed attack patterns for fast move generation
 
 use super::board::{Bitboard, Color, PieceType, Square};
+use crate::shogi::{BOARD_FILES, BOARD_RANKS, SHOGI_BOARD_SIZE};
 use lazy_static::lazy_static;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoroshiro128Plus;
@@ -13,7 +14,7 @@ pub use super::board::HAND_ORDER;
 /// Zobrist keys for hashing
 pub struct ZobristKeys {
     /// Keys for pieces indexed by [piece_type][color][square]
-    pub pieces: [[[u64; 81]; 2]; 14],
+    pub pieces: [[[u64; SHOGI_BOARD_SIZE]; 2]; 14],
     /// Key for side to move
     pub side_to_move: u64,
     /// Keys for pieces in hand indexed by [piece_type][color][count]
@@ -27,7 +28,7 @@ impl ZobristKeys {
         let mut rng = Xoroshiro128Plus::seed_from_u64(0x1234567890abcdef);
 
         let mut keys = Self {
-            pieces: [[[0; 81]; 2]; 14],
+            pieces: [[[0; SHOGI_BOARD_SIZE]; 2]; 14],
             side_to_move: rng.random(),
             hands: [[[0; 19]; 2]; 7],
         };
@@ -35,7 +36,7 @@ impl ZobristKeys {
         // Generate piece keys
         for piece_type in 0..14 {
             for color in 0..2 {
-                for square in 0..81 {
+                for square in 0..SHOGI_BOARD_SIZE {
                     keys.pieces[piece_type][color][square] = rng.random();
                 }
             }
@@ -100,22 +101,22 @@ impl Direction {
 /// Pre-computed attack tables
 struct AttackTables {
     /// King attacks from each square
-    pub king_attacks: [Bitboard; 81],
+    pub king_attacks: [Bitboard; SHOGI_BOARD_SIZE],
 
     /// Gold attacks from each square (also used for promoted pieces)
-    pub gold_attacks: [[Bitboard; 81]; 2], // [color][square]
+    pub gold_attacks: [[Bitboard; SHOGI_BOARD_SIZE]; 2], // [color][square]
 
     /// Silver attacks from each square
-    pub silver_attacks: [[Bitboard; 81]; 2], // [color][square]
+    pub silver_attacks: [[Bitboard; SHOGI_BOARD_SIZE]; 2], // [color][square]
 
     /// Knight attacks from each square
-    pub knight_attacks: [[Bitboard; 81]; 2], // [color][square]
+    pub knight_attacks: [[Bitboard; SHOGI_BOARD_SIZE]; 2], // [color][square]
 
     /// Lance attacks from each square (without blockers)
-    pub lance_attacks: [[Bitboard; 81]; 2], // [color][square]
+    pub lance_attacks: [[Bitboard; SHOGI_BOARD_SIZE]; 2], // [color][square]
 
     /// Pawn attacks from each square
-    pub pawn_attacks: [[Bitboard; 81]; 2], // [color][square]
+    pub pawn_attacks: [[Bitboard; SHOGI_BOARD_SIZE]; 2], // [color][square]
 
     /// File masks for quick file operations
     pub file_masks: [Bitboard; 9],
@@ -125,15 +126,15 @@ struct AttackTables {
 
     /// Bitboard of squares between two squares (exclusive)
     /// between_bb[sq1][sq2] gives the squares between sq1 and sq2
-    pub between_bb: [[Bitboard; 81]; 81],
+    pub between_bb: [[Bitboard; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE],
 
     /// Ray attacks from each square in each direction (without blockers)
     /// ray_bb[sq][dir] gives all squares in direction dir from sq
-    pub ray_bb: [[Bitboard; 8]; 81], // 8 directions per square
+    pub ray_bb: [[Bitboard; 8]; SHOGI_BOARD_SIZE], // 8 directions per square
 
     /// Lance-specific ray attacks for optimization
     /// lance_rays[color][sq] gives all squares a lance can attack from sq
-    pub lance_rays: [[Bitboard; 81]; 2], // [color][square]
+    pub lance_rays: [[Bitboard; SHOGI_BOARD_SIZE]; 2], // [color][square]
 }
 
 impl Default for AttackTables {
@@ -146,68 +147,64 @@ impl AttackTables {
     /// Generate all attack tables
     pub fn new() -> Self {
         let mut tables = AttackTables {
-            king_attacks: [Bitboard::EMPTY; 81],
-            gold_attacks: [[Bitboard::EMPTY; 81]; 2],
-            silver_attacks: [[Bitboard::EMPTY; 81]; 2],
-            knight_attacks: [[Bitboard::EMPTY; 81]; 2],
-            lance_attacks: [[Bitboard::EMPTY; 81]; 2],
-            pawn_attacks: [[Bitboard::EMPTY; 81]; 2],
+            king_attacks: [Bitboard::EMPTY; SHOGI_BOARD_SIZE],
+            gold_attacks: [[Bitboard::EMPTY; SHOGI_BOARD_SIZE]; 2],
+            silver_attacks: [[Bitboard::EMPTY; SHOGI_BOARD_SIZE]; 2],
+            knight_attacks: [[Bitboard::EMPTY; SHOGI_BOARD_SIZE]; 2],
+            lance_attacks: [[Bitboard::EMPTY; SHOGI_BOARD_SIZE]; 2],
+            pawn_attacks: [[Bitboard::EMPTY; SHOGI_BOARD_SIZE]; 2],
             file_masks: [Bitboard::EMPTY; 9],
             rank_masks: [Bitboard::EMPTY; 9],
-            between_bb: [[Bitboard::EMPTY; 81]; 81],
-            ray_bb: [[Bitboard::EMPTY; 8]; 81],
-            lance_rays: [[Bitboard::EMPTY; 81]; 2],
+            between_bb: [[Bitboard::EMPTY; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE],
+            ray_bb: [[Bitboard::EMPTY; 8]; SHOGI_BOARD_SIZE],
+            lance_rays: [[Bitboard::EMPTY; SHOGI_BOARD_SIZE]; 2],
         };
 
         // Generate file and rank masks
-        for file in 0..9 {
+        for file in 0..BOARD_FILES {
             let mut file_mask = Bitboard::EMPTY;
-            for rank in 0..9 {
-                file_mask.set(Square::new(file, rank));
+            for rank in 0..BOARD_RANKS {
+                file_mask.set(Square::new(file as u8, rank as u8));
             }
-            tables.file_masks[file as usize] = file_mask;
+            tables.file_masks[file] = file_mask;
         }
 
-        for rank in 0..9 {
+        for rank in 0..BOARD_RANKS {
             let mut rank_mask = Bitboard::EMPTY;
-            for file in 0..9 {
-                rank_mask.set(Square::new(file, rank));
+            for file in 0..BOARD_FILES {
+                rank_mask.set(Square::new(file as u8, rank as u8));
             }
-            tables.rank_masks[rank as usize] = rank_mask;
+            tables.rank_masks[rank] = rank_mask;
         }
 
         // Generate tables for each square
-        for sq in 0..81 {
-            let square = Square(sq);
-            tables.king_attacks[sq as usize] = tables.generate_king_attacks(square);
+        for sq in 0..SHOGI_BOARD_SIZE {
+            let square = Square(sq as u8);
+            tables.king_attacks[sq] = tables.generate_king_attacks(square);
 
             for color in [Color::Black, Color::White] {
                 let color_idx = color as usize;
-                tables.gold_attacks[color_idx][sq as usize] =
-                    tables.generate_gold_attacks(square, color);
-                tables.silver_attacks[color_idx][sq as usize] =
+                tables.gold_attacks[color_idx][sq] = tables.generate_gold_attacks(square, color);
+                tables.silver_attacks[color_idx][sq] =
                     tables.generate_silver_attacks(square, color);
-                tables.knight_attacks[color_idx][sq as usize] =
+                tables.knight_attacks[color_idx][sq] =
                     tables.generate_knight_attacks(square, color);
-                tables.lance_attacks[color_idx][sq as usize] =
-                    tables.generate_lance_attacks(square, color);
-                tables.pawn_attacks[color_idx][sq as usize] =
-                    tables.generate_pawn_attacks(square, color);
+                tables.lance_attacks[color_idx][sq] = tables.generate_lance_attacks(square, color);
+                tables.pawn_attacks[color_idx][sq] = tables.generate_pawn_attacks(square, color);
 
                 // Generate lance rays (full ray without blockers)
-                tables.lance_rays[color_idx][sq as usize] =
-                    tables.generate_lance_attacks(square, color);
+                tables.lance_rays[color_idx][sq] = tables.generate_lance_attacks(square, color);
             }
 
             // Generate ray attacks for all directions
             for (dir_idx, &dir) in Direction::ALL.iter().enumerate() {
-                tables.ray_bb[sq as usize][dir_idx] = tables.generate_ray_attacks(square, dir);
+                tables.ray_bb[sq][dir_idx] = tables.generate_ray_attacks(square, dir);
             }
         }
 
         // Generate between bitboards
-        for sq1 in 0..81 {
-            for sq2 in 0..81 {
+        for sq1 in 0..SHOGI_BOARD_SIZE {
+            for sq2 in 0..SHOGI_BOARD_SIZE {
                 tables.between_bb[sq1][sq2] =
                     tables.generate_between_bb(Square(sq1 as u8), Square(sq2 as u8));
             }

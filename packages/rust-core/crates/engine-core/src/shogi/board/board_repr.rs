@@ -4,6 +4,8 @@
 
 use super::bitboard::Bitboard;
 use super::types::{Color, Piece, PieceType, Square};
+use crate::shogi::board::types::NUM_PIECE_TYPES;
+use crate::shogi::board_constants::SHOGI_BOARD_SIZE;
 #[cfg(debug_assertions)]
 use log::warn;
 
@@ -15,7 +17,7 @@ pub struct Board {
     /// - [手番(先手/後手)][駒種(8種類)]の2次元配列
     /// - 例: piece_bb[BLACK][PAWN] = 先手の歩の位置すべて
     /// - 用途: 特定の駒種の移動生成、駒の価値計算
-    pub piece_bb: [[Bitboard; 8]; 2], // 8 piece types
+    pub piece_bb: [[Bitboard; NUM_PIECE_TYPES]; 2], // 8 piece types
 
     /// All pieces by color (cache)
     /// - 目的: 各手番の全駒位置をキャッシュ
@@ -41,18 +43,18 @@ pub struct Board {
     pub promoted_bb: Bitboard,
 
     /// Piece on each square (fast access)
-    pub squares: [Option<Piece>; 81],
+    pub squares: [Option<Piece>; SHOGI_BOARD_SIZE],
 }
 
 impl Board {
     /// Create empty board
     pub fn empty() -> Self {
         Board {
-            piece_bb: [[Bitboard::EMPTY; 8]; 2],
+            piece_bb: [[Bitboard::EMPTY; NUM_PIECE_TYPES]; 2],
             occupied_bb: [Bitboard::EMPTY; 2],
             all_bb: Bitboard::EMPTY,
             promoted_bb: Bitboard::EMPTY,
-            squares: [None; 81],
+            squares: [None; SHOGI_BOARD_SIZE],
         }
     }
 

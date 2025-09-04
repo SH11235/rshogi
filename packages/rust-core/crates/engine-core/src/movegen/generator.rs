@@ -7,6 +7,7 @@ use crate::shogi::board_constants::{
 };
 use crate::shogi::moves::{Move, MoveList};
 use crate::shogi::{Bitboard, Color, PieceType, Position, Square};
+use crate::shogi::{BOARD_FILES, BOARD_RANKS};
 
 use super::error::MoveGenError;
 
@@ -515,14 +516,16 @@ impl<'a> MoveGenImpl<'a> {
                         // Black lance moves toward rank 0 (up)
                         // Get all squares on the file up to (but not including) current rank
                         let file_mask = Bitboard(FILE_MASKS[lance_file as usize]);
-                        let rank_mask = Bitboard((1u128 << (from.rank() * 9)) - 1);
+                        let rank_mask =
+                            Bitboard((1u128 << (from.rank() as usize * BOARD_FILES)) - 1);
                         file_mask & rank_mask
                     }
                     Color::White => {
                         // White lance moves toward rank 8 (down)
                         // Get all squares on the file from rank+1 to rank 8
                         let file_mask = Bitboard(FILE_MASKS[lance_file as usize]);
-                        let rank_mask = !Bitboard((1u128 << ((from.rank() + 1) * 9)) - 1);
+                        let rank_mask =
+                            !Bitboard((1u128 << ((from.rank() as usize + 1) * BOARD_FILES)) - 1);
                         file_mask & rank_mask & Bitboard::ALL
                     }
                 };
@@ -697,7 +700,7 @@ impl<'a> MoveGenImpl<'a> {
                             let rank_step =
                                 (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
                             let mut r = self.king_sq.rank() as i8 + rank_step;
-                            while (0..9).contains(&r) {
+                            while (0..BOARD_RANKS as i8).contains(&r) {
                                 self.king_danger_squares
                                     .set(Square::new(self.king_sq.file(), r as u8));
                                 r += rank_step;
@@ -707,7 +710,7 @@ impl<'a> MoveGenImpl<'a> {
                             let file_step =
                                 (self.king_sq.file() as i8 - checker_sq.file() as i8).signum();
                             let mut f = self.king_sq.file() as i8 + file_step;
-                            while (0..9).contains(&f) {
+                            while (0..BOARD_FILES as i8).contains(&f) {
                                 self.king_danger_squares
                                     .set(Square::new(f as u8, self.king_sq.rank()));
                                 f += file_step;
@@ -724,7 +727,9 @@ impl<'a> MoveGenImpl<'a> {
                         // Move one step away from checker direction
                         let mut file = self.king_sq.file() as i8 + file_step;
                         let mut rank = self.king_sq.rank() as i8 + rank_step;
-                        while (0..9).contains(&file) && (0..9).contains(&rank) {
+                        while (0..BOARD_FILES as i8).contains(&file)
+                            && (0..BOARD_RANKS as i8).contains(&rank)
+                        {
                             self.king_danger_squares.set(Square::new(file as u8, rank as u8));
                             file += file_step;
                             rank += rank_step;
@@ -736,7 +741,7 @@ impl<'a> MoveGenImpl<'a> {
                             let rank_step =
                                 (self.king_sq.rank() as i8 - checker_sq.rank() as i8).signum();
                             let mut r = self.king_sq.rank() as i8 + rank_step;
-                            while (0..9).contains(&r) {
+                            while (0..BOARD_RANKS as i8).contains(&r) {
                                 self.king_danger_squares
                                     .set(Square::new(self.king_sq.file(), r as u8));
                                 r += rank_step;

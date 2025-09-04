@@ -4,6 +4,7 @@
 //! opening book binary format. Uses Zobrist hashing for good distribution
 //! and collision avoidance.
 
+use crate::shogi::{BOARD_FILES, BOARD_RANKS, SHOGI_BOARD_SIZE};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
@@ -18,7 +19,7 @@ pub struct HashStatistics {
 /// Position hasher using Zobrist hashing
 pub struct PositionHasher {
     /// Zobrist hash tables for pieces at each square
-    zobrist_pieces: [[u64; 32]; 81], // 81 squares, 32 piece types (including promoted)
+    zobrist_pieces: [[u64; 32]; SHOGI_BOARD_SIZE], // board squares, 32 piece types (including promoted)
     /// Zobrist hash for turn (future use - see docs/opening_book_future_improvements.md)
     #[allow(dead_code)]
     zobrist_turn: u64,
@@ -34,7 +35,7 @@ impl PositionHasher {
     /// Create a new position hasher
     pub fn new() -> Self {
         // Initialize Zobrist tables with pseudo-random values
-        let mut zobrist_pieces = [[0u64; 32]; 81];
+        let mut zobrist_pieces = [[0u64; 32]; SHOGI_BOARD_SIZE];
         let mut rng_state = 0x123456789abcdef0u64;
 
         // Fill piece tables
@@ -157,8 +158,12 @@ impl PositionHasher {
     fn hash_board_position(&self, board_position: &str) -> Result<u64> {
         let ranks: Vec<&str> = board_position.split('/').collect();
 
-        if ranks.len() != 9 {
-            return Err(anyhow!("Invalid rank count: expected 9, got {}", ranks.len()));
+        if ranks.len() != BOARD_RANKS {
+            return Err(anyhow!(
+                "Invalid rank count: expected {}, got {}",
+                BOARD_RANKS,
+                ranks.len()
+            ));
         }
 
         let mut hash = 0u64;
@@ -177,14 +182,14 @@ impl PositionHasher {
         let mut chars = rank.chars().peekable();
 
         while let Some(ch) = chars.next() {
-            if file_idx >= 9 {
+            if file_idx >= BOARD_FILES {
                 return Err(anyhow!("Rank too long: {}", rank));
             }
 
             if ch.is_ascii_digit() {
                 // Empty squares
                 let empty_count = ch.to_digit(10).unwrap() as usize;
-                if file_idx + empty_count > 9 {
+                if file_idx + empty_count > BOARD_FILES {
                     return Err(anyhow!("Invalid empty square count in rank: {}", rank));
                 }
                 file_idx += empty_count;
@@ -202,15 +207,19 @@ impl PositionHasher {
                 };
 
                 let piece_index = self.get_piece_index(piece_type, promoted)?;
-                let square_index = rank_idx * 9 + file_idx;
+                let idx = crate::shogi::square_index(file_idx, rank_idx);
 
-                hash ^= self.zobrist_pieces[square_index][piece_index];
+                hash ^= self.zobrist_pieces[idx][piece_index];
                 file_idx += 1;
             }
         }
 
-        if file_idx != 9 {
-            return Err(anyhow!("Rank too short: expected 9 squares, got {}", file_idx));
+        if file_idx != BOARD_FILES {
+            return Err(anyhow!(
+                "Rank too short: expected {} squares, got {}",
+                BOARD_FILES,
+                file_idx
+            ));
         }
 
         Ok(hash)

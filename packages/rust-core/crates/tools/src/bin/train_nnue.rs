@@ -40,6 +40,7 @@ use std::time::{Instant, SystemTime};
 use clap::{arg, Command};
 use engine_core::{
     evaluation::nnue::features::{extract_features, FE_END},
+    shogi::SHOGI_BOARD_SIZE,
     Color, Position,
 };
 use rand::rngs::StdRng;
@@ -118,8 +119,8 @@ struct CacheHeader {
 #[derive(Clone)]
 struct Network {
     // Input layer: HalfKP features -> accumulator
-    // Dimensions: [81 * FE_END, acc_dim] flattened to 1D
-    w0: Vec<f32>, // [(81 * FE_END) * acc_dim]
+    // Dimensions: [N * FE_END, acc_dim] flattened to 1D
+    w0: Vec<f32>, // [(SHOGI_BOARD_SIZE * FE_END) * acc_dim]
     b0: Vec<f32>, // [acc_dim]
 
     // Output layer: accumulator -> score
@@ -127,7 +128,7 @@ struct Network {
     b2: f32,
 
     // Hyperparameters
-    input_dim: usize, // 81 * FE_END
+    input_dim: usize, // SHOGI_BOARD_SIZE * FE_END
     acc_dim: usize,
     relu_clip: f32,
 }
@@ -135,7 +136,7 @@ struct Network {
 impl Network {
     fn new(acc_dim: usize, relu_clip: i32, rng: &mut impl Rng) -> Self {
         // Initialize weights with small random values
-        let input_dim = 81 * FE_END;
+        let input_dim = SHOGI_BOARD_SIZE * FE_END;
         let w0_size = input_dim * acc_dim;
         let mut w0 = vec![0.0f32; w0_size];
         for w in w0.iter_mut() {
@@ -419,8 +420,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("  Output: {}", out_dir.display());
     println!("  Settings: {:?}", config);
-    println!("  Feature dimension (input): {} (HalfKP)", 81 * FE_END);
-    println!("  Network: {} -> {} -> 1", 81 * FE_END, config.accumulator_dim);
+    println!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
+    println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
 
     // Load training data
     let start_time = Instant::now();
@@ -1202,7 +1203,7 @@ fn save_network(network: &Network, path: &Path) -> Result<(), Box<dyn std::error
     writeln!(file, "ARCHITECTURE SINGLE_CHANNEL")?; // Architecture type
     writeln!(file, "ACC_DIM {}", network.acc_dim)?;
     writeln!(file, "RELU_CLIP {}", network.relu_clip)?;
-    writeln!(file, "FEATURE_DIM {}", 81 * FE_END)?; // Total feature dimension
+    writeln!(file, "FEATURE_DIM {}", SHOGI_BOARD_SIZE * FE_END)?; // Total feature dimension
     writeln!(file, "END_HEADER")?;
 
     // Write binary data for better compatibility
