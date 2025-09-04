@@ -113,8 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         weight_gap_ref: app.get_one::<String>("weight-gap-ref").unwrap().parse()?,
         weight_exact: app.get_one::<String>("weight-exact").unwrap().parse()?,
         weight_non_exact: app.get_one::<String>("weight-non-exact").unwrap().parse()?,
-        exclude_no_legal_move: app.contains_id("exclude-no-legal-move"),
-        exclude_fallback: app.contains_id("exclude-fallback"),
+        exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
+        exclude_fallback: app.get_flag("exclude-fallback"),
     };
 
     let input_path = app.get_one::<String>("input").unwrap();
@@ -325,6 +325,16 @@ fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
     1.0 / (1.0 + (-cp as f32 / scale).exp())
 }
 
+fn bce_with_logits(logit: f32, target: f32) -> (f32, f32) {
+    // Numerically stable binary cross-entropy with logits
+    // Returns (loss, gradient)
+    let max_val = 0.0_f32.max(logit);
+    let loss = max_val - logit * target + ((-logit.abs()).exp() + 1.0).ln();
+    let sigmoid = 1.0 / (1.0 + (-logit).exp());
+    let grad = sigmoid - target;
+    (loss, grad)
+}
+
 fn calculate_weight(pos_data: &TrainingPosition, config: &Config) -> f32 {
     let mut weight = 1.0;
 
@@ -349,7 +359,7 @@ fn calculate_weight(pos_data: &TrainingPosition, config: &Config) -> f32 {
 
     // Depth-based weight
     if let (Some(depth), Some(seldepth)) = (pos_data.depth, pos_data.seldepth) {
-        if seldepth < depth + 6 {
+        if seldepth < depth.saturating_add(6) {
             weight *= 0.8;
         }
     }
@@ -419,12 +429,7 @@ fn compute_batch_gradient(weights: &[f32], batch: &[Sample], config: &Config) ->
 
         // Compute loss and gradient based on label type
         let (loss, grad_factor) = match config.label_type.as_str() {
-            "wdl" => {
-                let pred = 1.0 / (1.0 + (-logit).exp());
-                let loss = -(sample.label * pred.ln() + (1.0 - sample.label) * (1.0 - pred).ln());
-                let grad_factor = pred - sample.label;
-                (loss, grad_factor)
-            }
+            "wdl" => bce_with_logits(logit, sample.label),
             "cp" => {
                 let error = logit - sample.label;
                 let loss = 0.5 * error * error;
@@ -459,8 +464,8 @@ fn compute_validation_loss(weights: &[f32], samples: &[Sample], config: &Config)
 
         let loss = match config.label_type.as_str() {
             "wdl" => {
-                let pred = 1.0 / (1.0 + (-logit).exp());
-                -(sample.label * pred.ln() + (1.0 - sample.label) * (1.0 - pred).ln())
+                let (loss, _) = bce_with_logits(logit, sample.label);
+                loss
             }
             "cp" => {
                 let error = logit - sample.label;
