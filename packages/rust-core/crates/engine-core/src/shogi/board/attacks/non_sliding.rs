@@ -14,7 +14,7 @@ use crate::shogi::board::{Bitboard, Color, PieceType, Square};
 pub fn check_non_sliding_attacks(
     sq: Square,
     by_color: Color,
-    piece_bb: &[[Bitboard; 8]; 2],
+    piece_bb: &[[Bitboard; crate::shogi::board::types::NUM_PIECE_TYPES]; 2],
     promoted_bb: Bitboard,
 ) -> bool {
     // Check pawn attacks
@@ -71,7 +71,7 @@ pub fn check_non_sliding_attacks(
 pub fn get_non_sliding_attackers(
     sq: Square,
     by_color: Color,
-    piece_bb: &[[Bitboard; 8]; 2],
+    piece_bb: &[[Bitboard; crate::shogi::board::types::NUM_PIECE_TYPES]; 2],
     promoted_bb: Bitboard,
 ) -> Bitboard {
     let mut attackers = Bitboard::EMPTY;

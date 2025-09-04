@@ -2,6 +2,8 @@
 //!
 //! Tracks the success rate of moves in different contexts to improve move ordering
 
+use crate::shogi::board::NUM_PIECE_TYPES;
+use crate::shogi::SHOGI_BOARD_SIZE;
 use crate::{shogi::Move, Color, PieceType, Square};
 
 /// Maximum history score
@@ -14,7 +16,7 @@ const HISTORY_AGING_DIVISOR: i32 = 2;
 #[derive(Clone)]
 pub struct CounterMoveHistory {
     /// [color][from_square][to_square] -> counter move
-    table: [[[Option<Move>; 81]; 81]; 2],
+    table: [[[Option<Move>; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
 }
 
 impl Default for CounterMoveHistory {
@@ -27,7 +29,7 @@ impl CounterMoveHistory {
     /// Create new counter move history
     pub fn new() -> Self {
         CounterMoveHistory {
-            table: [[[None; 81]; 81]; 2],
+            table: [[[None; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
         }
     }
 
@@ -56,7 +58,7 @@ impl CounterMoveHistory {
 
     /// Clear all counter moves
     pub fn clear(&mut self) {
-        self.table = [[[None; 81]; 81]; 2];
+        self.table = [[[None; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2];
     }
 }
 
@@ -64,7 +66,7 @@ impl CounterMoveHistory {
 #[derive(Clone)]
 pub struct ButterflyHistory {
     /// [color][from_square][to_square] -> score
-    scores: [[[i32; 81]; 81]; 2],
+    scores: [[[i32; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
 }
 
 impl Default for ButterflyHistory {
@@ -77,7 +79,7 @@ impl ButterflyHistory {
     /// Create new butterfly history
     pub fn new() -> Self {
         ButterflyHistory {
-            scores: [[[0; 81]; 81]; 2],
+            scores: [[[0; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2],
         }
     }
 
@@ -135,7 +137,7 @@ impl ButterflyHistory {
 
     /// Clear all history scores
     pub fn clear(&mut self) {
-        self.scores = [[[0; 81]; 81]; 2];
+        self.scores = [[[0; SHOGI_BOARD_SIZE]; SHOGI_BOARD_SIZE]; 2];
     }
 }
 
@@ -157,9 +159,9 @@ impl Default for ContinuationHistory {
 impl ContinuationHistory {
     /// Create new continuation history
     pub fn new() -> Self {
-        // Simplified: 2 colors * 16 piece types * 81 squares * 16 piece types * 81 squares
+        // Simplified: 2 colors * 16 piece types * N squares * 16 piece types * N squares
         // This is large but manageable (~3.4MB)
-        let size = 2 * 16 * 81 * 16 * 81;
+        let size = 2 * 16 * SHOGI_BOARD_SIZE * 16 * SHOGI_BOARD_SIZE;
         ContinuationHistory {
             scores: vec![0; size],
             size,
@@ -176,10 +178,11 @@ impl ContinuationHistory {
         curr_to: Square,
     ) -> usize {
         let color_idx = color as usize;
-        let idx = color_idx * (16 * 81 * 16 * 81)
-            + prev_piece * (81 * 16 * 81)
-            + prev_to.index() * (16 * 81)
-            + curr_piece * 81
+        let n = SHOGI_BOARD_SIZE;
+        let idx = color_idx * (16 * n * 16 * n)
+            + prev_piece * (n * 16 * n)
+            + prev_to.index() * (16 * n)
+            + curr_piece * n
             + curr_to.index();
 
         debug_assert!(idx < self.size);
@@ -252,7 +255,7 @@ impl ContinuationHistory {
 #[derive(Clone)]
 pub struct CaptureHistory {
     /// [color][attacker_piece][victim_piece] -> score
-    scores: [[[i32; 8]; 8]; 2],
+    scores: [[[i32; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
 }
 
 impl Default for CaptureHistory {
@@ -265,7 +268,7 @@ impl CaptureHistory {
     /// Create new capture history
     pub fn new() -> Self {
         CaptureHistory {
-            scores: [[[0; 8]; 8]; 2],
+            scores: [[[0; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2],
         }
     }
 
@@ -309,7 +312,7 @@ impl CaptureHistory {
 
     /// Clear all capture history
     pub fn clear(&mut self) {
-        self.scores = [[[0; 8]; 8]; 2];
+        self.scores = [[[0; NUM_PIECE_TYPES]; NUM_PIECE_TYPES]; 2];
     }
 }
 

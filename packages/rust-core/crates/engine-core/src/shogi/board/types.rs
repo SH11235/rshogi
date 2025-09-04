@@ -24,16 +24,22 @@ impl Square {
     /// Consider using `from_usi_chars()` instead for safety.
     #[inline]
     pub const fn new(file: u8, rank: u8) -> Self {
-        debug_assert!(file < 9 && rank < 9, "Square::new called with invalid coordinates");
-        Square(rank * 9 + file)
+        // Use board constants for dimensions
+        // Note: BOARD_FILES/BOARD_RANKS are usize; cast to u8 for comparison/arithmetic
+        let files = crate::shogi::board_constants::BOARD_FILES as u8;
+        let ranks = crate::shogi::board_constants::BOARD_RANKS as u8;
+        debug_assert!(file < files && rank < ranks, "Square::new called with invalid coordinates");
+        Square(rank * files + file)
     }
 
     /// Create square from file and rank with bounds checking
     /// Returns None if coordinates are out of bounds
     #[inline]
     pub const fn new_safe(file: u8, rank: u8) -> Option<Self> {
-        if file < 9 && rank < 9 {
-            Some(Square(rank * 9 + file))
+        let files = crate::shogi::board_constants::BOARD_FILES as u8;
+        let ranks = crate::shogi::board_constants::BOARD_RANKS as u8;
+        if file < files && rank < ranks {
+            Some(Square(rank * files + file))
         } else {
             None
         }
@@ -43,14 +49,14 @@ impl Square {
     /// Returns: 0=9筋, 1=8筋, ..., 8=1筋
     #[inline]
     pub const fn file(self) -> u8 {
-        self.0 % 9
+        self.0 % (crate::shogi::board_constants::BOARD_FILES as u8)
     }
 
     /// Get rank (0-8, top to bottom)
     /// Returns: 0=a段, 1=b段, ..., 8=i段
     #[inline]
     pub const fn rank(self) -> u8 {
-        self.0 / 9
+        self.0 / (crate::shogi::board_constants::BOARD_FILES as u8)
     }
 
     /// Get index
@@ -62,7 +68,7 @@ impl Square {
     /// Flip for opponent's perspective
     #[inline]
     pub const fn flip(self) -> Self {
-        Square(80 - self.0)
+        Square(((crate::shogi::board_constants::SHOGI_BOARD_SIZE as u8) - 1) - self.0)
     }
 
     /// Create square from USI notation characters (low-level API)
@@ -162,7 +168,7 @@ pub enum PieceType {
 }
 
 // 手駒配列 (Position.hands) の並び順を一元管理（King を除く 7 種）
-pub const HAND_ORDER: [PieceType; 7] = [
+pub const HAND_ORDER: [PieceType; crate::shogi::piece_constants::NUM_HAND_PIECE_TYPES] = [
     PieceType::Rook,
     PieceType::Bishop,
     PieceType::Gold,
@@ -225,7 +231,7 @@ impl PieceType {
     /// hands のインデックスから PieceType を取得（範囲外は None）
     #[inline]
     pub const fn from_hand_index(index: usize) -> Option<PieceType> {
-        if index < 7 {
+        if index < crate::shogi::piece_constants::NUM_HAND_PIECE_TYPES {
             Some(HAND_ORDER[index])
         } else {
             None
@@ -355,7 +361,7 @@ pub const PROMOTED_OFFSET: usize = 8;
 pub const MAX_PIECE_INDEX: usize = NUM_PIECE_TYPES + PROMOTED_OFFSET; // 16
 
 /// Number of squares on the board
-pub const BOARD_SQUARES: usize = 81;
+pub const BOARD_SQUARES: usize = crate::shogi::board_constants::SHOGI_BOARD_SIZE;
 
 /// Side to move
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
