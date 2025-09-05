@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,13 @@ enum PresetKind {
     Baseline,
     Balanced,
     High,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompressionKind {
+    None,
+    Gz,
+    Zst,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +65,8 @@ struct Opts {
     amb_require_exact: bool,
     entropy_mate_mode: MateEntropyMode,
     entropy_scale: f64,
+    split_every: Option<usize>,
+    compress: CompressionKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +83,14 @@ struct ManifestBudget {
     mode: String,
     time_ms: Option<u64>,
     nodes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestAmbiguity {
+    gap2_threshold_cp: i32,
+    require_exact: bool,
+    mate_mode: String,
+    entropy_scale: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -114,6 +131,11 @@ struct Manifest {
     effective_min_depth: u8,
     output_sha256: Option<String>,
     output_bytes: Option<u64>,
+    part_index: Option<usize>,
+    part_count: Option<usize>,
+    count_in_part: Option<usize>,
+    compression: Option<String>,
+    ambiguity: Option<ManifestAmbiguity>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +202,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --reuse-tt (reuse TT and heuristics across positions; faster but may bias; default: false)");
         eprintln!("  --skip-overrun-factor <float> (timeout skip threshold factor; default: 2.0)");
         eprintln!("  --jobs <n> (outer parallelism for positions; engine threads stay 1)");
+        eprintln!("  --split <N> (rotate output every N lines as <out>.part-0001...)");
+        eprintln!("  --compress <gz|zst> (compress output parts; zst requires 'zstd' feature)");
         eprintln!("  --amb-gap2-threshold <cp> (default: 25; ambiguity threshold for gap2)");
         eprintln!(
             "  --amb-allow-inexact (allow non-Exact bounds for ambiguity; default requires Exact)"
@@ -245,6 +269,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         amb_require_exact: true,
         entropy_mate_mode: MateEntropyMode::Saturate,
         entropy_scale: 600.0,
+        split_every: None,
+        compress: CompressionKind::None,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -504,6 +530,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--split" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                    if v == 0 {
+                        eprintln!("Error: --split requires N > 0");
+                        std::process::exit(1);
+                    }
+                    opts.split_every = Some(v);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --split requires an integer value");
+                    std::process::exit(1);
+                }
+            }
+            "--compress" => {
+                if let Some(v) = args.get(i + 1) {
+                    match v.to_ascii_lowercase().as_str() {
+                        "gz" => opts.compress = CompressionKind::Gz,
+                        "zst" => opts.compress = CompressionKind::Zst,
+                        other => {
+                            eprintln!("Error: --compress must be gz|zst (got '{}')", other);
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --compress requires a value");
+                    std::process::exit(1);
+                }
+            }
             other => {
                 eprintln!("Unknown option: {}", other);
                 std::process::exit(1);
@@ -662,6 +717,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Skipped positions will be saved to: {}", skipped_path.display());
     println!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
     println!("Note: TT memory usage scales with jobs: ~ hash_mb × jobs per process");
+    if let Some(n) = opts.split_every {
+        println!("Split every: {} lines", n);
+    }
+    println!(
+        "Compression: {}",
+        match opts.compress {
+            CompressionKind::None => "none",
+            CompressionKind::Gz => "gz",
+            CompressionKind::Zst => "zst",
+        }
+    );
+
+    // Early feature guard for zstd compression for better UX
+    if matches!(opts.compress, CompressionKind::Zst) {
+        #[cfg(not(feature = "zstd"))]
+        {
+            eprintln!("Error: --compress zst requires building with `--features zstd`");
+            std::process::exit(1);
+        }
+    }
 
     // Calculate time limit based on depth (used only if --nodes is not set)
     let time_limit_ms = opts.time_limit_override_ms.unwrap_or(match effective_depth {
@@ -677,15 +752,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Nodes-based budget active; time limit ignored for search.");
     }
 
-    // Open files - append mode if resuming
-    let output_file = Arc::new(Mutex::new(
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(resume_from > 0 || existing_lines > 0)
-            .truncate(resume_from == 0 && existing_lines == 0)
-            .open(&output_path)?,
-    ));
+    // Decide if we use split/compressed output
+    let use_parted_output =
+        opts.split_every.is_some() || !matches!(opts.compress, CompressionKind::None);
+
+    // Open files - append mode if resuming (only when not using split/compress)
+    let output_file: Option<Arc<Mutex<File>>> = if !use_parted_output {
+        Some(Arc::new(Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(resume_from > 0 || existing_lines > 0)
+                .truncate(resume_from == 0 && existing_lines == 0)
+                .open(&output_path)?,
+        )))
+    } else {
+        None
+    };
 
     // Open skipped positions file (always append mode to not lose data)
     let skipped_file =
@@ -695,6 +778,190 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_path = {
         let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
         output_path.with_file_name(format!("{stem}.manifest.json"))
+    };
+
+    // Split/compress part manager
+    struct PartManifestInfo {
+        path: std::path::PathBuf,
+        count_in_part: usize,
+    }
+    // Writers for part files with explicit finalization semantics
+    trait PartWrite: Write + Send {
+        fn finalize(&mut self) -> std::io::Result<()>;
+    }
+    struct PlainPartWriter {
+        inner: BufWriter<File>,
+    }
+    impl Write for PlainPartWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+    impl PartWrite for PlainPartWriter {
+        fn finalize(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+    struct GzPartWriter {
+        inner: flate2::write::GzEncoder<BufWriter<File>>,
+    }
+    impl Write for GzPartWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+    impl PartWrite for GzPartWriter {
+        fn finalize(&mut self) -> std::io::Result<()> {
+            self.inner.try_finish()
+        }
+    }
+    #[cfg(feature = "zstd")]
+    struct ZstPartWriter {
+        inner: Option<zstd::stream::write::Encoder<'static, BufWriter<File>>>,
+    }
+    #[cfg(feature = "zstd")]
+    impl Write for ZstPartWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.as_mut().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.as_mut().unwrap().flush()
+        }
+    }
+    #[cfg(feature = "zstd")]
+    impl PartWrite for ZstPartWriter {
+        fn finalize(&mut self) -> std::io::Result<()> {
+            if let Some(enc) = self.inner.take() {
+                // finish() ensures frame footer is written and returns the underlying writer
+                let _ = enc.finish()?;
+            }
+            Ok(())
+        }
+    }
+    struct PartManager {
+        base_stem: String,
+        base_ext: String,
+        dir: std::path::PathBuf,
+        split_every: usize,
+        compress: CompressionKind,
+        current_part: usize,
+        lines_in_part: usize,
+        writer: Option<Box<dyn PartWrite>>,
+        part_manifests: Vec<PartManifestInfo>,
+    }
+    impl PartManager {
+        fn new(
+            output_path: &std::path::Path,
+            split_every: usize,
+            compress: CompressionKind,
+        ) -> Self {
+            let dir =
+                output_path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+            let stem = output_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let ext = output_path.extension().unwrap_or_default().to_string_lossy().to_string();
+            Self {
+                base_stem: stem,
+                base_ext: ext,
+                dir,
+                split_every,
+                compress,
+                current_part: 0,
+                lines_in_part: 0,
+                writer: None,
+                part_manifests: Vec::new(),
+            }
+        }
+        fn make_part_paths(&self, idx: usize) -> (std::path::PathBuf, std::path::PathBuf) {
+            let part_name = format!("{}.part-{:04}.{}", self.base_stem, idx, self.base_ext);
+            let mut file_name = part_name.clone();
+            match self.compress {
+                CompressionKind::None => {}
+                CompressionKind::Gz => file_name.push_str(".gz"),
+                CompressionKind::Zst => file_name.push_str(".zst"),
+            }
+            let out_path = self.dir.join(file_name);
+            let prog_path = self.dir.join(format!("{}.part-{:04}.progress", self.base_stem, idx));
+            (out_path, prog_path)
+        }
+        fn open_next(&mut self) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+            self.current_part += 1;
+            self.lines_in_part = 0;
+            let (out_path, _prog_path) = self.make_part_paths(self.current_part);
+            let file = File::create(&out_path)?;
+            let buf = BufWriter::with_capacity(1 << 20, file);
+            let w: Box<dyn PartWrite> = match self.compress {
+                CompressionKind::None => Box::new(PlainPartWriter { inner: buf }),
+                CompressionKind::Gz => {
+                    let enc = flate2::write::GzEncoder::new(buf, flate2::Compression::default());
+                    Box::new(GzPartWriter { inner: enc })
+                }
+                CompressionKind::Zst => {
+                    #[cfg(feature = "zstd")]
+                    {
+                        let enc = zstd::stream::write::Encoder::new(buf, 0)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                        Box::new(ZstPartWriter { inner: Some(enc) })
+                    }
+                    #[cfg(not(feature = "zstd"))]
+                    {
+                        return Err(std::io::Error::other(
+                            "zstd compression requires 'zstd' feature",
+                        ));
+                    }
+                }
+            };
+            self.writer = Some(w);
+            Ok(self.make_part_paths(self.current_part))
+        }
+        fn write_lines(&mut self, lines: &[String]) -> std::io::Result<()> {
+            for line in lines {
+                if self.current_part == 0 || (self.lines_in_part >= self.split_every) {
+                    self.finish_part().ok();
+                    self.open_next()?;
+                }
+                let w = self.writer.as_mut().unwrap();
+                writeln!(w, "{}", line)?;
+                self.lines_in_part += 1;
+            }
+            Ok(())
+        }
+        fn finish_part(&mut self) -> std::io::Result<()> {
+            if let Some(mut w) = self.writer.take() {
+                w.finalize()?;
+            }
+            if self.current_part > 0 {
+                let (out_path, prog) = self.make_part_paths(self.current_part);
+                // Write final progress snapshot for the part
+                std::fs::write(&prog, self.lines_in_part.to_string()).ok();
+                self.part_manifests.push(PartManifestInfo {
+                    path: out_path,
+                    count_in_part: self.lines_in_part,
+                });
+            }
+            Ok(())
+        }
+        fn update_part_progress(&self) -> std::io::Result<()> {
+            if self.current_part == 0 {
+                return Ok(());
+            }
+            let (_out, prog) = self.make_part_paths(self.current_part);
+            std::fs::write(prog, self.lines_in_part.to_string())?;
+            Ok(())
+        }
+    }
+
+    // Always create PartManager when using split or any compression
+    let mut part_mgr = if use_parted_output {
+        let n = opts.split_every.unwrap_or(usize::MAX);
+        Some(PartManager::new(&output_path, n, opts.compress))
+    } else {
+        None
     };
 
     let input_file = File::open(&input_path)?;
@@ -907,7 +1174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Process in batches (optionally inside a local rayon thread pool)
-    let run_batches = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut run_batches = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for (batch_idx, chunk) in sfen_positions.chunks(batch_size).enumerate() {
             if global_stop.load(Ordering::Relaxed) {
                 break;
@@ -947,8 +1214,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
 
             // Write successful results
-            {
-                let mut file = output_file.lock().unwrap();
+            if use_parted_output {
+                if let Some(pm) = part_mgr.as_mut() {
+                    pm.write_lines(&successful_results)?;
+                    pm.update_part_progress()?;
+                }
+            } else if let Some(ref of) = output_file {
+                let mut file = of.lock().unwrap();
                 for result in &successful_results {
                     writeln!(file, "{result}")?;
                 }
@@ -984,12 +1256,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(j) = opts.jobs {
         let pool = ThreadPoolBuilder::new().num_threads(j).build().expect("build rayon pool");
-        let res = pool.install(run_batches);
+        let res: Result<(), Box<dyn std::error::Error + Send + Sync>> = pool.install(run_batches);
         if let Err(e) = res {
-            return Err(e as Box<dyn std::error::Error>);
+            let err: Box<dyn std::error::Error> = e;
+            return Err(err);
         }
     } else if let Err(e) = run_batches() {
-        return Err(e as Box<dyn std::error::Error>);
+        return Err(e);
     }
 
     // Final statistics
@@ -1032,7 +1305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Build and write manifest.json
+    // Build and write manifests (split-aware)
     let calibration_out = if calibration_to_write.is_some() {
         calibration_to_write
     } else if let Some(ref man) = manifest_existing {
@@ -1067,73 +1340,199 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })()
     .unwrap_or((String::new(), 0));
 
-    let manifest = Manifest {
-        generated_at: chrono::Utc::now().to_rfc3339(),
-        git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
-        engine: engine_name.to_string(),
-        nnue_weights: opts.nnue_weights.clone(),
-        preset: preset_name,
-        overrides: Some(ManifestOverrides {
-            time: cli_set_time,
-            nodes: cli_set_nodes,
-            hash_mb: cli_set_hash,
-            multipv: cli_set_multipv,
-            min_depth: cli_set_min_depth,
-        }),
-        teacher_profile: format!("{:?}", opts.teacher_profile),
-        multipv: opts.multipv,
-        budget: ManifestBudget {
-            mode: if opts.nodes.is_some() {
-                "nodes".to_string()
-            } else {
-                "time".to_string()
+    let comp_str = match opts.compress {
+        CompressionKind::None => None,
+        CompressionKind::Gz => Some("gz".into()),
+        CompressionKind::Zst => Some("zst".into()),
+    };
+
+    if let Some(ref mut pm) = part_mgr {
+        // Finish the last open part and collect infos
+        pm.finish_part().ok();
+        let total_parts = pm.part_manifests.len();
+        for (i, info) in pm.part_manifests.iter().enumerate() {
+            let part_idx = i + 1;
+            // Write per-part manifest next to the part file with explicit naming
+            let man_path =
+                pm.dir.join(format!("{}.part-{:04}.manifest.json", pm.base_stem, part_idx));
+            // Compute per-part SHA-256 and size
+            let (out_sha256, out_bytes) = (|| -> Option<(String, u64)> {
+                use sha2::{Digest, Sha256};
+                let mut f = File::open(&info.path).ok()?;
+                let mut hasher = Sha256::new();
+                let mut buf = [0u8; 64 * 1024];
+                let mut total: u64 = 0;
+                loop {
+                    let n = std::io::Read::read(&mut f, &mut buf).ok()?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                    total += n as u64;
+                }
+                let hash = hasher.finalize();
+                Some((hex::encode(hash), total))
+            })()
+            .unwrap_or((String::new(), 0));
+            let manifest = Manifest {
+                generated_at: chrono::Utc::now().to_rfc3339(),
+                git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
+                engine: engine_name.to_string(),
+                nnue_weights: opts.nnue_weights.clone(),
+                preset: preset_name.clone(),
+                overrides: Some(ManifestOverrides {
+                    time: cli_set_time,
+                    nodes: cli_set_nodes,
+                    hash_mb: cli_set_hash,
+                    multipv: cli_set_multipv,
+                    min_depth: cli_set_min_depth,
+                }),
+                teacher_profile: format!("{:?}", opts.teacher_profile),
+                multipv: opts.multipv,
+                budget: ManifestBudget {
+                    mode: if opts.nodes.is_some() {
+                        "nodes".to_string()
+                    } else {
+                        "time".to_string()
+                    },
+                    time_ms: if opts.nodes.is_some() {
+                        None
+                    } else {
+                        Some(time_limit_ms)
+                    },
+                    nodes: opts.nodes,
+                },
+                min_depth: effective_depth,
+                hash_mb: opts.hash_mb,
+                threads_per_engine: 1,
+                jobs: opts.jobs,
+                count: total_processed,
+                cp_to_wdl_scale: opts.wdl_scale,
+                wdl_semantics: "side_to_move".to_string(),
+                calibration: calibration_out.clone(),
+                attempted: attempted_total,
+                skipped_timeout: total_skipped,
+                errors: serde_json::json!({
+                    "parse": e_parse,
+                    "nonexact_top1": e_nonexact,
+                    "empty_or_missing_pv": e_empty_pv,
+                }),
+                reuse_tt: opts.reuse_tt,
+                skip_overrun_factor: opts.skip_overrun_factor,
+                search_depth_arg: search_depth,
+                effective_min_depth: effective_depth,
+                output_sha256: if out_sha256.is_empty() {
+                    None
+                } else {
+                    Some(out_sha256)
+                },
+                output_bytes: if out_bytes == 0 {
+                    None
+                } else {
+                    Some(out_bytes)
+                },
+                part_index: Some(part_idx),
+                part_count: Some(total_parts),
+                count_in_part: Some(info.count_in_part),
+                compression: comp_str.clone(),
+                ambiguity: Some(ManifestAmbiguity {
+                    gap2_threshold_cp: opts.amb_gap2_threshold,
+                    require_exact: opts.amb_require_exact,
+                    mate_mode: match opts.entropy_mate_mode {
+                        MateEntropyMode::Exclude => "exclude".into(),
+                        MateEntropyMode::Saturate => "saturate".into(),
+                    },
+                    entropy_scale: opts.entropy_scale,
+                }),
+            };
+            if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
+                if let Err(e) = std::fs::write(&man_path, txt) {
+                    eprintln!(
+                        "Warning: failed to write part manifest ({}): {}",
+                        man_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    } else {
+        let manifest = Manifest {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
+            engine: engine_name.to_string(),
+            nnue_weights: opts.nnue_weights.clone(),
+            preset: preset_name.clone(),
+            overrides: Some(ManifestOverrides {
+                time: cli_set_time,
+                nodes: cli_set_nodes,
+                hash_mb: cli_set_hash,
+                multipv: cli_set_multipv,
+                min_depth: cli_set_min_depth,
+            }),
+            teacher_profile: format!("{:?}", opts.teacher_profile),
+            multipv: opts.multipv,
+            budget: ManifestBudget {
+                mode: if opts.nodes.is_some() {
+                    "nodes".into()
+                } else {
+                    "time".into()
+                },
+                time_ms: if opts.nodes.is_some() {
+                    None
+                } else {
+                    Some(time_limit_ms)
+                },
+                nodes: opts.nodes,
             },
-            time_ms: if opts.nodes.is_some() {
+            min_depth: effective_depth,
+            hash_mb: opts.hash_mb,
+            threads_per_engine: 1,
+            jobs: opts.jobs,
+            count: total_processed,
+            cp_to_wdl_scale: opts.wdl_scale,
+            wdl_semantics: "side_to_move".into(),
+            calibration: calibration_out,
+            attempted: attempted_total,
+            skipped_timeout: total_skipped,
+            errors: serde_json::json!({ "parse": e_parse, "nonexact_top1": e_nonexact, "empty_or_missing_pv": e_empty_pv }),
+            reuse_tt: opts.reuse_tt,
+            skip_overrun_factor: opts.skip_overrun_factor,
+            search_depth_arg: search_depth,
+            effective_min_depth: effective_depth,
+            output_sha256: if out_sha256.is_empty() {
                 None
             } else {
-                Some(time_limit_ms)
+                Some(out_sha256)
             },
-            nodes: opts.nodes,
-        },
-        min_depth: effective_depth,
-        hash_mb: opts.hash_mb,
-        threads_per_engine: 1,
-        jobs: opts.jobs,
-        count: total_processed,
-        cp_to_wdl_scale: opts.wdl_scale,
-        wdl_semantics: "side_to_move".to_string(),
-        calibration: calibration_out,
-        attempted: attempted_total,
-        skipped_timeout: total_skipped,
-        errors: serde_json::json!({
-            "parse": e_parse,
-            "nonexact_top1": e_nonexact,
-            "empty_or_missing_pv": e_empty_pv,
-        }),
-        reuse_tt: opts.reuse_tt,
-        skip_overrun_factor: opts.skip_overrun_factor,
-        search_depth_arg: search_depth,
-        effective_min_depth: effective_depth,
-        output_sha256: if out_sha256.is_empty() {
-            None
-        } else {
-            Some(out_sha256)
-        },
-        output_bytes: if out_bytes == 0 {
-            None
-        } else {
-            Some(out_bytes)
-        },
-    };
-    if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
-        if let Err(e) = std::fs::write(&manifest_path, txt) {
-            eprintln!(
-                "Warning: failed to write manifest.json ({}): {}",
-                manifest_path.display(),
-                e
-            );
-        } else {
-            println!("Manifest written: {}", manifest_path.display());
+            output_bytes: if out_bytes == 0 {
+                None
+            } else {
+                Some(out_bytes)
+            },
+            part_index: None,
+            part_count: None,
+            count_in_part: None,
+            compression: comp_str,
+            ambiguity: Some(ManifestAmbiguity {
+                gap2_threshold_cp: opts.amb_gap2_threshold,
+                require_exact: opts.amb_require_exact,
+                mate_mode: match opts.entropy_mate_mode {
+                    MateEntropyMode::Exclude => "exclude".into(),
+                    MateEntropyMode::Saturate => "saturate".into(),
+                },
+                entropy_scale: opts.entropy_scale,
+            }),
+        };
+        if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
+            if let Err(e) = std::fs::write(&manifest_path, txt) {
+                eprintln!(
+                    "Warning: failed to write manifest.json ({}): {}",
+                    manifest_path.display(),
+                    e
+                );
+            } else {
+                println!("Manifest written: {}", manifest_path.display());
+            }
         }
     }
 
@@ -1290,7 +1689,14 @@ fn process_position_with_engine(
             let gap = (l0.score_cp - l1.score_cp).abs();
             best2_gap_cp_meta =
                 format!(" best2_gap_cp:{} bound0:{:?} bound1:{:?}", gap, l0.bound, l1.bound);
-            if is_ambiguous_for_k3(l0.bound, l1.bound, l0.score_cp, l1.score_cp, env.opts.amb_gap2_threshold, env.opts.amb_require_exact) {
+            if is_ambiguous_for_k3(
+                l0.bound,
+                l1.bound,
+                l0.score_cp,
+                l1.score_cp,
+                env.opts.amb_gap2_threshold,
+                env.opts.amb_require_exact,
+            ) {
                 ambiguous_k3 = true;
                 let mut have_three = lines0.len() >= 3;
                 // lightweight copy: only first 3 lines
@@ -1308,9 +1714,9 @@ fn process_position_with_engine(
                         if let Some(n) = env.opts.nodes {
                             builder2 = builder2.fixed_nodes(n);
                         } else {
-                            // Keep within remaining budget conservatively: at least 1/4 of time_limit
+                            // Keep within remaining budget conservatively: at most 1/4 of time_limit
                             let rem = env.time_limit_ms.saturating_sub(elapsed_stats_ms);
-                            let cap = rem.max(env.time_limit_ms / 4);
+                            let cap = rem.min(env.time_limit_ms / 4);
                             builder2 = builder2.fixed_time_ms(cap);
                         }
                         let limits2 = builder2.build();
@@ -1318,30 +1724,33 @@ fn process_position_with_engine(
                         if let Some(ref lines2) = res2.lines {
                             lines_k = lines2.iter().take(3).cloned().collect();
                             have_three = lines_k.len() >= 3;
-                            // Switch reported stats to K=3 for consistency
-                            result_used_time_ms = res2.stats.elapsed.as_millis() as u64;
-                            result_used_depth = res2.stats.depth;
-                            result_used_seldepth = res2.stats.seldepth;
-                            result_used_nodes = res2.stats.nodes;
-                            result_used_qnodes = res2.stats.qnodes;
-                            result_used_tt_hits = res2.stats.tt_hits;
-                            result_used_re_searches = res2.stats.re_searches;
-                            result_used_pv_changed = res2.stats.pv_changed;
-                            result_used_root_fh = res2.stats.root_fail_high_count;
-                            result_used_null_cuts = res2.stats.null_cuts;
-                            result_used_lmr_count = res2.stats.lmr_count;
-                            eval_used = res2.score;
-                            used_k3_research = true;
+                            if have_three {
+                                // Adopt K=3 stats/lines (compute entropy once after this block)
+                                result_used_time_ms = res2.stats.elapsed.as_millis() as u64;
+                                result_used_depth = res2.stats.depth;
+                                result_used_seldepth = res2.stats.seldepth;
+                                result_used_nodes = res2.stats.nodes;
+                                result_used_qnodes = res2.stats.qnodes;
+                                result_used_tt_hits = res2.stats.tt_hits;
+                                result_used_re_searches = res2.stats.re_searches;
+                                result_used_pv_changed = res2.stats.pv_changed;
+                                result_used_root_fh = res2.stats.root_fail_high_count;
+                                result_used_null_cuts = res2.stats.null_cuts;
+                                result_used_lmr_count = res2.stats.lmr_count;
+                                eval_used = res2.score;
+                                used_k3_research = true;
+                            }
                         }
                     }
                 }
+                // Compute entropy once based on the final lines_k (either original or K=3 re-search)
                 if have_three {
-                    let ent = softmax_entropy_k3_from_lines(
+                    entropy_k3_opt = softmax_entropy_k3_from_lines(
                         &lines_k,
                         env.opts.entropy_scale,
                         env.opts.entropy_mate_mode,
                     );
-                    entropy_k3_opt = ent;
+                    // no extra clone
                     lines_used_opt = Some(lines_k);
                 }
             }
@@ -1384,7 +1793,11 @@ fn process_position_with_engine(
     // Prefer adopted lines reference for output sections
     let fallback_small = result.lines.as_ref();
     let lines_ref_for_output: Option<&[engine_core::search::types::RootLine]> =
-        if let Some(ref v) = lines_used_opt { Some(v.as_slice()) } else { fallback_small.map(|sv| sv.as_slice()) };
+        if let Some(ref v) = lines_used_opt {
+            Some(v.as_slice())
+        } else {
+            fallback_small.map(|sv| sv.as_slice())
+        };
 
     // Output according to selected format
     match env.opts.output_format {
@@ -1531,8 +1944,18 @@ fn softmax_entropy_k3_from_lines(
             match mate_mode {
                 MateEntropyMode::Exclude => return None,
                 MateEntropyMode::Saturate => {
-                    // Use the sign of score_cp to saturate
-                    let sign = if l.score_cp >= 0 { 1 } else { -1 };
+                    // Determine sign using mate_distance if present, otherwise score_internal/score_cp
+                    let sign = if let Some(md) = l.mate_distance {
+                        if md >= 0 {
+                            1
+                        } else {
+                            -1
+                        }
+                    } else if l.score_internal >= 0 {
+                        1
+                    } else {
+                        -1
+                    };
                     cp[i] = 32000 * sign;
                 }
             }
