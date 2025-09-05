@@ -101,7 +101,7 @@ mod performance_tests {
 #[cfg(test)]
 mod tt_tests {
     use super::*;
-    use crate::util::sync_compat::Ordering;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_bitmap_operations() {
@@ -712,7 +712,7 @@ mod tt_tests {
 
     #[test]
     fn test_empty_slot_mode() {
-        use crate::util::sync_compat::Ordering;
+        use std::sync::atomic::Ordering;
 
         let tt = TranspositionTable::new(1); // 1MB table
 
