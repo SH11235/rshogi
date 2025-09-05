@@ -822,11 +822,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     #[cfg(feature = "zstd")]
-    struct ZstPartWriter { inner: Option<Box<dyn Write + Send>> }
+    struct ZstPartWriter {
+        inner: Option<Box<dyn Write + Send>>,
+    }
     #[cfg(feature = "zstd")]
-    impl Write for ZstPartWriter { fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.as_mut().unwrap().write(buf) } fn flush(&mut self) -> std::io::Result<()> { self.inner.as_mut().unwrap().flush() } }
+    impl Write for ZstPartWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.as_mut().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.as_mut().unwrap().flush()
+        }
+    }
     #[cfg(feature = "zstd")]
-    impl PartWrite for ZstPartWriter { fn finalize(&mut self) -> std::io::Result<()> { self.inner.take(); Ok(()) } }
+    impl PartWrite for ZstPartWriter {
+        fn finalize(&mut self) -> std::io::Result<()> {
+            self.inner.take();
+            Ok(())
+        }
+    }
     struct PartManager {
         base_stem: String,
         base_ext: String,
@@ -895,8 +909,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     #[cfg(not(feature = "zstd"))]
                     {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        return Err(std::io::Error::other(
                             "zstd compression requires 'zstd' feature",
                         ));
                     }
@@ -1434,7 +1447,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut total: u64 = 0;
             loop {
                 let n = std::io::Read::read(&mut f, &mut buf).ok()?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 hasher.update(&buf[..n]);
                 total += n as u64;
             }
