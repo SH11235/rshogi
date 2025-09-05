@@ -11,14 +11,22 @@ fn bin_path(name: &str) -> PathBuf {
     if let Ok(p) = env::var(&key) {
         return PathBuf::from(p);
     }
-    // Fallback to target/debug
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/tools
-    p.pop(); // crates
-    p.push("target");
-    p.push("debug");
-    p.push(name);
-    p
+    // Fallback: prefer release if exists, otherwise debug
+    let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    base.pop(); // crates/tools
+    base.pop(); // crates
+    let mut rel = base.clone();
+    rel.push("target");
+    rel.push("release");
+    rel.push(name);
+    if rel.exists() {
+        return rel;
+    }
+    let mut dbg = base;
+    dbg.push("target");
+    dbg.push("debug");
+    dbg.push(name);
+    dbg
 }
 
 fn tmp_path(name: &str) -> PathBuf {
@@ -480,6 +488,62 @@ fn test_merge_stdin_stdout() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("\"sfen\":\"s1\""));
     assert!(stdout.contains("\"sfen\":\"s2\""));
+}
+
+#[test]
+fn test_merge_manifest_out_with_stdout() {
+    use serde_json::Value;
+    // Prepare inputs
+    let rec1 = "{\"sfen\":\"s1\",\"depth\":1,\"seldepth\":1,\"nodes\":1,\"time_ms\":1,\"bound1\":\"Exact\",\"bound2\":\"Exact\"}";
+    let rec2 = "{\"sfen\":\"s2\",\"depth\":2,\"seldepth\":2,\"nodes\":2,\"time_ms\":2,\"bound1\":\"Lower\",\"bound2\":\"Lower\"}";
+    let in1 = tmp_path("mani_in1.jsonl");
+    let in2 = tmp_path("mani_in2.jsonl");
+    write_text(&in1, &make_jsonl(&[rec1]));
+    write_text(&in2, &make_jsonl(&[rec2]));
+
+    let mani_out = tmp_path("merge_manifest.json");
+    let out = std::process::Command::new(bin_path("merge_annotation_results"))
+        .args([
+            in1.to_str().unwrap(),
+            in2.to_str().unwrap(),
+            "-", // stdout
+            "--dedup-by-sfen",
+            "--manifest-out",
+            mani_out.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run merge stdout with manifest-out");
+    assert!(out.status.success());
+    // Manifest should be written
+    let mani_str = read_text(&mani_out);
+    let v: Value = serde_json::from_str(&mani_str).expect("parse manifest");
+    assert_eq!(v.get("tool").and_then(|x| x.as_str()), Some("merge_annotation_results"));
+    let _ = std::fs::remove_file(&in1);
+    let _ = std::fs::remove_file(&in2);
+    let _ = std::fs::remove_file(&mani_out);
+}
+
+#[test]
+fn test_merge_mode_conflict() {
+    // Create minimal inputs
+    let rec = "{\"sfen\":\"s\",\"depth\":1,\"seldepth\":1,\"nodes\":1,\"time_ms\":1,\"bound1\":\"Exact\",\"bound2\":\"Exact\"}";
+    let in1 = tmp_path("mode_conflict_in.jsonl");
+    let outp = tmp_path("mode_conflict_out.jsonl");
+    write_text(&in1, &make_jsonl(&[rec]));
+    let out = std::process::Command::new(bin_path("merge_annotation_results"))
+        .args([
+            in1.to_str().unwrap(),
+            outp.to_str().unwrap(),
+            "--dedup-by-sfen",
+            "--mode",
+            "depth-first",
+            "--prefer-deeper",
+        ])
+        .output()
+        .expect("run merge with conflicting args");
+    assert!(!out.status.success(), "expected clap conflicts_with to error");
+    let _ = std::fs::remove_file(&in1);
+    let _ = std::fs::remove_file(&outp);
 }
 
 #[test]

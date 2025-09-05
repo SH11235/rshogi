@@ -6,7 +6,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
-use tools::common::io::{open_reader, open_writer};
+use tools::common::io::{open_reader, open_writer, Writer};
 
 /// Degree of exactness for tie-breaking.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
@@ -347,8 +347,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Prepare output (support STDOUT and future compressed extensions)
-    let mut out: Box<dyn Write> = open_writer(&output_path)?;
+    // Prepare output (support STDOUT and compressed extensions). Use Writer to propagate finish errors.
+    let mut out: Writer = open_writer(&output_path)?;
 
     let mut read_lines: usize = 0; // non-empty lines encountered
     let mut valid_json_lines: usize = 0; // successfully parsed JSON lines
@@ -389,6 +389,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Avoid unused warnings
             let _ = file_idx;
         }
+        // Finalize output stream and then write manifest
+        out.close()?;
         let manifest_out = cli.manifest_out.as_ref().map(PathBuf::from);
         let counts = LineCounts {
             read_lines,
@@ -454,6 +456,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         written_lines += 1;
     }
 
+    // Finalize output stream and then write manifest
+    out.close()?;
     let manifest_out = cli.manifest_out.as_ref().map(PathBuf::from);
     let counts = LineCounts {
         read_lines,

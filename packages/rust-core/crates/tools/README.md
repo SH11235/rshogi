@@ -160,6 +160,7 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
   - EXACT 優先: `EXACT度 → depth → seldepth → nodes → time_ms → file_idx → line_idx`
   - 深さ優先（`--prefer-deeper`）: `depth → seldepth → EXACT度 → nodes → time_ms → file_idx → line_idx`
   - 完全同点では、先に現れた行（小さい `file_idx/line_idx`）を保持。
+  - 注: `nodes` / `time_ms` は「大きいほど優先」します（より計算資源を掛けた結果を採用）。
 - 出力順の安定化: dedup 時の最終出力は `sfen` 昇順で書き出し。
 - STDIN/STDOUT: 入力に `-` を指定すると STDIN を読む。出力に `-` を指定すると STDOUT に書き出し。
 - マニフェスト統合: 既定では出力ファイルと同ディレクトリに `manifest.json` を生成。出力が STDOUT の場合は
