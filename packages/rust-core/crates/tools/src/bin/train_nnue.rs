@@ -378,8 +378,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(["wdl", "cp"]) // strict accepted values
                 .default_value("wdl"),
         )
-        .arg(arg!(--scale <N> "Scale for cp->wdl conversion").default_value("600"))
-        .arg(arg!(--"cp-clip" <N> "Clip CP values to this range").default_value("1200"))
+        .arg(
+            arg!(--scale <N> "Scale for cp->wdl conversion")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("600"),
+        )
+        .arg(
+            arg!(--"cp-clip" <N> "Clip CP values to this range")
+                .value_parser(clap::value_parser!(i32).range(0..))
+                .default_value("1200"),
+        )
         .arg(arg!(--"acc-dim" <N> "Accumulator dimension").default_value("256"))
         .arg(arg!(--"relu-clip" <N> "ReLU clipping value").default_value("127"))
         .arg(arg!(--shuffle "Shuffle training data"))
@@ -398,14 +406,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         optimizer: app.get_one::<String>("opt").unwrap().to_string(),
         l2_reg: app.get_one::<String>("l2").unwrap().parse()?,
         label_type: app.get_one::<String>("label").unwrap().to_string(),
-        scale: app.get_one::<String>("scale").unwrap().parse()?,
-        cp_clip: app.get_one::<String>("cp-clip").unwrap().parse()?,
+        scale: *app.get_one::<f32>("scale").unwrap(),
+        cp_clip: *app.get_one::<i32>("cp-clip").unwrap(),
         accumulator_dim: app.get_one::<String>("acc-dim").unwrap().parse()?,
         relu_clip: app.get_one::<String>("relu-clip").unwrap().parse()?,
         shuffle: app.get_flag("shuffle"),
         exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
         exclude_fallback: app.get_flag("exclude-fallback"),
     };
+
+    if config.scale <= 0.0 {
+        return Err("Invalid --scale: must be > 0".into());
+    }
 
     let input_path = app.get_one::<String>("input").unwrap();
     let validation_path = app.get_one::<String>("validation");
@@ -1750,5 +1762,47 @@ mod tests {
         let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("exceeds"), "unexpected err msg: {}", msg);
+    }
+
+    // n_features=0 のサンプルのみで 1 epoch 学習し、NaN が発生しないことのスモーク
+    #[test]
+    fn train_one_batch_with_zero_feature_sample_smoke() {
+        use rand::SeedableRng;
+
+        // 単一サンプル（特徴なし、重み1.0、ラベル0.0）
+        let mut samples = vec![Sample {
+            features: Vec::new(),
+            label: 0.0,
+            weight: 1.0,
+        }];
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+
+        let td = tempfile::tempdir().unwrap();
+        let out_dir = td.path();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+        train_model(&mut net, &mut samples, &None, &cfg, out_dir, None, &mut rng).unwrap();
+
+        // NaN が混入していないこと
+        assert!(net.w0.iter().all(|v| v.is_finite()));
+        assert!(net.b0.iter().all(|v| v.is_finite()));
+        assert!(net.w2.iter().all(|v| v.is_finite()));
+        assert!(net.b2.is_finite());
     }
 }
