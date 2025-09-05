@@ -26,6 +26,12 @@ enum PresetKind {
     High,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MateEntropyMode {
+    Exclude,
+    Saturate,
+}
+
 #[derive(Clone, Debug)]
 struct Opts {
     engine: EngineType,
@@ -47,6 +53,10 @@ struct Opts {
     no_recalib: bool,
     force_recalib: bool,
     jobs: Option<usize>,
+    // Step 4: conditional MultiPV K=3 entropy
+    amb_gap2_threshold: i32,
+    amb_require_exact: bool,
+    entropy_mate_mode: MateEntropyMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +111,8 @@ struct Manifest {
     skip_overrun_factor: f64,
     search_depth_arg: u8,
     effective_min_depth: u8,
+    output_sha256: Option<String>,
+    output_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,7 +126,6 @@ struct GenShared {
     error_count: Arc<AtomicUsize>,
     skipped_count: Arc<AtomicUsize>,
     errors_parse: Arc<AtomicUsize>,
-    errors_timeout: Arc<AtomicUsize>,
     errors_nonexact_top1: Arc<AtomicUsize>,
     errors_empty_pv: Arc<AtomicUsize>,
     skipped_file: Arc<Mutex<File>>,
@@ -125,12 +136,26 @@ struct ProcEnv<'a> {
     time_limit_ms: u64,
     opts: &'a Opts,
     shared: &'a GenShared,
+    global_stop: Arc<AtomicBool>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
+    // Global cancellation flag (Ctrl-C)
+    let global_stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = global_stop.clone();
+        let installed = ctrlc::set_handler(move || {
+            if !stop.swap(true, Ordering::Relaxed) {
+                eprintln!("Received Ctrl-C: requesting graceful stop ...");
+            }
+        });
+        if let Err(e) = installed {
+            eprintln!("Warning: failed to install Ctrl-C handler: {}", e);
+        }
+    }
     if args.len() < 3 {
         eprintln!(
             "Usage: {} <input_sfen_file> <output_training_data> [depth] [batch_size] [resume_from]",
@@ -153,6 +178,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --reuse-tt (reuse TT and heuristics across positions; faster but may bias; default: false)");
         eprintln!("  --skip-overrun-factor <float> (timeout skip threshold factor; default: 2.0)");
         eprintln!("  --jobs <n> (outer parallelism for positions; engine threads stay 1)");
+        eprintln!("  --amb-gap2-threshold <cp> (default: 25; ambiguity threshold for gap2)");
+        eprintln!(
+            "  --amb-allow-inexact (allow non-Exact bounds for ambiguity; default requires Exact)"
+        );
+        eprintln!("  --entropy-mate-mode <exclude|saturate> (mate handling in entropy; default: saturate)");
         eprintln!("  --no-recalib (reuse manifest calibration if available)");
         eprintln!("  --force-recalib (force re-calibration even if manifest exists)");
         eprintln!("\nRecommended settings for initial NNUE data:");
@@ -209,6 +239,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         no_recalib: false,
         force_recalib: false,
         jobs: None,
+        amb_gap2_threshold: 25,
+        amb_require_exact: true,
+        entropy_mate_mode: MateEntropyMode::Saturate,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -343,6 +376,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 2;
                 } else {
                     eprintln!("Error: --skip-overrun-factor requires a float value");
+                    std::process::exit(1);
+                }
+            }
+            "--amb-gap2-threshold" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<i32>().ok()) {
+                    opts.amb_gap2_threshold = v.max(0);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --amb-gap2-threshold requires an integer value (centipawns)");
+                    std::process::exit(1);
+                }
+            }
+            "--amb-allow-inexact" => {
+                opts.amb_require_exact = false;
+                i += 1;
+            }
+            "--entropy-mate-mode" => {
+                if let Some(v) = args.get(i + 1) {
+                    match v.to_ascii_lowercase().as_str() {
+                        "exclude" => opts.entropy_mate_mode = MateEntropyMode::Exclude,
+                        "saturate" => opts.entropy_mate_mode = MateEntropyMode::Saturate,
+                        other => {
+                            eprintln!(
+                                "Error: --entropy-mate-mode must be exclude|saturate (got '{}')",
+                                other
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --entropy-mate-mode requires a value");
                     std::process::exit(1);
                 }
             }
@@ -567,6 +632,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("MultiPV: {}", opts.multipv);
     println!("Teacher profile: {:?}", opts.teacher_profile);
     println!("Reuse TT: {}", opts.reuse_tt);
+    println!(
+        "Ambiguity: gap2_th={}cp, require_exact={}, mate_mode={:?}",
+        opts.amb_gap2_threshold, opts.amb_require_exact, opts.entropy_mate_mode
+    );
     if let Some(n) = opts.nodes {
         println!("Nodes (limit): {}", n);
     }
@@ -579,6 +648,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Skipped positions will be saved to: {}", skipped_path.display());
     println!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
+    println!("Note: TT memory usage scales with jobs: ~ hash_mb × jobs per process");
 
     // Calculate time limit based on depth (used only if --nodes is not set)
     let time_limit_ms = opts.time_limit_override_ms.unwrap_or(match effective_depth {
@@ -618,6 +688,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = BufReader::new(input_file);
     let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
 
+    fn normalize_sfen_tokens(sfen: &str) -> Option<String> {
+        // Reconstruct first 4 tokens (board, side, hands, move count)
+        let mut it = sfen.split_whitespace();
+        let b = it.next()?;
+        let s = it.next()?;
+        let h = it.next()?;
+        let m = it.next()?;
+        Some(format!("{} {} {} {}", b, s, h, m))
+    }
+
     fn extract_sfen(line: &str) -> Option<String> {
         let start = line.find("sfen ")? + 5;
         // normalize tabs to spaces to robustly detect " moves"
@@ -628,7 +708,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .or_else(|| rest_norm.find('#'))
             .unwrap_or(rest_norm.len());
         let sfen = rest_norm[..end].trim();
-        (!sfen.is_empty()).then(|| sfen.to_string())
+        if sfen.is_empty() {
+            return None;
+        }
+        normalize_sfen_tokens(sfen)
     }
     let sfen_positions: Vec<(usize, String)> = lines
         .into_iter()
@@ -702,6 +785,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut total_nodes: u64 = 0;
                 let mut total_ms: u64 = 0;
                 for (i, (_idx, sfen)) in sfen_positions.iter().take(sample_n).enumerate() {
+                    if global_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     if i % 25 == 0 {
                         println!("  calibrating {}/{}", i + 1, sample_n);
                     }
@@ -785,7 +871,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let error_count = Arc::new(AtomicUsize::new(0));
     let skipped_count = Arc::new(AtomicUsize::new(0));
     let errors_parse = Arc::new(AtomicUsize::new(0));
-    let errors_timeout = Arc::new(AtomicUsize::new(0));
     let errors_nonexact_top1 = Arc::new(AtomicUsize::new(0));
     let errors_empty_pv = Arc::new(AtomicUsize::new(0));
     let total_attempted = Arc::new(AtomicUsize::new(positions_to_skip));
@@ -794,7 +879,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         error_count: error_count.clone(),
         skipped_count: skipped_count.clone(),
         errors_parse: errors_parse.clone(),
-        errors_timeout: errors_timeout.clone(),
         errors_nonexact_top1: errors_nonexact_top1.clone(),
         errors_empty_pv: errors_empty_pv.clone(),
         skipped_file: skipped_file.clone(),
@@ -805,11 +889,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time_limit_ms,
         opts: &opts,
         shared: &shared,
+        global_stop: global_stop.clone(),
     };
 
     // Process in batches (optionally inside a local rayon thread pool)
-    let run_batches = || {
+    let run_batches = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for (batch_idx, chunk) in sfen_positions.chunks(batch_size).enumerate() {
+            if global_stop.load(Ordering::Relaxed) {
+                break;
+            }
             let batch_start = std::time::Instant::now();
 
             println!(
@@ -877,17 +965,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (new_processed as f64 / total_positions as f64) * 100.0
             );
         }
-        Ok::<(), Box<dyn std::error::Error>>(())
+        Ok(())
     };
 
     if let Some(j) = opts.jobs {
         let pool = ThreadPoolBuilder::new().num_threads(j).build().expect("build rayon pool");
-        pool.install(|| {
-            // Ignore error here; errors would bubble via ? in real refactor
-            let _ = run_batches();
-        });
-    } else {
-        let _ = run_batches();
+        let res = pool.install(run_batches);
+        if let Err(e) = res {
+            return Err(e as Box<dyn std::error::Error>);
+        }
+    } else if let Err(e) = run_batches() {
+        return Err(e as Box<dyn std::error::Error>);
     }
 
     // Final statistics
@@ -945,6 +1033,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EngineType::EnhancedNnue => "enhanced-nnue",
     };
     let attempted_total = total_attempted.load(Ordering::Relaxed);
+    // Compute output file SHA-256
+    let (out_sha256, out_bytes) = (|| -> Option<(String, u64)> {
+        use sha2::{Digest, Sha256};
+        let mut f = File::open(&output_path).ok()?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut total: u64 = 0;
+        loop {
+            let n = std::io::Read::read(&mut f, &mut buf).ok()?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as u64;
+        }
+        let hash = hasher.finalize();
+        Some((hex::encode(hash), total))
+    })()
+    .unwrap_or((String::new(), 0));
+
     let manifest = Manifest {
         generated_at: chrono::Utc::now().to_rfc3339(),
         git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
@@ -992,6 +1100,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         skip_overrun_factor: opts.skip_overrun_factor,
         search_depth_arg: search_depth,
         effective_min_depth: effective_depth,
+        output_sha256: if out_sha256.is_empty() {
+            None
+        } else {
+            Some(out_sha256)
+        },
+        output_bytes: if out_bytes == 0 {
+            None
+        } else {
+            Some(out_bytes)
+        },
     };
     if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
         if let Err(e) = std::fs::write(&manifest_path, txt) {
@@ -1030,7 +1148,8 @@ fn process_position_with_engine(
     if !env.opts.reuse_tt {
         eng.reset_for_position();
     }
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    // Use global stop flag for graceful cancellation
+    let stop_flag = env.global_stop.clone();
 
     // Build limits: prefer nodes-based budget if provided
     let mut builder = SearchLimits::builder()
@@ -1061,7 +1180,6 @@ fn process_position_with_engine(
             eprintln!("Position {} took too long ({:.1}s), skipping", idx + 1, elapsed_s);
         }
         env.shared.skipped_count.fetch_add(1, Ordering::Relaxed);
-        env.shared.errors_timeout.fetch_add(1, Ordering::Relaxed);
 
         // Write to skipped file with reason (JSON)
         if let Ok(mut file) = env.shared.skipped_file.lock() {
@@ -1132,17 +1250,51 @@ fn process_position_with_engine(
         return None;
     }
 
-    // Compute best2 gap if MultiPV >= 2 and we have 2 lines
+    // Compute best2 gap, detect ambiguity, and optionally compute K=3 entropy
     let mut best2_gap_cp_meta = String::new();
-    if env.opts.multipv >= 2 {
-        if let Some(ref lines) = result.lines {
-            if lines.len() >= 2 {
-                let l0 = &lines[0];
-                let l1 = &lines[1];
-                // Prefer reporting gap even if non-Exact, but you may filter later
-                let gap = (l0.score_cp - l1.score_cp).abs();
-                best2_gap_cp_meta =
-                    format!(" best2_gap_cp:{} bound0:{:?} bound1:{:?}", gap, l0.bound, l1.bound);
+    let mut ambiguous_k3 = false;
+    let mut entropy_k3_opt: Option<f64> = None;
+    let mut lines_used_opt: Option<Vec<engine_core::search::types::RootLine>> = None;
+    if let Some(ref lines0) = result.lines {
+        if lines0.len() >= 2 {
+            let l0 = &lines0[0];
+            let l1 = &lines0[1];
+            let gap = (l0.score_cp - l1.score_cp).abs();
+            best2_gap_cp_meta =
+                format!(" best2_gap_cp:{} bound0:{:?} bound1:{:?}", gap, l0.bound, l1.bound);
+            let exact_ok = !env.opts.amb_require_exact
+                || (matches!(l0.bound, Bound::Exact) && matches!(l1.bound, Bound::Exact));
+            if exact_ok && gap <= env.opts.amb_gap2_threshold {
+                ambiguous_k3 = true;
+                let mut have_three = lines0.len() >= 3;
+                let mut lines_k = lines0.clone().to_vec();
+                if !have_three {
+                    let mut pos2 = position.clone();
+                    let mut builder2 = SearchLimits::builder()
+                        .depth(env.depth)
+                        .stop_flag(stop_flag.clone())
+                        .multipv(3);
+                    if let Some(n) = env.opts.nodes {
+                        builder2 = builder2.fixed_nodes(n);
+                    } else {
+                        builder2 = builder2.fixed_time_ms(env.time_limit_ms);
+                    }
+                    let limits2 = builder2.build();
+                    let res2 = eng.search(&mut pos2, limits2);
+                    if let Some(ref lines2) = res2.lines {
+                        lines_k = lines2.clone().to_vec();
+                        have_three = lines_k.len() >= 3;
+                    }
+                }
+                if have_three {
+                    let ent = softmax_entropy_k3_from_lines(
+                        &lines_k,
+                        env.opts.wdl_scale,
+                        env.opts.entropy_mate_mode,
+                    );
+                    entropy_k3_opt = ent;
+                    lines_used_opt = Some(lines_k);
+                }
             }
         }
     }
@@ -1189,6 +1341,12 @@ fn process_position_with_engine(
             if !best2_gap_cp_meta.is_empty() {
                 line.push_str(&best2_gap_cp_meta);
             }
+            if let Some(ent) = entropy_k3_opt {
+                line.push_str(&format!(" ent_k3:{:.6}", ent));
+            }
+            if ambiguous_k3 {
+                line.push_str(" ambiguous:true");
+            }
             Some(line)
         }
         OutputFormat::Jsonl => {
@@ -1197,7 +1355,15 @@ fn process_position_with_engine(
             let mut bound2 = None;
             let mut gap2: Option<i32> = None;
             let mut lines_json = Vec::new();
-            if let Some(ref lines) = result.lines {
+            // Prefer lines from K=3 re-search if present; otherwise use original lines
+            let fallback_small = result.lines.as_ref();
+            let lines_ref: Option<&[engine_core::search::types::RootLine]> =
+                if let Some(ref v) = lines_used_opt {
+                    Some(v.as_slice())
+                } else {
+                    fallback_small.map(|sv| sv.as_slice())
+                };
+            if let Some(lines) = lines_ref {
                 for (i, l) in lines.iter().enumerate() {
                     if i == 0 {
                         bound1 = Some(format!("{:?}", l.bound));
@@ -1232,6 +1398,11 @@ fn process_position_with_engine(
                 None
             };
 
+            let root_idx_val: u32 = if let Some(lines) = lines_ref {
+                lines.first().map(|l| (l.multipv_index.saturating_sub(1)) as u32).unwrap_or(0)
+            } else {
+                0
+            };
             let json_obj = json!({
                 "sfen": sfen,
                 "lines": lines_json,
@@ -1249,11 +1420,13 @@ fn process_position_with_engine(
                 "bound1": bound1,
                 "bound2": bound2,
                 "tt_hit_rate": tt_hit_rate,
-                "root_move_index": 0,
+                "root_move_index": root_idx_val,
                 "label": label_kind,
                 "eval": eval,
                 "wdl": wdl_prob_opt,
                 "meta": meta.trim(),
+                "ambiguous": ambiguous_k3,
+                "softmax_entropy_k3": entropy_k3_opt,
             });
             Some(json_obj.to_string())
         }
@@ -1265,4 +1438,50 @@ fn cp_to_wdl(cp: i32, scale: f64) -> f64 {
     // Clamp CP to a reasonable range to avoid NaNs
     let x = (cp as f64).clamp(-32000.0, 32000.0) / scale;
     1.0 / (1.0 + (-x).exp())
+}
+
+fn softmax_entropy_k3_from_lines(
+    lines: &[engine_core::search::types::RootLine],
+    scale: f64,
+    mate_mode: MateEntropyMode,
+) -> Option<f64> {
+    if lines.len() < 3 {
+        return None;
+    }
+    let mut cp: [i32; 3] = [0; 3];
+    for i in 0..3 {
+        let l = &lines[i];
+        let is_mate = l.mate_distance.is_some();
+        if is_mate {
+            match mate_mode {
+                MateEntropyMode::Exclude => return None,
+                MateEntropyMode::Saturate => {
+                    // Use the sign of score_cp to saturate
+                    let sign = if l.score_cp >= 0 { 1 } else { -1 };
+                    cp[i] = 32000 * sign;
+                }
+            }
+        } else {
+            cp[i] = l.score_cp;
+        }
+    }
+    // logits = cp/scale, softmax, then entropy
+    let logits = [
+        cp[0] as f64 / scale,
+        cp[1] as f64 / scale,
+        cp[2] as f64 / scale,
+    ];
+    let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let exps = [
+        (logits[0] - max).exp(),
+        (logits[1] - max).exp(),
+        (logits[2] - max).exp(),
+    ];
+    let sum = exps[0] + exps[1] + exps[2];
+    if sum == 0.0 || !sum.is_finite() {
+        return None;
+    }
+    let probs = [exps[0] / sum, exps[1] / sum, exps[2] / sum];
+    let entropy = -probs.iter().map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 }).sum::<f64>();
+    Some(entropy)
 }

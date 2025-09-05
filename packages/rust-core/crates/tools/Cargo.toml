@@ -20,6 +20,9 @@ rand_xoshiro = { workspace = true }
 rayon = "1.10"
 zstd = { version = "0.13", optional = true }
 bytemuck = "1.15"
+ctrlc = "3.4"
+sha2 = "0.10"
+hex = "0.4"
 
 [features]
 zstd = ["dep:zstd"]
