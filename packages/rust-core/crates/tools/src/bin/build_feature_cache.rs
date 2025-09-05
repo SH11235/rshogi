@@ -9,7 +9,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{arg, Command};
-use engine_core::{evaluation::nnue::features::extract_features, Color, Position};
+use engine_core::{
+    evaluation::nnue::features::{extract_features, FE_END},
+    shogi::SHOGI_BOARD_SIZE,
+    Color, Position,
+};
 use serde::Deserialize;
 
 // Cache format version (v1)
@@ -119,9 +123,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(["wdl", "cp"]) // strict accepted values
                 .default_value("wdl"),
         )
-        .arg(arg!(--scale <N> "Scale for cp->wdl conversion").default_value("600"))
-        .arg(arg!(--"cp-clip" <N> "Clip CP values to this range").default_value("1200"))
-        .arg(arg!(--"chunk-size" <N> "Samples per chunk").default_value("16384"))
+        .arg(
+            arg!(--scale <N> "Scale for cp->wdl conversion")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("600"),
+        )
+        .arg(
+            arg!(--"cp-clip" <N> "Clip CP values to this range")
+                .value_parser(clap::value_parser!(i32).range(0..))
+                .default_value("1200"),
+        )
+        .arg(
+            arg!(--"chunk-size" <N> "Samples per chunk")
+                .value_parser(clap::value_parser!(u32).range(1..))
+                .default_value("16384"),
+        )
         .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves"))
         .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used"))
         .arg(arg!(--compress "Enable payload compression"))
@@ -139,9 +155,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input_path = app.get_one::<String>("input").unwrap();
     let output_path = app.get_one::<String>("output").unwrap();
     let label_type = app.get_one::<String>("label").unwrap();
-    let scale: f32 = app.get_one::<String>("scale").unwrap().parse()?;
-    let cp_clip: i32 = app.get_one::<String>("cp-clip").unwrap().parse()?;
-    let chunk_size: u32 = app.get_one::<String>("chunk-size").unwrap().parse()?;
+    let scale: f32 = *app.get_one::<f32>("scale").unwrap();
+    let cp_clip: i32 = *app.get_one::<i32>("cp-clip").unwrap();
+    let chunk_size: u32 = *app.get_one::<u32>("chunk-size").unwrap();
+    if scale <= 0.0 {
+        return Err("Invalid --scale: must be > 0".into());
+    }
     let exclude_no_legal_move = app.get_flag("exclude-no-legal-move");
     let exclude_fallback = app.get_flag("exclude-fallback");
     let compress_flag = app.get_flag("compress");
@@ -358,6 +377,16 @@ fn write_samples_to_sink<W: Write>(
             if config.dedup_features {
                 features_buf.sort_unstable();
                 features_buf.dedup();
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let max_dim = (SHOGI_BOARD_SIZE * FE_END) as u32;
+                debug_assert!(
+                    features_buf.iter().all(|&f| f < max_dim),
+                    "feature index OOB: some index >= {}",
+                    max_dim
+                );
             }
 
             let cp_oriented = if perspective == Color::Black {
