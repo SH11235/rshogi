@@ -19,6 +19,7 @@ rand = { workspace = true }
 rand_xoshiro = { workspace = true }
 rayon = "1.10"
 zstd = { version = "0.13", optional = true }
+bytemuck = "1.15"
 
 [features]
 zstd = ["dep:zstd"]
