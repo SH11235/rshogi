@@ -2,7 +2,7 @@
 
 use super::constants::{AGE_MASK, GENERATION_CYCLE};
 use super::*;
-use crate::util::sync_compat::Ordering;
+use std::sync::atomic::Ordering;
 
 impl TranspositionTable {
     /// Check if bucket is empty (all entries have key == 0)

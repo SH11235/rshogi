@@ -7,7 +7,7 @@ use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
 use super::utils::{try_update_entry_generic, UpdateResult};
 use crate::search::tt::simd::simd_enabled;
 use crate::search::NodeType;
-use crate::util::sync_compat::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Flexible bucket that can hold variable number of entries
 /// Note: For optimal performance, consider using fixed-size TTBucket when possible

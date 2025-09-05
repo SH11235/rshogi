@@ -16,7 +16,7 @@ use super::constants::{DEPTH_MASK, DEPTH_SHIFT};
 use super::entry::TTEntry;
 #[cfg(feature = "tt_metrics")]
 use super::metrics::{record_metric, DetailedTTMetrics, MetricType};
-use crate::util::sync_compat::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum number of CAS retry attempts before giving up
 const MAX_CAS_RETRIES: usize = 3;

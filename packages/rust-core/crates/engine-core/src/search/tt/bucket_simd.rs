@@ -3,7 +3,7 @@
 use super::constants::BUCKET_SIZE;
 use super::entry::TTEntry;
 use crate::search::NodeType;
-use crate::util::sync_compat::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// SIMD-optimized probe implementation for TTBucket
 pub(crate) fn probe_simd(
