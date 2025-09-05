@@ -373,7 +373,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(arg!(--lr <RATE> "Learning rate").default_value("0.001"))
         .arg(arg!(--opt <TYPE> "Optimizer: sgd, adam").default_value("adam"))
         .arg(arg!(--l2 <RATE> "L2 regularization").default_value("0.000001"))
-        .arg(arg!(-l --label <TYPE> "Label type: wdl, cp").default_value("wdl"))
+        .arg(
+            arg!(-l --label <TYPE> "Label type: wdl, cp")
+                .value_parser(["wdl", "cp"]) // strict accepted values
+                .default_value("wdl"),
+        )
         .arg(arg!(--scale <N> "Scale for cp->wdl conversion").default_value("600"))
         .arg(arg!(--"cp-clip" <N> "Clip CP values to this range").default_value("1200"))
         .arg(arg!(--"acc-dim" <N> "Accumulator dimension").default_value("256"))
@@ -808,13 +812,26 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
             .into());
         }
 
-        // Read features in bulk
-        let mut buf = vec![0u8; n_features * 4];
-        r.read_exact(&mut buf)?;
-        let features: Vec<u32> = buf
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        // Read features in bulk (bytemuck fast path on LE; safe fallback on BE)
+        let mut features: Vec<u32> = vec![0u32; n_features];
+        #[cfg(target_endian = "little")]
+        {
+            use bytemuck::cast_slice_mut;
+            r.read_exact(cast_slice_mut::<u32, u8>(&mut features))?;
+        }
+        #[cfg(target_endian = "big")]
+        {
+            let mut buf = vec![0u8; n_features * 4];
+            r.read_exact(&mut buf)?;
+            for (dst, chunk) in features.iter_mut().zip(buf.chunks_exact(4)) {
+                *dst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let max_dim = (SHOGI_BOARD_SIZE * FE_END) as u32;
+            debug_assert!(features.iter().all(|&f| f < max_dim), "feature index OOB");
+        }
 
         // Read label
         let mut lb = [0u8; 4];

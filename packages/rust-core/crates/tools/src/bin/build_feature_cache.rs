@@ -114,7 +114,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .about("Build feature cache from JSONL training data")
         .arg(arg!(-i --input <FILE> "Input JSONL file").required(true))
         .arg(arg!(-o --output <FILE> "Output cache file").required(true))
-        .arg(arg!(-l --label <TYPE> "Label type: wdl, cp").default_value("wdl"))
+        .arg(
+            arg!(-l --label <TYPE> "Label type: wdl, cp")
+                .value_parser(["wdl", "cp"]) // strict accepted values
+                .default_value("wdl"),
+        )
         .arg(arg!(--scale <N> "Scale for cp->wdl conversion").default_value("600"))
         .arg(arg!(--"cp-clip" <N> "Clip CP values to this range").default_value("1200"))
         .arg(arg!(--"chunk-size" <N> "Samples per chunk").default_value("16384"))
@@ -258,6 +262,9 @@ fn write_samples_to_sink<W: Write>(
     let mut processed = 0;
     // Reusable feature buffer (typical active features << 256)
     let mut features_buf: Vec<u32> = Vec::with_capacity(256);
+    // Reusable u8 scratch for big-endian fallback writes
+    #[cfg(target_endian = "big")]
+    let mut u8_buf: Vec<u8> = Vec::with_capacity(4096);
 
     for line in reader.lines() {
         let line = line?;
@@ -375,13 +382,22 @@ fn write_samples_to_sink<W: Write>(
             // Write sample (no padding; meta layout fixed)
             let n_features = features_buf.len() as u32;
             sink.write_all(&n_features.to_le_bytes())?;
-            // Bulk write features in one syscall-friendly buffer
+            // Bulk write features
             if !features_buf.is_empty() {
-                let mut buf = Vec::with_capacity(features_buf.len() * 4);
-                for &feat in &features_buf {
-                    buf.extend_from_slice(&feat.to_le_bytes());
+                #[cfg(target_endian = "little")]
+                {
+                    use bytemuck::cast_slice;
+                    sink.write_all(cast_slice::<u32, u8>(&features_buf))?;
                 }
-                sink.write_all(&buf)?;
+                #[cfg(target_endian = "big")]
+                {
+                    u8_buf.clear();
+                    u8_buf.reserve(features_buf.len() * 4);
+                    for &feat in &features_buf {
+                        u8_buf.extend_from_slice(&feat.to_le_bytes());
+                    }
+                    sink.write_all(&u8_buf)?;
+                }
             }
             sink.write_all(&label.to_le_bytes())?;
             let gap = pos_data.best2_gap_cp.unwrap_or(0).clamp(0, u16::MAX as i32) as u16;
