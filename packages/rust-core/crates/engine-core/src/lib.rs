@@ -20,6 +20,4 @@ pub use search::history::History;
 pub use search::TranspositionTable;
 pub use shogi::position::ZobristTable;
 pub use shogi::{Bitboard, Board, Color, Piece, PieceType, Position, Square};
-pub use std::sync::atomic::{AtomicU64, Ordering};
-pub use std::sync::Arc;
 pub use time_management::{TimeControl, TimeLimits, TimeManager, TimeParameters};

@@ -21,7 +21,7 @@
 - Formatting: rustfmt (see `rustfmt.toml`), max width 100, 4-space tabs, edition 2021.
 - Linting: clippy (see `clippy.toml`); treat warnings as errors in CI/dev.
 - Naming: snake_case for modules/functions, CamelCase for types/traits, SCREAMING_SNAKE_CASE for consts.
-- Features: use kebab/snake (e.g., `tt_metrics`, `ybwc`, `nightly`, `loom`). Enable with `--features`.
+- Features: use kebab/snake (e.g., `tt_metrics`, `ybwc`, `nightly`). Enable with `--features`.
 
 ## Testing Guidelines
 - Unit tests: co-located `mod tests` or `src/.../tests/*.rs` (descriptive names like `check_evasion.rs`).
@@ -35,7 +35,7 @@
 
 ## Security & Configuration Tips
 - CPU features are auto-detected in `build.rs`. For best performance: `RUSTFLAGS="-C target-cpu=native" cargo build --release`.
-- Non-WASM concurrency testing uses optional `loom`; enable with `--features loom` on non-wasm targets.
+- Concurrency testing: use standard threads; keep tests small and deterministic.
 
 ## Rust Module Structure Policy (2018–2024 Editions)
 - File-as-module layout: prefer `src/foo.rs` for the parent and `src/foo/*.rs` for children (no new `mod.rs`). Legacy/generated `mod.rs` may remain but should not be introduced anew.
