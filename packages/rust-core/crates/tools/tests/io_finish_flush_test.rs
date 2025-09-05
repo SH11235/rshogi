@@ -9,22 +9,22 @@ fn bin_path(name: &str) -> PathBuf {
     if let Ok(p) = std::env::var(&key) {
         return PathBuf::from(p);
     }
-    // Try debug then release as fallback
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/tools
-    p.pop(); // crates
-    let mut cand = p.clone();
-    cand.push("target");
-    cand.push("debug");
-    cand.push(name);
-    if cand.exists() {
-        return cand;
+    // Fallback: prefer release (common in CI), then debug
+    let mut base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    base.pop(); // crates/tools
+    base.pop(); // crates
+    let mut rel = base.clone();
+    rel.push("target");
+    rel.push("release");
+    rel.push(name);
+    if rel.exists() {
+        return rel;
     }
-    let mut cand2 = p;
-    cand2.push("target");
-    cand2.push("release");
-    cand2.push(name);
-    cand2
+    let mut dbg = base;
+    dbg.push("target");
+    dbg.push("debug");
+    dbg.push(name);
+    dbg
 }
 
 fn tmp_path(name: &str) -> PathBuf {
