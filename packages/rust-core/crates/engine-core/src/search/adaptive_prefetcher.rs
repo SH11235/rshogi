@@ -5,8 +5,8 @@
 //! - Dynamically adjusts prefetch distance based on effectiveness
 //! - Provides statistics for performance tuning
 
-use crate::util::sync_compat::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Adaptive prefetcher for the transposition table
 ///

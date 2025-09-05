@@ -3,6 +3,7 @@
 //! Provides efficient bit-level operations for board state representation
 
 use super::types::Square;
+use crate::shogi::board_constants::SHOGI_BOARD_SIZE;
 
 /// Bitboard (81 squares)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -13,33 +14,33 @@ impl Bitboard {
     pub const EMPTY: Self = Bitboard(0);
 
     /// All squares set
-    pub const ALL: Self = Bitboard((1u128 << 81) - 1);
+    pub const ALL: Self = Bitboard((1u128 << SHOGI_BOARD_SIZE) - 1);
 
     /// Create bitboard with single square set
     #[inline]
     pub fn from_square(sq: Square) -> Self {
-        debug_assert!(sq.0 < 81);
+        debug_assert!(sq.0 < SHOGI_BOARD_SIZE as u8);
         Bitboard(1u128 << sq.index())
     }
 
     /// Set bit at square
     #[inline]
     pub fn set(&mut self, sq: Square) {
-        debug_assert!(sq.0 < 81);
+        debug_assert!(sq.0 < SHOGI_BOARD_SIZE as u8);
         self.0 |= 1u128 << sq.index();
     }
 
     /// Clear bit at square
     #[inline]
     pub fn clear(&mut self, sq: Square) {
-        debug_assert!(sq.0 < 81);
+        debug_assert!(sq.0 < SHOGI_BOARD_SIZE as u8);
         self.0 &= !(1u128 << sq.index());
     }
 
     /// Test bit at square
     #[inline]
     pub fn test(&self, sq: Square) -> bool {
-        debug_assert!(sq.0 < 81);
+        debug_assert!(sq.0 < SHOGI_BOARD_SIZE as u8);
         (self.0 >> sq.index()) & 1 != 0
     }
 
@@ -195,20 +196,23 @@ mod tests {
         use crate::shogi::attacks;
 
         // Test the attacks::file_mask function
-        for file in 0..9 {
+        for file in 0..crate::shogi::BOARD_FILES as u8 {
             let mask = attacks::file_mask(file);
 
             // Verify that all squares in the file are set
-            for rank in 0..9 {
-                let sq = Square(file + rank * 9);
+            for rank in 0..crate::shogi::BOARD_RANKS as u8 {
+                let idx = crate::shogi::square_index(file as usize, rank as usize) as u8;
+                let sq = Square(idx);
                 assert!(mask.test(sq), "file {file} rank {rank} should be set");
             }
 
             // Verify that squares in other files are not set
-            for other_file in 0..9 {
+            for other_file in 0..crate::shogi::BOARD_FILES as u8 {
                 if other_file != file {
-                    for rank in 0..9 {
-                        let sq = Square(other_file + rank * 9);
+                    for rank in 0..crate::shogi::BOARD_RANKS as u8 {
+                        let idx =
+                            crate::shogi::square_index(other_file as usize, rank as usize) as u8;
+                        let sq = Square(idx);
                         assert!(!mask.test(sq), "file {other_file} rank {rank} should not be set");
                     }
                 }

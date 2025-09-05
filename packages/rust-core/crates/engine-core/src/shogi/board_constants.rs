@@ -12,6 +12,12 @@ pub const SHOGI_BOARD_SIZE: usize = 81;
 pub const BOARD_FILES: usize = 9;
 pub const BOARD_RANKS: usize = 9;
 
+/// Calculate linear square index from file and rank
+#[inline]
+pub const fn square_index(file: usize, rank: usize) -> usize {
+    rank * BOARD_FILES + file
+}
+
 // ==== Rank Mask Constants ====
 
 /// Rank mask constants for optimization (u128 format for Bitboard)
@@ -89,14 +95,14 @@ pub const RANK_MASKS: [u128; 9] = [
 /// Get file mask as Bitboard
 #[inline]
 pub fn file_mask_bb(file: usize) -> Bitboard {
-    debug_assert!(file < 9);
+    debug_assert!(file < BOARD_FILES);
     Bitboard(FILE_MASKS[file])
 }
 
 /// Get rank mask as Bitboard
 #[inline]
 pub fn rank_mask_bb(rank: usize) -> Bitboard {
-    debug_assert!(rank < 9);
+    debug_assert!(rank < BOARD_RANKS);
     Bitboard(RANK_MASKS[rank])
 }
 
@@ -108,12 +114,12 @@ mod tests {
     #[test]
     fn test_rank_masks() {
         // Test that each rank mask covers exactly 9 squares
-        for rank in 0..9 {
+        for rank in 0..BOARD_RANKS {
             let mask = Bitboard(RANK_MASKS[rank]);
             assert_eq!(mask.count_ones(), 9);
 
             // Verify correct squares are set
-            for file in 0..9 {
+            for file in 0..BOARD_FILES {
                 let sq = Square::new(file as u8, rank as u8);
                 assert!(mask.test(sq));
             }
@@ -123,12 +129,12 @@ mod tests {
     #[test]
     fn test_file_masks() {
         // Test that each file mask covers exactly 9 squares
-        for file in 0..9 {
+        for file in 0..BOARD_FILES {
             let mask = Bitboard(FILE_MASKS[file]);
             assert_eq!(mask.count_ones(), 9);
 
             // Verify correct squares are set
-            for rank in 0..9 {
+            for rank in 0..BOARD_RANKS {
                 let sq = Square::new(file as u8, rank as u8);
                 assert!(mask.test(sq));
             }
@@ -143,7 +149,7 @@ mod tests {
         // Black promotion zone: ranks 0-2
         assert_eq!(black_zone.count_ones(), 27);
         for rank in 0..3 {
-            for file in 0..9 {
+            for file in 0..BOARD_FILES {
                 let sq = Square::new(file as u8, rank as u8);
                 assert!(black_zone.test(sq));
             }
@@ -152,7 +158,7 @@ mod tests {
         // White promotion zone: ranks 6-8
         assert_eq!(white_zone.count_ones(), 27);
         for rank in 6..9 {
-            for file in 0..9 {
+            for file in 0..BOARD_FILES {
                 let sq = Square::new(file as u8, rank as u8);
                 assert!(white_zone.test(sq));
             }

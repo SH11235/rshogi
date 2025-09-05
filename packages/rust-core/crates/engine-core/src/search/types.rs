@@ -38,6 +38,8 @@ pub struct SearchStats {
     pub aspiration_hits: Option<u32>,
     /// Total re-searches performed
     pub re_searches: Option<u32>,
+    /// Number of times PV head changed (root)
+    pub pv_changed: Option<u32>,
     /// Duplication percentage for parallel search (0-100)
     pub duplication_percentage: Option<f64>,
     /// Number of check extensions applied
@@ -54,6 +56,8 @@ pub struct SearchStats {
     pub pv_trim_checks: Option<u64>,
     /// Number of times PV was actually trimmed
     pub pv_trim_cuts: Option<u64>,
+    /// Root-level fail-high occurrences (for diagnostics)
+    pub root_fail_high_count: Option<u64>,
 }
 
 impl SearchStats {
@@ -68,6 +72,17 @@ impl SearchStats {
 /// Bound kind for root lines (alias to NodeType for clarity)
 pub type Bound = NodeType;
 
+/// Teacher profile for conservative/aggressive pruning policy during data labeling
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherProfile {
+    /// Most conservative pruning (prefer safety and verification)
+    Safe,
+    /// Balanced pruning (default for teacher data)
+    Balanced,
+    /// More aggressive pruning (faster, less verification)
+    Aggressive,
+}
+
 /// Root line representation for MultiPV (index 0 is the best line)
 #[derive(Clone, Debug)]
 pub struct RootLine {
@@ -75,18 +90,28 @@ pub struct RootLine {
     pub multipv_index: u8,
     /// Root move of this line
     pub root_move: Move,
-    /// Evaluation score in centipawns (side to move)
+    /// Engine internal score (mate distances retained)
+    pub score_internal: i32,
+    /// Evaluation score in centipawns (side to move, clipped for output)
     pub score_cp: i32,
     /// Bound type (Exact/LowerBound/UpperBound)
     pub bound: Bound,
     /// Depth reached for this line
     pub depth: u32,
+    /// Selective depth for this line (if available)
+    pub seldepth: Option<u8>,
     /// Principal variation for this root move
     pub pv: SmallVec<[Move; 32]>,
     /// Optional meta: nodes counted when producing this line
     pub nodes: Option<u64>,
     /// Optional meta: time in milliseconds spent on this line
     pub time_ms: Option<u64>,
+    /// If true, we failed to exactify due to budget/time limits
+    pub exact_exhausted: bool,
+    /// Reason for exhaustion (e.g., "budget", "timeout")
+    pub exhaust_reason: Option<String>,
+    /// Mate distance if score represents mate
+    pub mate_distance: Option<i32>,
 }
 
 /// Search result

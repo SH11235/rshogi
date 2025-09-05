@@ -6,8 +6,6 @@ edition = "2021"
 [features]
 # Default features
 default = ["hashfull_filter"]
-# Loom feature for parallel safety testing (not available on WASM)
-loom = ["dep:loom"]
 # Feature for tests that require large stack size
 large-stack-tests = []
 # Feature to enable nightly-only optimizations (e.g., ARM64 prefetch)
@@ -36,10 +34,6 @@ crossbeam-utils = "0.8"
 crossbeam-deque = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.0", features = ["derive"] }
-
-# Loom is only available for non-WASM targets
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-loom = { version = "0.7", features = ["checkpoint"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.6", features = ["html_reports"] }

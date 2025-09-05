@@ -3,6 +3,7 @@
 //! Defines move types and basic move operations for shogi
 
 use super::board::{PieceType, Square};
+use crate::shogi::board_constants::SHOGI_BOARD_SIZE;
 use smallvec::SmallVec;
 
 /// Type alias for move lists using SmallVec
@@ -81,7 +82,7 @@ impl Move {
     /// Note: This is a temporary API. Use normal_with_piece for full functionality.
     #[inline]
     pub fn normal(from: Square, to: Square, promote: bool) -> Self {
-        debug_assert!(from.0 < 81 && to.0 < 81);
+        debug_assert!(from.0 < SHOGI_BOARD_SIZE as u8 && to.0 < SHOGI_BOARD_SIZE as u8);
         let mut data = to.0 as u32;
         data |= (from.0 as u32) << 7;
         if promote {
@@ -100,7 +101,7 @@ impl Move {
         piece_type: PieceType,
         captured_type: Option<PieceType>,
     ) -> Self {
-        debug_assert!(from.0 < 81 && to.0 < 81);
+        debug_assert!(from.0 < SHOGI_BOARD_SIZE as u8 && to.0 < SHOGI_BOARD_SIZE as u8);
         let mut data = to.0 as u32;
         data |= (from.0 as u32) << 7;
         if promote {
@@ -117,12 +118,12 @@ impl Move {
     /// Create a drop move (placing piece from hand)
     #[inline]
     pub fn drop(piece_type: PieceType, to: Square) -> Self {
-        debug_assert!(to.0 < 81);
+        debug_assert!(to.0 < SHOGI_BOARD_SIZE as u8);
         debug_assert!(!matches!(piece_type, PieceType::King));
 
         let mut data = to.0 as u32;
         // Encode piece type in source field (81-87)
-        data |= (81 + piece_type as u32 - 1) << 7; // -1 to skip King
+        data |= ((SHOGI_BOARD_SIZE as u32) + piece_type as u32 - 1) << 7; // -1 to skip King
         data |= 1 << 15; // Set drop flag
                          // Also store piece type in the dedicated field (add 1 to distinguish from 0 = unknown)
         data |= ((piece_type as u32) + 1) << 16;
@@ -168,7 +169,7 @@ impl Move {
     pub fn drop_piece_type(self) -> PieceType {
         debug_assert!(self.is_drop());
         let encoded = ((self.data >> 7) & 0x7F) as u8;
-        match encoded - 81 {
+        match encoded - (SHOGI_BOARD_SIZE as u8) {
             0 => PieceType::Rook,
             1 => PieceType::Bishop,
             2 => PieceType::Gold,
@@ -403,7 +404,7 @@ impl<'a> IntoIterator for &'a MoveList {
 
 #[cfg(test)]
 mod tests {
-    use crate::usi::parse_usi_square;
+    use crate::{shogi::BOARD_FILES, usi::parse_usi_square};
 
     use super::*;
 
@@ -529,10 +530,10 @@ mod tests {
         // to_u32() → from_u32() のラウンドトリップテスト
 
         // 全ての升目の組み合わせをテスト（サンプリング）
-        for from_file in 0..9 {
-            for from_rank in 0..9 {
-                for to_file in 0..9 {
-                    for to_rank in 0..9 {
+        for from_file in 0..BOARD_FILES as u8 {
+            for from_rank in 0..BOARD_FILES as u8 {
+                for to_file in 0..BOARD_FILES as u8 {
+                    for to_rank in 0..BOARD_FILES as u8 {
                         let from = Square::new(from_file, from_rank);
                         let to = Square::new(to_file, to_rank);
 
@@ -562,8 +563,8 @@ mod tests {
             PieceType::Lance,
             PieceType::Pawn,
         ] {
-            for file in 0..9 {
-                for rank in 0..9 {
+            for file in 0..BOARD_FILES as u8 {
+                for rank in 0..BOARD_FILES as u8 {
                     let to = Square::new(file, rank);
                     let m = Move::drop(*pt, to);
                     let encoded = m.to_u32();
@@ -610,8 +611,8 @@ mod tests {
         // 要素の追加
         for i in 0..10 {
             list.push(Move::normal(
-                Square::new((i % 9) as u8, 0),
-                Square::new((i % 9) as u8, 1),
+                Square::new((i % BOARD_FILES) as u8, 0),
+                Square::new((i % BOARD_FILES) as u8, 1),
                 false,
             ));
         }
@@ -626,7 +627,7 @@ mod tests {
         // インデックスアクセス
         for i in 0..10 {
             let m = list[i];
-            assert_eq!(m.from(), Some(Square::new((i % 9) as u8, 0)));
+            assert_eq!(m.from(), Some(Square::new((i % BOARD_FILES) as u8, 0)));
         }
 
         // clear操作
@@ -643,8 +644,11 @@ mod tests {
         // 最大容量までの追加をテスト
         for i in 0..256 {
             list.push(Move::normal(
-                Square::new((i % 9) as u8, (i / 9 % 9) as u8),
-                Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8),
+                Square::new((i % BOARD_FILES) as u8, (i / BOARD_FILES % BOARD_FILES) as u8),
+                Square::new(
+                    ((i + 1) % BOARD_FILES) as u8,
+                    ((i + 1) / BOARD_FILES % BOARD_FILES) as u8,
+                ),
                 false,
             ));
         }
@@ -654,8 +658,17 @@ mod tests {
         // 全ての要素が正しく保存されているか確認
         for i in 0..256 {
             let m = list[i];
-            assert_eq!(m.from(), Some(Square::new((i % 9) as u8, (i / 9 % 9) as u8)));
-            assert_eq!(m.to(), Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8));
+            assert_eq!(
+                m.from(),
+                Some(Square::new((i % BOARD_FILES) as u8, (i / BOARD_FILES % BOARD_FILES) as u8))
+            );
+            assert_eq!(
+                m.to(),
+                Square::new(
+                    ((i + 1) % BOARD_FILES) as u8,
+                    ((i + 1) / BOARD_FILES % BOARD_FILES) as u8
+                )
+            );
         }
     }
 
@@ -668,8 +681,11 @@ mod tests {
         // Add exactly 128 moves (should stay on stack)
         for i in 0..128 {
             list.push(Move::normal(
-                Square::new((i % 9) as u8, (i / 9 % 9) as u8),
-                Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8),
+                Square::new((i % BOARD_FILES) as u8, (i / BOARD_FILES % BOARD_FILES) as u8),
+                Square::new(
+                    ((i + 1) % BOARD_FILES) as u8,
+                    ((i + 1) / BOARD_FILES % BOARD_FILES) as u8,
+                ),
                 false,
             ));
         }
@@ -682,8 +698,11 @@ mod tests {
         // Continue adding moves to verify heap allocation works correctly
         for i in 129..200 {
             list.push(Move::normal(
-                Square::new((i % 9) as u8, (i / 9 % 9) as u8),
-                Square::new(((i + 1) % 9) as u8, ((i + 1) / 9 % 9) as u8),
+                Square::new((i % BOARD_FILES) as u8, (i / BOARD_FILES % BOARD_FILES) as u8),
+                Square::new(
+                    ((i + 1) % BOARD_FILES) as u8,
+                    ((i + 1) / BOARD_FILES % BOARD_FILES) as u8,
+                ),
                 false,
             ));
         }
@@ -692,7 +711,10 @@ mod tests {
         // Verify all moves are accessible
         for i in 0..128 {
             let m = list[i];
-            assert_eq!(m.from(), Some(Square::new((i % 9) as u8, (i / 9 % 9) as u8)));
+            assert_eq!(
+                m.from(),
+                Some(Square::new((i % BOARD_FILES) as u8, (i / BOARD_FILES % BOARD_FILES) as u8))
+            );
         }
 
         // Verify the 129th move

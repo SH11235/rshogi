@@ -3,8 +3,10 @@
 use engine_core::{
     engine::controller::{Engine, EngineType},
     evaluate::Evaluator,
+    evaluation::nnue::features::FE_END,
     nnue::{weights::load_weights, NNUEEvaluatorWrapper},
     search::SearchLimits,
+    shogi::SHOGI_BOARD_SIZE,
     usi::parse_usi_square,
     Color, Piece, PieceType, Position,
 };
@@ -83,7 +85,7 @@ fn test_load_nnue_file() {
     match load_weights(decompressed_path) {
         Ok((transformer, network)) => {
             println!("Successfully loaded NNUE weights");
-            assert_eq!(transformer.weights.len(), 81 * 2182 * 256);
+            assert_eq!(transformer.weights.len(), SHOGI_BOARD_SIZE * FE_END * 256);
             assert_eq!(transformer.biases.len(), 256);
             assert_eq!(network.hidden1_weights.len(), 512 * 32);
             assert_eq!(network.hidden1_biases.len(), 32);

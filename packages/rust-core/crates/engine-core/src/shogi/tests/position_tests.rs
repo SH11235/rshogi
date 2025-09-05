@@ -394,8 +394,8 @@ fn test_do_move_undo_move_reversibility() {
     assert_eq!(pos.history.len(), original_pos.history.len());
 
     // 盤面も元に戻ったことを確認
-    for sq in 0..81 {
-        let square = Square(sq);
+    for sq in 0..crate::shogi::SHOGI_BOARD_SIZE {
+        let square = Square(sq.try_into().unwrap());
         assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
     }
 }
@@ -430,8 +430,8 @@ fn test_do_move_undo_move_capture() {
 
     pos.undo_move(mv, undo);
     assert_eq!(pos.hash, before.hash);
-    for sq in 0..81 {
-        let s = Square(sq);
+    for sq in 0..crate::shogi::SHOGI_BOARD_SIZE {
+        let s = Square(sq.try_into().unwrap());
         assert_eq!(pos.board.piece_on(s), before.board.piece_on(s));
     }
 }
@@ -531,8 +531,8 @@ fn test_do_move_undo_move_multiple() {
     assert_eq!(pos.hash, original_pos.hash);
     assert_eq!(pos.side_to_move, original_pos.side_to_move);
     assert_eq!(pos.ply, original_pos.ply);
-    for sq in 0..81 {
-        let square = Square(sq);
+    for sq in 0..crate::shogi::SHOGI_BOARD_SIZE {
+        let square = Square(sq.try_into().unwrap());
         assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
     }
 }
@@ -553,8 +553,8 @@ fn test_do_null_move_undo_null_move() {
     assert_eq!(pos.history.len(), 1); // History should contain one entry
 
     // Board should remain unchanged
-    for sq in 0..81 {
-        let square = Square(sq);
+    for sq in 0..crate::shogi::SHOGI_BOARD_SIZE {
+        let square = Square(sq.try_into().unwrap());
         assert_eq!(pos.board.piece_on(square), original_pos.board.piece_on(square));
     }
 

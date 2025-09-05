@@ -31,6 +31,9 @@ pub struct SearchLimits {
     /// Skip quiescence search at depth 0 and return immediate evaluation
     /// This is useful for extremely time-constrained situations
     pub immediate_eval_at_depth_zero: bool,
+    /// Number of principal variations to search (MultiPV)
+    /// 1 = single PV (default), higher values enable multi-PV search
+    pub multipv: u8,
 }
 
 impl Default for SearchLimits {
@@ -48,6 +51,7 @@ impl Default for SearchLimits {
             ponder_hit_flag: None,
             qnodes_counter: None,
             immediate_eval_at_depth_zero: false,
+            multipv: 1,
         }
     }
 }
@@ -114,6 +118,7 @@ pub struct SearchLimitsBuilder {
     iteration_callback: Option<IterationCallback>,
     ponder_hit_flag: Option<Arc<AtomicBool>>,
     immediate_eval_at_depth_zero: bool,
+    multipv: u8,
 }
 
 impl Default for SearchLimitsBuilder {
@@ -130,6 +135,7 @@ impl Default for SearchLimitsBuilder {
             iteration_callback: None,
             ponder_hit_flag: None,
             immediate_eval_at_depth_zero: false,
+            multipv: 1,
         }
     }
 }
@@ -289,6 +295,15 @@ impl SearchLimitsBuilder {
         self
     }
 
+    /// Set MultiPV count
+    ///
+    /// Sets the number of principal variations to search. Value is clamped to range 1-20.
+    /// Default is 1 (single PV search).
+    pub fn multipv(mut self, k: u8) -> Self {
+        self.multipv = k.clamp(1, 20);
+        self
+    }
+
     /// Build SearchLimits
     ///
     /// Validates the configuration and builds the SearchLimits.
@@ -323,6 +338,7 @@ impl SearchLimitsBuilder {
             ponder_hit_flag: self.ponder_hit_flag,
             qnodes_counter: None,
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
+            multipv: self.multipv,
         }
     }
 }
@@ -350,6 +366,7 @@ impl From<crate::time_management::TimeLimits> for SearchLimits {
             ponder_hit_flag: None,
             qnodes_counter: None,
             immediate_eval_at_depth_zero: false,
+            multipv: 1,
         }
     }
 }
@@ -396,6 +413,7 @@ impl Clone for SearchLimits {
             ponder_hit_flag: self.ponder_hit_flag.clone(),
             qnodes_counter: self.qnodes_counter.clone(),
             immediate_eval_at_depth_zero: self.immediate_eval_at_depth_zero,
+            multipv: self.multipv,
         }
     }
 }
@@ -419,6 +437,7 @@ impl std::fmt::Debug for SearchLimits {
             .field("ponder_hit_flag", &self.ponder_hit_flag.is_some())
             .field("qnodes_counter", &self.qnodes_counter.is_some())
             .field("immediate_eval_at_depth_zero", &self.immediate_eval_at_depth_zero)
+            .field("multipv", &self.multipv)
             .finish()
     }
 }
@@ -588,5 +607,59 @@ mod tests {
         limits_with.ponder_hit_flag = Some(Arc::new(AtomicBool::new(false)));
         let debug_str_with = format!("{limits_with:?}");
         assert!(debug_str_with.contains("ponder_hit_flag: true"));
+    }
+
+    #[test]
+    fn test_multipv_builder() {
+        // Test basic usage
+        let limits = SearchLimits::builder().multipv(5).build();
+        assert_eq!(limits.multipv, 5);
+
+        // Test clamping to max 20
+        let limits_clamped = SearchLimits::builder().multipv(30).build();
+        assert_eq!(limits_clamped.multipv, 20);
+
+        // Test clamping to min 1
+        let limits_min = SearchLimits::builder().multipv(0).build();
+        assert_eq!(limits_min.multipv, 1);
+
+        // Test default value is 1
+        let limits_default = SearchLimits::builder().build();
+        assert_eq!(limits_default.multipv, 1);
+    }
+
+    #[test]
+    fn test_multipv_with_other_limits() {
+        let limits = SearchLimits::builder()
+            .depth(10)
+            .fixed_time_ms(1000)
+            .multipv(3)
+            .nodes(50000)
+            .build();
+
+        assert_eq!(limits.depth, Some(10));
+        assert_eq!(limits.multipv, 3);
+        assert_eq!(limits.node_limit(), Some(50000));
+        assert_eq!(limits.time_limit(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_multipv_clone() {
+        let original = SearchLimits::builder().multipv(7).depth(15).build();
+        let cloned = original.clone();
+
+        assert_eq!(cloned.multipv, original.multipv);
+        assert_eq!(cloned.depth, original.depth);
+    }
+
+    #[test]
+    fn test_multipv_debug_output() {
+        let limits_with = SearchLimits::builder().multipv(5).build();
+        let debug_str = format!("{limits_with:?}");
+        assert!(debug_str.contains("multipv: 5"));
+
+        let limits_without = SearchLimits::builder().build();
+        let debug_str_none = format!("{limits_without:?}");
+        assert!(debug_str_none.contains("multipv: 1"));
     }
 }

@@ -4,6 +4,7 @@
 //! for creating and querying positions.
 
 use crate::shogi::board::{Board, Color, Piece, PieceType, Square};
+use crate::shogi::NUM_HAND_PIECE_TYPES;
 
 /// Information needed to undo a move
 #[derive(Clone, Debug)]
@@ -25,7 +26,7 @@ pub struct Position {
     pub board: Board,
 
     /// Pieces in hand [color][piece_type] (excluding King)
-    pub hands: [[u8; 7]; 2],
+    pub hands: [[u8; NUM_HAND_PIECE_TYPES]; 2],
 
     /// 手番 (Black or White)
     pub side_to_move: Color,
@@ -47,7 +48,7 @@ impl Position {
     pub fn empty() -> Self {
         Position {
             board: Board::empty(),
-            hands: [[0; 7]; 2],
+            hands: [[0; NUM_HAND_PIECE_TYPES]; 2],
             side_to_move: Color::Black,
             ply: 0,
             hash: 0,

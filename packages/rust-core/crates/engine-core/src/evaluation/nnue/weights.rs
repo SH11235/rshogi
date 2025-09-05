@@ -4,6 +4,7 @@
 
 use super::features::{FeatureTransformer, FE_END};
 use super::network::Network;
+use crate::shogi::SHOGI_BOARD_SIZE;
 use std::error::Error;
 use std::fs::File;
 use std::io::Read;
@@ -32,7 +33,7 @@ const MAX_SUPPORTED_VERSION: u32 = 1;
 const MAX_FILE_SIZE: u32 = 200 * 1024 * 1024;
 
 /// Expected weight sizes for validation
-const EXPECTED_FT_WEIGHTS: usize = 81 * FE_END * 256; // Feature transformer weights
+const EXPECTED_FT_WEIGHTS: usize = SHOGI_BOARD_SIZE * FE_END * 256; // Feature transformer weights
 const EXPECTED_FT_BIASES: usize = 256; // Feature transformer biases
 const EXPECTED_H1_WEIGHTS: usize = 512 * 32; // Hidden layer 1 weights
 const EXPECTED_H1_BIASES: usize = 32; // Hidden layer 1 biases

@@ -322,7 +322,7 @@ mod tests {
         // Test piece-square values
         for color in 0..2 {
             for piece in 0..14 {
-                for sq in 0..81 {
+                for sq in 0..crate::shogi::SHOGI_BOARD_SIZE {
                     let hash = table.piece_square[color][piece][sq];
                     assert!(values.insert(hash), "Duplicate hash found");
                 }
@@ -600,7 +600,7 @@ mod tests {
             let mut pos = Position::empty();
 
             // Add kings (required) - vary their positions too
-            let black_king_file = ((i * 7) % 9) as u8;
+            let black_king_file = ((i * 7) % crate::shogi::BOARD_FILES) as u8;
             let black_king_rank = 'g' as u8 + (i % 3) as u8;
             let black_king_file_char = (b'9' - black_king_file) as char;
             let black_king_rank_char = black_king_rank as char;
@@ -616,7 +616,7 @@ mod tests {
                 );
             }
 
-            let white_king_file = ((i * 3) % 9) as u8;
+            let white_king_file = ((i * 3) % crate::shogi::BOARD_FILES) as u8;
             let white_king_rank = 'a' as u8 + (i % 3) as u8;
             let white_king_file_char = (b'9' - white_king_file) as char;
             let white_king_rank_char = white_king_rank as char;
@@ -645,9 +645,9 @@ mod tests {
 
             // Add pieces based on different patterns
             for j in 0..5 {
-                let idx = (i * 7 + j * 13) % 81;
-                let file = idx % 9;
-                let rank = idx / 9;
+                let idx = (i * 7 + j * 13) % crate::shogi::SHOGI_BOARD_SIZE;
+                let file = idx % crate::shogi::BOARD_FILES;
+                let rank = idx / crate::shogi::BOARD_FILES;
 
                 let file_char = (b'9' - file as u8) as char;
                 let rank_char = (b'a' + rank as u8) as char;
