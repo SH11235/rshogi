@@ -250,7 +250,8 @@ impl Agg {
                 }
             }
             // Invariant: mate_boundary==true なのに gap_no_mate に混入
-            if inserted_nm && rec.mate_boundary.unwrap_or(false) {
+            // ただし --with-mate（= exclude_mate == false）の時は混入を許容する
+            if exclude_mate && inserted_nm && rec.mate_boundary.unwrap_or(false) {
                 self.inv_mate_mixed_into_no_mate += 1;
             }
         }
@@ -463,41 +464,46 @@ fn build_agg_for(
     seed: Option<u64>,
 ) -> Agg {
     let mut a = Agg::default();
-    if let Ok(reader) = open_reader(path) {
-        let cap = sample_n.unwrap_or(0);
-        let use_res = cap > 0;
-        let mut rng = make_rng(seed);
-        let stream = Deserializer::from_reader(reader).into_iter::<Record>();
-        if !use_res {
-            let mut ing = 0usize;
-            for rec in stream {
-                let Ok(rec) = rec else { continue };
-                a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
-                ing += 1;
-                if let Some(m) = limit {
-                    if ing >= m {
-                        break;
-                    }
+    let reader = match open_reader(path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("analyze_teaching_quality: failed to open {}: {}", path, e);
+            return a;
+        }
+    };
+    let cap = sample_n.unwrap_or(0);
+    let use_res = cap > 0;
+    let mut rng = make_rng(seed);
+    let stream = Deserializer::from_reader(reader).into_iter::<Record>();
+    if !use_res {
+        let mut ing = 0usize;
+        for rec in stream {
+            let Ok(rec) = rec else { continue };
+            a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
+            ing += 1;
+            if let Some(m) = limit {
+                if ing >= m {
+                    break;
                 }
             }
-        } else {
-            let mut seen = 0usize;
-            let mut reservoir: Vec<Record> = Vec::new();
-            for rec in stream {
-                let Ok(rec) = rec else { continue };
-                seen += 1;
-                if reservoir.len() < cap {
-                    reservoir.push(rec);
-                } else {
-                    let j = rng.random_range(0..seen);
-                    if j < cap {
-                        reservoir[j] = rec;
-                    }
+        }
+    } else {
+        let mut seen = 0usize;
+        let mut reservoir: Vec<Record> = Vec::new();
+        for rec in stream {
+            let Ok(rec) = rec else { continue };
+            seen += 1;
+            if reservoir.len() < cap {
+                reservoir.push(rec);
+            } else {
+                let j = rng.random_range(0..seen);
+                if j < cap {
+                    reservoir[j] = rec;
                 }
             }
-            for rec in reservoir.into_iter() {
-                a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
-            }
+        }
+        for rec in reservoir.into_iter() {
+            a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
         }
     }
     a
@@ -714,7 +720,7 @@ struct Cli {
     #[arg(long = "quantiles-backend", value_enum)]
     quantiles_backend: Option<QuantilesBackendArg>,
     /// Shorthand for --quantiles-backend p2
-    #[arg(long = "approx-quantiles")]
+    #[arg(long = "approx-quantiles", conflicts_with = "quantiles_backend")]
     approx_quantiles: bool,
     /// Gate config (file path or inline JSON)
     #[arg(long = "gate")]
@@ -900,8 +906,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .then(a.exact_score.cmp(&b.exact_score))
                 .then(a.nodes.cmp(&b.nodes))
                 .then(a.time_ms.cmp(&b.time_ms))
-                .then(a.file_idx.cmp(&b.file_idx))
-                .then(a.line_idx.cmp(&b.line_idx))
+                // 「先勝ち」: file_idx/line_idx は小さい方を優先
+                .then_with(|| b.file_idx.cmp(&a.file_idx))
+                .then_with(|| b.line_idx.cmp(&a.line_idx))
         }
 
         let mut best: HashMap<String, (Record, Key)> = HashMap::new();
