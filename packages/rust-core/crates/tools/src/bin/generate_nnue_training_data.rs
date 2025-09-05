@@ -1,8 +1,15 @@
 use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::search::common::{get_mate_distance, is_mate_score};
 use engine_core::search::limits::SearchLimits;
-use engine_core::search::types::TeacherProfile;
+use engine_core::search::types::{Bound, TeacherProfile};
 use engine_core::Position;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LabelKind {
@@ -36,6 +43,54 @@ struct Opts {
     calibrate_sample: usize,
     reuse_tt: bool,
     skip_overrun_factor: f64,
+    no_recalib: bool,
+    force_recalib: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestCalibration {
+    nps: Option<f64>,
+    target_nodes: Option<u64>,
+    samples: Option<usize>,
+    min_depth_used: Option<u8>,
+    timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestBudget {
+    mode: String,
+    time_ms: Option<u64>,
+    nodes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestOverrides {
+    time: bool,
+    nodes: bool,
+    hash_mb: bool,
+    multipv: bool,
+    min_depth: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Manifest {
+    generated_at: String,
+    git_commit: Option<String>,
+    engine: String,
+    nnue_weights: Option<String>,
+    preset: Option<String>,
+    overrides: Option<ManifestOverrides>,
+    teacher_profile: String,
+    multipv: u8,
+    budget: ManifestBudget,
+    min_depth: u8,
+    hash_mb: usize,
+    threads_per_engine: usize,
+    jobs: Option<usize>,
+    count: usize,
+    cp_to_wdl_scale: f64,
+    wdl_semantics: String,
+    calibration: Option<ManifestCalibration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,15 +116,7 @@ struct ProcEnv<'a> {
     opts: &'a Opts,
     shared: &'a GenShared,
 }
-use rayon::prelude::*;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
-/// NNUE学習データ生成用のツール
-/// 初期段階では浅い探索で高速にデータを集めることを優先
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
@@ -85,14 +132,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("\nOptional flags:");
         eprintln!("  --engine <material|enhanced|nnue|enhanced-nnue> (default: material)");
         eprintln!("  --nnue-weights <path> (required if engine is nnue/enhanced-nnue and weights not zero)");
-        eprintln!("  --preset <baseline|balanced|high> (apply recommended time/hash/multipv/min-depth)");
+        eprintln!(
+            "  --preset <baseline|balanced|high> (apply recommended time/hash/multipv/min-depth; time is ignored if --nodes is set)"
+        );
         eprintln!("  --label <cp|wdl|hybrid> (default: cp)");
         eprintln!("  --wdl-scale <float> (default: 600.0)");
         eprintln!("  --hybrid-ply-cutoff <u32> (default: 100, ply<=cutoff use WDL else CP)");
         eprintln!("  --time-limit-ms <u64> (override per-position time budget)");
         eprintln!("  --hash-mb <usize> (TT size per engine instance, default: 16)");
-        eprintln!("  --reuse-tt (reuse transposition table across positions; default: false)");
+        eprintln!("  --reuse-tt (reuse TT and heuristics across positions; faster but may bias; default: false)");
         eprintln!("  --skip-overrun-factor <float> (timeout skip threshold factor; default: 2.0)");
+        eprintln!("  --no-recalib (reuse manifest calibration if available)");
+        eprintln!("  --force-recalib (force re-calibration even if manifest exists)");
         eprintln!("\nRecommended settings for initial NNUE data:");
         eprintln!("  - Depth 2: Fast collection, basic evaluation");
         eprintln!("  - Depth 3: Balanced speed/quality");
@@ -144,6 +195,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         calibrate_sample: 200,
         reuse_tt: false,
         skip_overrun_factor: 2.0,
+        no_recalib: false,
+        force_recalib: false,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -168,7 +221,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "balanced" => preset_sel = Some(PresetKind::Balanced),
                         "high" => preset_sel = Some(PresetKind::High),
                         other => {
-                            eprintln!("Error: unknown preset '{}'. Use baseline|balanced|high", other);
+                            eprintln!(
+                                "Error: unknown preset '{}'. Use baseline|balanced|high",
+                                other
+                            );
                             std::process::exit(1);
                         }
                     }
@@ -278,6 +334,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--no-recalib" => {
+                opts.no_recalib = true;
+                i += 1;
+            }
+            "--force-recalib" => {
+                opts.force_recalib = true;
+                i += 1;
+            }
             "--teacher-profile" => {
                 if let Some(v) = args.get(i + 1) {
                     match v.to_ascii_lowercase().as_str() {
@@ -351,12 +415,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Apply preset after parsing, but allow explicit CLI overrides to win
     let mut preset_log: Option<String> = None;
+    let mut preset_name: Option<String> = None;
     if let Some(p) = preset_sel {
         let (time_ms, hash_mb, multipv, min_depth) = match p {
             PresetKind::Baseline => (100u64, 16usize, 1u8, 2u8),
             PresetKind::Balanced => (200u64, 32usize, 2u8, 3u8),
             PresetKind::High => (400u64, 64usize, 3u8, 4u8),
         };
+        preset_name = Some(
+            match p {
+                PresetKind::Baseline => "baseline",
+                PresetKind::Balanced => "balanced",
+                PresetKind::High => "high",
+            }
+            .to_string(),
+        );
         // Apply unless overridden by CLI
         if !cli_set_hash {
             opts.hash_mb = hash_mb;
@@ -370,17 +443,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !cli_set_time && !cli_set_nodes {
             opts.time_limit_override_ms = Some(time_ms);
         }
+        // Build an informative preset log with effective mode/value and override hints
+        let mode = if cli_set_nodes || opts.nodes.is_some() {
+            "nodes"
+        } else {
+            "time"
+        };
+        let min_depth_log =
+            opts.min_depth.map(|d| d.to_string()).unwrap_or_else(|| "<unset>".into());
+        let eff = match (mode, opts.time_limit_override_ms, opts.nodes) {
+            ("time", Some(ms), _) => format!("time_ms={}", ms),
+            ("nodes", _, Some(n)) => format!("nodes={}", n),
+            _ => format!("time_ms={}", time_ms),
+        };
         preset_log = Some(format!(
-            "Preset {:?} -> time_ms={}, hash_mb={}, multipv={}, min_depth={}{}{}{}{}",
+            "Preset {:?} -> mode={}, {}{} hash_mb={} multipv={} min_depth={}{}{}{}",
             p,
-            time_ms,
+            mode,
+            eff,
+            if cli_set_time || cli_set_nodes {
+                " (overridden)"
+            } else {
+                ""
+            },
             opts.hash_mb,
             opts.multipv,
-            opts.min_depth.unwrap_or(0),
-            if cli_set_time || cli_set_nodes { " (time/nodes overridden)" } else { "" },
-            if cli_set_hash { " (hash overridden)" } else { "" },
-            if cli_set_multipv { " (multipv overridden)" } else { "" },
-            if cli_set_min_depth { " (min_depth overridden)" } else { "" },
+            min_depth_log,
+            if cli_set_hash {
+                " (hash overridden)"
+            } else {
+                ""
+            },
+            if cli_set_multipv {
+                " (multipv overridden)"
+            } else {
+                ""
+            },
+            if cli_set_min_depth {
+                " (min_depth overridden)"
+            } else {
+                ""
+            },
         ));
     }
 
@@ -424,7 +527,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================");
     let effective_depth = opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
     println!("Search depth: {effective_depth}");
-    if let Some(ref s) = preset_log { println!("Preset: {s}"); }
+    if let Some(ref s) = preset_log {
+        println!("Preset: {s}");
+    }
     println!("Batch size: {batch_size}");
     println!("Engine: {:?}", opts.engine);
     if let Some(ref w) = opts.nnue_weights {
@@ -478,20 +583,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skipped_file =
         Arc::new(Mutex::new(OpenOptions::new().create(true).append(true).open(&skipped_path)?));
 
+    // Resolve manifest path (same directory as output)
+    let manifest_path = output_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("manifest.json");
+
     let input_file = File::open(&input_path)?;
     let reader = BufReader::new(input_file);
     let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
 
     fn extract_sfen(line: &str) -> Option<String> {
         let start = line.find("sfen ")? + 5;
-        let rest = &line[start..];
-        let end = rest.find(" moves").or_else(|| rest.find('#')).unwrap_or(rest.len());
-        let sfen = rest[..end].trim();
-        if sfen.is_empty() {
-            None
-        } else {
-            Some(sfen.to_string())
-        }
+        // normalize tabs to spaces to robustly detect " moves"
+        let rest_raw = &line[start..];
+        let rest_norm = rest_raw.replace('\t', " ");
+        let end = rest_norm
+            .find(" moves")
+            .or_else(|| rest_norm.find('#'))
+            .unwrap_or(rest_norm.len());
+        let sfen = rest_norm[..end].trim();
+        (!sfen.is_empty()).then(|| sfen.to_string())
     }
     let sfen_positions: Vec<(usize, String)> = lines
         .into_iter()
@@ -503,58 +615,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nFound {total_positions} positions in input file");
 
     // Optional: calibrate nodes from NPS if requested and nodes not explicitly set
+    let mut manifest_existing: Option<Manifest> = None;
+    if manifest_path.exists() {
+        if let Ok(txt) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(m) = serde_json::from_str::<Manifest>(&txt) {
+                manifest_existing = Some(m);
+            }
+        }
+    }
+    let mut calibration_to_write: Option<ManifestCalibration> = None;
     if opts.nodes.is_none() {
         if let Some(target_ms) = opts.nodes_autocalibrate_ms {
-            println!("Starting nodes auto-calibration: target {} ms", target_ms);
-            let sample_n = opts.calibrate_sample.min(total_positions).max(10);
-            // Prepare a reusable engine for calibration
-            let mut engine = Engine::new(opts.engine);
-            engine.set_hash_size(opts.hash_mb);
-            engine.set_threads(1);
-            engine.set_multipv(opts.multipv);
-            engine.set_teacher_profile(opts.teacher_profile);
-            if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
-                if let Some(ref path) = opts.nnue_weights {
-                    let _ = engine.load_nnue_weights(path);
+            // Reuse prior calibration if requested and available
+            if opts.no_recalib && !opts.force_recalib {
+                if let Some(ref man) = manifest_existing {
+                    if let Some(ref calib) = man.calibration {
+                        if let Some(tn) = calib.target_nodes {
+                            opts.nodes = Some(tn);
+                            println!(
+                                "Reusing calibration from manifest: target_nodes={} (samples={:?}, min_depth={:?})",
+                                tn, calib.samples, calib.min_depth_used
+                            );
+                        }
+                    }
                 }
             }
 
-            let mut total_nodes: u64 = 0;
-            let mut total_ms: u64 = 0;
-            for (i, (_idx, sfen)) in sfen_positions.iter().take(sample_n).enumerate() {
-                if i % 25 == 0 {
-                    println!("  calibrating {}/{}", i + 1, sample_n);
+            if opts.nodes.is_none() {
+                println!("Starting nodes auto-calibration: target {} ms", target_ms);
+                let sample_n = opts.calibrate_sample.min(total_positions).max(10);
+                // Prepare a reusable engine for calibration
+                let mut engine = Engine::new(opts.engine);
+                engine.set_hash_size(opts.hash_mb);
+                engine.set_threads(1);
+                engine.set_multipv(opts.multipv);
+                engine.set_teacher_profile(opts.teacher_profile);
+                if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
+                    if let Some(ref path) = opts.nnue_weights {
+                        let _ = engine.load_nnue_weights(path);
+                    }
                 }
-                // Build position
-                let mut pos = match engine_core::usi::parse_sfen(sfen) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                engine.reset_for_position();
-                // Fixed-time calibration search (use min depth for stability)
-                let depth = opts.min_depth.unwrap_or(2).max(2);
-                let limits = SearchLimits::builder()
-                    .depth(depth)
-                    .fixed_time_ms(200)
-                    .multipv(opts.multipv)
-                    .build();
-                let start = std::time::Instant::now();
-                let result = engine.search(&mut pos, limits);
-                let elapsed = start.elapsed();
-                total_nodes = total_nodes.saturating_add(result.stats.nodes);
-                total_ms = total_ms.saturating_add(elapsed.as_millis() as u64);
-            }
 
-            if total_ms > 0 && total_nodes > 0 {
-                let nps = (total_nodes as f64) / (total_ms as f64 / 1000.0);
-                let target_nodes = (nps * (target_ms as f64) / 1000.0) as u64;
-                opts.nodes = Some(target_nodes.max(10_000));
-                println!(
-                    "Auto-calibration done: NPS≈{:.0}, nodes target={} ({} ms)",
-                    nps, target_nodes, target_ms
-                );
-            } else {
-                println!("Auto-calibration failed (zero ms or nodes). Using time budget.");
+                let mut total_nodes: u64 = 0;
+                let mut total_ms: u64 = 0;
+                for (i, (_idx, sfen)) in sfen_positions.iter().take(sample_n).enumerate() {
+                    if i % 25 == 0 {
+                        println!("  calibrating {}/{}", i + 1, sample_n);
+                    }
+                    // Build position
+                    let mut pos = match engine_core::usi::parse_sfen(sfen) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    engine.reset_for_position();
+                    // Fixed-time calibration search (use min depth for stability)
+                    let depth = opts.min_depth.unwrap_or(2).max(2);
+                    let limits = SearchLimits::builder()
+                        .depth(depth)
+                        .fixed_time_ms(200)
+                        .multipv(opts.multipv)
+                        .build();
+                    let start = std::time::Instant::now();
+                    let result = engine.search(&mut pos, limits);
+                    let elapsed = start.elapsed();
+                    total_nodes = total_nodes.saturating_add(result.stats.nodes);
+                    total_ms = total_ms.saturating_add(elapsed.as_millis() as u64);
+                }
+
+                if total_ms > 0 && total_nodes > 0 {
+                    let nps = (total_nodes as f64) / (total_ms as f64 / 1000.0);
+                    let target_nodes = (nps * (target_ms as f64) / 1000.0) as u64;
+                    let target_nodes = target_nodes.max(10_000);
+                    opts.nodes = Some(target_nodes);
+                    println!(
+                        "Auto-calibration done: NPS≈{:.0}, nodes target={} ({} ms)",
+                        nps, target_nodes, target_ms
+                    );
+                    calibration_to_write = Some(ManifestCalibration {
+                        nps: Some(nps),
+                        target_nodes: Some(target_nodes),
+                        samples: Some(sample_n),
+                        min_depth_used: Some(opts.min_depth.unwrap_or(2).max(2)),
+                        timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                    });
+                } else {
+                    println!("Auto-calibration failed (zero ms or nodes). Using time budget.");
+                }
             }
         }
     }
@@ -691,6 +837,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_errors = error_count.load(Ordering::Relaxed);
     let total_skipped = skipped_count.load(Ordering::Relaxed);
     let e_parse = errors_parse.load(Ordering::Relaxed);
+    let e_timeout = errors_timeout.load(Ordering::Relaxed);
     let e_nonexact = errors_nonexact_top1.load(Ordering::Relaxed);
     let e_empty_pv = errors_empty_pv.load(Ordering::Relaxed);
     let newly_processed = total_processed - skip_count;
@@ -703,6 +850,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Total processed: {total_processed}");
     println!("Errors (total): {total_errors}");
     println!("  - parse: {e_parse}");
+    println!("  - timeout_overruns: {e_timeout}");
     println!("  - nonexact_top1: {e_nonexact}");
     println!("  - empty_or_missing_pv: {e_empty_pv}");
     println!("Skipped (timeout): {total_skipped}");
@@ -724,6 +872,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             search_depth + 1,
             batch_size / 2
         );
+    }
+
+    // Build and write manifest.json
+    let calibration_out = if calibration_to_write.is_some() {
+        calibration_to_write
+    } else if let Some(ref man) = manifest_existing {
+        man.calibration.clone()
+    } else {
+        None
+    };
+    let engine_name = match opts.engine {
+        EngineType::Material => "material",
+        EngineType::Enhanced => "enhanced",
+        EngineType::Nnue => "nnue",
+        EngineType::EnhancedNnue => "enhanced-nnue",
+    };
+    let manifest = Manifest {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
+        engine: engine_name.to_string(),
+        nnue_weights: opts.nnue_weights.clone(),
+        preset: preset_name,
+        overrides: Some(ManifestOverrides {
+            time: cli_set_time,
+            nodes: cli_set_nodes,
+            hash_mb: cli_set_hash,
+            multipv: cli_set_multipv,
+            min_depth: cli_set_min_depth,
+        }),
+        teacher_profile: format!("{:?}", opts.teacher_profile),
+        multipv: opts.multipv,
+        budget: ManifestBudget {
+            mode: if opts.nodes.is_some() {
+                "nodes".to_string()
+            } else {
+                "time".to_string()
+            },
+            time_ms: if opts.nodes.is_some() {
+                None
+            } else {
+                Some(time_limit_ms)
+            },
+            nodes: opts.nodes,
+        },
+        min_depth: effective_depth,
+        hash_mb: opts.hash_mb,
+        threads_per_engine: 1,
+        jobs: None,
+        count: total_processed,
+        cp_to_wdl_scale: opts.wdl_scale,
+        wdl_semantics: "side_to_move".to_string(),
+        calibration: calibration_out,
+    };
+    if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
+        if let Err(e) = std::fs::write(&manifest_path, txt) {
+            eprintln!(
+                "Warning: failed to write manifest.json ({}): {}",
+                manifest_path.display(),
+                e
+            );
+        } else {
+            println!("Manifest written: {}", manifest_path.display());
+        }
     }
 
     Ok(())
@@ -768,11 +979,12 @@ fn process_position_with_engine(
     let start = std::time::Instant::now();
     let mut pos_clone = position.clone();
     let result = eng.search(&mut pos_clone, limits);
+    let elapsed_stats_ms = result.stats.elapsed.as_millis() as u64;
     let elapsed = start.elapsed();
 
     // Check if we exceeded time limit significantly (only when using time-based budget)
     if env.opts.nodes.is_none()
-        && (elapsed.as_millis() as f64) > (env.time_limit_ms as f64) * env.opts.skip_overrun_factor
+        && (elapsed_stats_ms as f64) > (env.time_limit_ms as f64) * env.opts.skip_overrun_factor
     {
         if idx < 10 || (idx + 1) % 100 == 0 {
             eprintln!(
@@ -787,15 +999,16 @@ fn process_position_with_engine(
         // Write to skipped file with reason (JSON)
         if let Ok(mut file) = env.shared.skipped_file.lock() {
             let budget_ms = env.time_limit_ms;
-            let overrun_factor = (elapsed.as_millis() as f64) / (budget_ms as f64);
+            let overrun_factor = (elapsed_stats_ms as f64) / (budget_ms as f64);
             let obj = serde_json::json!({
                 "sfen": sfen,
                 "timeout": true,
-                "elapsed_ms": elapsed.as_millis() as u64,
+                "elapsed_ms": elapsed_stats_ms,
                 "budget_ms": budget_ms,
                 "overrun_factor": overrun_factor,
                 "depth_reached": result.stats.depth,
                 "reason": "time_overrun",
+                "mode": "time",
                 "index": idx + 1,
             });
             writeln!(file, "{}", obj).ok();
@@ -815,7 +1028,7 @@ fn process_position_with_engine(
         if !lines.is_empty() {
             has_lines = true;
             if let Some(l0) = lines.first() {
-                top1_exact = matches!(format!("{:?}", l0.bound).as_str(), "Exact");
+                top1_exact = matches!(l0.bound, Bound::Exact);
             }
         }
     }
@@ -827,6 +1040,7 @@ fn process_position_with_engine(
                 "sfen": sfen,
                 "search_error": "empty_or_missing_pv",
                 "depth_reached": depth_reached,
+                "mode": "search",
                 "index": idx + 1,
             });
             writeln!(file, "{}", obj).ok();
@@ -842,6 +1056,7 @@ fn process_position_with_engine(
                 "sfen": sfen,
                 "search_error": "nonexact_top1",
                 "depth_reached": depth_reached,
+                "mode": "search",
                 "index": idx + 1,
             });
             writeln!(file, "{}", obj).ok();
@@ -880,7 +1095,9 @@ fn process_position_with_engine(
     };
 
     // Metadata for quality tracking
-    let mut meta = if env.opts.nodes.is_none() && elapsed.as_millis() > env.time_limit_ms as u128 {
+    let mut meta = if env.opts.nodes.is_none()
+        && (elapsed_stats_ms as f64) > (env.time_limit_ms as f64) * env.opts.skip_overrun_factor
+    {
         format!(" # timeout_d{depth_reached}")
     } else {
         format!(" # d{depth_reached}")
