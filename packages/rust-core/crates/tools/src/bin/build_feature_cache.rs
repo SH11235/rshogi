@@ -30,6 +30,14 @@ const FLAG_MATE_BOUNDARY: u8 = 1 << 1;
 const FLAG_PERSPECTIVE_BLACK: u8 = 1 << 2;
 const FLAG_STM_BLACK: u8 = 1 << 3;
 
+#[inline]
+fn is_exact_opt(s: &Option<String>) -> bool {
+    s.as_deref()
+        .map(|t| t.trim())
+        .map(|t| t.eq_ignore_ascii_case("Exact"))
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PayloadEncodingKind {
     None,
@@ -113,8 +121,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves"))
         .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used"))
         .arg(arg!(--compress "Enable payload compression"))
-        .arg(arg!(--"compressor" <KIND> "Compressor kind: gz|zst (default gz when --compress)").required(false))
-        .arg(arg!(--"compress-level" <N> "Compression level (gz: 0-9, zst: e.g. 1-19)").required(false))
+        .arg(
+            arg!(--"compressor" <KIND> "Compressor kind: gz|zst (default gz when --compress)")
+                .required(false),
+        )
+        .arg(
+            arg!(--"compress-level" <N> "Compression level (gz: 0-9, zst: e.g. 1-19)")
+                .required(false),
+        )
         .arg(arg!(--"dedup-features" "Sort & deduplicate active features per sample (slower)"))
         .get_matches();
 
@@ -127,9 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exclude_no_legal_move = app.get_flag("exclude-no-legal-move");
     let exclude_fallback = app.get_flag("exclude-fallback");
     let compress_flag = app.get_flag("compress");
-    let compressor_kind = app
-        .get_one::<String>("compressor")
-        .map(|s| s.to_ascii_lowercase());
+    let compressor_kind = app.get_one::<String>("compressor").map(|s| s.to_ascii_lowercase());
 
     println!("Building feature cache:");
     println!("  Input: {}", input_path);
@@ -166,9 +178,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PayloadEncodingKind::None
     };
 
-    let compress_level: Option<i32> = app
-        .get_one::<String>("compress-level")
-        .and_then(|s| s.parse::<i32>().ok());
+    let compress_level: Option<i32> =
+        app.get_one::<String>("compress-level").and_then(|s| s.parse::<i32>().ok());
     if let Some(lvl) = compress_level {
         println!("  Compression level: {}", lvl);
     }
@@ -218,7 +229,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Average features per sample: {:.1}", avg_features);
     println!(
         "  Feature dedup: {}",
-        if config.dedup_features { "enabled" } else { "disabled" }
+        if config.dedup_features {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
     println!(
         "  Cache file size: {} MB",
@@ -311,9 +326,8 @@ fn write_samples_to_sink<W: Write>(
 
         // Build common metadata flags
         let mut base_flags = 0u8;
-        // both_exact
-        let both_exact = pos_data.bound1.as_deref() == Some("Exact")
-            && pos_data.bound2.as_deref() == Some("Exact");
+        // both_exact (robust to case/whitespace)
+        let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
         if both_exact {
             base_flags |= FLAG_BOTH_EXACT;
         }
@@ -339,7 +353,11 @@ fn write_samples_to_sink<W: Write>(
                 features_buf.dedup();
             }
 
-            let cp_oriented = if perspective == Color::Black { cp_black } else { cp_white };
+            let cp_oriented = if perspective == Color::Black {
+                cp_black
+            } else {
+                cp_white
+            };
             let label = match config.label_type.as_str() {
                 "wdl" => cp_to_wdl(cp_oriented, config.scale),
                 "cp" => (cp_oriented.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
@@ -411,11 +429,10 @@ fn write_cache_file_streaming(
             // Gzip compressed payload
             use flate2::write::GzEncoder;
             use flate2::Compression;
-            let level = config
-                .compress_level
-                .map(|l| l.clamp(0, 9) as u32)
-                .unwrap_or(6);
-            let mut encoder = GzEncoder::new(file, Compression::new(level));
+            let level = config.compress_level.map(|l| l.clamp(0, 9) as u32).unwrap_or(6);
+            // Buffer the file under the gzip encoder for better I/O throughput
+            let sink = BufWriter::new(file);
+            let mut encoder = GzEncoder::new(sink, Compression::new(level));
             let (num_samples, total_features, skipped, processed) =
                 write_samples_to_sink(&mut encoder, reader, config)?;
             // Ensure encoder is finished (flush data to file)
@@ -452,10 +469,12 @@ fn write_cache_file_streaming(
     f_header.write_all(&[config.payload_encoding.code()])?; // payload_encoding
     f_header.write_all(&[0u8; 2])?; // reserved16
     f_header.write_all(&payload_offset.to_le_bytes())?; // payload_offset
-    let sample_flags_mask: u32 =
-        (FLAG_BOTH_EXACT as u32) | (FLAG_MATE_BOUNDARY as u32) | (FLAG_PERSPECTIVE_BLACK as u32) | (FLAG_STM_BLACK as u32);
+    let sample_flags_mask: u32 = (FLAG_BOTH_EXACT as u32)
+        | (FLAG_MATE_BOUNDARY as u32)
+        | (FLAG_PERSPECTIVE_BLACK as u32)
+        | (FLAG_STM_BLACK as u32);
     f_header.write_all(&sample_flags_mask.to_le_bytes())?; // flags mask
-    // pad reserved to HEADER_SIZE
+                                                           // pad reserved to HEADER_SIZE
     let written = 4 + 4 + 8 + 4 + 4 + 1 + 1 + 2 + 8 + 4; // 40
     let reserved_tail = (HEADER_SIZE as usize).saturating_sub(written);
     if reserved_tail > 0 {
@@ -463,4 +482,318 @@ fn write_cache_file_streaming(
     }
 
     Ok((num_samples, total_features))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    fn write_minimal_jsonl(dir: &PathBuf) -> PathBuf {
+        let jsonl_path = dir.join("input.jsonl");
+        let mut f = File::create(&jsonl_path).unwrap();
+        // stm = Black, cp=+100
+        writeln!(
+            f,
+            "{{\"sfen\":\"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\",\"eval\":100,\"depth\":10,\"seldepth\":12,\"bound1\":\"Exact\",\"bound2\":\"Exact\",\"best2_gap_cp\":25}}"
+        )
+        .unwrap();
+        // stm = White, cp=+200
+        writeln!(
+            f,
+            "{{\"sfen\":\"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1\",\"eval\":200,\"depth\":10,\"seldepth\":12,\"bound1\":\"Exact\",\"bound2\":\"Exact\",\"best2_gap_cp\":30}}"
+        )
+        .unwrap();
+        jsonl_path
+    }
+
+    fn parse_cache_labels(path: &PathBuf) -> (u64, Vec<(usize, f32)>) {
+        let mut f = File::open(path).unwrap();
+        let mut magic = [0u8; 4];
+        f.read_exact(&mut magic).unwrap();
+        assert_eq!(&magic, b"NNFC");
+        let mut u32b = [0u8; 4];
+        let mut u64b = [0u8; 8];
+        // version
+        f.read_exact(&mut u32b).unwrap();
+        assert_eq!(u32::from_le_bytes(u32b), 1);
+        // feature_set_id
+        f.read_exact(&mut u32b).unwrap();
+        assert_eq!(u32::from_le_bytes(u32b), FEATURE_SET_ID);
+        // num_samples
+        f.read_exact(&mut u64b).unwrap();
+        let num_samples = u64::from_le_bytes(u64b);
+        // chunk_size
+        f.read_exact(&mut u32b).unwrap();
+        let _chunk = u32::from_le_bytes(u32b);
+        // header_size
+        f.read_exact(&mut u32b).unwrap();
+        let _hs = u32::from_le_bytes(u32b);
+        // endianness
+        let mut b = [0u8; 1];
+        f.read_exact(&mut b).unwrap();
+        assert_eq!(b[0], 0);
+        // payload_encoding
+        f.read_exact(&mut b).unwrap();
+        let enc = b[0];
+        // reserved16
+        let mut r16 = [0u8; 2];
+        f.read_exact(&mut r16).unwrap();
+        // payload_offset
+        f.read_exact(&mut u64b).unwrap();
+        let off = u64::from_le_bytes(u64b);
+        // flags mask
+        f.read_exact(&mut u32b).unwrap();
+        let _mask = u32::from_le_bytes(u32b);
+        f.seek(SeekFrom::Start(off)).unwrap();
+
+        let reader: Box<dyn Read> = match enc {
+            0 => Box::new(f),
+            1 => Box::new(flate2::read::GzDecoder::new(f)),
+            2 => {
+                #[cfg(feature = "zstd")]
+                {
+                    Box::new(zstd::Decoder::new(f).unwrap())
+                }
+                #[cfg(not(feature = "zstd"))]
+                {
+                    panic!("zstd decoding requested without 'zstd' feature");
+                }
+            }
+            _ => panic!("unexpected encoding {}", enc),
+        };
+        let mut r = std::io::BufReader::new(reader);
+
+        let mut out = Vec::new();
+        for _ in 0..num_samples {
+            let mut nb = [0u8; 4];
+            r.read_exact(&mut nb).unwrap();
+            let n = u32::from_le_bytes(nb) as usize;
+            let mut feat_bytes = vec![0u8; n * 4];
+            r.read_exact(&mut feat_bytes).unwrap();
+            let mut lb = [0u8; 4];
+            r.read_exact(&mut lb).unwrap();
+            let label = f32::from_le_bytes(lb);
+            let mut gap = [0u8; 2];
+            r.read_exact(&mut gap).unwrap();
+            let mut d = [0u8; 1];
+            r.read_exact(&mut d).unwrap();
+            let mut sd = [0u8; 1];
+            r.read_exact(&mut sd).unwrap();
+            let mut fl = [0u8; 1];
+            r.read_exact(&mut fl).unwrap();
+            out.push((n, label));
+        }
+        (num_samples, out)
+    }
+
+    #[test]
+    fn v1_uncompressed_roundtrip_and_orientation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let jsonl = write_minimal_jsonl(&dir);
+        let out = dir.join("out.cache");
+
+        let cfg = CacheConfig {
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            chunk_size: 1024,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            payload_encoding: PayloadEncodingKind::None,
+            compress_level: None,
+            dedup_features: false,
+        };
+
+        let (num, _feat) =
+            write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
+                .unwrap();
+        assert_eq!(num, 4);
+
+        let (ns, samples) = parse_cache_labels(&out);
+        assert_eq!(ns, 4);
+        assert!(samples.iter().all(|(n, _)| *n > 0));
+
+        let b0 = samples[0].1;
+        let w0 = samples[1].1;
+        assert!((b0 - 1.0).abs() < 1e-6);
+        assert!((w0 + 1.0).abs() < 1e-6);
+
+        let b1 = samples[2].1;
+        let w1 = samples[3].1;
+        assert!((b1 + 2.0).abs() < 1e-6);
+        assert!((w1 - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn v1_gzip_roundtrip_and_orientation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let jsonl = write_minimal_jsonl(&dir);
+        let out = dir.join("out_gz.cache");
+
+        let cfg = CacheConfig {
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            chunk_size: 1024,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            payload_encoding: PayloadEncodingKind::Gzip,
+            compress_level: Some(6),
+            dedup_features: false,
+        };
+
+        let (num, _feat) =
+            write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
+                .unwrap();
+        assert_eq!(num, 4);
+
+        let (ns, samples) = parse_cache_labels(&out);
+        assert_eq!(ns, 4);
+        assert!(samples.iter().all(|(n, _)| *n > 0));
+        let b0 = samples[0].1;
+        let w0 = samples[1].1;
+        assert!((b0 - 1.0).abs() < 1e-6);
+        assert!((w0 + 1.0).abs() < 1e-6);
+    }
+
+    // 非圧縮 WDL の黒白反転テスト
+    #[test]
+    fn v1_uncompressed_wdl_orientation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let jsonl = write_minimal_jsonl(&dir);
+        let out = dir.join("out_wdl.cache");
+
+        let cfg = CacheConfig {
+            label_type: "wdl".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            chunk_size: 1024,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            payload_encoding: PayloadEncodingKind::None,
+            compress_level: None,
+            dedup_features: false,
+        };
+        let (_num, _feat) =
+            write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
+                .unwrap();
+
+        let (_ns, samples) = parse_cache_labels(&out);
+        // 1局面目: stm=Black, cp=+100 -> wdl ~ 0.5377 > 0.5
+        // 2番目のサンプル（White視点）は -100 -> ~0.4623 < 0.5
+        let b0 = samples[0].1;
+        let w0 = samples[1].1;
+        assert!(b0 > 0.5 && b0 < 0.7, "b0={}", b0);
+        assert!(w0 < 0.5 && w0 > 0.3, "w0={}", w0);
+    }
+
+    // gzip 圧縮のレベル 0,6,9 で往復できるか
+    #[test]
+    fn v1_gzip_levels_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let jsonl = write_minimal_jsonl(&dir);
+        for lvl in [0, 6, 9] {
+            let out = dir.join(format!("out_gz_{lvl}.cache"));
+            let cfg = CacheConfig {
+                label_type: "cp".to_string(),
+                scale: 600.0,
+                cp_clip: 1200,
+                chunk_size: 1024,
+                exclude_no_legal_move: false,
+                exclude_fallback: false,
+                payload_encoding: PayloadEncodingKind::Gzip,
+                compress_level: Some(lvl),
+                dedup_features: false,
+            };
+            let (num, _feat) =
+                write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
+                    .unwrap();
+            assert_eq!(num, 4);
+            let (ns, samples) = parse_cache_labels(&out);
+            assert_eq!(ns, 4);
+            assert!(samples.iter().all(|(n, _)| *n > 0));
+        }
+    }
+
+    // zstd 圧縮のレベル 1,3,10 で往復（feature 有効時）
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn test_zstd_v1_levels_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let jsonl = write_minimal_jsonl(&dir);
+        for lvl in [1, 3, 10] {
+            let out = dir.join(format!("out_zst_{lvl}.cache"));
+            let cfg = CacheConfig {
+                label_type: "cp".to_string(),
+                scale: 600.0,
+                cp_clip: 1200,
+                chunk_size: 1024,
+                exclude_no_legal_move: false,
+                exclude_fallback: false,
+                payload_encoding: PayloadEncodingKind::Zstd,
+                compress_level: Some(lvl),
+                dedup_features: false,
+            };
+            let (num, _feat) =
+                write_cache_file_streaming(jsonl.to_str().unwrap(), out.to_str().unwrap(), &cfg)
+                    .unwrap();
+            assert_eq!(num, 4);
+            let (ns, samples) = parse_cache_labels(&out);
+            assert_eq!(ns, 4);
+            assert!(samples.iter().all(|(n, _)| *n > 0));
+        }
+    }
+
+    // dedup-features の ON/OFF で n_features が非増加であること＆パイプライン成功
+    #[test]
+    fn v1_dedup_features_does_not_increase_and_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let jsonl = write_minimal_jsonl(&dir);
+
+        // dedup OFF
+        let out_off = dir.join("out_dedup_off.cache");
+        let cfg_off = CacheConfig {
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            chunk_size: 1024,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+            payload_encoding: PayloadEncodingKind::None,
+            compress_level: None,
+            dedup_features: false,
+        };
+        let (_num_off, _feat_off) = write_cache_file_streaming(
+            jsonl.to_str().unwrap(),
+            out_off.to_str().unwrap(),
+            &cfg_off,
+        )
+        .unwrap();
+        let (_ns_off, samples_off) = parse_cache_labels(&out_off);
+        let avg_off =
+            (samples_off.iter().map(|(n, _)| *n as f32).sum::<f32>()) / samples_off.len() as f32;
+
+        // dedup ON
+        let out_on = dir.join("out_dedup_on.cache");
+        let cfg_on = CacheConfig {
+            dedup_features: true,
+            ..cfg_off
+        };
+        let (_num_on, _feat_on) =
+            write_cache_file_streaming(jsonl.to_str().unwrap(), out_on.to_str().unwrap(), &cfg_on)
+                .unwrap();
+        let (_ns_on, samples_on) = parse_cache_labels(&out_on);
+        let avg_on =
+            (samples_on.iter().map(|(n, _)| *n as f32).sum::<f32>()) / samples_on.len() as f32;
+
+        // 重複活性が発生しない局面でも、dedup により特徴数が非増加であることのみ保証
+        assert!(avg_on <= avg_off + 1e-6, "avg_on={} avg_off={}", avg_on, avg_off);
+    }
 }
