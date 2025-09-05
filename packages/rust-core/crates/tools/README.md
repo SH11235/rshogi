@@ -112,6 +112,7 @@ cargo run --release -p tools --bin merge_annotation_results -- \
   - `train_wdl_baseline` / `train_cp_baseline`: 軽量ベースライン学習（WDL/CP）
   - `analyze_teaching_quality`: 品質解析/要約/ゲート/複数入力比較/近似分位
     - `--dedup-by-sfen` の選定規則（固定）: `depth → seldepth → EXACT度 → nodes → time_ms`。完全同点では、先に現れた行（小さい `file_idx/line_idx`）を優先。
+    - `--limit` と併用時は、上位（良い順）から取り込みます。完全同点のケースでは「先勝ち」のため、入力順（file/lineの小さい方）が優先されます。
   - `extract_flagged_positions`: JSONL から条件抽出
   - `merge_annotation_results`: JSONL マージと重複解消
   - `validate_cp_dataset`: CP テキストデータの整合チェック（レガシー）

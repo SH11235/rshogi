@@ -63,7 +63,11 @@ impl Writer {
     /// Finalize the stream and flush underlying file/stdout.
     pub fn close(self) -> io::Result<()> {
         match self {
-            Writer::Plain(mut f) => f.flush(),
+            Writer::Plain(f) => {
+                // into_inner() flushes internal buffer; propagate error if flush fails
+                let mut file = f.into_inner().map_err(|e| e.into_error())?;
+                file.flush()
+            }
             Writer::Stdout(mut s) => s.flush(),
             Writer::Gz(e) => {
                 let mut f = e.finish()?; // returns File
