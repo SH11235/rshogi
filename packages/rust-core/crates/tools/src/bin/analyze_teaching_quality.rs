@@ -3,12 +3,13 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 
 use rand::Rng;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
 use serde::Deserialize;
+use serde_json::de::Deserializer;
 use serde_json::{json, Value};
 use tools::stats::{compute_stats_exact, quantile_sorted, OnlineP2, OnlineTDigest};
 
@@ -368,6 +369,27 @@ impl Agg {
     }
 }
 
+impl Agg {
+    // Flush TDigest-backed online fields so we can read without cloning
+    fn finalize_online(&mut self) {
+        if let Some(ref mut o) = self.times_td {
+            o.flush();
+        }
+        if let Some(ref mut o) = self.nodes_td {
+            o.flush();
+        }
+        if let Some(ref mut o) = self.seldef_td {
+            o.flush();
+        }
+        if let Some(ref mut o) = self.gaps_nm_td {
+            o.flush();
+        }
+        if let Some(ref mut o) = self.gaps_all_td {
+            o.flush();
+        }
+    }
+}
+
 fn wilson_ci(k: usize, n: usize, z: f64) -> (f64, f64) {
     if n == 0 {
         return (0.0, 0.0);
@@ -387,6 +409,16 @@ fn mean_i64(v: &[i64]) -> f64 {
         0.0
     } else {
         v.iter().sum::<i64>() as f64 / v.len() as f64
+    }
+}
+
+fn csv_escape(s: &str) -> String {
+    let needs_quotes = s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r');
+    if needs_quotes {
+        let escaped = s.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    } else {
+        s.to_string()
     }
 }
 
@@ -460,16 +492,11 @@ fn build_agg_for(
         let cap = sample_n.unwrap_or(0);
         let use_res = cap > 0;
         let mut rng = make_rng(seed);
+        let stream = Deserializer::from_reader(reader).into_iter::<Record>();
         if !use_res {
             let mut ing = 0usize;
-            for line in reader.lines() {
-                let Ok(line) = line else { continue };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let Ok(rec) = serde_json::from_str::<Record>(&line) else {
-                    continue;
-                };
+            for rec in stream {
+                let Ok(rec) = rec else { continue };
                 a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
                 ing += 1;
                 if let Some(m) = limit {
@@ -481,14 +508,8 @@ fn build_agg_for(
         } else {
             let mut seen = 0usize;
             let mut reservoir: Vec<Record> = Vec::new();
-            for line in reader.lines() {
-                let Ok(line) = line else { continue };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let Ok(rec) = serde_json::from_str::<Record>(&line) else {
-                    continue;
-                };
+            for rec in stream {
+                let Ok(rec) = rec else { continue };
                 seen += 1;
                 if reservoir.len() < cap {
                     reservoir.push(rec);
@@ -507,7 +528,50 @@ fn build_agg_for(
     a
 }
 
+struct PairAgg {
+    a1: Agg,
+    a2: Agg,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_pair_agg(
+    path1: &str,
+    path2: &str,
+    expected_mpv: usize,
+    exclude_mate: bool,
+    seldef_delta: i32,
+    qbackend: QuantilesBackend,
+    limit: Option<usize>,
+    sample_n: Option<usize>,
+    seed: Option<u64>,
+) -> PairAgg {
+    let mut a1 = build_agg_for(
+        path1,
+        expected_mpv,
+        exclude_mate,
+        seldef_delta,
+        qbackend,
+        limit,
+        sample_n,
+        seed,
+    );
+    let mut a2 = build_agg_for(
+        path2,
+        expected_mpv,
+        exclude_mate,
+        seldef_delta,
+        qbackend,
+        limit,
+        sample_n,
+        seed,
+    );
+    a1.finalize_online();
+    a2.finalize_online();
+    PairAgg { a1, a2 }
+}
+
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct GateConfig {
     #[serde(default)]
     exact_top1_min: Option<f64>,
@@ -571,6 +635,54 @@ struct GateConfig {
     seldepth_deficit_p90_max: Option<i64>,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum GateMode {
+    #[value(name = "warn")]
+    Warn,
+    #[value(name = "fail")]
+    Fail,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Eq)]
+enum ReportKind {
+    #[value(name = "exact-rate")]
+    ExactRate,
+    #[value(name = "gap-distribution")]
+    GapDistribution,
+    #[value(name = "gap2")]
+    Gap2,
+    #[value(name = "time-distribution")]
+    TimeDistribution,
+    #[value(name = "nodes-distribution")]
+    NodesDistribution,
+    #[value(name = "bound-distribution")]
+    BoundDistribution,
+    #[value(name = "tt")]
+    Tt,
+    #[value(name = "null-lmr")]
+    NullLmr,
+    #[value(name = "invariants")]
+    Invariants,
+    #[value(name = "fallback")]
+    Fallback,
+    #[value(name = "seldepth-deficit")]
+    SeldepthDeficit,
+    #[value(name = "non-exact-reason")]
+    NonExactReason,
+    #[value(name = "ambiguous")]
+    Ambiguous,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum QuantilesBackendArg {
+    #[value(name = "exact")]
+    Exact,
+    #[value(name = "p2", alias = "approx")]
+    P2,
+    #[value(name = "tdigest", alias = "t-digest", alias = "td")]
+    TDigest,
+}
+
 #[derive(Parser)]
 #[command(
     name = "analyze_teaching_quality",
@@ -582,8 +694,8 @@ struct Cli {
     /// Primary input JSONL file
     input: String,
     /// Reports to print (repeatable)
-    #[arg(long = "report")]
-    report: Vec<String>,
+    #[arg(long = "report", value_enum)]
+    report: Vec<ReportKind>,
     /// Expected MultiPV for invariants
     #[arg(long = "expected-multipv", alias = "expected-mpv", default_value_t = 2)]
     expected_mpv: usize,
@@ -624,8 +736,8 @@ struct Cli {
     #[arg(long = "sample")]
     sample: Option<usize>,
     /// Quantiles backend name (exact|p2|tdigest); --approx-quantiles forces p2
-    #[arg(long = "quantiles-backend")]
-    quantiles_backend: Option<String>,
+    #[arg(long = "quantiles-backend", value_enum)]
+    quantiles_backend: Option<QuantilesBackendArg>,
     /// Shorthand for --quantiles-backend p2
     #[arg(long = "approx-quantiles")]
     approx_quantiles: bool,
@@ -633,34 +745,37 @@ struct Cli {
     #[arg(long = "gate")]
     gate: Option<String>,
     /// Gate mode (warn|fail)
-    #[arg(long = "gate-mode", default_value = "warn")]
-    gate_mode: String,
+    #[arg(long = "gate-mode", value_enum, default_value_t = GateMode::Warn)]
+    gate_mode: GateMode,
     /// Seed for reproducible sampling (optional)
     #[arg(long = "seed")]
     seed: Option<u64>,
 }
 
-fn parse_quantiles_backend(s: &Option<String>, approx: bool) -> Option<QuantilesBackend> {
+fn parse_quantiles_backend(
+    s: &Option<QuantilesBackendArg>,
+    approx: bool,
+) -> Option<QuantilesBackend> {
     if approx {
         return Some(QuantilesBackend::P2);
     }
-    if let Some(name) = s.as_ref() {
-        QuantilesBackend::from_str(name)
-    } else {
-        None
-    }
+    s.as_ref().map(|v| match v {
+        QuantilesBackendArg::Exact => QuantilesBackend::Exact,
+        QuantilesBackendArg::P2 => QuantilesBackend::P2,
+        QuantilesBackendArg::TDigest => QuantilesBackend::TDigest,
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let input = &cli.input;
-    let reports: Vec<String> = cli.report.clone();
+    let reports: Vec<ReportKind> = cli.report.clone();
     let expected_mpv: usize = cli.expected_mpv.max(1);
     let want_summary = cli.summary;
     let want_json = cli.json;
     let want_csv = cli.csv;
     let want_csv_header = cli.csv_header;
-    let gate_mode_fail = matches!(cli.gate_mode.as_str(), "fail");
+    let gate_mode_fail = matches!(cli.gate_mode, GateMode::Fail);
     let mut gate: Option<GateConfig> = None;
     let more_inputs: Vec<String> = cli.inputs.clone();
     let dedup_by_sfen = cli.dedup_by_sfen;
@@ -728,15 +843,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut ingested: usize = 0;
         'outer: for path in &inputs {
             let reader = open_reader(path)?;
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let rec: Record = match serde_json::from_str(&line) {
+            let stream = Deserializer::from_reader(reader).into_iter::<Record>();
+            for rec in stream {
+                let rec = match rec {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
@@ -821,15 +930,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut best: HashMap<String, (Record, Key)> = HashMap::new();
         for (file_idx, path) in inputs.iter().enumerate() {
             let reader = open_reader(path)?;
-            for (line_idx, line) in reader.lines().enumerate() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let rec: Record = match serde_json::from_str(&line) {
+            let stream = Deserializer::from_reader(reader).into_iter::<Record>();
+            let mut line_idx: usize = 0;
+            for rec in stream {
+                line_idx += 1;
+                let rec = match rec {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
@@ -884,9 +989,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Finalize online quantiles once (avoid clone + repeated compress)
+    agg.finalize_online();
+
+    // Precompute pair aggregation once when exactly two inputs and not dedup-by-sfen
+    let mut pair: Option<PairAgg> = if inputs.len() == 2 && !dedup_by_sfen {
+        Some(build_pair_agg(
+            &inputs[0],
+            &inputs[1],
+            expected_mpv,
+            exclude_mate,
+            seldef_delta,
+            qbackend,
+            limit,
+            sample_n,
+            cli.seed,
+        ))
+    } else {
+        None
+    };
+
     for r in reports {
-        match r.as_str() {
-            "exact-rate" => {
+        match r {
+            ReportKind::ExactRate => {
                 // exact_top1
                 let (n1, d1) = (agg.top1_exact, agg.total);
                 let (l1, h1) = wilson_ci(n1, d1, 1.96);
@@ -899,7 +1024,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let r2 = if d2 > 0 { n2 as f64 / d2 as f64 } else { 0.0 };
                 println!("exact_both: {:.3} ({} / {}), ci95=[{:.3},{:.3}]", r2, n2, d2, l2, h2);
             }
-            "gap-distribution" => match qbackend {
+            ReportKind::GapDistribution => match qbackend {
                 QuantilesBackend::Exact => {
                     if agg.gaps_all.is_empty() {
                         println!("gap_distribution: no-data");
@@ -940,7 +1065,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             },
-            "gap2" => {
+            ReportKind::Gap2 => {
                 // gap2_no_mate (robust) + gap2_all summary
                 if agg.lines_ge2 == 0 {
                     println!("gap2: lines_ge2=0");
@@ -988,8 +1113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     QuantilesBackend::TDigest => {
-                        let o = agg.gaps_nm_td.clone();
-                        if let Some(mut od) = o {
+                        if let Some(ref mut od) = agg.gaps_nm_td {
                             (
                                 od.count,
                                 od.min,
@@ -1036,8 +1160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     QuantilesBackend::TDigest => {
-                        let o = agg.gaps_all_td.clone();
-                        if let Some(mut od) = o {
+                        if let Some(ref mut od) = agg.gaps_all_td {
                             (od.count, od.min, od.max, od.sum as f64 / (od.count as f64), od.q(0.5))
                         } else {
                             (0, 0, 0, 0.0, 0)
@@ -1053,7 +1176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-            "time-distribution" => match qbackend {
+            ReportKind::TimeDistribution => match qbackend {
                 QuantilesBackend::Exact => {
                     if agg.times_ms.is_empty() {
                         println!("time_distribution: no-data");
@@ -1081,8 +1204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 QuantilesBackend::TDigest => {
-                    if let Some(ref o) = agg.times_td {
-                        let mut td = o.clone();
+                    if let Some(ref mut td) = agg.times_td {
                         let count = td.count;
                         let min = td.min;
                         let max = td.max;
@@ -1096,14 +1218,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             },
-            "bound-distribution" => {
+            ReportKind::BoundDistribution => {
                 println!(
                     "bound1: exact={} lower={} upper={} other={} | bound2: exact={} lower={} upper={} other={}",
                     agg.b1_exact, agg.b1_lower, agg.b1_upper, agg.b1_other,
                     agg.b2_exact, agg.b2_lower, agg.b2_upper, agg.b2_other
                 );
             }
-            "tt" => {
+            ReportKind::Tt => {
                 if agg.tt_rates.is_empty() {
                     println!("tt: no-data");
                 } else {
@@ -1114,7 +1236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("tt: mean={:.3} median={:.3} samples={}", mean, med, v.len());
                 }
             }
-            "null-lmr" => {
+            ReportKind::NullLmr => {
                 let used_rate = if agg.total > 0 {
                     agg.used_null_sum as f64 / agg.total as f64
                 } else {
@@ -1131,7 +1253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agg.used_null_sum, used_rate, agg.lmr_sum, lmr_mean, lmr_per_node_mean
                 );
             }
-            "seldepth-deficit" => match qbackend {
+            ReportKind::SeldepthDeficit => match qbackend {
                 QuantilesBackend::Exact => {
                     if agg.seldef.is_empty() {
                         println!("seldepth_deficit: no-data");
@@ -1159,8 +1281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 QuantilesBackend::TDigest => {
-                    if let Some(ref o) = agg.seldef_td {
-                        let mut td = o.clone();
+                    if let Some(ref mut td) = agg.seldef_td {
                         let count = td.count;
                         let min = td.min;
                         let max = td.max;
@@ -1174,7 +1295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             },
-            "non-exact-reason" => {
+            ReportKind::NonExactReason => {
                 let t = agg.non_exact_total as f64;
                 if agg.non_exact_total == 0 {
                     println!("non_exact_reason: no-data");
@@ -1189,7 +1310,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-            "ambiguous" => {
+            ReportKind::Ambiguous => {
                 let n_amb = agg.lines_ge2;
                 if n_amb == 0 {
                     println!("ambiguous: no-data");
@@ -1209,7 +1330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("ambiguous: n={} rate20={:.3} ci95=[{:.3},{:.3}] rate30={:.3} ci95=[{:.3},{:.3}]", n_amb, r20, l20, h20, r30, l30, h30);
                 }
             }
-            "nodes-distribution" => match qbackend {
+            ReportKind::NodesDistribution => match qbackend {
                 QuantilesBackend::Exact => {
                     if agg.nodes.is_empty() {
                         println!("nodes_distribution: no-data");
@@ -1237,8 +1358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 QuantilesBackend::TDigest => {
-                    if let Some(ref o) = agg.nodes_td {
-                        let mut td = o.clone();
+                    if let Some(ref mut td) = agg.nodes_td {
                         let count = td.count;
                         let min = td.min;
                         let max = td.max;
@@ -1252,7 +1372,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             },
-            "fallback" => {
+            ReportKind::Fallback => {
                 let n = agg.total;
                 let r = if n > 0 {
                     agg.fallback_record as f64 / n as f64
@@ -1264,7 +1384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agg.fallback_record, r, agg.fallback_top1, agg.fallback_top2
                 );
             }
-            "invariants" => {
+            ReportKind::Invariants => {
                 let total = agg.total.max(1);
                 let r1 = agg.inv_mpv_lt_expected as f64 / total as f64;
                 let r2 = agg.inv_gap_with_non_exact as f64 / total as f64;
@@ -1281,7 +1401,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agg.total, expected_mpv
                 );
             }
-            other => println!("Unknown report: {}", other),
         }
     }
 
@@ -1297,8 +1416,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let r2 = if d2 > 0 { n2 as f64 / d2 as f64 } else { 0.0 };
 
         // gaps
-        let mut td_gnm = agg.gaps_nm_td.clone();
-        let mut td_gall = agg.gaps_all_td.clone();
         let gaps_nm_stats = match qbackend {
             QuantilesBackend::Exact => {
                 let mut v = agg.gaps_no_mate.clone();
@@ -1306,7 +1423,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 compute_stats_exact(&v)
             }
             QuantilesBackend::P2 => agg.gaps_nm_p2.as_ref().and_then(|o| o.stats()),
-            QuantilesBackend::TDigest => td_gnm.as_mut().and_then(|o| o.stats()),
+            QuantilesBackend::TDigest => agg.gaps_nm_td.as_mut().and_then(|o| o.stats()),
         };
         let gaps_nm_p05 = match qbackend {
             QuantilesBackend::Exact => {
@@ -1319,7 +1436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             QuantilesBackend::P2 => agg.gaps_nm_p2.as_ref().map(|o| o.q05()),
-            QuantilesBackend::TDigest => td_gnm.as_mut().map(|o| o.q(0.05)),
+            QuantilesBackend::TDigest => agg.gaps_nm_td.as_mut().map(|o| o.q(0.05)),
         };
         let gaps_all_stats = match qbackend {
             QuantilesBackend::Exact => {
@@ -1328,7 +1445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 compute_stats_exact(&v)
             }
             QuantilesBackend::P2 => agg.gaps_all_p2.as_ref().and_then(|o| o.stats()),
-            QuantilesBackend::TDigest => td_gall.as_mut().and_then(|o| o.stats()),
+            QuantilesBackend::TDigest => agg.gaps_all_td.as_mut().and_then(|o| o.stats()),
         };
         let coverage = if agg.lines_ge2 > 0 {
             (match qbackend {
@@ -1369,23 +1486,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (amb30_ci_low, amb30_ci_high) = wilson_ci(k30, n_amb, 1.96);
 
         // time/nodes
-        let mut td_t = agg.times_td.clone();
-        let mut td_n = agg.nodes_td.clone();
-        let mut td_s = agg.seldef_td.clone();
         let t_stats = match qbackend {
             QuantilesBackend::Exact => compute_stats_exact(&agg.times_ms),
             QuantilesBackend::P2 => agg.times_p2.as_ref().and_then(|o| o.stats()),
-            QuantilesBackend::TDigest => td_t.as_mut().and_then(|o| o.stats()),
+            QuantilesBackend::TDigest => agg.times_td.as_mut().and_then(|o| o.stats()),
         };
         let n_stats = match qbackend {
             QuantilesBackend::Exact => compute_stats_exact(&agg.nodes),
             QuantilesBackend::P2 => agg.nodes_p2.as_ref().and_then(|o| o.stats()),
-            QuantilesBackend::TDigest => td_n.as_mut().and_then(|o| o.stats()),
+            QuantilesBackend::TDigest => agg.nodes_td.as_mut().and_then(|o| o.stats()),
         };
         let seldef_stats = match qbackend {
             QuantilesBackend::Exact => compute_stats_exact(&agg.seldef),
             QuantilesBackend::P2 => agg.seldef_p2.as_ref().and_then(|o| o.stats()),
-            QuantilesBackend::TDigest => td_s.as_mut().and_then(|o| o.stats()),
+            QuantilesBackend::TDigest => agg.seldef_td.as_mut().and_then(|o| o.stats()),
         };
 
         if want_summary {
@@ -1425,6 +1539,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "  ambiguous: rate20={:.3} [ci95 {:.3}-{:.3}] rate30={:.3} [ci95 {:.3}-{:.3}]",
                 amb20, amb20_ci_low, amb20_ci_high, amb30, amb30_ci_low, amb30_ci_high
             );
+            // Also print coverage-based ambiguous rates (divide by gap2_no_mate count)
+            let amb20_cov = if let Some(s) = gaps_nm_stats {
+                if s.count > 0 {
+                    if matches!(qbackend, QuantilesBackend::Exact) {
+                        agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count() as f64
+                            / s.count as f64
+                    } else {
+                        agg.amb_le20_cnt as f64 / s.count as f64
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let amb30_cov = if let Some(s) = gaps_nm_stats {
+                if s.count > 0 {
+                    if matches!(qbackend, QuantilesBackend::Exact) {
+                        agg.gaps_no_mate.iter().filter(|&&g| g <= 30).count() as f64
+                            / s.count as f64
+                    } else {
+                        agg.amb_le30_cnt as f64 / s.count as f64
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            println!("  ambiguous_covered: rate20={:.3} rate30={:.3}", amb20_cov, amb30_cov);
             // compact bound/tt/null-lmr line
             let tt_mean = if agg.tt_rates.is_empty() {
                 None
@@ -1489,27 +1633,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // If exactly 2 inputs and no dedup, show simple delta summary (file2 - file1)
-            if inputs.len() == 2 && !dedup_by_sfen {
-                let a1 = build_agg_for(
-                    &inputs[0],
-                    expected_mpv,
-                    exclude_mate,
-                    seldef_delta,
-                    qbackend,
-                    limit,
-                    sample_n,
-                    cli.seed,
-                );
-                let a2 = build_agg_for(
-                    &inputs[1],
-                    expected_mpv,
-                    exclude_mate,
-                    seldef_delta,
-                    qbackend,
-                    limit,
-                    sample_n,
-                    cli.seed,
-                );
+            if let Some(ref mut p) = pair {
+                let a1 = &mut p.a1;
+                let a2 = &mut p.a2;
                 let eb1 = if a1.both_exact_denom > 0 {
                     a1.both_exact as f64 / a1.both_exact_denom as f64
                 } else {
@@ -1521,41 +1647,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     0.0
                 };
                 // respect backend for deltas
-                let mut td_t1 = a1.times_td.clone();
-                let mut td_t2 = a2.times_td.clone();
                 let t1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.times_ms),
                     QuantilesBackend::P2 => a1.times_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_t1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.times_td.as_mut().and_then(|o| o.stats()),
                 };
                 let t2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.times_ms),
                     QuantilesBackend::P2 => a2.times_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_t2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.times_td.as_mut().and_then(|o| o.stats()),
                 };
-                let mut td_n1 = a1.nodes_td.clone();
-                let mut td_n2 = a2.nodes_td.clone();
                 let n1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.nodes),
                     QuantilesBackend::P2 => a1.nodes_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_n1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.nodes_td.as_mut().and_then(|o| o.stats()),
                 };
                 let n2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.nodes),
                     QuantilesBackend::P2 => a2.nodes_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_n2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.nodes_td.as_mut().and_then(|o| o.stats()),
                 };
-                let mut td_g1 = a1.gaps_nm_td.clone();
-                let mut td_g2 = a2.gaps_nm_td.clone();
                 let g1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.gaps_no_mate),
                     QuantilesBackend::P2 => a1.gaps_nm_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_g1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.gaps_nm_td.as_mut().and_then(|o| o.stats()),
                 };
                 let g2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.gaps_no_mate),
                     QuantilesBackend::P2 => a2.gaps_nm_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_g2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.gaps_nm_td.as_mut().and_then(|o| o.stats()),
                 };
                 let delta_gap_p50 = if let (Some(s1), Some(s2)) = (g1, g2) {
                     Some(s2.p50 - s1.p50)
@@ -1881,28 +2001,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 json!(agg.non_exact_unknown as f64 / tne),
             );
 
-            // Optional: add delta to JSON when exactly 2 inputs and no dedup
-            if inputs.len() == 2 && !dedup_by_sfen {
-                let a1 = build_agg_for(
-                    &inputs[0],
-                    expected_mpv,
-                    exclude_mate,
-                    seldef_delta,
-                    qbackend,
-                    limit,
-                    sample_n,
-                    cli.seed,
-                );
-                let a2 = build_agg_for(
-                    &inputs[1],
-                    expected_mpv,
-                    exclude_mate,
-                    seldef_delta,
-                    qbackend,
-                    limit,
-                    sample_n,
-                    cli.seed,
-                );
+            // Add ambiguous rates (coverage-based)
+            let amb20_cov = if let Some(s) = gaps_nm_stats {
+                if s.count > 0 {
+                    if matches!(qbackend, QuantilesBackend::Exact) {
+                        agg.gaps_no_mate.iter().filter(|&&g| g <= 20).count() as f64
+                            / s.count as f64
+                    } else {
+                        agg.amb_le20_cnt as f64 / s.count as f64
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let amb30_cov = if let Some(s) = gaps_nm_stats {
+                if s.count > 0 {
+                    if matches!(qbackend, QuantilesBackend::Exact) {
+                        agg.gaps_no_mate.iter().filter(|&&g| g <= 30).count() as f64
+                            / s.count as f64
+                    } else {
+                        agg.amb_le30_cnt as f64 / s.count as f64
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            obj.insert("ambiguous_rate_20_covered".into(), json!(amb20_cov));
+            obj.insert("ambiguous_rate_30_covered".into(), json!(amb30_cov));
+
+            // Optional: add delta to JSON (use precomputed pair)
+            if let Some(ref mut p) = pair {
+                let a1 = &mut p.a1;
+                let a2 = &mut p.a2;
                 let eb1 = if a1.both_exact_denom > 0 {
                     a1.both_exact as f64 / a1.both_exact_denom as f64
                 } else {
@@ -1916,41 +2050,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 obj.insert("delta_exact_both".into(), json!(eb2 - eb1));
 
                 // time/nodes/gap deltas with backend respect
-                let mut td_t1 = a1.times_td.clone();
-                let mut td_t2 = a2.times_td.clone();
                 let t1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.times_ms),
                     QuantilesBackend::P2 => a1.times_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_t1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.times_td.as_mut().and_then(|o| o.stats()),
                 };
                 let t2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.times_ms),
                     QuantilesBackend::P2 => a2.times_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_t2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.times_td.as_mut().and_then(|o| o.stats()),
                 };
-                let mut td_n1 = a1.nodes_td.clone();
-                let mut td_n2 = a2.nodes_td.clone();
                 let n1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.nodes),
                     QuantilesBackend::P2 => a1.nodes_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_n1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.nodes_td.as_mut().and_then(|o| o.stats()),
                 };
                 let n2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.nodes),
                     QuantilesBackend::P2 => a2.nodes_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_n2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.nodes_td.as_mut().and_then(|o| o.stats()),
                 };
-                let mut td_g1 = a1.gaps_nm_td.clone();
-                let mut td_g2 = a2.gaps_nm_td.clone();
                 let g1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.gaps_no_mate),
                     QuantilesBackend::P2 => a1.gaps_nm_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_g1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.gaps_nm_td.as_mut().and_then(|o| o.stats()),
                 };
                 let g2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.gaps_no_mate),
                     QuantilesBackend::P2 => a2.gaps_nm_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_g2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.gaps_nm_td.as_mut().and_then(|o| o.stats()),
                 };
 
                 match (g1, g2) {
@@ -2052,6 +2180,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "ambiguous_rate_30",
                     "ambiguous_rate_30_ci_low",
                     "ambiguous_rate_30_ci_high",
+                    "ambiguous_rate_20_covered",
+                    "ambiguous_rate_30_covered",
                     "fallback_used_count",
                     "fallback_used_rate",
                     "bound1_exact",
@@ -2135,12 +2265,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(serde_json::Value::Number(n)) => n.to_string(),
                         Some(serde_json::Value::Bool(b)) => {
                             if *b {
-                                "1".to_string()
+                                "1".into()
                             } else {
-                                "0".to_string()
+                                "0".into()
                             }
                         }
-                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(serde_json::Value::String(s)) => csv_escape(s),
                         _ => String::new(),
                     };
                     row.push(s);
@@ -2151,6 +2281,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(g) = gate {
             let mut failed = false;
+            let mut pass_cnt: usize = 0;
+            let mut fail_cnt: usize = 0;
             // Evaluate each threshold if present
             if let Some(th) = g.exact_top1_min {
                 let ok = r1 >= th;
@@ -2160,6 +2292,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.exact_both_min {
@@ -2170,6 +2307,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.gap_no_mate_median_min {
@@ -2181,6 +2323,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.gap_no_mate_p05_min {
@@ -2192,6 +2339,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.fallback_used_max {
@@ -2202,6 +2354,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.ambiguous_rate_30_max {
@@ -2212,6 +2369,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.ambiguous_rate_20_max {
@@ -2222,6 +2384,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             // invariants (counts)
@@ -2233,6 +2400,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.mpv_lt_expected_rate_max {
@@ -2346,27 +2518,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut delta_tt_mean: Option<f64> = None;
             let mut delta_null_rate: Option<f64> = None;
             let mut delta_lmr_mean: Option<f64> = None;
-            if inputs.len() == 2 && !dedup_by_sfen {
-                let a1 = build_agg_for(
-                    &inputs[0],
-                    expected_mpv,
-                    exclude_mate,
-                    seldef_delta,
-                    qbackend,
-                    limit,
-                    sample_n,
-                    cli.seed,
-                );
-                let a2 = build_agg_for(
-                    &inputs[1],
-                    expected_mpv,
-                    exclude_mate,
-                    seldef_delta,
-                    qbackend,
-                    limit,
-                    sample_n,
-                    cli.seed,
-                );
+            if let Some(ref mut p) = pair {
+                let a1 = &mut p.a1;
+                let a2 = &mut p.a2;
                 let eb1 = if a1.both_exact_denom > 0 {
                     a1.both_exact as f64 / a1.both_exact_denom as f64
                 } else {
@@ -2379,51 +2533,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 delta_eb = Some(eb2 - eb1);
                 // time deltas (respect backend)
-                let mut td_t1 = a1.times_td.clone();
-                let mut td_t2 = a2.times_td.clone();
                 let t1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.times_ms),
                     QuantilesBackend::P2 => a1.times_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_t1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.times_td.as_mut().and_then(|o| o.stats()),
                 };
                 let t2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.times_ms),
                     QuantilesBackend::P2 => a2.times_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_t2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.times_td.as_mut().and_then(|o| o.stats()),
                 };
                 if let (Some(s1), Some(s2)) = (t1, t2) {
                     delta_t50 = Some(s2.p50 - s1.p50);
                     delta_t95 = Some(s2.p95 - s1.p95);
                 }
                 // nodes deltas (respect backend)
-                let mut td_n1 = a1.nodes_td.clone();
-                let mut td_n2 = a2.nodes_td.clone();
                 let n1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.nodes),
                     QuantilesBackend::P2 => a1.nodes_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_n1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.nodes_td.as_mut().and_then(|o| o.stats()),
                 };
                 let n2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.nodes),
                     QuantilesBackend::P2 => a2.nodes_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_n2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.nodes_td.as_mut().and_then(|o| o.stats()),
                 };
                 if let (Some(s1), Some(s2)) = (n1, n2) {
                     delta_n50 = Some(s2.p50 - s1.p50);
                     delta_n95 = Some(s2.p95 - s1.p95);
                 }
                 // gap2_no_mate median delta (respect backend)
-                let mut td_g1 = a1.gaps_nm_td.clone();
-                let mut td_g2 = a2.gaps_nm_td.clone();
                 let g1 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a1.gaps_no_mate),
                     QuantilesBackend::P2 => a1.gaps_nm_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_g1.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a1.gaps_nm_td.as_mut().and_then(|o| o.stats()),
                 };
                 let g2 = match qbackend {
                     QuantilesBackend::Exact => compute_stats_exact(&a2.gaps_no_mate),
                     QuantilesBackend::P2 => a2.gaps_nm_p2.as_ref().and_then(|o| o.stats()),
-                    QuantilesBackend::TDigest => td_g2.as_mut().and_then(|o| o.stats()),
+                    QuantilesBackend::TDigest => a2.gaps_nm_td.as_mut().and_then(|o| o.stats()),
                 };
                 if let (Some(s1), Some(s2)) = (g1, g2) {
                     delta_gap50 = Some(s2.p50 - s1.p50);
@@ -2454,6 +2602,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2466,6 +2619,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2478,6 +2636,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2490,6 +2653,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2502,6 +2670,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2514,6 +2687,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2526,6 +2704,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2538,6 +2721,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2550,6 +2738,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         th,
                         if ok { "PASS" } else { "FAIL" }
                     );
+                    if ok {
+                        pass_cnt += 1;
+                    } else {
+                        fail_cnt += 1;
+                    }
                     failed |= !ok;
                 }
             }
@@ -2564,6 +2757,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.seldepth_deficit_p90_max {
@@ -2575,8 +2773,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
+
+            println!("GATE SUMMARY: PASS {} / FAIL {}", pass_cnt, fail_cnt);
 
             if failed && gate_mode_fail {
                 std::process::exit(1);
@@ -2593,13 +2798,4 @@ enum QuantilesBackend {
     TDigest,
 }
 
-impl QuantilesBackend {
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "exact" => Some(QuantilesBackend::Exact),
-            "p2" | "approx" => Some(QuantilesBackend::P2),
-            "tdigest" | "t-digest" | "td" => Some(QuantilesBackend::TDigest),
-            _ => None,
-        }
-    }
-}
+// Note: parsing moved to clap ValueEnum `QuantilesBackendArg` + `parse_quantiles_backend`.

@@ -34,16 +34,31 @@ pub fn compute_stats_exact(values: &[i64]) -> Option<StatsI64> {
     }
     let mean = sum as f64 / count as f64;
     let mut v = values.to_vec();
-    v.sort_unstable();
+    let n = v.len();
+    // nearest-rank-ish index (consistent with existing quantile_sorted)
+    let idx = |q: f64| -> usize { (((n - 1) as f64 * q).round() as usize).min(n - 1) };
+    let i50 = idx(0.5);
+    let i90 = idx(0.9);
+    let i95 = idx(0.95);
+    let i99 = idx(0.99);
+    // Sort indices descending and deduplicate while preserving need
+    let mut idxs = vec![i99, i95, i90, i50];
+    idxs.sort_unstable_by(|a, b| b.cmp(a));
+    idxs.dedup();
+    // Use select_nth_unstable for each index from largest to smallest
+    for &i in &idxs {
+        let (_less, _nth, _greater) = v.select_nth_unstable(i);
+        // no-op; positions are now correct up to i
+    }
     Some(StatsI64 {
         count,
         min: min_v,
         max: max_v,
         mean,
-        p50: quantile_sorted(&v, 0.5),
-        p90: quantile_sorted(&v, 0.9),
-        p95: quantile_sorted(&v, 0.95),
-        p99: quantile_sorted(&v, 0.99),
+        p50: v[i50],
+        p90: v[i90],
+        p95: v[i95],
+        p99: v[i99],
     })
 }
 
@@ -232,6 +247,10 @@ impl TDigest {
             compression: (compression as f64).clamp(20.0, 1000.0),
         }
     }
+    // Flush buffered samples into centroids (single compress pass)
+    pub fn flush(&mut self) {
+        self.compress();
+    }
     pub fn add(&mut self, x: f64) {
         self.buf.push(x);
         if self.buf.len() > 2048 {
@@ -343,6 +362,10 @@ impl OnlineTDigest {
         self.sum += v as i128;
         self.td.add(v as f64);
     }
+    // Ensure internal buffer is compressed so reads won't need cloning
+    pub fn flush(&mut self) {
+        self.td.flush();
+    }
     pub fn stats(&mut self) -> Option<StatsI64> {
         if self.count == 0 {
             return None;
@@ -384,7 +407,7 @@ mod tests {
         for i in 0..1000 {
             o.add(i);
         }
-        let mut s = o.stats().unwrap();
+        let s = o.stats().unwrap();
         assert!(s.p50 >= s.min && s.p50 <= s.max);
         assert!(s.p99 >= s.p95);
     }
