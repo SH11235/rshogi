@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use tools::common::io::{open_reader, open_writer};
+use tools::common::io::{open_reader, open_writer, Writer};
 
 // open_reader moved to tools::common::io
 
@@ -44,9 +44,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let reader = open_reader(&input)?;
     // Choose output: file or stdout (compressed if extension suggests)
-    let mut out: Box<dyn Write> = match output_opt {
+    let mut out: Writer = match output_opt {
         Some(path) => open_writer(&path)?,
-        None => Box::new(std::io::stdout()),
+        None => open_writer("-")?,
     };
 
     for (line_idx, line) in reader.lines().enumerate() {
@@ -88,13 +88,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        // Non-exact condition
+        // Non-exact condition (+ fallback to lines[0..1].bound)
         if include_non_exact {
             let b1 = v.get("bound1").and_then(|x| x.as_str());
             let b2 = v.get("bound2").and_then(|x| x.as_str());
             let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
             if matches!(b1, Some(b) if !is_exact(b)) || matches!(b2, Some(b) if !is_exact(b)) {
                 flag = true;
+            } else if !flag {
+                // fallback: inspect lines[0..1].bound when bound1/2 are absent
+                let lines_non_exact = v.get("lines").and_then(|x| x.as_array()).is_some_and(|ls| {
+                    let b = |i| {
+                        ls.get(i)
+                            .and_then(|l: &serde_json::Value| l.get("bound"))
+                            .and_then(|x| x.as_str())
+                    };
+                    matches!(b(0), Some(s) if !is_exact(s))
+                        || matches!(b(1), Some(s) if !is_exact(s))
+                });
+                if lines_non_exact {
+                    flag = true;
+                }
             }
         }
         // Aspiration failures
@@ -105,9 +119,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        // Mate boundary
+        // Mate boundary (record-level flag or any line has mate_distance)
         if include_mate_boundary {
-            if let Some(lines) = v.get("lines").and_then(|x| x.as_array()) {
+            if v.get("mate_boundary").and_then(|x| x.as_bool()) == Some(true) {
+                flag = true;
+            } else if let Some(lines) = v.get("lines").and_then(|x| x.as_array()) {
                 if lines.iter().any(|l| l.get("mate_distance").and_then(|m| m.as_i64()).is_some()) {
                     flag = true;
                 }
@@ -119,5 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Ensure output is finalized
+    out.close()?;
     Ok(())
 }

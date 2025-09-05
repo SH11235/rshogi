@@ -174,11 +174,14 @@ impl Agg {
             .as_deref()
             .or_else(|| rec.lines.get(1).and_then(|l| l.bound.as_deref()))
             .unwrap_or("");
+        // Case-insensitive checks for Exact and bound synonyms
+        let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
+        let norm = |s: &str| s.to_ascii_lowercase();
 
-        if b1 == "Exact" {
+        if is_exact(b1) {
             self.top1_exact += 1;
         }
-        if b1 == "Exact" && b2 == "Exact" {
+        if is_exact(b1) && is_exact(b2) {
             self.both_exact += 1;
         }
         if rec.lines.len() >= 2 {
@@ -187,16 +190,16 @@ impl Agg {
         }
 
         // bound distribution
-        match b1 {
-            "Exact" => self.b1_exact += 1,
-            "LowerBound" => self.b1_lower += 1,
-            "UpperBound" => self.b1_upper += 1,
+        match norm(b1).as_str() {
+            "exact" => self.b1_exact += 1,
+            "lower" | "lowerbound" => self.b1_lower += 1,
+            "upper" | "upperbound" => self.b1_upper += 1,
             _ => self.b1_other += 1,
         }
-        match b2 {
-            "Exact" => self.b2_exact += 1,
-            "LowerBound" => self.b2_lower += 1,
-            "UpperBound" => self.b2_upper += 1,
+        match norm(b2).as_str() {
+            "exact" => self.b2_exact += 1,
+            "lower" | "lowerbound" => self.b2_lower += 1,
+            "upper" | "upperbound" => self.b2_upper += 1,
             _ => self.b2_other += 1,
         }
 
@@ -221,8 +224,12 @@ impl Agg {
         if rec.lines.len() >= 2 {
             let l0 = &rec.lines[0];
             let l1 = &rec.lines[1];
-            let bound_ok =
-                l0.bound.as_deref() == Some("Exact") && l1.bound.as_deref() == Some("Exact");
+            let bound_ok = l0
+                .bound
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("Exact"))
+                .unwrap_or(false)
+                && l1.bound.as_deref().map(|s| s.eq_ignore_ascii_case("Exact")).unwrap_or(false);
             let mate_free = l0.mate_distance.is_none() && l1.mate_distance.is_none();
             let mut inserted_nm = false;
             if bound_ok && (mate_free || !exclude_mate) {
@@ -285,7 +292,7 @@ impl Agg {
         if expected_mpv >= 2 && rec.lines.len() < expected_mpv {
             self.inv_mpv_lt_expected += 1;
         }
-        if rec.best2_gap_cp.is_some() && !(b1 == "Exact" && b2 == "Exact") {
+        if rec.best2_gap_cp.is_some() && !(is_exact(b1) && is_exact(b2)) {
             self.inv_gap_with_non_exact += 1;
         }
         // Invariant: no_legal_move==false なのに lines が空
@@ -324,7 +331,7 @@ impl Agg {
         }
 
         // non-exact reason hint aggregation (only when non-exact)
-        let is_non_exact = !(b1 == "Exact" && b2 == "Exact");
+        let is_non_exact = !(is_exact(b1) && is_exact(b2));
         if is_non_exact {
             self.non_exact_total += 1;
             let mut budget = false;
