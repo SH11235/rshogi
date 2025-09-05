@@ -32,7 +32,7 @@
 //! speed for sparse feature sets like HalfKP.
 
 use std::fs::{create_dir_all, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -100,13 +100,7 @@ struct Sample {
     weight: f32,
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
-struct CacheHeader {
-    version: u32,
-    num_samples: u64,
-    feature_dim: u32,
-}
+// CacheHeader schema is parsed ad-hoc (v1 only). No struct kept to avoid drift.
 
 /// NNUE Network structure with single-channel accumulator
 ///
@@ -577,34 +571,37 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
             skipped += 1;
             continue;
         };
+        // Oriented CP (black perspective)
+        let stm = position.side_to_move;
+        let cp_black = if stm == Color::Black { cp } else { -cp };
+        let cp_white = -cp_black;
 
-        let mut features = Vec::new();
-        // Extract features from black's perspective
-        let black_features = extract_features(&position, black_king, Color::Black);
-        for &f in black_features.as_slice() {
-            features.push(f as u32);
-        }
-        // Extract features from white's perspective
-        let white_features = extract_features(&position, white_king, Color::White);
-        for &f in white_features.as_slice() {
-            features.push(f as u32);
-        }
-
-        // Calculate label
-        let label = match config.label_type.as_str() {
-            "wdl" => cp_to_wdl(cp, config.scale),
-            "cp" => (cp.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
-            _ => continue,
-        };
-
-        // Calculate sample weight
+        // Calculate sample weight once (shared)
         let weight = calculate_weight(&pos_data, config);
 
-        samples.push(Sample {
-            features,
-            label,
-            weight,
-        });
+        // Black perspective sample
+        {
+            let feats = extract_features(&position, black_king, Color::Black);
+            let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
+            let label = match config.label_type.as_str() {
+                "wdl" => cp_to_wdl(cp_black, config.scale),
+                "cp" => (cp_black.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
+                _ => continue,
+            };
+            samples.push(Sample { features, label, weight });
+        }
+
+        // White perspective sample
+        {
+            let feats = extract_features(&position, white_king, Color::White);
+            let features: Vec<u32> = feats.as_slice().iter().map(|&f| f as u32).collect();
+            let label = match config.label_type.as_str() {
+                "wdl" => cp_to_wdl(cp_white, config.scale),
+                "cp" => (cp_white.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
+                _ => continue,
+            };
+            samples.push(Sample { features, label, weight });
+        }
     }
 
     if skipped > 0 {
@@ -649,7 +646,7 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
 fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
     let mut f = File::open(path)?;
 
-    // Read header - matches build_feature_cache.rs format
+    // Read header - matches build_feature_cache.rs v1 extended header
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != b"NNFC" {
@@ -659,32 +656,82 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     let mut u32b = [0u8; 4];
     let mut u64b = [0u8; 8];
 
-    // Version
+    // Version (v1 only)
     f.read_exact(&mut u32b)?;
     let version = u32::from_le_bytes(u32b);
     if version != 1 {
-        return Err(format!("Unsupported cache version: {version}").into());
+        return Err(format!("Unsupported cache version: {version} (v1 required)" ).into());
     }
 
-    // Feature set ID
+    // feature set id, num samples, chunk size
     f.read_exact(&mut u32b)?;
-    let _feature_set_id = u32::from_le_bytes(u32b);
+    let feature_set_id = u32::from_le_bytes(u32b);
+    const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
+    if feature_set_id != FEATURE_SET_ID_HALF {
+        return Err(format!("Unsupported feature_set_id: 0x{:08x}", feature_set_id).into());
+    }
 
-    // Number of samples
     f.read_exact(&mut u64b)?;
     let num_samples = u64::from_le_bytes(u64b);
 
-    // Chunk size
     f.read_exact(&mut u32b)?;
     let _chunk_size = u32::from_le_bytes(u32b);
 
-    // Reserved
-    let mut reserved = [0u8; 16];
-    f.read_exact(&mut reserved)?;
+    // header_size
+    f.read_exact(&mut u32b)?; // header_size
+    let _header_size = u32::from_le_bytes(u32b);
+    // endianness
+    let mut b = [0u8; 1];
+    f.read_exact(&mut b)?;
+    let endianness = b[0];
+    if endianness != 0 {
+        return Err("Unsupported endianness in cache header (expected LE=0)".into());
+    }
+    // payload_encoding
+    f.read_exact(&mut b)?;
+    let payload_encoding = b[0];
+    // reserved16
+    let mut _r16 = [0u8; 2];
+    f.read_exact(&mut _r16)?;
+    // payload_offset
+    f.read_exact(&mut u64b)?;
+    let payload_offset = u64::from_le_bytes(u64b);
+    // sample_flags_mask
+    f.read_exact(&mut u32b)?;
+    let flags_mask = u32::from_le_bytes(u32b);
+    // Skip to payload_offset if header had extra bytes
+    let current = f.stream_position()?;
+    if current < payload_offset {
+        f.seek(SeekFrom::Start(payload_offset))?;
+    }
+
+    // Prepare reader for payload (gzip/zstd)
+    let reader: Box<dyn Read> = match payload_encoding {
+        0 => Box::new(f),
+        1 => {
+            use flate2::read::GzDecoder;
+            Box::new(GzDecoder::new(f))
+        }
+        2 => {
+            #[cfg(feature = "zstd")]
+            {
+                Box::new(zstd::Decoder::new(f)?)
+            }
+            #[cfg(not(feature = "zstd"))]
+            {
+                return Err("zstd payload requires building with 'zstd' feature".into());
+            }
+        }
+        other => return Err(format!("Unknown payload encoding: {}", other).into()),
+    };
+
+    let mut r = BufReader::new(reader);
 
     println!("Loading cache: {num_samples} samples");
 
     let mut samples = Vec::with_capacity(num_samples as usize);
+    let mut unknown_flag_samples: u64 = 0;
+    let mut unknown_flag_bits_accum: u32 = 0;
 
     for i in 0..num_samples {
         if i % 100000 == 0 && i > 0 {
@@ -693,12 +740,12 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
 
         // Read number of features
         let mut nb = [0u8; 4];
-        f.read_exact(&mut nb)?;
+        r.read_exact(&mut nb)?;
         let n_features = u32::from_le_bytes(nb) as usize;
 
         // Read features in bulk
         let mut buf = vec![0u8; n_features * 4];
-        f.read_exact(&mut buf)?;
+        r.read_exact(&mut buf)?;
         let features: Vec<u32> = buf
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -706,28 +753,31 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
 
         // Read label
         let mut lb = [0u8; 4];
-        f.read_exact(&mut lb)?;
+        r.read_exact(&mut lb)?;
         let label = f32::from_le_bytes(lb);
 
         // Read metadata: gap, depth, seldepth, flags, padding
         let mut gapb = [0u8; 2];
-        f.read_exact(&mut gapb)?;
+        r.read_exact(&mut gapb)?;
         let gap = u16::from_le_bytes(gapb);
 
         let mut depth = [0u8; 1];
-        f.read_exact(&mut depth)?;
+        r.read_exact(&mut depth)?;
         let depth = depth[0];
 
         let mut seldepth = [0u8; 1];
-        f.read_exact(&mut seldepth)?;
+        r.read_exact(&mut seldepth)?;
         let seldepth = seldepth[0];
 
         let mut flags = [0u8; 1];
-        f.read_exact(&mut flags)?;
+        r.read_exact(&mut flags)?;
         let flags = flags[0];
+        let unknown = (flags as u32) & !flags_mask;
+        if unknown != 0 {
+            unknown_flag_samples += 1;
+            unknown_flag_bits_accum |= unknown;
+        }
 
-        let mut _pad = [0u8; 1];
-        f.read_exact(&mut _pad)?;
 
         // Calculate weight using same policy as JSONL loading
         let mut weight = 1.0;
@@ -754,6 +804,13 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
             label,
             weight,
         });
+    }
+
+    if unknown_flag_samples > 0 {
+        eprintln!(
+            "Warning: {} samples contained unknown flag bits (mask=0x{:08x}, seen=0x{:08x})",
+            unknown_flag_samples, flags_mask, unknown_flag_bits_accum
+        );
     }
 
     Ok(samples)
