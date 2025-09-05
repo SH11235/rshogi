@@ -688,7 +688,7 @@ enum QuantilesBackendArg {
     name = "analyze_teaching_quality",
     about = "Teacher data quality analyzer",
     disable_help_subcommand = true,
-    after_help = "Reports: exact-rate, gap-distribution, gap2, time-distribution, nodes-distribution, bound-distribution, tt, null-lmr, invariants, fallback, seldepth-deficit, non-exact-reason, ambiguous"
+    after_help = "Reports: exact-rate, gap-distribution, gap2, time-distribution, nodes-distribution, bound-distribution, tt, null-lmr, invariants, fallback, seldepth-deficit, non-exact-reason, ambiguous\nExample: --gate crates/tools/ci_gate.sample.json --gate-mode fail"
 )]
 struct Cli {
     /// Primary input JSONL file
