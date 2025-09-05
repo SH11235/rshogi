@@ -36,7 +36,7 @@ fn preset_balanced_with_multipv_override() {
         .stdout(predicate::str::contains("Preset Balanced"))
         .stdout(predicate::str::contains("multipv=3"));
     // manifest should exist and reflect overrides
-    let manifest = tmp.path().join("manifest.json");
+    let manifest = tmp.path().join("out.manifest.json");
     let txt = fs::read_to_string(&manifest).expect("manifest exists");
     assert!(txt.contains("\"preset\": \"balanced\""));
     assert!(txt.contains("\"multipv\": true")); // overrides.multipv
@@ -50,7 +50,7 @@ fn preset_high_with_nodes_switches_mode() {
     assert.success().stdout(predicate::str::contains("Preset High")).stdout(
         predicate::str::contains("mode=nodes").and(predicate::str::contains("nodes=5000000")),
     );
-    let manifest = tmp.path().join("manifest.json");
+    let manifest = tmp.path().join("out.manifest.json");
     let txt = fs::read_to_string(&manifest).expect("manifest exists");
     assert!(txt.contains("\"preset\": \"high\""));
     assert!(txt.contains("\"mode\": \"nodes\""));
@@ -77,7 +77,7 @@ fn preset_baseline_time_override_order_invariant() {
         .stdout(predicate::str::contains("mode=time"))
         .stdout(predicate::str::contains("time_ms=150"));
 
-    let manifest = tmp2.path().join("manifest.json");
+    let manifest = tmp2.path().join("out.manifest.json");
     let txt = fs::read_to_string(&manifest).expect("manifest exists");
     assert!(txt.contains("\"preset\": \"baseline\""));
     assert!(txt.contains("\"time\": true")); // overrides.time

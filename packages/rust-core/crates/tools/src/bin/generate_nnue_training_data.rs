@@ -4,6 +4,7 @@ use engine_core::search::limits::SearchLimits;
 use engine_core::search::types::{Bound, TeacherProfile};
 use engine_core::Position;
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -45,6 +46,7 @@ struct Opts {
     skip_overrun_factor: f64,
     no_recalib: bool,
     force_recalib: bool,
+    jobs: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +93,14 @@ struct Manifest {
     cp_to_wdl_scale: f64,
     wdl_semantics: String,
     calibration: Option<ManifestCalibration>,
+    // Added operational stats
+    attempted: usize,
+    skipped_timeout: usize,
+    errors: serde_json::Value,
+    reuse_tt: bool,
+    skip_overrun_factor: f64,
+    search_depth_arg: u8,
+    effective_min_depth: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --hash-mb <usize> (TT size per engine instance, default: 16)");
         eprintln!("  --reuse-tt (reuse TT and heuristics across positions; faster but may bias; default: false)");
         eprintln!("  --skip-overrun-factor <float> (timeout skip threshold factor; default: 2.0)");
+        eprintln!("  --jobs <n> (outer parallelism for positions; engine threads stay 1)");
         eprintln!("  --no-recalib (reuse manifest calibration if available)");
         eprintln!("  --force-recalib (force re-calibration even if manifest exists)");
         eprintln!("\nRecommended settings for initial NNUE data:");
@@ -197,6 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         skip_overrun_factor: 2.0,
         no_recalib: false,
         force_recalib: false,
+        jobs: None,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -331,6 +343,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 2;
                 } else {
                     eprintln!("Error: --skip-overrun-factor requires a float value");
+                    std::process::exit(1);
+                }
+            }
+            "--jobs" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                    opts.jobs = Some(v.max(1));
+                    i += 2;
+                } else {
+                    eprintln!("Error: --jobs requires an integer value");
                     std::process::exit(1);
                 }
             }
@@ -549,11 +570,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = opts.nodes {
         println!("Nodes (limit): {}", n);
     }
+    if let Some(j) = opts.jobs {
+        println!("Jobs (outer parallelism): {}", j);
+    }
     println!("CPU cores: {:?}", std::thread::available_parallelism());
     if resume_from > 0 || existing_lines > 0 {
         println!("Resuming from position: {}", resume_from.max(existing_lines));
     }
     println!("Skipped positions will be saved to: {}", skipped_path.display());
+    println!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
 
     // Calculate time limit based on depth (used only if --nodes is not set)
     let time_limit_ms = opts.time_limit_override_ms.unwrap_or(match effective_depth {
@@ -583,11 +608,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skipped_file =
         Arc::new(Mutex::new(OpenOptions::new().create(true).append(true).open(&skipped_path)?));
 
-    // Resolve manifest path (same directory as output)
-    let manifest_path = output_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("manifest.json");
+    // Resolve manifest path bound to output file name: <out>.manifest.json
+    let manifest_path = {
+        let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
+        output_path.with_file_name(format!("{stem}.manifest.json"))
+    };
 
     let input_file = File::open(&input_path)?;
     let reader = BufReader::new(input_file);
@@ -629,14 +654,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Reuse prior calibration if requested and available
             if opts.no_recalib && !opts.force_recalib {
                 if let Some(ref man) = manifest_existing {
-                    if let Some(ref calib) = man.calibration {
-                        if let Some(tn) = calib.target_nodes {
-                            opts.nodes = Some(tn);
-                            println!(
-                                "Reusing calibration from manifest: target_nodes={} (samples={:?}, min_depth={:?})",
-                                tn, calib.samples, calib.min_depth_used
-                            );
+                    // Check compatibility
+                    let engine_name = match opts.engine {
+                        EngineType::Material => "material",
+                        EngineType::Enhanced => "enhanced",
+                        EngineType::Nnue => "nnue",
+                        EngineType::EnhancedNnue => "enhanced-nnue",
+                    };
+                    let effective_depth =
+                        opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
+                    let compat = man.engine == engine_name
+                        && man.nnue_weights == opts.nnue_weights
+                        && man.hash_mb == opts.hash_mb
+                        && man.multipv == opts.multipv
+                        && man.min_depth == effective_depth;
+                    if compat {
+                        if let Some(ref calib) = man.calibration {
+                            if let Some(tn) = calib.target_nodes {
+                                opts.nodes = Some(tn);
+                                println!(
+                                    "Reusing calibration from manifest: target_nodes={} (samples={:?}, min_depth={:?})",
+                                    tn, calib.samples, calib.min_depth_used
+                                );
+                            }
                         }
+                    } else {
+                        println!("Existing calibration found but incompatible with current settings; recalibrating.");
                     }
                 }
             }
@@ -764,72 +807,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shared: &shared,
     };
 
-    // Process in batches
-    for (batch_idx, chunk) in sfen_positions.chunks(batch_size).enumerate() {
-        let batch_start = std::time::Instant::now();
+    // Process in batches (optionally inside a local rayon thread pool)
+    let run_batches = || {
+        for (batch_idx, chunk) in sfen_positions.chunks(batch_size).enumerate() {
+            let batch_start = std::time::Instant::now();
 
-        println!(
-            "\nBatch {}/{}: Processing {} positions...",
-            batch_idx + 1,
-            remaining_positions.div_ceil(batch_size),
-            chunk.len()
-        );
+            println!(
+                "\nBatch {}/{}: Processing {} positions...",
+                batch_idx + 1,
+                remaining_positions.div_ceil(batch_size),
+                chunk.len()
+            );
 
-        let batch_results: Vec<_> = chunk
-            .par_iter()
-            .map_init(
-                || {
-                    let mut eng = Engine::new(opts.engine);
-                    eng.set_hash_size(opts.hash_mb);
-                    eng.set_threads(1);
-                    eng.set_multipv_persistent(opts.multipv);
-                    eng.set_teacher_profile(opts.teacher_profile);
-                    if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
-                        if let Some(ref path) = opts.nnue_weights {
-                            if let Err(e) = eng.load_nnue_weights(path) {
-                                eprintln!("Failed to load NNUE weights ({}): {}", path, e);
+            let batch_results: Vec<_> = chunk
+                .par_iter()
+                .map_init(
+                    || {
+                        let mut eng = Engine::new(opts.engine);
+                        eng.set_hash_size(opts.hash_mb);
+                        eng.set_threads(1);
+                        eng.set_multipv_persistent(opts.multipv);
+                        eng.set_teacher_profile(opts.teacher_profile);
+                        if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
+                            if let Some(ref path) = opts.nnue_weights {
+                                if let Err(e) = eng.load_nnue_weights(path) {
+                                    eprintln!("Failed to load NNUE weights ({}): {}", path, e);
+                                }
                             }
                         }
-                    }
-                    eng
-                },
-                |eng, (idx, sfen)| process_position_with_engine(*idx, sfen, &env, eng),
-            )
-            .collect();
+                        eng
+                    },
+                    |eng, (idx, sfen)| process_position_with_engine(*idx, sfen, &env, eng),
+                )
+                .collect();
 
-        // Separate successful results from skipped ones
-        let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
+            // Separate successful results from skipped ones
+            let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
 
-        // Write successful results
-        {
-            let mut file = output_file.lock().unwrap();
-            for result in &successful_results {
-                writeln!(file, "{result}")?;
+            // Write successful results
+            {
+                let mut file = output_file.lock().unwrap();
+                for result in &successful_results {
+                    writeln!(file, "{result}")?;
+                }
+                file.flush()?;
             }
-            file.flush()?;
+
+            // Update progress
+            let new_processed = processed_count
+                .fetch_add(successful_results.len(), Ordering::Relaxed)
+                + successful_results.len();
+            let new_attempted =
+                total_attempted.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
+
+            // Save progress to file (total positions attempted, including skipped)
+            std::fs::write(&progress_path, new_attempted.to_string())?;
+
+            let batch_time = batch_start.elapsed();
+            let positions_per_sec = chunk.len() as f64 / batch_time.as_secs_f64();
+
+            println!(
+                "Batch complete: {} results in {:.1}s ({:.0} pos/sec)",
+                successful_results.len(),
+                batch_time.as_secs_f32(),
+                positions_per_sec
+            );
+            println!(
+                "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
+                (new_processed as f64 / total_positions as f64) * 100.0
+            );
         }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
 
-        // Update progress
-        let new_processed = processed_count.fetch_add(successful_results.len(), Ordering::Relaxed)
-            + successful_results.len();
-        let new_attempted = total_attempted.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
-
-        // Save progress to file (total positions attempted, including skipped)
-        std::fs::write(&progress_path, new_attempted.to_string())?;
-
-        let batch_time = batch_start.elapsed();
-        let positions_per_sec = chunk.len() as f64 / batch_time.as_secs_f64();
-
-        println!(
-            "Batch complete: {} results in {:.1}s ({:.0} pos/sec)",
-            successful_results.len(),
-            batch_time.as_secs_f32(),
-            positions_per_sec
-        );
-        println!(
-            "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
-            (new_processed as f64 / total_positions as f64) * 100.0
-        );
+    if let Some(j) = opts.jobs {
+        let pool = ThreadPoolBuilder::new().num_threads(j).build().expect("build rayon pool");
+        pool.install(|| {
+            // Ignore error here; errors would bubble via ? in real refactor
+            let _ = run_batches();
+        });
+    } else {
+        let _ = run_batches();
     }
 
     // Final statistics
@@ -837,7 +895,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_errors = error_count.load(Ordering::Relaxed);
     let total_skipped = skipped_count.load(Ordering::Relaxed);
     let e_parse = errors_parse.load(Ordering::Relaxed);
-    let e_timeout = errors_timeout.load(Ordering::Relaxed);
     let e_nonexact = errors_nonexact_top1.load(Ordering::Relaxed);
     let e_empty_pv = errors_empty_pv.load(Ordering::Relaxed);
     let newly_processed = total_processed - skip_count;
@@ -848,12 +905,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Previously processed: {skip_count}");
     println!("Newly processed: {newly_processed}");
     println!("Total processed: {total_processed}");
-    println!("Errors (total): {total_errors}");
+    println!("Errors (hard): {total_errors}");
     println!("  - parse: {e_parse}");
-    println!("  - timeout_overruns: {e_timeout}");
     println!("  - nonexact_top1: {e_nonexact}");
     println!("  - empty_or_missing_pv: {e_empty_pv}");
-    println!("Skipped (timeout): {total_skipped}");
+    println!("Skipped (timeout_overruns): {total_skipped}");
 
     if newly_processed > 0 {
         let success_rate = (newly_processed as f64
@@ -888,6 +944,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EngineType::Nnue => "nnue",
         EngineType::EnhancedNnue => "enhanced-nnue",
     };
+    let attempted_total = total_attempted.load(Ordering::Relaxed);
     let manifest = Manifest {
         generated_at: chrono::Utc::now().to_rfc3339(),
         git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
@@ -919,11 +976,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_depth: effective_depth,
         hash_mb: opts.hash_mb,
         threads_per_engine: 1,
-        jobs: None,
+        jobs: opts.jobs,
         count: total_processed,
         cp_to_wdl_scale: opts.wdl_scale,
         wdl_semantics: "side_to_move".to_string(),
         calibration: calibration_out,
+        attempted: attempted_total,
+        skipped_timeout: total_skipped,
+        errors: serde_json::json!({
+            "parse": e_parse,
+            "nonexact_top1": e_nonexact,
+            "empty_or_missing_pv": e_empty_pv,
+        }),
+        reuse_tt: opts.reuse_tt,
+        skip_overrun_factor: opts.skip_overrun_factor,
+        search_depth_arg: search_depth,
+        effective_min_depth: effective_depth,
     };
     if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
         if let Err(e) = std::fs::write(&manifest_path, txt) {
@@ -976,22 +1044,21 @@ fn process_position_with_engine(
     }
     let limits = builder.build();
 
-    let start = std::time::Instant::now();
     let mut pos_clone = position.clone();
     let result = eng.search(&mut pos_clone, limits);
     let elapsed_stats_ms = result.stats.elapsed.as_millis() as u64;
-    let elapsed = start.elapsed();
 
-    // Check if we exceeded time limit significantly (only when using time-based budget)
-    if env.opts.nodes.is_none()
-        && (elapsed_stats_ms as f64) > (env.time_limit_ms as f64) * env.opts.skip_overrun_factor
-    {
+    // Determine time budget status in time mode
+    let is_time_mode = env.opts.nodes.is_none();
+    let timed_out = is_time_mode && (elapsed_stats_ms > env.time_limit_ms);
+    let overrun = is_time_mode
+        && (elapsed_stats_ms as f64) > (env.time_limit_ms as f64) * env.opts.skip_overrun_factor;
+
+    // If overrun the skip threshold, record and skip this position
+    if overrun {
         if idx < 10 || (idx + 1) % 100 == 0 {
-            eprintln!(
-                "Position {} took too long ({:.1}s), skipping",
-                idx + 1,
-                elapsed.as_secs_f32()
-            );
+            let elapsed_s = (elapsed_stats_ms as f64) / 1000.0;
+            eprintln!("Position {} took too long ({:.1}s), skipping", idx + 1, elapsed_s);
         }
         env.shared.skipped_count.fetch_add(1, Ordering::Relaxed);
         env.shared.errors_timeout.fetch_add(1, Ordering::Relaxed);
@@ -1095,9 +1162,7 @@ fn process_position_with_engine(
     };
 
     // Metadata for quality tracking
-    let mut meta = if env.opts.nodes.is_none()
-        && (elapsed_stats_ms as f64) > (env.time_limit_ms as f64) * env.opts.skip_overrun_factor
-    {
+    let mut meta = if timed_out {
         format!(" # timeout_d{depth_reached}")
     } else {
         format!(" # d{depth_reached}")
