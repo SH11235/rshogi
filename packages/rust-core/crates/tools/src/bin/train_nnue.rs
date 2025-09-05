@@ -737,6 +737,15 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     // payload_offset
     f.read_exact(&mut u64b)?;
     let payload_offset = u64::from_le_bytes(u64b);
+    // Validate payload_offset against header end (magic(4) + header_size)
+    let header_end = 4u64 + header_size as u64;
+    if payload_offset < header_end {
+        return Err(format!(
+            "payload_offset ({}) is smaller than header end ({}); file {} may be corrupted",
+            payload_offset, header_end, path
+        )
+        .into());
+    }
     // sample_flags_mask
     f.read_exact(&mut u32b)?;
     let flags_mask = u32::from_le_bytes(u32b);
@@ -789,6 +798,15 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         let mut nb = [0u8; 4];
         r.read_exact(&mut nb)?;
         let n_features = u32::from_le_bytes(nb) as usize;
+        // Guard against unreasonable feature counts (OOM/corruption)
+        const MAX_FEATURES_PER_SAMPLE: usize = SHOGI_BOARD_SIZE * FE_END;
+        if n_features > MAX_FEATURES_PER_SAMPLE {
+            return Err(format!(
+                "n_features={} exceeds sane limit {}; file {} may be corrupted",
+                n_features, MAX_FEATURES_PER_SAMPLE, path
+            )
+            .into());
+        }
 
         // Read features in bulk
         let mut buf = vec![0u8; n_features * 4];
@@ -1676,10 +1694,8 @@ mod tests {
         let out_dir = td.path();
         let mut dummy_rng1 = rand::rngs::StdRng::seed_from_u64(123);
         let mut dummy_rng2 = rand::rngs::StdRng::seed_from_u64(123);
-        train_model(&mut net1, &mut samples1, &None, &cfg, out_dir, None, &mut dummy_rng1)
-            .unwrap();
-        train_model(&mut net2, &mut samples2, &None, &cfg, out_dir, None, &mut dummy_rng2)
-            .unwrap();
+        train_model(&mut net1, &mut samples1, &None, &cfg, out_dir, None, &mut dummy_rng1).unwrap();
+        train_model(&mut net2, &mut samples2, &None, &cfg, out_dir, None, &mut dummy_rng2).unwrap();
 
         // 重みの一致を確認（厳密一致 or 十分小さい誤差）
         assert_eq!(net1.w0.len(), net2.w0.len());
@@ -1695,11 +1711,27 @@ mod tests {
         for (a, b) in net1.w2.iter().zip(net2.w2.iter()) {
             assert!((a - b).abs() <= eps, "w2 diff: {} vs {}", a, b);
         }
-        assert!(
-            (net1.b2 - net2.b2).abs() <= eps,
-            "b2 diff: {} vs {}",
-            net1.b2,
-            net2.b2
-        );
+        assert!((net1.b2 - net2.b2).abs() <= eps, "b2 diff: {} vs {}", net1.b2, net2.b2);
+    }
+
+    // 巨大な n_features を持つ壊れキャッシュが上限制約でエラーになること
+    #[test]
+    fn n_features_exceeds_limit_errors() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("too_many_features.cache");
+        let mut f = File::create(&path).unwrap();
+        // 1サンプル・非圧縮・flags_mask=0
+        let off = write_v1_header(&mut f, 0x48414C46, 1, 1024, 48, 0, 0, 0);
+        f.seek(SeekFrom::Start(off)).unwrap();
+        // 上限 (SHOGI_BOARD_SIZE*FE_END) + 1 を書く
+        let max_allowed = (SHOGI_BOARD_SIZE * FE_END) as u32;
+        let n_features = max_allowed + 1;
+        f.write_all(&n_features.to_le_bytes()).unwrap();
+        // 以降のボディは不要（n_features検証で即エラー）
+        f.flush().unwrap();
+
+        let err = load_samples_from_cache(path.to_str().unwrap()).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("exceeds"), "unexpected err msg: {}", msg);
     }
 }
