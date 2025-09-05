@@ -70,8 +70,8 @@ impl Writer {
             }
             #[cfg(feature = "zstd")]
             Writer::Zst(e) => {
-                e.finish()?; // finalize encoder
-                Ok(())
+                let mut f = e.finish()?; // finalize encoder and get File back
+                f.flush()
             }
         }
     }

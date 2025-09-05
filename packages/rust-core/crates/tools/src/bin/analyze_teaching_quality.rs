@@ -873,11 +873,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bound2
                 .as_deref()
                 .or_else(|| rec.lines.get(1).and_then(|l| l.bound.as_deref()));
-            let exact_score = match (b1 == Some("Exact"), b2 == Some("Exact")) {
-                (true, true) => 2,
-                (true, false) => 1,
-                _ => 0,
-            };
+            let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
+            let exact_score =
+                match (b1.map(is_exact).unwrap_or(false), b2.map(is_exact).unwrap_or(false)) {
+                    (true, true) => 2,
+                    (true, false) => 1,
+                    _ => 0,
+                };
             let nodes = rec.nodes.unwrap_or(0);
             let time_ms = rec.time_ms.unwrap_or(0);
             Key {
@@ -2392,6 +2394,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.gap_with_non_exact_max {
@@ -2402,6 +2409,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.gap_with_non_exact_rate_max {
@@ -2414,6 +2426,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.no_legal_but_empty_max {
@@ -2424,6 +2441,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.no_legal_but_empty_rate_max {
@@ -2436,6 +2458,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.fallback_true_no_reason_max {
@@ -2446,6 +2473,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.fallback_true_no_reason_rate_max {
@@ -2458,6 +2490,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.mate_mixed_into_no_mate_max {
@@ -2468,6 +2505,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.mate_mixed_into_no_mate_rate_max {
@@ -2480,6 +2522,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
 
