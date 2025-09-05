@@ -121,9 +121,11 @@ jobs:
       - name: Run tests with feature ${{ matrix.feature }}
         run: |
           echo "Running tests with feature: ${{ matrix.feature }}"
-          output=$(cargo test --release -p tools --features ${{ matrix.feature }} -- test_zstd 2>&1)
+          # Run tests that have zstd or zst in their name
+          output=$(cargo test --release -p tools --features ${{ matrix.feature }} -- 'zst' 2>&1)
           echo "$output"
-          if echo "$output" | grep -q "0 passed"; then
+          # Check if any tests with the feature were actually executed
+          if ! echo "$output" | grep -E "test .*(zst|zstd).*ok" > /dev/null; then
             echo "::error::No tests were run with feature ${{ matrix.feature }}"
             exit 1
           fi
