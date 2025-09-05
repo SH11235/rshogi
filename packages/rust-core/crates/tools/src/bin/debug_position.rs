@@ -17,11 +17,11 @@ struct Args {
     sfen: Option<String>,
 
     /// Maximum search depth (default: 5)
-    #[arg(short, long, default_value = "5")]
+    #[arg(short, long, default_value_t = 5)]
     depth: u8,
 
     /// Time limit per search in milliseconds (default: 1000)
-    #[arg(short, long, default_value = "1000")]
+    #[arg(short, long, default_value_t = 1000)]
     time: u64,
 
     /// Engine type to use (material, nnue, enhanced, enhanced_nnue)
@@ -50,6 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let args = Args::parse();
+    if args.depth < 1 {
+        return Err("--depth must be >= 1".into());
+    }
+    if args.time < 1 {
+        return Err("--time must be >= 1".into());
+    }
 
     // Default to initial position if no SFEN provided
     let sfen_input = args

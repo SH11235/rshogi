@@ -89,9 +89,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(arg!(-b --"batch-size" <N> "Batch size").default_value("4096"))
         .arg(arg!(--lr <RATE> "Learning rate").default_value("0.001"))
         .arg(arg!(--l2 <RATE> "L2 regularization").default_value("0.000001"))
-        .arg(arg!(-l --label <TYPE> "Label type: wdl, cp, hybrid").default_value("wdl"))
-        .arg(arg!(--scale <N> "Scale for cp->wdl conversion").default_value("600"))
-        .arg(arg!(--"cp-clip" <N> "Clip CP values to this range").default_value("1200"))
+        .arg(
+            arg!(-l --label <TYPE> "Label type: wdl, cp, hybrid")
+                .value_parser(["wdl", "cp", "hybrid"]) // strict accepted values
+                .default_value("wdl"),
+        )
+        .arg(
+            arg!(--scale <N> "Scale for cp->wdl conversion")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("600"),
+        )
+        .arg(
+            arg!(--"cp-clip" <N> "Clip CP values to this range")
+                .value_parser(clap::value_parser!(i32))
+                .default_value("1200"),
+        )
         .arg(
             arg!(--"weight-gap-ref" <N> "Reference gap for weight calculation").default_value("50"),
         )
@@ -108,8 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         learning_rate: app.get_one::<String>("lr").unwrap().parse()?,
         l2_reg: app.get_one::<String>("l2").unwrap().parse()?,
         label_type: app.get_one::<String>("label").unwrap().to_string(),
-        scale: app.get_one::<String>("scale").unwrap().parse()?,
-        cp_clip: app.get_one::<String>("cp-clip").unwrap().parse()?,
+        scale: *app.get_one::<f32>("scale").unwrap(),
+        cp_clip: *app.get_one::<i32>("cp-clip").unwrap(),
         weight_gap_ref: app.get_one::<String>("weight-gap-ref").unwrap().parse()?,
         weight_exact: app.get_one::<String>("weight-exact").unwrap().parse()?,
         weight_non_exact: app.get_one::<String>("weight-non-exact").unwrap().parse()?,
@@ -119,6 +131,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let input_path = app.get_one::<String>("input").unwrap();
     let validation_path = app.get_one::<String>("validation");
+
+    // Sanity checks for numeric args
+    if config.scale <= 0.0 {
+        return Err("Invalid --scale: must be > 0".into());
+    }
+    if config.cp_clip < 0 {
+        return Err("Invalid --cp-clip: must be >= 0".into());
+    }
+    if config.epochs == 0 || config.batch_size == 0 {
+        return Err("Invalid --epochs/--batch-size: must be >= 1".into());
+    }
+    if !config.learning_rate.is_finite() || config.learning_rate <= 0.0 {
+        return Err("Invalid --lr: must be > 0".into());
+    }
+    if !config.l2_reg.is_finite() || config.l2_reg < 0.0 {
+        return Err("Invalid --l2: must be >= 0".into());
+    }
 
     let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
     let out_dir = app
