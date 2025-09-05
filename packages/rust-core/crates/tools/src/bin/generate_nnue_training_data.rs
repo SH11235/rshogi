@@ -11,6 +11,13 @@ enum LabelKind {
     Hybrid,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresetKind {
+    Baseline,
+    Balanced,
+    High,
+}
+
 #[derive(Clone, Debug)]
 struct Opts {
     engine: EngineType,
@@ -78,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("\nOptional flags:");
         eprintln!("  --engine <material|enhanced|nnue|enhanced-nnue> (default: material)");
         eprintln!("  --nnue-weights <path> (required if engine is nnue/enhanced-nnue and weights not zero)");
+        eprintln!("  --preset <baseline|balanced|high> (apply recommended time/hash/multipv/min-depth)");
         eprintln!("  --label <cp|wdl|hybrid> (default: cp)");
         eprintln!("  --wdl-scale <float> (default: 600.0)");
         eprintln!("  --hybrid-ply-cutoff <u32> (default: 100, ply<=cutoff use WDL else CP)");
@@ -141,11 +149,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
     // Be robust to missing optional numerics by scanning for the first `--*` token from index 3
     let mut i = 3;
+    // Track explicit CLI overrides to apply after preset
+    let mut cli_set_time = false;
+    let mut cli_set_hash = false;
+    let mut cli_set_multipv = false;
+    let mut cli_set_min_depth = false;
+    let mut cli_set_nodes = false;
+    let mut preset_sel: Option<PresetKind> = None;
     while i < args.len() && !args[i].starts_with('-') {
         i += 1;
     }
     while i < args.len() {
         match args[i].as_str() {
+            "--preset" => {
+                if let Some(v) = args.get(i + 1) {
+                    match v.to_ascii_lowercase().as_str() {
+                        "baseline" => preset_sel = Some(PresetKind::Baseline),
+                        "balanced" => preset_sel = Some(PresetKind::Balanced),
+                        "high" => preset_sel = Some(PresetKind::High),
+                        other => {
+                            eprintln!("Error: unknown preset '{}'. Use baseline|balanced|high", other);
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("Error: --preset requires a value");
+                    std::process::exit(1);
+                }
+            }
             "--engine" => {
                 if let Some(v) = args.get(i + 1).and_then(|s| parse_engine(s)) {
                     opts.engine = v;
@@ -196,6 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--time-limit-ms" => {
                 if let Some(ms) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
                     opts.time_limit_override_ms = Some(ms);
+                    cli_set_time = true;
                     i += 2;
                 } else {
                     eprintln!("Error: --time-limit-ms requires an integer value");
@@ -205,6 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--hash-mb" => {
                 if let Some(mb) = args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
                     opts.hash_mb = mb.max(1);
+                    cli_set_hash = true;
                     i += 2;
                 } else {
                     eprintln!("Error: --hash-mb requires an integer value");
@@ -218,6 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--multipv" => {
                 if let Some(k) = args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
                     opts.multipv = k.max(1);
+                    cli_set_multipv = true;
                     i += 2;
                 } else {
                     eprintln!("Error: --multipv requires an integer value");
@@ -227,6 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--nodes" => {
                 if let Some(n) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
                     opts.nodes = Some(n);
+                    cli_set_nodes = true;
                     i += 2;
                 } else {
                     eprintln!("Error: --nodes requires an integer value");
@@ -281,6 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--min-depth" => {
                 if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
                     opts.min_depth = Some(v);
+                    cli_set_min_depth = true;
                     i += 2;
                 } else {
                     eprintln!("Error: --min-depth requires an integer value");
@@ -310,6 +347,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+    }
+
+    // Apply preset after parsing, but allow explicit CLI overrides to win
+    let mut preset_log: Option<String> = None;
+    if let Some(p) = preset_sel {
+        let (time_ms, hash_mb, multipv, min_depth) = match p {
+            PresetKind::Baseline => (100u64, 16usize, 1u8, 2u8),
+            PresetKind::Balanced => (200u64, 32usize, 2u8, 3u8),
+            PresetKind::High => (400u64, 64usize, 3u8, 4u8),
+        };
+        // Apply unless overridden by CLI
+        if !cli_set_hash {
+            opts.hash_mb = hash_mb;
+        }
+        if !cli_set_multipv {
+            opts.multipv = multipv;
+        }
+        if !cli_set_min_depth {
+            opts.min_depth = Some(min_depth);
+        }
+        if !cli_set_time && !cli_set_nodes {
+            opts.time_limit_override_ms = Some(time_ms);
+        }
+        preset_log = Some(format!(
+            "Preset {:?} -> time_ms={}, hash_mb={}, multipv={}, min_depth={}{}{}{}{}",
+            p,
+            time_ms,
+            opts.hash_mb,
+            opts.multipv,
+            opts.min_depth.unwrap_or(0),
+            if cli_set_time || cli_set_nodes { " (time/nodes overridden)" } else { "" },
+            if cli_set_hash { " (hash overridden)" } else { "" },
+            if cli_set_multipv { " (multipv overridden)" } else { "" },
+            if cli_set_min_depth { " (min_depth overridden)" } else { "" },
+        ));
     }
 
     // Create skipped positions output file path
@@ -352,6 +424,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================");
     let effective_depth = opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
     println!("Search depth: {effective_depth}");
+    if let Some(ref s) = preset_log { println!("Preset: {s}"); }
     println!("Batch size: {batch_size}");
     println!("Engine: {:?}", opts.engine);
     if let Some(ref w) = opts.nnue_weights {
