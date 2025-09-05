@@ -1,13 +1,12 @@
+use chrono::{DateTime, FixedOffset, Utc};
+use clap::{Parser, ValueEnum};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
-
-#[cfg(feature = "zstd")]
-use zstd::stream::read::Decoder as ZstdDecoder;
+use tools::common::io::{open_reader, open_writer};
 
 /// Degree of exactness for tie-breaking.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
@@ -48,24 +47,23 @@ fn as_i64(v: &Value) -> i64 {
     }
 }
 
+fn is_exact_str(s: &str) -> bool {
+    s.eq_ignore_ascii_case("exact")
+}
+
 fn exactness_from_bounds(v: &Value) -> Exactness {
     // Prefer explicit bound1/bound2 when present
     let b1 = v.get("bound1").and_then(|x| x.as_str());
     let b2 = v.get("bound2").and_then(|x| x.as_str());
-    match (b1 == Some("Exact"), b2 == Some("Exact")) {
+    match (b1.map(is_exact_str).unwrap_or(false), b2.map(is_exact_str).unwrap_or(false)) {
         (true, true) => return Exactness::Both,
         (true, false) => return Exactness::Top1,
         _ => {}
     }
     // Fallback: inspect first two lines[].bound
     if let Some(lines) = v.get("lines").and_then(|x| x.as_array()) {
-        let b = |i: usize| {
-            lines
-                .get(i)
-                .and_then(|l| l.get("bound"))
-                .and_then(|x| x.as_str())
-        };
-        match (b(0) == Some("Exact"), b(1) == Some("Exact")) {
+        let b = |i: usize| lines.get(i).and_then(|l| l.get("bound")).and_then(|x| x.as_str());
+        match (b(0).map(is_exact_str).unwrap_or(false), b(1).map(is_exact_str).unwrap_or(false)) {
             (true, true) => Exactness::Both,
             (true, false) => Exactness::Top1,
             _ => Exactness::None,
@@ -82,7 +80,17 @@ fn parse_rec(v: Value, file_idx: usize, line_idx: usize) -> Option<Rec> {
     let nodes = v.get("nodes").map(as_i64).unwrap_or(0);
     let time_ms = v.get("time_ms").map(as_i64).unwrap_or(0);
     let exact = exactness_from_bounds(&v);
-    Some(Rec { v, sfen, depth, seldepth, exact, nodes, time_ms, file_idx, line_idx })
+    Some(Rec {
+        v,
+        sfen,
+        depth,
+        seldepth,
+        exact,
+        nodes,
+        time_ms,
+        file_idx,
+        line_idx,
+    })
 }
 
 /// Return Ordering::Greater when `a` is better than `b`.
@@ -107,40 +115,22 @@ fn cmp_rec(a: &Rec, b: &Rec, mode: Mode) -> Ordering {
         return ord;
     }
     // Stabilize: earlier (smaller file/line idx) wins on ties
-    b.file_idx
-        .cmp(&a.file_idx)
-        .then(b.line_idx.cmp(&a.line_idx))
+    b.file_idx.cmp(&a.file_idx).then(b.line_idx.cmp(&a.line_idx))
 }
 
-fn open_reader<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn BufRead>> {
-    let p = path.as_ref();
-    if p.to_string_lossy() == "-" {
-        return Ok(Box::new(BufReader::new(io::stdin())));
-    }
-    let f = File::open(p)?;
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    if ext == "gz" {
-        let dec = flate2::read::GzDecoder::new(f);
-        return Ok(Box::new(BufReader::new(dec)));
-    }
-    #[cfg(feature = "zstd")]
-    if ext == "zst" {
-        let dec = ZstdDecoder::new(f)?;
-        return Ok(Box::new(BufReader::new(dec)));
-    }
-    Ok(Box::new(BufReader::new(f)))
+#[derive(Clone, Copy)]
+struct LineCounts {
+    read_lines: usize,
+    valid_json_lines: usize,
+    written_lines: usize,
 }
 
 fn write_aggregated_manifest(
     output_path: &Path,
+    manifest_out: Option<&Path>,
     inputs: &[String],
     mode: Mode,
-    total_read: usize,
+    counts: LineCounts,
     output_items: Option<&[Rec]>,
 ) {
     // Build sources info and collect config fields
@@ -201,18 +191,40 @@ fn write_aggregated_manifest(
 
     // Stats from output items if provided
     let mut agg_obj = json!({
-        "total_positions": total_read,
-        "deduplicated_positions": output_items.map(|v| v.len()).unwrap_or(total_read),
+        "read_lines": counts.read_lines,
+        "valid_json_lines": counts.valid_json_lines,
+        "written_lines": counts.written_lines,
+        "total_positions": counts.read_lines, // kept for backward compatibility
+        "deduplicated_positions": output_items.map(|v| v.len()).unwrap_or(counts.written_lines),
         "config": {
             "multipv": unique_or_varies_i64(&multipv_vals),
             "teacher_profile": unique_or_varies_str(&teacher_vals),
             "hash_mb": unique_or_varies_i64(&hash_vals),
         },
-        "generated_at_range": {
+        "generated_at_range": Value::Null,
+    });
+
+    // Safe min/max for timestamps with timezone handling; fallback to string compare
+    let mut parsed: Vec<DateTime<Utc>> = Vec::new();
+    for ts in &gen_ats {
+        if let Ok(dt) = ts.parse::<DateTime<FixedOffset>>() {
+            parsed.push(dt.with_timezone(&Utc));
+        } else if let Ok(dt) = ts.parse::<DateTime<Utc>>() {
+            parsed.push(dt);
+        }
+    }
+    let gen_range_val = if !parsed.is_empty() {
+        json!({
+            "min": parsed.iter().min().map(|d| d.to_rfc3339()),
+            "max": parsed.iter().max().map(|d| d.to_rfc3339()),
+        })
+    } else {
+        json!({
             "min": gen_ats.iter().min().cloned(),
             "max": gen_ats.iter().max().cloned(),
-        }
-    });
+        })
+    };
+    agg_obj["generated_at_range"] = gen_range_val;
 
     if let Some(items) = output_items {
         if !items.is_empty() {
@@ -260,67 +272,89 @@ fn write_aggregated_manifest(
         "aggregated": agg_obj,
     });
 
-    if let Some(dir) = output_path.parent() {
-        let out = dir.join("manifest.json");
-        let _ = std::fs::write(out, serde_json::to_string_pretty(&manifest).unwrap_or_default());
+    // Determine manifest destination
+    let manifest_path = if let Some(mo) = manifest_out {
+        Some(mo.to_path_buf())
+    } else {
+        output_path.parent().map(|dir| dir.join("manifest.json"))
+    };
+
+    if let Some(path) = manifest_path {
+        match std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap_or_default()) {
+            Ok(_) => {}
+            Err(e) => eprintln!("[warn] failed to write manifest at {}: {}", path.display(), e),
+        }
+    } else {
+        eprintln!("[warn] manifest output is not specified (use --manifest-out) and output is STDOUT; skipping manifest write");
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!(
-            "Usage: {} <input1.jsonl> <...> <output.jsonl> [--dedup-by-sfen] [--prefer-deeper]",
-            args[0]
-        );
-        std::process::exit(1);
+    #[derive(Clone, Copy, Debug, ValueEnum)]
+    enum ModeArg {
+        #[value(name = "exact-first")]
+        ExactFirst,
+        #[value(name = "depth-first")]
+        DepthFirst,
     }
 
-    let mut input_paths = Vec::new();
-    let mut dedup_by_sfen = false;
-    let mut prefer_deeper = false;
-
-    // Collect until we hit an option; last non-option is output
-    let mut i = 1;
-    while i < args.len() && !args[i].starts_with('-') {
-        input_paths.push(args[i].clone());
-        i += 1;
+    #[derive(Parser, Debug)]
+    #[command(
+        name = "merge_annotation_results",
+        about = "Merge JSONL annotations with optional deduplication.",
+        disable_help_subcommand = true,
+        after_help = "Notes: --mode and --prefer-deeper are mutually exclusive.\n--prefer-deeper is an alias of '--mode depth-first'.\nUse '-' for STDIN/STDOUT and '--manifest-out <PATH>' to save manifest when output is '-'."
+    )]
+    struct Cli {
+        /// Input JSONL files (use '-' for STDIN); last positional is output
+        #[arg(value_name="INPUTS...", required=true, num_args=2..)]
+        inputs: Vec<String>,
+        /// Deduplicate by SFEN
+        #[arg(long)]
+        dedup_by_sfen: bool,
+        /// Prefer deeper search (alias of --mode depth-first). Not compatible with --mode.
+        #[arg(long, conflicts_with = "mode")]
+        prefer_deeper: bool,
+        /// Merge mode: exact-first | depth-first
+        #[arg(long, value_enum, conflicts_with = "prefer_deeper")]
+        mode: Option<ModeArg>,
+        /// Manifest output path (required when output is '-')
+        #[arg(long, value_name = "PATH")]
+        manifest_out: Option<String>,
     }
-    if input_paths.len() < 2 {
+
+    let cli = Cli::parse();
+    if cli.inputs.len() < 2 {
         eprintln!("Need at least one input and one output");
         std::process::exit(1);
     }
-    let output_path = PathBuf::from(input_paths.pop().unwrap());
+    let (output_raw, rest_inputs) = {
+        let (last, rest) = cli.inputs.split_last().unwrap();
+        (last.clone(), rest.to_vec())
+    };
+    let input_paths = rest_inputs;
+    let output_path = PathBuf::from(&output_raw);
 
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dedup-by-sfen" => {
-                dedup_by_sfen = true;
-                i += 1;
-            }
-            "--prefer-deeper" => {
-                prefer_deeper = true;
-                i += 1;
-            }
-            other => {
-                eprintln!("Unknown option: {}", other);
-                std::process::exit(1);
+    let mode = match cli.mode {
+        Some(ModeArg::ExactFirst) => Mode::ExactFirst,
+        Some(ModeArg::DepthFirst) => Mode::DepthFirst,
+        None => {
+            if cli.prefer_deeper {
+                Mode::DepthFirst
+            } else {
+                Mode::ExactFirst
             }
         }
-    }
+    };
 
-    let mode = if prefer_deeper { Mode::DepthFirst } else { Mode::ExactFirst };
+    // Prepare output (support STDOUT and future compressed extensions)
+    let mut out: Box<dyn Write> = open_writer(&output_path)?;
 
-    // Prepare output
-    let mut out = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&output_path)?;
+    let mut read_lines: usize = 0; // non-empty lines encountered
+    let mut valid_json_lines: usize = 0; // successfully parsed JSON lines
+    let mut written_lines: usize = 0; // lines written to output
 
-    let mut total_read: usize = 0;
-
-    if !dedup_by_sfen {
+    if !cli.dedup_by_sfen {
         // Non-dedup: stream-concatenate inputs preserving order. Validate JSON minimally.
         for (file_idx, path) in input_paths.iter().enumerate() {
             let reader = open_reader(path)?;
@@ -330,10 +364,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if l.trim().is_empty() {
                             continue;
                         }
-                        total_read += 1;
+                        read_lines += 1;
                         match serde_json::from_str::<Value>(&l) {
                             Ok(_) => {
+                                valid_json_lines += 1;
                                 writeln!(out, "{}", l)?;
+                                written_lines += 1;
                             }
                             Err(e) => {
                                 eprintln!(
@@ -353,7 +389,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Avoid unused warnings
             let _ = file_idx;
         }
-        write_aggregated_manifest(&output_path, &input_paths, mode, total_read, None);
+        let manifest_out = cli.manifest_out.as_ref().map(PathBuf::from);
+        let counts = LineCounts {
+            read_lines,
+            valid_json_lines,
+            written_lines,
+        };
+        write_aggregated_manifest(
+            &output_path,
+            manifest_out.as_deref(),
+            &input_paths,
+            mode,
+            counts,
+            None,
+        );
         return Ok(());
     }
 
@@ -372,9 +421,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if line.trim().is_empty() {
                 continue;
             }
-            total_read += 1;
+            read_lines += 1;
             let v: Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
+                Ok(v) => {
+                    valid_json_lines += 1;
+                    v
+                }
                 Err(e) => {
                     eprintln!("[warn] json parse error at {}:{} -> {}", path, line_idx + 1, e);
                     continue;
@@ -399,9 +451,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     items.sort_unstable_by(|a, b| a.sfen.cmp(&b.sfen));
     for rec in &items {
         writeln!(out, "{}", rec.v)?;
+        written_lines += 1;
     }
 
-    write_aggregated_manifest(&output_path, &input_paths, mode, total_read, Some(&items));
+    let manifest_out = cli.manifest_out.as_ref().map(PathBuf::from);
+    let counts = LineCounts {
+        read_lines,
+        valid_json_lines,
+        written_lines,
+    };
+    write_aggregated_manifest(
+        &output_path,
+        manifest_out.as_deref(),
+        &input_paths,
+        mode,
+        counts,
+        Some(&items),
+    );
 
     Ok(())
 }
