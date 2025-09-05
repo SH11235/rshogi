@@ -37,3 +37,9 @@ complete-result.json
 .cargo/config.local.toml
 
 memo/
+
+# Ignore tool-generated manifests under run outputs
+runs/**/manifest.json
+
+# Avoid re-introducing accidentally generated manifest in tools crate root
+crates/tools/manifest.json
