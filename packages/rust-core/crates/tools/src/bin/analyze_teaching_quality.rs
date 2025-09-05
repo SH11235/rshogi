@@ -2,8 +2,6 @@ use clap::Parser;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
-use std::fs::File;
-use std::io::BufReader;
 
 use rand::Rng;
 use rand::SeedableRng;
@@ -11,6 +9,7 @@ use rand_xoshiro::Xoshiro256StarStar;
 use serde::Deserialize;
 use serde_json::de::Deserializer;
 use serde_json::{json, Value};
+use tools::common::io::open_reader;
 use tools::stats::{compute_stats_exact, quantile_sorted, OnlineP2, OnlineTDigest};
 
 // Phase 1-1: 型定義とストリーミング基盤
@@ -421,37 +420,6 @@ fn csv_escape(s: &str) -> String {
         s.to_string()
     }
 }
-
-fn open_reader(path: &str) -> std::io::Result<BufReader<Box<dyn std::io::Read>>> {
-    let file = File::open(path)?;
-    if path.ends_with(".gz") {
-        let dec = flate2::read::GzDecoder::new(file);
-        Ok(BufReader::new(Box::new(dec)))
-    } else if path.ends_with(".zst") {
-        #[cfg(feature = "zstd")]
-        {
-            let dec = zstd::stream::read::Decoder::new(file)?;
-            Ok(BufReader::new(Box::new(dec)))
-        }
-        #[cfg(not(feature = "zstd"))]
-        {
-            eprintln!(".zst input requires building tools with feature 'zstd'");
-            std::process::exit(1);
-        }
-    } else {
-        Ok(BufReader::new(Box::new(file)))
-    }
-}
-
-// moved: crate::stats::quantile_sorted
-
-// moved: crate::stats::StatsI64
-
-// removed legacy in-file P2/compute_stats (moved to tools::stats)
-
-// (removed: OnlineP2 moved to crate::stats)
-
-// (removed: TDigest/OnlineTDigest moved to crate::stats)
 
 fn ensure_p2(slot: &mut Option<OnlineP2>) -> &mut OnlineP2 {
     if slot.is_none() {

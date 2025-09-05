@@ -98,6 +98,36 @@ jobs:
           echo "## Large Stack Test Summary"
           echo "Total ignored tests: $(grep -r "#\[ignore\]" --include="*.rs" . | grep -B1 "fn test_" | wc -l)"
 
+  test-features:
+    name: Test with Features
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature:
+          - zstd
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/rust-core
+          key: rust-cache-feature-${{ matrix.feature }}
+      - name: Run tests with feature ${{ matrix.feature }}
+        run: |
+          echo "Running tests with feature: ${{ matrix.feature }}"
+          output=$(cargo test --release -p tools --features ${{ matrix.feature }} -- test_zstd 2>&1)
+          echo "$output"
+          if echo "$output" | grep -q "0 passed"; then
+            echo "::error::No tests were run with feature ${{ matrix.feature }}"
+            exit 1
+          fi
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
