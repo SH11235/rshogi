@@ -21,7 +21,7 @@ const CACHE_VERSION: u32 = 1;
 const FEATURE_SET_ID: u32 = 0x48414C46; // "HALF" for HalfKP
 
 // Header constants (v1). Bytes after magic ("NNFC").
-const HEADER_SIZE: u32 = 48;
+const HEADER_SIZE_V1: u32 = 48;
 
 // Flags (shared across versions)
 const FLAG_BOTH_EXACT: u8 = 1 << 0;
@@ -375,9 +375,13 @@ fn write_samples_to_sink<W: Write>(
             // Write sample (no padding; meta layout fixed)
             let n_features = features_buf.len() as u32;
             sink.write_all(&n_features.to_le_bytes())?;
-            // Bulk write features
-            for &feat in &features_buf {
-                sink.write_all(&feat.to_le_bytes())?;
+            // Bulk write features in one syscall-friendly buffer
+            if !features_buf.is_empty() {
+                let mut buf = Vec::with_capacity(features_buf.len() * 4);
+                for &feat in &features_buf {
+                    buf.extend_from_slice(&feat.to_le_bytes());
+                }
+                sink.write_all(&buf)?;
             }
             sink.write_all(&label.to_le_bytes())?;
             let gap = pos_data.best2_gap_cp.unwrap_or(0).clamp(0, u16::MAX as i32) as u16;
@@ -409,7 +413,7 @@ fn write_cache_file_streaming(
     let mut file = File::create(output_path)?;
     file.write_all(b"NNFC")?;
     let header_pos = file.stream_position()?; // right after magic
-    let header_placeholder = vec![0u8; HEADER_SIZE as usize];
+    let header_placeholder = vec![0u8; HEADER_SIZE_V1 as usize];
     file.write_all(&header_placeholder)?;
     // Payload starts here
     let payload_offset = file.stream_position()?;
@@ -443,12 +447,15 @@ fn write_cache_file_streaming(
         PayloadEncodingKind::Zstd => {
             // Zstd compressed payload
             let level = config.compress_level.unwrap_or(0);
-            let mut encoder = zstd::Encoder::new(file, level)?; // 0 = default level
+            // Buffer the file under the zstd encoder for better I/O throughput
+            let sink = BufWriter::new(file);
+            let mut encoder = zstd::Encoder::new(sink, level)?; // 0 = default level
             let (num_samples, total_features, skipped, processed) = {
                 // zstd::Encoder implements Write
                 write_samples_to_sink(&mut encoder, reader, config)?
             };
-            let _file = encoder.finish()?; // returns File
+            // Finish encoder, retrieving the underlying BufWriter<File>
+            let _sink = encoder.finish()?;
             (num_samples, total_features, skipped, processed)
         }
     };
@@ -464,7 +471,7 @@ fn write_cache_file_streaming(
     f_header.write_all(&FEATURE_SET_ID.to_le_bytes())?; // feature_set_id
     f_header.write_all(&num_samples.to_le_bytes())?; // num_samples
     f_header.write_all(&config.chunk_size.to_le_bytes())?; // chunk_size
-    f_header.write_all(&HEADER_SIZE.to_le_bytes())?; // header_size
+    f_header.write_all(&HEADER_SIZE_V1.to_le_bytes())?; // header_size
     f_header.write_all(&[0u8])?; // endianness (0 = LE)
     f_header.write_all(&[config.payload_encoding.code()])?; // payload_encoding
     f_header.write_all(&[0u8; 2])?; // reserved16
@@ -476,7 +483,7 @@ fn write_cache_file_streaming(
     f_header.write_all(&sample_flags_mask.to_le_bytes())?; // flags mask
                                                            // pad reserved to HEADER_SIZE
     let written = 4 + 4 + 8 + 4 + 4 + 1 + 1 + 2 + 8 + 4; // 40
-    let reserved_tail = (HEADER_SIZE as usize).saturating_sub(written);
+    let reserved_tail = (HEADER_SIZE_V1 as usize).saturating_sub(written);
     if reserved_tail > 0 {
         f_header.write_all(&vec![0u8; reserved_tail])?;
     }
