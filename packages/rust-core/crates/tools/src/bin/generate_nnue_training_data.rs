@@ -27,6 +27,8 @@ struct Opts {
     min_depth: Option<u8>,
     nodes_autocalibrate_ms: Option<u64>,
     calibrate_sample: usize,
+    reuse_tt: bool,
+    skip_overrun_factor: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +41,10 @@ enum OutputFormat {
 struct GenShared {
     error_count: Arc<AtomicUsize>,
     skipped_count: Arc<AtomicUsize>,
+    errors_parse: Arc<AtomicUsize>,
+    errors_timeout: Arc<AtomicUsize>,
+    errors_nonexact_top1: Arc<AtomicUsize>,
+    errors_empty_pv: Arc<AtomicUsize>,
     skipped_file: Arc<Mutex<File>>,
 }
 
@@ -77,6 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --hybrid-ply-cutoff <u32> (default: 100, ply<=cutoff use WDL else CP)");
         eprintln!("  --time-limit-ms <u64> (override per-position time budget)");
         eprintln!("  --hash-mb <usize> (TT size per engine instance, default: 16)");
+        eprintln!("  --reuse-tt (reuse transposition table across positions; default: false)");
+        eprintln!("  --skip-overrun-factor <float> (timeout skip threshold factor; default: 2.0)");
         eprintln!("\nRecommended settings for initial NNUE data:");
         eprintln!("  - Depth 2: Fast collection, basic evaluation");
         eprintln!("  - Depth 3: Balanced speed/quality");
@@ -126,6 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_depth: None,
         nodes_autocalibrate_ms: None,
         calibrate_sample: 200,
+        reuse_tt: false,
+        skip_overrun_factor: 2.0,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -201,6 +211,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--reuse-tt" => {
+                opts.reuse_tt = true;
+                i += 1;
+            }
             "--multipv" => {
                 if let Some(k) = args.get(i + 1).and_then(|s| s.parse::<u8>().ok()) {
                     opts.multipv = k.max(1);
@@ -216,6 +230,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 2;
                 } else {
                     eprintln!("Error: --nodes requires an integer value");
+                    std::process::exit(1);
+                }
+            }
+            "--skip-overrun-factor" => {
+                if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
+                    opts.skip_overrun_factor = v.max(1.0);
+                    i += 2;
+                } else {
+                    eprintln!("Error: --skip-overrun-factor requires a float value");
                     std::process::exit(1);
                 }
             }
@@ -344,6 +367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hash size (MB): {}", opts.hash_mb);
     println!("MultiPV: {}", opts.multipv);
     println!("Teacher profile: {:?}", opts.teacher_profile);
+    println!("Reuse TT: {}", opts.reuse_tt);
     if let Some(n) = opts.nodes {
         println!("Nodes (limit): {}", n);
     }
@@ -385,23 +409,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = BufReader::new(input_file);
     let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
 
-    // Extract SFEN positions
+    fn extract_sfen(line: &str) -> Option<String> {
+        let start = line.find("sfen ")? + 5;
+        let rest = &line[start..];
+        let end = rest.find(" moves").or_else(|| rest.find('#')).unwrap_or(rest.len());
+        let sfen = rest[..end].trim();
+        if sfen.is_empty() {
+            None
+        } else {
+            Some(sfen.to_string())
+        }
+    }
     let sfen_positions: Vec<(usize, String)> = lines
         .into_iter()
         .enumerate()
-        .filter_map(|(idx, line)| {
-            let line = line.trim();
-            if line.is_empty() || !line.contains("sfen") {
-                return None;
-            }
-
-            if let Some(start_idx) = line.find("sfen ") {
-                let sfen_part = line[start_idx + 5..].to_string();
-                Some((idx, sfen_part))
-            } else {
-                None
-            }
-        })
+        .filter_map(|(idx, line)| extract_sfen(line.trim()).map(|s| (idx, s)))
         .collect();
 
     let total_positions = sfen_positions.len();
@@ -500,11 +522,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let processed_count = Arc::new(AtomicUsize::new(skip_count));
     let error_count = Arc::new(AtomicUsize::new(0));
     let skipped_count = Arc::new(AtomicUsize::new(0));
+    let errors_parse = Arc::new(AtomicUsize::new(0));
+    let errors_timeout = Arc::new(AtomicUsize::new(0));
+    let errors_nonexact_top1 = Arc::new(AtomicUsize::new(0));
+    let errors_empty_pv = Arc::new(AtomicUsize::new(0));
     let total_attempted = Arc::new(AtomicUsize::new(positions_to_skip));
 
     let shared = GenShared {
         error_count: error_count.clone(),
         skipped_count: skipped_count.clone(),
+        errors_parse: errors_parse.clone(),
+        errors_timeout: errors_timeout.clone(),
+        errors_nonexact_top1: errors_nonexact_top1.clone(),
+        errors_empty_pv: errors_empty_pv.clone(),
         skipped_file: skipped_file.clone(),
     };
 
@@ -526,8 +556,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chunk.len()
         );
 
-        let batch_results: Vec<_> =
-            chunk.par_iter().map(|(idx, sfen)| process_position(*idx, sfen, &env)).collect();
+        let batch_results: Vec<_> = chunk
+            .par_iter()
+            .map_init(
+                || {
+                    let mut eng = Engine::new(opts.engine);
+                    eng.set_hash_size(opts.hash_mb);
+                    eng.set_threads(1);
+                    eng.set_multipv_persistent(opts.multipv);
+                    eng.set_teacher_profile(opts.teacher_profile);
+                    if matches!(opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
+                        if let Some(ref path) = opts.nnue_weights {
+                            if let Err(e) = eng.load_nnue_weights(path) {
+                                eprintln!("Failed to load NNUE weights ({}): {}", path, e);
+                            }
+                        }
+                    }
+                    eng
+                },
+                |eng, (idx, sfen)| process_position_with_engine(*idx, sfen, &env, eng),
+            )
+            .collect();
 
         // Separate successful results from skipped ones
         let successful_results: Vec<_> = batch_results.into_iter().flatten().collect();
@@ -568,6 +617,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_processed = processed_count.load(Ordering::Relaxed);
     let total_errors = error_count.load(Ordering::Relaxed);
     let total_skipped = skipped_count.load(Ordering::Relaxed);
+    let e_parse = errors_parse.load(Ordering::Relaxed);
+    let e_nonexact = errors_nonexact_top1.load(Ordering::Relaxed);
+    let e_empty_pv = errors_empty_pv.load(Ordering::Relaxed);
     let newly_processed = total_processed - skip_count;
 
     println!("\n{}", "=".repeat(60));
@@ -576,7 +628,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Previously processed: {skip_count}");
     println!("Newly processed: {newly_processed}");
     println!("Total processed: {total_processed}");
-    println!("Errors: {total_errors}");
+    println!("Errors (total): {total_errors}");
+    println!("  - parse: {e_parse}");
+    println!("  - nonexact_top1: {e_nonexact}");
+    println!("  - empty_or_missing_pv: {e_empty_pv}");
     println!("Skipped (timeout): {total_skipped}");
 
     if newly_processed > 0 {
@@ -601,7 +656,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String> {
+fn process_position_with_engine(
+    idx: usize,
+    sfen: &str,
+    env: &ProcEnv<'_>,
+    eng: &mut Engine,
+) -> Option<String> {
     let position = match Position::from_sfen(sfen) {
         Ok(pos) => pos,
         Err(e) => {
@@ -609,31 +669,14 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
                 eprintln!("Error parsing position {}: {}", idx + 1, e);
             }
             env.shared.error_count.fetch_add(1, Ordering::Relaxed);
+            env.shared.errors_parse.fetch_add(1, Ordering::Relaxed);
             return None;
         }
     };
 
-    // Create engine according to options
-    let mut engine = Engine::new(env.opts.engine);
-    // Reduce TT to avoid high memory usage with parallel batches
-    engine.set_hash_size(env.opts.hash_mb);
-    // Determinism for teacher data
-    engine.set_threads(1);
-    // Reset per-position for reproducibility (must come BEFORE setting runtime knobs)
-    engine.reset_for_position();
-    // Apply runtime knobs after reset so they persist (multipv persistent)
-    engine.set_multipv_persistent(env.opts.multipv);
-    engine.set_teacher_profile(env.opts.teacher_profile);
-    // Load NNUE weights if requested
-    if matches!(env.opts.engine, EngineType::Nnue | EngineType::EnhancedNnue) {
-        if let Some(ref path) = env.opts.nnue_weights {
-            if let Err(e) = engine.load_nnue_weights(path) {
-                if idx < 10 {
-                    eprintln!("Failed to load NNUE weights ({}): {}", path, e);
-                }
-                // Fall back: continue with zero weights
-            }
-        }
+    // Reset per position only when not reusing TT
+    if !env.opts.reuse_tt {
+        eng.reset_for_position();
     }
     let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -643,8 +686,7 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
         .stop_flag(stop_flag.clone())
         .multipv(env.opts.multipv);
     if let Some(n) = env.opts.nodes {
-        // Keep nodes in both time_control and field for consistency (builder validates)
-        builder = builder.fixed_nodes(n).nodes(n);
+        builder = builder.fixed_nodes(n);
     } else {
         builder = builder.fixed_time_ms(env.time_limit_ms);
     }
@@ -652,11 +694,13 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
 
     let start = std::time::Instant::now();
     let mut pos_clone = position.clone();
-    let result = engine.search(&mut pos_clone, limits);
+    let result = eng.search(&mut pos_clone, limits);
     let elapsed = start.elapsed();
 
     // Check if we exceeded time limit significantly (only when using time-based budget)
-    if env.opts.nodes.is_none() && elapsed.as_millis() > (env.time_limit_ms * 2) as u128 {
+    if env.opts.nodes.is_none()
+        && (elapsed.as_millis() as f64) > (env.time_limit_ms as f64) * env.opts.skip_overrun_factor
+    {
         if idx < 10 || (idx + 1) % 100 == 0 {
             eprintln!(
                 "Position {} took too long ({:.1}s), skipping",
@@ -665,18 +709,23 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
             );
         }
         env.shared.skipped_count.fetch_add(1, Ordering::Relaxed);
+        env.shared.errors_timeout.fetch_add(1, Ordering::Relaxed);
 
-        // Write to skipped file with reason
+        // Write to skipped file with reason (JSON)
         if let Ok(mut file) = env.shared.skipped_file.lock() {
-            writeln!(
-                file,
-                "sfen {} # position {} timeout {:.1}s depth_reached {}",
-                sfen,
-                idx + 1,
-                elapsed.as_secs_f32(),
-                result.stats.depth
-            )
-            .ok();
+            let budget_ms = env.time_limit_ms;
+            let overrun_factor = (elapsed.as_millis() as f64) / (budget_ms as f64);
+            let obj = serde_json::json!({
+                "sfen": sfen,
+                "timeout": true,
+                "elapsed_ms": elapsed.as_millis() as u64,
+                "budget_ms": budget_ms,
+                "overrun_factor": overrun_factor,
+                "depth_reached": result.stats.depth,
+                "reason": "time_overrun",
+                "index": idx + 1,
+            });
+            writeln!(file, "{}", obj).ok();
             file.flush().ok();
         }
 
@@ -685,6 +734,48 @@ fn process_position(idx: usize, sfen: &str, env: &ProcEnv<'_>) -> Option<String>
 
     let eval = result.score;
     let depth_reached = result.stats.depth;
+
+    // Validate PV and top1 bound=Exact
+    let mut has_lines = false;
+    let mut top1_exact = false;
+    if let Some(ref lines) = result.lines {
+        if !lines.is_empty() {
+            has_lines = true;
+            if let Some(l0) = lines.first() {
+                top1_exact = matches!(format!("{:?}", l0.bound).as_str(), "Exact");
+            }
+        }
+    }
+    if !has_lines {
+        env.shared.error_count.fetch_add(1, Ordering::Relaxed);
+        env.shared.errors_empty_pv.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut file) = env.shared.skipped_file.lock() {
+            let obj = serde_json::json!({
+                "sfen": sfen,
+                "search_error": "empty_or_missing_pv",
+                "depth_reached": depth_reached,
+                "index": idx + 1,
+            });
+            writeln!(file, "{}", obj).ok();
+            file.flush().ok();
+        }
+        return None;
+    }
+    if !top1_exact {
+        env.shared.error_count.fetch_add(1, Ordering::Relaxed);
+        env.shared.errors_nonexact_top1.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut file) = env.shared.skipped_file.lock() {
+            let obj = serde_json::json!({
+                "sfen": sfen,
+                "search_error": "nonexact_top1",
+                "depth_reached": depth_reached,
+                "index": idx + 1,
+            });
+            writeln!(file, "{}", obj).ok();
+            file.flush().ok();
+        }
+        return None;
+    }
 
     // Compute best2 gap if MultiPV >= 2 and we have 2 lines
     let mut best2_gap_cp_meta = String::new();
