@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 #[cfg(feature = "zstd")]
@@ -29,8 +29,9 @@ pub fn open_reader<P: AsRef<Path>>(path: P) -> io::Result<Box<dyn BufRead>> {
 use zstd::stream::write::Encoder as ZstdEncoder;
 
 /// Writer wrapper to propagate finish/close errors for compressed outputs.
+#[must_use = "call .close() to propagate compression/IO errors"]
 pub enum Writer {
-    Plain(File),
+    Plain(BufWriter<File>),
     Stdout(std::io::Stdout),
     Gz(flate2::write::GzEncoder<File>),
     #[cfg(feature = "zstd")]
@@ -94,5 +95,6 @@ pub fn open_writer<P: AsRef<Path>>(path: P) -> io::Result<Writer> {
         let enc = ZstdEncoder::new(f, 0)?; // no auto_finish; finalize via close()
         return Ok(Writer::Zst(enc));
     }
-    Ok(Writer::Plain(File::create(p)?))
+    let f = File::create(p)?;
+    Ok(Writer::Plain(BufWriter::new(f)))
 }

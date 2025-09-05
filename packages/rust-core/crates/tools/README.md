@@ -111,6 +111,7 @@ cargo run --release -p tools --bin merge_annotation_results -- \
   - `train_nnue`: NNUE 学習（行疎更新、量子化保存対応）
   - `train_wdl_baseline` / `train_cp_baseline`: 軽量ベースライン学習（WDL/CP）
   - `analyze_teaching_quality`: 品質解析/要約/ゲート/複数入力比較/近似分位
+    - `--dedup-by-sfen` の選定規則（固定）: `depth → seldepth → EXACT度 → nodes → time_ms`。完全同点では、先に現れた行（小さい `file_idx/line_idx`）を優先。
   - `extract_flagged_positions`: JSONL から条件抽出
   - `merge_annotation_results`: JSONL マージと重複解消
   - `validate_cp_dataset`: CP テキストデータの整合チェック（レガシー）
