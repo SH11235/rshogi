@@ -5,6 +5,9 @@
 
 use super::board::PieceType;
 
+/// Number of hand piece types (King excluded)
+pub const NUM_HAND_PIECE_TYPES: usize = 7;
+
 /// All piece types in the game
 pub const ALL_PIECE_TYPES: [PieceType; 8] = [
     PieceType::King,
@@ -19,7 +22,7 @@ pub const ALL_PIECE_TYPES: [PieceType; 8] = [
 
 /// All piece types that can be on the board (excluding King)
 /// This is useful for feature extraction and move generation
-pub const BOARD_PIECE_TYPES: [PieceType; 7] = [
+pub const BOARD_PIECE_TYPES: [PieceType; NUM_HAND_PIECE_TYPES] = [
     PieceType::Rook,
     PieceType::Bishop,
     PieceType::Gold,
@@ -31,7 +34,7 @@ pub const BOARD_PIECE_TYPES: [PieceType; 7] = [
 
 /// All piece types that can be in hand
 /// Hand pieces use a specific ordering for indexing
-pub const HAND_PIECE_TYPES: [PieceType; 7] = [
+pub const HAND_PIECE_TYPES: [PieceType; NUM_HAND_PIECE_TYPES] = [
     PieceType::Rook,   // index 0
     PieceType::Bishop, // index 1
     PieceType::Gold,   // index 2
@@ -43,7 +46,7 @@ pub const HAND_PIECE_TYPES: [PieceType; 7] = [
 
 /// Maximum number of each piece type that can be in hand
 /// Indexed by hand array index (same order as HAND_PIECE_TYPES)
-pub const MAX_HAND_PIECES: [u8; 7] = [
+pub const MAX_HAND_PIECES: [u8; NUM_HAND_PIECE_TYPES] = [
     2,  // Rook: max 2
     2,  // Bishop: max 2
     4,  // Gold: max 4
@@ -124,7 +127,9 @@ pub const SEE_GAIN_ARRAY_SIZE: usize = 32;
 
 /// SEE piece values table indexed by [promoted][piece_type]
 /// Index 0: unpromoted, Index 1: promoted
-pub const SEE_PIECE_VALUES: [[i32; 8]; 2] = [
+use super::board::NUM_PIECE_TYPES;
+
+pub const SEE_PIECE_VALUES: [[i32; NUM_PIECE_TYPES]; 2] = [
     // Unpromoted values
     [
         10000, // King (0)
@@ -190,8 +195,8 @@ mod tests {
     fn test_constant_arrays() {
         // Verify all arrays have expected lengths
         assert_eq!(ALL_PIECE_TYPES.len(), 8);
-        assert_eq!(BOARD_PIECE_TYPES.len(), 7);
-        assert_eq!(HAND_PIECE_TYPES.len(), 7);
+        assert_eq!(BOARD_PIECE_TYPES.len(), NUM_HAND_PIECE_TYPES);
+        assert_eq!(HAND_PIECE_TYPES.len(), NUM_HAND_PIECE_TYPES);
 
         // Verify BOARD_PIECE_TYPES excludes King
         assert!(!BOARD_PIECE_TYPES.contains(&PieceType::King));

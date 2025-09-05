@@ -1,7 +1,8 @@
 //! USI notation parsing and formatting
 
 use crate::shogi::{
-    piece_type_to_hand_index, Color, Move, PieceType, Position, Square, MAX_HAND_PIECES,
+    piece_type_to_hand_index, Color, Move, PieceType, Position, Square, BOARD_FILES, BOARD_RANKS,
+    MAX_HAND_PIECES, NUM_HAND_PIECE_TYPES,
 };
 use std::fmt;
 
@@ -27,7 +28,7 @@ impl fmt::Display for UsiParseError {
             UsiParseError::InvalidMoveFormat(s) => write!(f, "Invalid move format: {s}"),
             UsiParseError::InvalidSfen(s) => write!(f, "Invalid SFEN: {s}"),
             UsiParseError::InvalidRankCount(n) => {
-                write!(f, "Invalid rank count: {n} (expected 9)")
+                write!(f, "Invalid rank count: {n} (expected {} )", BOARD_RANKS)
             }
             UsiParseError::UnknownPieceChar(c) => write!(f, "Unknown piece character: {c}"),
             UsiParseError::InvalidHandsFormat(s) => write!(f, "Invalid hands format: {s}"),
@@ -162,8 +163,8 @@ fn parse_piece_type_and_color(ch: char) -> Result<(usize, usize), UsiParseError>
 }
 
 /// Parse hands from SFEN format (e.g., "2P3l4n" or "-")
-fn parse_hands(hands_str: &str) -> Result<[[u8; 7]; 2], UsiParseError> {
-    let mut hands = [[0u8; 7]; 2];
+fn parse_hands(hands_str: &str) -> Result<[[u8; NUM_HAND_PIECE_TYPES]; 2], UsiParseError> {
+    let mut hands = [[0u8; NUM_HAND_PIECE_TYPES]; 2];
 
     if hands_str == "-" {
         return Ok(hands);
@@ -214,7 +215,7 @@ pub fn parse_sfen(sfen: &str) -> Result<Position, UsiParseError> {
 
     // Parse board
     let ranks: Vec<&str> = board_str.split('/').collect();
-    if ranks.len() != 9 {
+    if ranks.len() != BOARD_RANKS {
         return Err(UsiParseError::InvalidRankCount(ranks.len()));
     }
 
@@ -228,10 +229,11 @@ pub fn parse_sfen(sfen: &str) -> Result<Position, UsiParseError> {
             let c = chars[i];
 
             // Check if we've already filled the rank
-            if file_idx >= 9 {
+            if file_idx >= BOARD_FILES {
                 return Err(UsiParseError::InvalidSfen(format!(
-                    "Rank {} has too many characters: extra characters after 9 squares",
-                    rank_idx + 1
+                    "Rank {} has too many characters: extra characters after {} squares",
+                    rank_idx + 1,
+                    BOARD_FILES
                 )));
             }
 
@@ -244,15 +246,16 @@ pub fn parse_sfen(sfen: &str) -> Result<Position, UsiParseError> {
                         rank_idx + 1
                     )));
                 }
-                if file_idx + count > 9 {
+                if file_idx + (count as usize) > BOARD_FILES {
                     return Err(UsiParseError::InvalidSfen(format!(
-                        "Rank {} has too many squares: position {} + {} empty squares exceeds 9",
+                        "Rank {} has too many squares: position {} + {} empty squares exceeds {}",
                         rank_idx + 1,
                         file_idx + 1,
-                        count
+                        count,
+                        BOARD_FILES
                     )));
                 }
-                file_idx += count;
+                file_idx += count as usize;
             } else if c == '+' {
                 // Promoted piece
                 i += 1;
@@ -268,7 +271,7 @@ pub fn parse_sfen(sfen: &str) -> Result<Position, UsiParseError> {
                     Color::White
                 };
                 let piece_type = parse_usi_piece_type(piece_char)?;
-                let square = Square::new(file_idx, rank_idx as u8);
+                let square = Square::new(file_idx as u8, rank_idx as u8);
 
                 // Create promoted piece
                 let mut piece = crate::shogi::Piece::new(piece_type, color);
@@ -284,7 +287,7 @@ pub fn parse_sfen(sfen: &str) -> Result<Position, UsiParseError> {
                     Color::White
                 };
                 let piece_type = parse_usi_piece_type(c)?;
-                let square = Square::new(file_idx, rank_idx as u8);
+                let square = Square::new(file_idx as u8, rank_idx as u8);
 
                 let piece = crate::shogi::Piece::new(piece_type, color);
                 pos.board.put_piece(square, piece);
@@ -294,11 +297,12 @@ pub fn parse_sfen(sfen: &str) -> Result<Position, UsiParseError> {
             i += 1;
         }
 
-        if file_idx != 9 {
+        if file_idx != BOARD_FILES {
             return Err(UsiParseError::InvalidSfen(format!(
-                "Rank {} has wrong number of squares: expected 9, got {}",
+                "Rank {} has wrong number of squares: expected {}, got {}",
                 rank_idx + 1,
-                file_idx
+                BOARD_FILES,
+                file_idx,
             )));
         }
     }
@@ -363,14 +367,14 @@ pub fn position_to_sfen(pos: &Position) -> String {
 
     // 1. Board
     let mut board_str = String::new();
-    for rank in 0..9 {
+    for rank in 0..BOARD_RANKS {
         if rank > 0 {
             board_str.push('/');
         }
 
         let mut empty_count = 0;
-        for file in 0..9 {
-            let square = Square::new(file, rank);
+        for file in 0..BOARD_FILES {
+            let square = Square::new(file as u8, rank as u8);
             if let Some(piece) = pos.board.piece_on(square) {
                 if empty_count > 0 {
                     board_str.push_str(&empty_count.to_string());
@@ -514,7 +518,7 @@ mod tests {
     fn test_parse_hands() {
         // Empty hands
         let hands = parse_hands("-").unwrap();
-        assert_eq!(hands, [[0; 7]; 2]);
+        assert_eq!(hands, [[0; NUM_HAND_PIECE_TYPES]; 2]);
 
         // Single piece
         let hands = parse_hands("P").unwrap();

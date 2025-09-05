@@ -203,6 +203,16 @@ pub fn lmr_reduction(depth: u8, moves_searched: u32) -> u8 {
     }
 }
 
+/// Cap for LMR reduction based on teacher profile
+#[inline]
+pub fn lmr_cap_for_profile(profile: crate::search::types::TeacherProfile) -> u8 {
+    match profile {
+        crate::search::types::TeacherProfile::Safe => 2,
+        crate::search::types::TeacherProfile::Balanced => 3,
+        crate::search::types::TeacherProfile::Aggressive => 6,
+    }
+}
+
 /// Calculate LMR reduction with logarithmic formula (alternative implementation)
 /// Optimized formula for shogi with adjusted parameters
 /// Can be enabled by switching the function call in node.rs for A/B testing

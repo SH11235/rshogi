@@ -1,6 +1,6 @@
 //! CPU cache prefetch utilities for transposition table
 
-use crate::util::sync_compat::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Architecture-specific imports for x86/x86_64
 #[cfg(target_arch = "x86")]

@@ -3,23 +3,17 @@
 //! HalfKP uses the king position and all other pieces as features
 
 use crate::{
-    shogi::{piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES},
+    shogi::{
+        piece_type_to_hand_index, BOARD_PIECE_TYPES, HAND_PIECE_TYPES, MAX_HAND_PIECES,
+        SHOGI_BOARD_SIZE,
+    },
     Color, Piece, PieceType, Position, Square,
 };
 
 #[cfg(debug_assertions)]
 use log::{error, warn};
 
-/// Maximum pieces in hand for each type (indexed as in hands array)
-const MAX_HAND_PIECES: [u8; 7] = [
-    2,  // Rook (index 0)
-    2,  // Bishop (index 1)
-    4,  // Gold (index 2)
-    4,  // Silver (index 3)
-    4,  // Knight (index 4)
-    4,  // Lance (index 5)
-    18, // Pawn (index 6)
-];
+// Use global MAX_HAND_PIECES from piece_constants
 
 /// Piece representation for feature indexing
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,20 +22,21 @@ pub struct BonaPiece(u16);
 impl BonaPiece {
     /// Create BonaPiece from board piece
     pub fn from_board(piece: Piece, sq: Square) -> Option<Self> {
+        let s = SHOGI_BOARD_SIZE as u16;
         let piece_offset = match (piece.piece_type, piece.is_promoted()) {
             (PieceType::Pawn, false) => 0,
-            (PieceType::Lance, false) => 81,
-            (PieceType::Knight, false) => 162,
-            (PieceType::Silver, false) => 243,
-            (PieceType::Gold, false) => 324,
-            (PieceType::Bishop, false) => 405,
-            (PieceType::Rook, false) => 486,
-            (PieceType::Pawn, true) => 567,   // Tokin
-            (PieceType::Lance, true) => 648,  // Promoted Lance
-            (PieceType::Knight, true) => 729, // Promoted Knight
-            (PieceType::Silver, true) => 810, // Promoted Silver
-            (PieceType::Bishop, true) => 891, // Horse
-            (PieceType::Rook, true) => 972,   // Dragon
+            (PieceType::Lance, false) => s,
+            (PieceType::Knight, false) => 2 * s,
+            (PieceType::Silver, false) => 3 * s,
+            (PieceType::Gold, false) => 4 * s,
+            (PieceType::Bishop, false) => 5 * s,
+            (PieceType::Rook, false) => 6 * s,
+            (PieceType::Pawn, true) => 7 * s,    // Tokin
+            (PieceType::Lance, true) => 8 * s,   // Promoted Lance
+            (PieceType::Knight, true) => 9 * s,  // Promoted Knight
+            (PieceType::Silver, true) => 10 * s, // Promoted Silver
+            (PieceType::Bishop, true) => 11 * s, // Horse
+            (PieceType::Rook, true) => 12 * s,   // Dragon
             (PieceType::King, _) => {
                 #[cfg(debug_assertions)]
                 warn!("[NNUE] Attempted to create BonaPiece for King");
@@ -54,7 +49,12 @@ impl BonaPiece {
             }
         };
 
-        let color_offset = if piece.color == Color::White { 1053 } else { 0 };
+        // 13 piece groups (excluding kings as features) per color
+        let color_offset = if piece.color == Color::White {
+            (13 * SHOGI_BOARD_SIZE) as u16
+        } else {
+            0
+        };
         let index = piece_offset + sq.index() as u16 + color_offset;
 
         Some(BonaPiece(index))
@@ -100,7 +100,7 @@ pub const FE_END: usize = 2106 + 76; // 2106 board + 76 hand
 /// Calculate HalfKP feature index
 pub fn halfkp_index(king_sq: Square, piece: BonaPiece) -> usize {
     let index = king_sq.index() * FE_END + piece.index();
-    debug_assert!(index < 81 * FE_END);
+    debug_assert!(index < SHOGI_BOARD_SIZE * FE_END);
     index
 }
 
@@ -116,21 +116,21 @@ impl FeatureTransformer {
     /// Create zero-initialized feature transformer
     pub fn zero() -> Self {
         FeatureTransformer {
-            weights: vec![0; 81 * FE_END * 256], // 81 king squares * features * 256 outputs
+            weights: vec![0; SHOGI_BOARD_SIZE * FE_END * 256], // king squares * features * 256 outputs
             biases: vec![0; 256],
         }
     }
 
     /// Get weight for specific feature and output index
     pub fn weight(&self, feature_idx: usize, output_idx: usize) -> i16 {
-        debug_assert!(feature_idx < 81 * FE_END); // HalfKP index includes king position
+        debug_assert!(feature_idx < SHOGI_BOARD_SIZE * FE_END); // HalfKP index includes king position
         debug_assert!(output_idx < 256);
         self.weights[feature_idx * 256 + output_idx]
     }
 
     /// Get mutable weight reference
     pub fn weight_mut(&mut self, feature_idx: usize, output_idx: usize) -> &mut i16 {
-        debug_assert!(feature_idx < 81 * FE_END);
+        debug_assert!(feature_idx < SHOGI_BOARD_SIZE * FE_END);
         debug_assert!(output_idx < 256);
         &mut self.weights[feature_idx * 256 + output_idx]
     }

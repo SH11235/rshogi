@@ -30,6 +30,7 @@ fn test_search_stack_integration() {
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
+        multipv: 1,
     };
 
     let result = searcher.search(&mut pos, limits);
@@ -70,6 +71,7 @@ fn test_search_stack_killers() {
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
+        multipv: 1,
     };
 
     let result = searcher.search(&mut pos, limits);
@@ -102,6 +104,7 @@ fn test_search_stack_static_eval_cache() {
         iteration_callback: None,
         ponder_hit_flag: None,
         immediate_eval_at_depth_zero: false,
+        multipv: 1,
     };
 
     let result = searcher.search(&mut pos, limits);

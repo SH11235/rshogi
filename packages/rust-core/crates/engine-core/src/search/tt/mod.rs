@@ -28,8 +28,8 @@ pub mod utils;
 #[cfg(test)]
 mod tests;
 
+use crate::Position;
 use crate::{search::SEARCH_INF, shogi::Move};
-use crate::{util, Position};
 use bucket::TTBucket;
 use constants::ABDADA_CUT_FLAG;
 use flexible_bucket::FlexibleTTBucket;
@@ -37,7 +37,7 @@ use prefetch::PrefetchStatsTracker;
 // Integrated PV reconstruction here
 #[cfg(feature = "tt_metrics")]
 use std::sync::atomic::AtomicU64 as StdAtomicU64;
-use util::sync_compat::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 use utils::*;
 
 // No need to import entry module since it's already defined

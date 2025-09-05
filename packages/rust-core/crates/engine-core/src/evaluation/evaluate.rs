@@ -2,7 +2,11 @@
 //!
 //! Simple material-based evaluation
 
-use crate::{shogi::ALL_PIECE_TYPES, Color, PieceType, Position, Square};
+use crate::shogi::board::NUM_PIECE_TYPES;
+use crate::{
+    shogi::{ALL_PIECE_TYPES, NUM_HAND_PIECE_TYPES},
+    Color, PieceType, Position, Square,
+};
 
 /// Trait for position evaluation
 pub trait Evaluator {
@@ -18,7 +22,7 @@ impl<T: Evaluator + ?Sized> Evaluator for std::sync::Arc<T> {
 }
 
 /// Piece values in centipawns
-const PIECE_VALUES: [i32; 8] = [
+const PIECE_VALUES: [i32; NUM_PIECE_TYPES] = [
     0,    // King (infinite value, but we use 0 here)
     1000, // Rook
     800,  // Bishop
@@ -30,7 +34,7 @@ const PIECE_VALUES: [i32; 8] = [
 ];
 
 /// Promoted piece bonus
-const PROMOTION_BONUS: [i32; 8] = [
+const PROMOTION_BONUS: [i32; NUM_PIECE_TYPES] = [
     0,   // King cannot promote
     200, // Dragon (promoted rook)
     200, // Horse (promoted bishop)
@@ -74,7 +78,7 @@ pub fn evaluate(pos: &Position) -> i32 {
     }
 
     // Material in hand
-    for piece_idx in 0..7 {
+    for piece_idx in 0..NUM_HAND_PIECE_TYPES {
         let our_hand = pos.hands[us as usize][piece_idx] as i32;
         let their_hand = pos.hands[them as usize][piece_idx] as i32;
 

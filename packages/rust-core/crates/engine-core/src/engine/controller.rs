@@ -125,6 +125,8 @@ pub struct Engine {
     tt_size_mb: usize,
     // Pending TT size for safe update during search
     pending_tt_size: Option<usize>,
+    // Desired MultiPV (applied to new/recreated searchers)
+    desired_multi_pv: u8,
 }
 
 impl Engine {
@@ -202,6 +204,7 @@ impl Engine {
             pending_thread_count: None,
             tt_size_mb: default_tt_size,
             pending_tt_size: None,
+            desired_multi_pv: 1,
         }
     }
 
@@ -214,6 +217,11 @@ impl Engine {
     /// Set MultiPV lines (1 = single PV). Applies to all active searchers.
     pub fn set_multipv(&self, k: u8) {
         let k = k.clamp(1, 20);
+        // Record desired value for future recreated searchers
+        // SAFETY: casting self to mut via interior mutability is avoided; we accept not updating here.
+        // The value is primarily applied immediately to live searchers below and on future clear_hash/set_engine_type.
+        // To guarantee persistence across resets, callers should set again after reset_for_position().
+        // As a stronger guarantee, we maintain desired_multi_pv via a separate setter (see below).
         // For each searcher type, set if present
         if let Ok(mut guard) = self.material_searcher.lock() {
             if let Some(ref mut s) = *guard {
@@ -237,6 +245,70 @@ impl Engine {
         }
 
         // Parallel searchers: MultiPV is not yet supported in parallel mode.
+    }
+
+    /// Persist desired MultiPV and apply to current searchers
+    pub fn set_multipv_persistent(&mut self, k: u8) {
+        let k = k.clamp(1, 20);
+        self.desired_multi_pv = k;
+        self.set_multipv(k);
+    }
+
+    /// Set pruning teacher profile across searchers
+    pub fn set_teacher_profile(&self, profile: crate::search::types::TeacherProfile) {
+        if let Ok(mut guard) = self.material_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_teacher_profile(profile);
+            }
+        }
+        if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_teacher_profile(profile);
+            }
+        }
+        if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_teacher_profile(profile);
+            }
+        }
+        if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.set_teacher_profile(profile);
+            }
+        }
+    }
+
+    /// Reset state for a fresh position: TT, heuristics, and thread policy.
+    /// Ensures reproducibility for teacher data generation.
+    pub fn reset_for_position(&mut self) {
+        // Clear TT and rebuild searchers to point at fresh TT
+        self.clear_hash();
+
+        // Reset per-searcher heuristics for reproducibility
+        if let Ok(mut guard) = self.material_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.reset_history();
+            }
+        }
+        if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.reset_history();
+            }
+        }
+        if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.reset_history();
+            }
+        }
+        if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
+            if let Some(ref mut s) = *guard {
+                s.reset_history();
+            }
+        }
+
+        // Force single-threaded deterministic search for teacher data
+        self.use_parallel = false;
+        self.num_threads = 1;
     }
 
     /// Calculate active threads based on game phase
@@ -809,10 +881,12 @@ impl Engine {
         match self.engine_type {
             EngineType::Material => {
                 if let Ok(mut guard) = self.material_searcher.lock() {
-                    *guard = Some(MaterialSearcher::new_with_tt_size(
+                    let mut s = MaterialSearcher::new_with_tt_size(
                         *self.material_evaluator,
                         self.tt_size_mb,
-                    ));
+                    );
+                    s.set_multi_pv(self.desired_multi_pv);
+                    *guard = Some(s);
                 }
             }
             EngineType::Nnue => {
@@ -820,15 +894,19 @@ impl Engine {
                     evaluator: self.nnue_evaluator.clone(),
                 };
                 if let Ok(mut guard) = self.nnue_basic_searcher.lock() {
-                    *guard = Some(NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb));
+                    let mut s = NnueBasicSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                    s.set_multi_pv(self.desired_multi_pv);
+                    *guard = Some(s);
                 }
             }
             EngineType::Enhanced => {
                 if let Ok(mut guard) = self.material_enhanced_searcher.lock() {
-                    *guard = Some(MaterialEnhancedSearcher::new_with_tt_size(
+                    let mut s = MaterialEnhancedSearcher::new_with_tt_size(
                         *self.material_evaluator,
                         self.tt_size_mb,
-                    ));
+                    );
+                    s.set_multi_pv(self.desired_multi_pv);
+                    *guard = Some(s);
                 }
             }
             EngineType::EnhancedNnue => {
@@ -836,8 +914,9 @@ impl Engine {
                     evaluator: self.nnue_evaluator.clone(),
                 };
                 if let Ok(mut guard) = self.nnue_enhanced_searcher.lock() {
-                    *guard =
-                        Some(NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb));
+                    let mut s = NnueEnhancedSearcher::new_with_tt_size(nnue_proxy, self.tt_size_mb);
+                    s.set_multi_pv(self.desired_multi_pv);
+                    *guard = Some(s);
                 }
             }
         }

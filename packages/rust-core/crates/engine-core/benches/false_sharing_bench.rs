@@ -35,9 +35,11 @@ fn bench_shared_history_concurrent(c: &mut Criterion) {
                             // Each thread updates different squares to measure false-sharing
                             for i in 0..1000 {
                                 // Spread updates across different cache lines
-                                let square_idx = (thread_id * 9 + i % 9) % 81;
-                                let file = (square_idx % 9) as u8;
-                                let rank = (square_idx / 9) as u8;
+                                let square_idx = (thread_id * engine_core::shogi::BOARD_FILES
+                                    + i % engine_core::shogi::BOARD_FILES)
+                                    % engine_core::shogi::SHOGI_BOARD_SIZE;
+                                let file = (square_idx % engine_core::shogi::BOARD_FILES) as u8;
+                                let rank = (square_idx / engine_core::shogi::BOARD_FILES) as u8;
                                 let square = Square::new(file + 1, rank + 1);
 
                                 history.update(
@@ -119,9 +121,9 @@ fn bench_history_aging(c: &mut Criterion) {
         let history = SharedHistory::new();
 
         // Pre-populate with some values
-        for i in 0..81 {
-            let file = (i % 9) as u8;
-            let rank = (i / 9) as u8;
+        for i in 0..engine_core::shogi::SHOGI_BOARD_SIZE {
+            let file = (i % engine_core::shogi::BOARD_FILES) as u8;
+            let rank = (i / engine_core::shogi::BOARD_FILES) as u8;
             let square = Square::new(file + 1, rank + 1);
             history.update(Color::Black, PieceType::Pawn, square, 1000);
             history.update(Color::White, PieceType::Rook, square, 2000);

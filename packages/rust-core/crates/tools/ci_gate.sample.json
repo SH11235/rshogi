@@ -1,0 +1,15 @@
+{
+  "exact_top1_min": 0.98,
+  "exact_both_min": 0.90,
+  "gap_no_mate_median_min": 40,
+  "gap_no_mate_p05_min": 15,
+  "fallback_used_max": 0,
+  "ambiguous_rate_30_max": 0.35,
+
+  "mpv_lt_expected_rate_max": 0.01,
+  "gap_with_non_exact_rate_max": 0.02,
+  "no_legal_but_empty_rate_max": 0.005,
+  "fallback_true_no_reason_rate_max": 0.001,
+  "mate_mixed_into_no_mate_rate_max": 0.001
+}
+
