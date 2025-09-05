@@ -757,15 +757,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opts.split_every.is_some() || !matches!(opts.compress, CompressionKind::None);
 
     // Open files - append mode if resuming (only when not using split/compress)
-    let output_file: Option<Arc<Mutex<File>>> = if !use_parted_output {
-        Some(Arc::new(Mutex::new(
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(resume_from > 0 || existing_lines > 0)
-                .truncate(resume_from == 0 && existing_lines == 0)
-                .open(&output_path)?,
-        )))
+    let output_file: Option<Arc<Mutex<BufWriter<File>>>> = if !use_parted_output {
+        let f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(resume_from > 0 || existing_lines > 0)
+            .truncate(resume_from == 0 && existing_lines == 0)
+            .open(&output_path)?;
+        let bw = BufWriter::with_capacity(1 << 20, f);
+        Some(Arc::new(Mutex::new(bw)))
     } else {
         None
     };
@@ -822,28 +822,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     #[cfg(feature = "zstd")]
-    struct ZstPartWriter {
-        inner: Option<zstd::stream::write::Encoder<'static, BufWriter<File>>>,
-    }
+    struct ZstPartWriter { inner: Option<Box<dyn Write + Send>> }
     #[cfg(feature = "zstd")]
-    impl Write for ZstPartWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.inner.as_mut().unwrap().write(buf)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.inner.as_mut().unwrap().flush()
-        }
-    }
+    impl Write for ZstPartWriter { fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.as_mut().unwrap().write(buf) } fn flush(&mut self) -> std::io::Result<()> { self.inner.as_mut().unwrap().flush() } }
     #[cfg(feature = "zstd")]
-    impl PartWrite for ZstPartWriter {
-        fn finalize(&mut self) -> std::io::Result<()> {
-            if let Some(enc) = self.inner.take() {
-                // finish() ensures frame footer is written and returns the underlying writer
-                let _ = enc.finish()?;
-            }
-            Ok(())
-        }
-    }
+    impl PartWrite for ZstPartWriter { fn finalize(&mut self) -> std::io::Result<()> { self.inner.take(); Ok(()) } }
     struct PartManager {
         base_stem: String,
         base_ext: String,
@@ -905,12 +888,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     #[cfg(feature = "zstd")]
                     {
                         let enc = zstd::stream::write::Encoder::new(buf, 0)
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-                        Box::new(ZstPartWriter { inner: Some(enc) })
+                            .map_err(std::io::Error::other)?;
+                        let auto = enc.auto_finish();
+                        let boxed: Box<dyn Write + Send> = Box::new(auto);
+                        Box::new(ZstPartWriter { inner: Some(boxed) })
                     }
                     #[cfg(not(feature = "zstd"))]
                     {
-                        return Err(std::io::Error::other(
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
                             "zstd compression requires 'zstd' feature",
                         ));
                     }
@@ -1217,7 +1203,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if use_parted_output {
                 if let Some(pm) = part_mgr.as_mut() {
                     pm.write_lines(&successful_results)?;
-                    pm.update_part_progress()?;
+                    if let Err(e) = pm.update_part_progress() {
+                        eprintln!("Warning: failed to write part progress: {}", e);
+                    }
                 }
             } else if let Some(ref of) = output_file {
                 let mut file = of.lock().unwrap();
@@ -1320,25 +1308,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EngineType::EnhancedNnue => "enhanced-nnue",
     };
     let attempted_total = total_attempted.load(Ordering::Relaxed);
-    // Compute output file SHA-256
-    let (out_sha256, out_bytes) = (|| -> Option<(String, u64)> {
-        use sha2::{Digest, Sha256};
-        let mut f = File::open(&output_path).ok()?;
-        let mut hasher = Sha256::new();
-        let mut buf = [0u8; 64 * 1024];
-        let mut total: u64 = 0;
-        loop {
-            let n = std::io::Read::read(&mut f, &mut buf).ok()?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            total += n as u64;
-        }
-        let hash = hasher.finalize();
-        Some((hex::encode(hash), total))
-    })()
-    .unwrap_or((String::new(), 0));
 
     let comp_str = match opts.compress {
         CompressionKind::None => None,
@@ -1456,6 +1425,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
+        // Compute SHA-256/bytes of the single output file
+        let (out_sha256, out_bytes) = (|| -> Option<(String, u64)> {
+            use sha2::{Digest, Sha256};
+            let mut f = File::open(&output_path).ok()?;
+            let mut hasher = Sha256::new();
+            let mut buf = [0u8; 64 * 1024];
+            let mut total: u64 = 0;
+            loop {
+                let n = std::io::Read::read(&mut f, &mut buf).ok()?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+                total += n as u64;
+            }
+            let hash = hasher.finalize();
+            Some((hex::encode(hash), total))
+        })()
+        .unwrap_or((String::new(), 0));
         let manifest = Manifest {
             generated_at: chrono::Utc::now().to_rfc3339(),
             git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
@@ -1712,7 +1698,9 @@ fn process_position_with_engine(
                             .stop_flag(stop_flag.clone())
                             .multipv(3);
                         if let Some(n) = env.opts.nodes {
-                            builder2 = builder2.fixed_nodes(n);
+                            // In nodes mode, cap K=3 re-search to a conservative fraction to avoid doubling work
+                            let n_k3 = std::cmp::max(n / 4, 10_000);
+                            builder2 = builder2.fixed_nodes(n_k3);
                         } else {
                             // Keep within remaining budget conservatively: at most 1/4 of time_limit
                             let rem = env.time_limit_ms.saturating_sub(elapsed_stats_ms);
