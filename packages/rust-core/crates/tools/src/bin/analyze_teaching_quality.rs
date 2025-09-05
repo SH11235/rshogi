@@ -401,11 +401,12 @@ fn wilson_ci(k: usize, n: usize, z: f64) -> (f64, f64) {
     if n == 0 {
         return (0.0, 0.0);
     }
-    let p = k as f64 / n as f64;
+    let nf = n as f64;
+    let p = k as f64 / nf;
     let z2 = z * z;
-    let denom = 1.0 + z2 / (n as f64);
-    let center = p + z2 / (2.0 * n as f64);
-    let spread = (p * (1.0 - p) / (n as f64) + z2 / (4.0 * (n * n) as f64)).sqrt();
+    let denom = 1.0 + z2 / nf;
+    let center = p + z2 / (2.0 * nf);
+    let spread = (p * (1.0 - p) / nf + z2 / (4.0 * nf * nf)).sqrt();
     let low = (center - z * spread) / denom;
     let high = (center + z * spread) / denom;
     (low.clamp(0.0, 1.0), high.clamp(0.0, 1.0))
