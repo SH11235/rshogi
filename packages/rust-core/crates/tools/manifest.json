@@ -403,6 +403,206 @@
                                                   "mode": "exact-first",
                                                   "sources": [
                                                     {
+                                                      "manifest": {
+                                                        "aggregated": {
+                                                          "config": {
+                                                            "hash_mb": null,
+                                                            "multipv": null,
+                                                            "teacher_profile": null
+                                                          },
+                                                          "deduplicated_positions": 2,
+                                                          "generated_at_range": {
+                                                            "max": null,
+                                                            "min": null
+                                                          },
+                                                          "read_lines": 2,
+                                                          "stats": {
+                                                            "depth": {
+                                                              "avg": 1.5,
+                                                              "max": 2,
+                                                              "min": 1
+                                                            },
+                                                            "nodes": {
+                                                              "avg": 1.5,
+                                                              "max": 2,
+                                                              "min": 1
+                                                            },
+                                                            "seldepth": {
+                                                              "avg": 1.5,
+                                                              "max": 2,
+                                                              "min": 1
+                                                            },
+                                                            "time_ms": {
+                                                              "avg": 1.5,
+                                                              "max": 2,
+                                                              "min": 1
+                                                            }
+                                                          },
+                                                          "total_positions": 2,
+                                                          "valid_json_lines": 2,
+                                                          "written_lines": 2
+                                                        },
+                                                        "inputs": [
+                                                          "-"
+                                                        ],
+                                                        "mode": "exact-first",
+                                                        "sources": [
+                                                          {
+                                                            "manifest": {
+                                                              "aggregated": {
+                                                                "config": {
+                                                                  "hash_mb": null,
+                                                                  "multipv": null,
+                                                                  "teacher_profile": null
+                                                                },
+                                                                "deduplicated_positions": 2,
+                                                                "generated_at_range": {
+                                                                  "max": null,
+                                                                  "min": null
+                                                                },
+                                                                "read_lines": 2,
+                                                                "stats": {
+                                                                  "depth": {
+                                                                    "avg": 1.5,
+                                                                    "max": 2,
+                                                                    "min": 1
+                                                                  },
+                                                                  "nodes": {
+                                                                    "avg": 1.5,
+                                                                    "max": 2,
+                                                                    "min": 1
+                                                                  },
+                                                                  "seldepth": {
+                                                                    "avg": 1.5,
+                                                                    "max": 2,
+                                                                    "min": 1
+                                                                  },
+                                                                  "time_ms": {
+                                                                    "avg": 1.5,
+                                                                    "max": 2,
+                                                                    "min": 1
+                                                                  }
+                                                                },
+                                                                "total_positions": 2,
+                                                                "valid_json_lines": 2,
+                                                                "written_lines": 2
+                                                              },
+                                                              "inputs": [
+                                                                "-"
+                                                              ],
+                                                              "mode": "exact-first",
+                                                              "sources": [
+                                                                {
+                                                                  "manifest": {
+                                                                    "aggregated": {
+                                                                      "config": {
+                                                                        "hash_mb": null,
+                                                                        "multipv": null,
+                                                                        "teacher_profile": null
+                                                                      },
+                                                                      "deduplicated_positions": 2,
+                                                                      "generated_at_range": {
+                                                                        "max": null,
+                                                                        "min": null
+                                                                      },
+                                                                      "read_lines": 2,
+                                                                      "stats": {
+                                                                        "depth": {
+                                                                          "avg": 1.5,
+                                                                          "max": 2,
+                                                                          "min": 1
+                                                                        },
+                                                                        "nodes": {
+                                                                          "avg": 1.5,
+                                                                          "max": 2,
+                                                                          "min": 1
+                                                                        },
+                                                                        "seldepth": {
+                                                                          "avg": 1.5,
+                                                                          "max": 2,
+                                                                          "min": 1
+                                                                        },
+                                                                        "time_ms": {
+                                                                          "avg": 1.5,
+                                                                          "max": 2,
+                                                                          "min": 1
+                                                                        }
+                                                                      },
+                                                                      "total_positions": 2,
+                                                                      "valid_json_lines": 2,
+                                                                      "written_lines": 2
+                                                                    },
+                                                                    "inputs": [
+                                                                      "-"
+                                                                    ],
+                                                                    "mode": "exact-first",
+                                                                    "sources": [
+                                                                      {
+                                                                        "manifest": {
+                                                                          "aggregated": {
+                                                                            "config": {
+                                                                              "hash_mb": null,
+                                                                              "multipv": null,
+                                                                              "teacher_profile": null
+                                                                            },
+                                                                            "deduplicated_positions": 2,
+                                                                            "generated_at_range": {
+                                                                              "max": null,
+                                                                              "min": null
+                                                                            },
+                                                                            "read_lines": 2,
+                                                                            "stats": {
+                                                                              "depth": {
+                                                                                "avg": 1.5,
+                                                                                "max": 2,
+                                                                                "min": 1
+                                                                              },
+                                                                              "nodes": {
+                                                                                "avg": 1.5,
+                                                                                "max": 2,
+                                                                                "min": 1
+                                                                              },
+                                                                              "seldepth": {
+                                                                                "avg": 1.5,
+                                                                                "max": 2,
+                                                                                "min": 1
+                                                                              },
+                                                                              "time_ms": {
+                                                                                "avg": 1.5,
+                                                                                "max": 2,
+                                                                                "min": 1
+                                                                              }
+                                                                            },
+                                                                            "total_positions": 2,
+                                                                            "valid_json_lines": 2,
+                                                                            "written_lines": 2
+                                                                          },
+                                                                          "inputs": [
+                                                                            "-"
+                                                                          ],
+                                                                          "mode": "exact-first",
+                                                                          "sources": [
+                                                                            {
+                                                                              "path": "-"
+                                                                            }
+                                                                          ],
+                                                                          "tool": "merge_annotation_results"
+                                                                        },
+                                                                        "path": "-"
+                                                                      }
+                                                                    ],
+                                                                    "tool": "merge_annotation_results"
+                                                                  },
+                                                                  "path": "-"
+                                                                }
+                                                              ],
+                                                              "tool": "merge_annotation_results"
+                                                            },
+                                                            "path": "-"
+                                                          }
+                                                        ],
+                                                        "tool": "merge_annotation_results"
+                                                      },
                                                       "path": "-"
                                                     }
                                                   ],
