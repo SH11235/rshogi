@@ -23,6 +23,7 @@ bytemuck = "1.15"
 ctrlc = "3.4"
 sha2 = "0.10"
 hex = "0.4"
+smallvec = { workspace = true }
 
 [features]
 zstd = ["dep:zstd"]

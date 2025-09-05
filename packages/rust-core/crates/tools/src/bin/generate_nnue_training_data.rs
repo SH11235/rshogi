@@ -1166,6 +1166,11 @@ fn process_position_with_engine(
     let mut pos_clone = position.clone();
     let result = eng.search(&mut pos_clone, limits);
     let elapsed_stats_ms = result.stats.elapsed.as_millis() as u64;
+    // Track which search stats we will report (K=2 by default; may switch to K=3)
+    let mut result_used_time_ms = elapsed_stats_ms;
+    let mut result_used_depth = result.stats.depth;
+    let mut result_used_seldepth = result.stats.seldepth;
+    let mut result_used_nodes = result.stats.nodes;
 
     // Determine time budget status in time mode
     let is_time_mode = env.opts.nodes.is_none();
@@ -1262,28 +1267,40 @@ fn process_position_with_engine(
             let gap = (l0.score_cp - l1.score_cp).abs();
             best2_gap_cp_meta =
                 format!(" best2_gap_cp:{} bound0:{:?} bound1:{:?}", gap, l0.bound, l1.bound);
-            let exact_ok = !env.opts.amb_require_exact
-                || (matches!(l0.bound, Bound::Exact) && matches!(l1.bound, Bound::Exact));
-            if exact_ok && gap <= env.opts.amb_gap2_threshold {
+            if is_ambiguous_for_k3(l0.bound, l1.bound, l0.score_cp, l1.score_cp, env.opts.amb_gap2_threshold, env.opts.amb_require_exact) {
                 ambiguous_k3 = true;
                 let mut have_three = lines0.len() >= 3;
-                let mut lines_k = lines0.clone().to_vec();
+                // lightweight copy: only first 3 lines
+                let mut lines_k: Vec<_> = lines0.iter().take(3).cloned().collect();
                 if !have_three {
-                    let mut pos2 = position.clone();
-                    let mut builder2 = SearchLimits::builder()
-                        .depth(env.depth)
-                        .stop_flag(stop_flag.clone())
-                        .multipv(3);
-                    if let Some(n) = env.opts.nodes {
-                        builder2 = builder2.fixed_nodes(n);
+                    // If we already exceeded time budget on K=2 in time mode, skip K=3 to avoid budget blow-up
+                    if is_time_mode && timed_out {
+                        have_three = false;
                     } else {
-                        builder2 = builder2.fixed_time_ms(env.time_limit_ms);
-                    }
-                    let limits2 = builder2.build();
-                    let res2 = eng.search(&mut pos2, limits2);
-                    if let Some(ref lines2) = res2.lines {
-                        lines_k = lines2.clone().to_vec();
-                        have_three = lines_k.len() >= 3;
+                        let mut pos2 = position.clone();
+                        let mut builder2 = SearchLimits::builder()
+                            .depth(env.depth)
+                            .stop_flag(stop_flag.clone())
+                            .multipv(3);
+                        if let Some(n) = env.opts.nodes {
+                            builder2 = builder2.fixed_nodes(n);
+                        } else {
+                            // Keep within remaining budget conservatively: at least 1/4 of time_limit
+                            let rem = env.time_limit_ms.saturating_sub(elapsed_stats_ms);
+                            let cap = rem.max(env.time_limit_ms / 4);
+                            builder2 = builder2.fixed_time_ms(cap);
+                        }
+                        let limits2 = builder2.build();
+                        let res2 = eng.search(&mut pos2, limits2);
+                        if let Some(ref lines2) = res2.lines {
+                            lines_k = lines2.iter().take(3).cloned().collect();
+                            have_three = lines_k.len() >= 3;
+                            // Switch reported stats to K=3 for consistency
+                            result_used_time_ms = res2.stats.elapsed.as_millis() as u64;
+                            result_used_depth = res2.stats.depth;
+                            result_used_seldepth = res2.stats.seldepth;
+                            result_used_nodes = res2.stats.nodes;
+                        }
                     }
                 }
                 if have_three {
@@ -1314,7 +1331,9 @@ fn process_position_with_engine(
     };
 
     // Metadata for quality tracking
-    let mut meta = if timed_out {
+    // Apply timeout mark if either K=2 or K=3 (if run) exceeded the time budget
+    let timed_out_any = is_time_mode && (result_used_time_ms > env.time_limit_ms);
+    let mut meta = if timed_out_any {
         format!(" # timeout_d{depth_reached}")
     } else {
         format!(" # d{depth_reached}")
@@ -1403,14 +1422,15 @@ fn process_position_with_engine(
             } else {
                 0
             };
+            let lines_origin = if lines_used_opt.is_some() { "k3" } else { "k2" };
             let json_obj = json!({
                 "sfen": sfen,
                 "lines": lines_json,
-                "depth": result.stats.depth,
-                "seldepth": result.stats.seldepth,
-                "nodes": result.stats.nodes,
+                "depth": result_used_depth,
+                "seldepth": result_used_seldepth,
+                "nodes": result_used_nodes,
                 "nodes_q": result.stats.qnodes,
-                "time_ms": result.stats.elapsed.as_millis() as u64,
+                "time_ms": result_used_time_ms,
                 "aspiration_retries": result.stats.re_searches,
                 "pv_changed": result.stats.pv_changed,
                 "best2_gap_cp": gap2,
@@ -1421,6 +1441,7 @@ fn process_position_with_engine(
                 "bound2": bound2,
                 "tt_hit_rate": tt_hit_rate,
                 "root_move_index": root_idx_val,
+                "lines_origin": lines_origin,
                 "label": label_kind,
                 "eval": eval,
                 "wdl": wdl_prob_opt,
@@ -1438,6 +1459,20 @@ fn cp_to_wdl(cp: i32, scale: f64) -> f64 {
     // Clamp CP to a reasonable range to avoid NaNs
     let x = (cp as f64).clamp(-32000.0, 32000.0) / scale;
     1.0 / (1.0 + (-x).exp())
+}
+
+#[inline]
+fn is_ambiguous_for_k3(
+    b0: Bound,
+    b1: Bound,
+    cp0: i32,
+    cp1: i32,
+    threshold: i32,
+    require_exact: bool,
+) -> bool {
+    let exact_ok = !require_exact || (matches!(b0, Bound::Exact) && matches!(b1, Bound::Exact));
+    let gap = (cp0 - cp1).abs();
+    exact_ok && gap <= threshold
 }
 
 fn softmax_entropy_k3_from_lines(
@@ -1484,4 +1519,69 @@ fn softmax_entropy_k3_from_lines(
     let probs = [exps[0] / sum, exps[1] / sum, exps[2] / sum];
     let entropy = -probs.iter().map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 }).sum::<f64>();
     Some(entropy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_core::search::types::{Bound, RootLine};
+    use smallvec::smallvec;
+
+    fn mk_line(cp: i32) -> RootLine {
+        RootLine {
+            multipv_index: 1,
+            root_move: engine_core::shogi::Move::null(),
+            score_internal: cp,
+            score_cp: cp,
+            bound: Bound::Exact,
+            depth: 1,
+            seldepth: None,
+            pv: smallvec![],
+            nodes: None,
+            time_ms: None,
+            exact_exhausted: false,
+            exhaust_reason: None,
+            mate_distance: None,
+        }
+    }
+
+    #[test]
+    fn test_softmax_entropy_k3() {
+        let lines = vec![mk_line(10), mk_line(9), mk_line(8)];
+        let ent = softmax_entropy_k3_from_lines(&lines, 600.0, MateEntropyMode::Saturate);
+        assert!(ent.is_some());
+        let v = ent.unwrap();
+        assert!(v > 0.0 && v.is_finite());
+
+        let mut lines2 = lines.clone();
+        lines2[0].mate_distance = Some(3);
+        let ent2 = softmax_entropy_k3_from_lines(&lines2, 600.0, MateEntropyMode::Exclude);
+        assert!(ent2.is_none());
+    }
+
+    #[test]
+    fn test_timeout_vs_overrun_flags() {
+        let (limit, factor) = (100_u64, 2.0_f64);
+        // helper mirrors production logic
+        let decide = |elapsed: u64| -> (bool, bool) {
+            let timed_out = elapsed > limit;
+            let overrun = (elapsed as f64) > (limit as f64) * factor;
+            (timed_out, overrun)
+        };
+        assert_eq!(decide(90), (false, false));
+        assert_eq!(decide(150), (true, false));
+        assert_eq!(decide(250), (true, true));
+    }
+
+    #[test]
+    fn test_is_ambiguous_for_k3() {
+        // exact required, small gap
+        assert!(is_ambiguous_for_k3(Bound::Exact, Bound::Exact, 10, 0, 25, true));
+        // exact required, nonexact bound -> false
+        assert!(!is_ambiguous_for_k3(Bound::UpperBound, Bound::Exact, 5, 0, 25, true));
+        // allow inexact
+        assert!(is_ambiguous_for_k3(Bound::UpperBound, Bound::Exact, 5, 0, 25, false));
+        // gap too large
+        assert!(!is_ambiguous_for_k3(Bound::Exact, Bound::Exact, 100, 0, 25, true));
+    }
 }

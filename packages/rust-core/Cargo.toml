@@ -22,6 +22,7 @@ rand = "0.9"
 rand_xoshiro = "0.7"
 regex = "1.11.2"
 slab = "0.4.11"  # Security fix for RUSTSEC-2025-0047
+smallvec = "1.15"
 futures = "0.3"  # Force latest futures version
 
 # Debug build optimizations for reasonable test performance
