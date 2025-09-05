@@ -57,6 +57,7 @@ struct Opts {
     amb_gap2_threshold: i32,
     amb_require_exact: bool,
     entropy_mate_mode: MateEntropyMode,
+    entropy_scale: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         eprintln!("  --label <cp|wdl|hybrid> (default: cp)");
         eprintln!("  --wdl-scale <float> (default: 600.0)");
+        eprintln!("  --entropy-scale <float> (default: 600.0; temperature for K=3 entropy)");
         eprintln!("  --hybrid-ply-cutoff <u32> (default: 100, ply<=cutoff use WDL else CP)");
         eprintln!("  --time-limit-ms <u64> (override per-position time budget)");
         eprintln!("  --hash-mb <usize> (TT size per engine instance, default: 16)");
@@ -242,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         amb_gap2_threshold: 25,
         amb_require_exact: true,
         entropy_mate_mode: MateEntropyMode::Saturate,
+        entropy_scale: 600.0,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -314,6 +317,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 2;
                 } else {
                     eprintln!("Error: --wdl-scale requires a float value");
+                    std::process::exit(1);
+                }
+            }
+            "--entropy-scale" => {
+                if let Some(scale) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
+                    opts.entropy_scale = scale;
+                    i += 2;
+                } else {
+                    eprintln!("Error: --entropy-scale requires a float value");
                     std::process::exit(1);
                 }
             }
@@ -628,6 +640,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Hybrid cutoff ply: {}", opts.hybrid_ply_cutoff);
         }
     }
+    println!("Entropy scale: {:.3}", opts.entropy_scale);
     println!("Hash size (MB): {}", opts.hash_mb);
     println!("MultiPV: {}", opts.multipv);
     println!("Teacher profile: {:?}", opts.teacher_profile);
@@ -803,6 +816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .depth(depth)
                         .fixed_time_ms(200)
                         .multipv(opts.multipv)
+                        .stop_flag(global_stop.clone())
                         .build();
                     let start = std::time::Instant::now();
                     let result = engine.search(&mut pos, limits);
@@ -1171,6 +1185,15 @@ fn process_position_with_engine(
     let mut result_used_depth = result.stats.depth;
     let mut result_used_seldepth = result.stats.seldepth;
     let mut result_used_nodes = result.stats.nodes;
+    let mut result_used_qnodes = result.stats.qnodes;
+    let mut result_used_tt_hits = result.stats.tt_hits;
+    let mut result_used_re_searches = result.stats.re_searches;
+    let mut result_used_pv_changed = result.stats.pv_changed;
+    let mut result_used_root_fh = result.stats.root_fail_high_count;
+    let mut result_used_null_cuts = result.stats.null_cuts;
+    let mut result_used_lmr_count = result.stats.lmr_count;
+    let mut eval_used = result.score;
+    let mut used_k3_research = false;
 
     // Determine time budget status in time mode
     let is_time_mode = env.opts.nodes.is_none();
@@ -1208,7 +1231,7 @@ fn process_position_with_engine(
         return None;
     }
 
-    let eval = result.score;
+    let _eval = result.score; // superseded by eval_used
     let depth_reached = result.stats.depth;
 
     // Validate PV and top1 bound=Exact
@@ -1300,13 +1323,22 @@ fn process_position_with_engine(
                             result_used_depth = res2.stats.depth;
                             result_used_seldepth = res2.stats.seldepth;
                             result_used_nodes = res2.stats.nodes;
+                            result_used_qnodes = res2.stats.qnodes;
+                            result_used_tt_hits = res2.stats.tt_hits;
+                            result_used_re_searches = res2.stats.re_searches;
+                            result_used_pv_changed = res2.stats.pv_changed;
+                            result_used_root_fh = res2.stats.root_fail_high_count;
+                            result_used_null_cuts = res2.stats.null_cuts;
+                            result_used_lmr_count = res2.stats.lmr_count;
+                            eval_used = res2.score;
+                            used_k3_research = true;
                         }
                     }
                 }
                 if have_three {
                     let ent = softmax_entropy_k3_from_lines(
                         &lines_k,
-                        env.opts.wdl_scale,
+                        env.opts.entropy_scale,
                         env.opts.entropy_mate_mode,
                     );
                     entropy_k3_opt = ent;
@@ -1319,11 +1351,11 @@ fn process_position_with_engine(
     // Compute labels
     let (label_kind, wdl_prob_opt) = match env.opts.label {
         LabelKind::Cp => ("cp", None),
-        LabelKind::Wdl => ("wdl", Some(cp_to_wdl(eval, env.opts.wdl_scale))),
+        LabelKind::Wdl => ("wdl", Some(cp_to_wdl(eval_used, env.opts.wdl_scale))),
         LabelKind::Hybrid => {
             let use_wdl = position.ply as u32 <= env.opts.hybrid_ply_cutoff;
             if use_wdl {
-                ("wdl", Some(cp_to_wdl(eval, env.opts.wdl_scale)))
+                ("wdl", Some(cp_to_wdl(eval_used, env.opts.wdl_scale)))
             } else {
                 ("cp", None)
             }
@@ -1334,30 +1366,44 @@ fn process_position_with_engine(
     // Apply timeout mark if either K=2 or K=3 (if run) exceeded the time budget
     let timed_out_any = is_time_mode && (result_used_time_ms > env.time_limit_ms);
     let mut meta = if timed_out_any {
-        format!(" # timeout_d{depth_reached}")
+        format!(" # timeout_d{}", result_used_depth)
     } else {
-        format!(" # d{depth_reached}")
+        format!(" # d{}", result_used_depth)
     };
 
     // Add label type
     meta.push_str(&format!(" label:{}", label_kind));
 
     // Mark mate scores explicitly
-    if is_mate_score(eval) {
-        if let Some(md) = get_mate_distance(eval) {
+    if is_mate_score(eval_used) {
+        if let Some(md) = get_mate_distance(eval_used) {
             meta.push_str(&format!(" mate:{}", md));
         }
     }
 
+    // Prefer adopted lines reference for output sections
+    let fallback_small = result.lines.as_ref();
+    let lines_ref_for_output: Option<&[engine_core::search::types::RootLine]> =
+        if let Some(ref v) = lines_used_opt { Some(v.as_slice()) } else { fallback_small.map(|sv| sv.as_slice()) };
+
     // Output according to selected format
     match env.opts.output_format {
         OutputFormat::Text => {
-            let mut line = format!("{sfen} eval {eval}");
+            let mut line = format!("{sfen} eval {eval_used}");
             if let Some(p) = wdl_prob_opt {
                 line.push_str(&format!(" wdl {:.6}", p));
             }
             line.push_str(&meta);
-            if !best2_gap_cp_meta.is_empty() {
+            // Recompute best2 gap on adopted lines if available
+            if let Some(lines) = lines_ref_for_output {
+                if lines.len() >= 2 {
+                    let g = (lines[0].score_cp - lines[1].score_cp).abs();
+                    line.push_str(&format!(
+                        " best2_gap_cp:{} bound0:{:?} bound1:{:?}",
+                        g, lines[0].bound, lines[1].bound
+                    ));
+                }
+            } else if !best2_gap_cp_meta.is_empty() {
                 line.push_str(&best2_gap_cp_meta);
             }
             if let Some(ent) = entropy_k3_opt {
@@ -1374,14 +1420,8 @@ fn process_position_with_engine(
             let mut bound2 = None;
             let mut gap2: Option<i32> = None;
             let mut lines_json = Vec::new();
-            // Prefer lines from K=3 re-search if present; otherwise use original lines
-            let fallback_small = result.lines.as_ref();
-            let lines_ref: Option<&[engine_core::search::types::RootLine]> =
-                if let Some(ref v) = lines_used_opt {
-                    Some(v.as_slice())
-                } else {
-                    fallback_small.map(|sv| sv.as_slice())
-                };
+            // Prefer adopted lines (from K=3 if present) else original
+            let lines_ref: Option<&[engine_core::search::types::RootLine]> = lines_ref_for_output;
             if let Some(lines) = lines_ref {
                 for (i, l) in lines.iter().enumerate() {
                     if i == 0 {
@@ -1411,8 +1451,8 @@ fn process_position_with_engine(
                 }
             }
 
-            let tt_hit_rate = if result.stats.nodes > 0 {
-                result.stats.tt_hits.map(|h| (h as f64) / (result.stats.nodes as f64))
+            let tt_hit_rate = if result_used_nodes > 0 {
+                result_used_tt_hits.map(|h| (h as f64) / (result_used_nodes as f64))
             } else {
                 None
             };
@@ -1422,28 +1462,28 @@ fn process_position_with_engine(
             } else {
                 0
             };
-            let lines_origin = if lines_used_opt.is_some() { "k3" } else { "k2" };
+            let lines_origin = if used_k3_research { "k3" } else { "k2" };
             let json_obj = json!({
                 "sfen": sfen,
                 "lines": lines_json,
                 "depth": result_used_depth,
                 "seldepth": result_used_seldepth,
                 "nodes": result_used_nodes,
-                "nodes_q": result.stats.qnodes,
+                "nodes_q": result_used_qnodes,
                 "time_ms": result_used_time_ms,
-                "aspiration_retries": result.stats.re_searches,
-                "pv_changed": result.stats.pv_changed,
+                "aspiration_retries": result_used_re_searches,
+                "pv_changed": result_used_pv_changed,
                 "best2_gap_cp": gap2,
-                "root_fail_high_count": result.stats.root_fail_high_count,
-                "used_null": result.stats.null_cuts.map(|c| c > 0).unwrap_or(false),
-                "lmr_applied": result.stats.lmr_count.unwrap_or(0),
+                "root_fail_high_count": result_used_root_fh,
+                "used_null": result_used_null_cuts.map(|c| c > 0).unwrap_or(false),
+                "lmr_applied": result_used_lmr_count.unwrap_or(0),
                 "bound1": bound1,
                 "bound2": bound2,
                 "tt_hit_rate": tt_hit_rate,
                 "root_move_index": root_idx_val,
                 "lines_origin": lines_origin,
                 "label": label_kind,
-                "eval": eval,
+                "eval": eval_used,
                 "wdl": wdl_prob_opt,
                 "meta": meta.trim(),
                 "ambiguous": ambiguous_k3,
