@@ -973,10 +973,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         fn finish_part(&mut self) -> std::io::Result<()> {
+            let was_open = self.writer.is_some();
             if let Some(mut w) = self.writer.take() {
                 w.finalize()?;
             }
-            if self.current_part > 0 {
+            if was_open && self.current_part > 0 {
                 let (out_path, prog) = self.make_part_paths(self.current_part);
                 // Write final progress snapshot for the part (best effort, atomic)
                 write_atomic_best_effort(&prog, &self.lines_in_part.to_string());
@@ -1677,8 +1678,7 @@ fn process_position_with_engine(
                 "mode": "time",
                 "index": idx + 1,
             });
-            writeln!(file, "{}", obj).ok();
-            file.flush().ok();
+            let _ = writeln!(file, "{}", obj);
         }
 
         return None;
@@ -1709,8 +1709,7 @@ fn process_position_with_engine(
                 "mode": "search",
                 "index": idx + 1,
             });
-            writeln!(file, "{}", obj).ok();
-            file.flush().ok();
+            let _ = writeln!(file, "{}", obj);
         }
         return None;
     }
@@ -1725,8 +1724,7 @@ fn process_position_with_engine(
                 "mode": "search",
                 "index": idx + 1,
             });
-            writeln!(file, "{}", obj).ok();
-            file.flush().ok();
+            let _ = writeln!(file, "{}", obj);
         }
         return None;
     }
