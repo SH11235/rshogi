@@ -115,4 +115,3 @@ fn generate_split_gz_smoke_parts_and_manifests_consistent() {
     // It's acceptable that no part is produced (e.g., all positions skipped)
     let _ = saw_any_part;
 }
-
