@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::de::Deserializer;
 use serde_json::{json, Value};
 use tools::common::io::open_reader;
+use tools::common::manifest::{resolve_manifest, AutoloadMode};
 use tools::stats::{compute_stats_exact, quantile_sorted, OnlineP2, OnlineTDigest};
 
 // Phase 1-1: 型定義とストリーミング基盤
@@ -665,6 +666,16 @@ enum QuantilesBackendArg {
     TDigest,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestAutoloadModeArg {
+    #[value(name = "strict")]
+    Strict,
+    #[value(name = "permissive")]
+    Permissive,
+    #[value(name = "off")]
+    Off,
+}
+
 #[derive(Parser)]
 #[command(
     name = "analyze_teaching_quality",
@@ -711,6 +722,9 @@ struct Cli {
     /// Disable manifest auto-detection
     #[arg(long = "no-manifest-autoload")]
     no_manifest_autoload: bool,
+    /// Manifest autoload mode (strict|permissive|off)
+    #[arg(long = "manifest-autoload-mode", value_enum)]
+    manifest_autoload_mode: Option<ManifestAutoloadModeArg>,
     /// Limit processed records
     #[arg(long = "limit")]
     limit: Option<usize>,
@@ -795,23 +809,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load manifest (explicit or auto-detect near primary input)
     let mut manifest_json: Option<Value> = None;
+    // Determine autoload mode
+    let autoload_mode = if let Some(m) = cli.manifest_autoload_mode {
+        match m {
+            ManifestAutoloadModeArg::Strict => AutoloadMode::Strict,
+            ManifestAutoloadModeArg::Permissive => AutoloadMode::Permissive,
+            ManifestAutoloadModeArg::Off => AutoloadMode::Off,
+        }
+    } else if cli.no_manifest_autoload {
+        AutoloadMode::Off
+    } else {
+        AutoloadMode::Strict
+    };
+
+    // Explicit manifest path has precedence; verify if possible
     if let Some(mp) = manifest_path.as_ref() {
         if let Ok(s) = fs::read_to_string(mp) {
             if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                if let Some(primary) = inputs.first() {
+                    let input_path = std::path::Path::new(primary);
+                    match tools::common::manifest::verify_manifest_json_against_input(
+                        &v, input_path,
+                    ) {
+                        Ok(tools::common::manifest::VerifyOutcome::Mismatch) => {
+                            return Err(
+                                "Explicit --manifest does not match input (sha/bytes mismatch)"
+                                    .into(),
+                            );
+                        }
+                        Ok(tools::common::manifest::VerifyOutcome::Undecidable) => {
+                            eprintln!("[warn] explicit --manifest has no sha/bytes; accepting");
+                        }
+                        _ => {}
+                    }
+                }
                 manifest_json = Some(v);
             }
         }
-    } else if !no_manifest_autoload {
+    } else if autoload_mode != AutoloadMode::Off {
         if let Some(primary) = inputs.first() {
-            if let Some(dir) = std::path::Path::new(primary).parent() {
-                let candidate = dir.join("manifest.json");
-                if candidate.exists() {
-                    if let Ok(s) = fs::read_to_string(&candidate) {
-                        if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                            manifest_json = Some(v);
-                        }
+            let p = std::path::Path::new(primary);
+            match resolve_manifest(p, autoload_mode) {
+                Ok(Some(res)) => {
+                    if res.verified {
+                        eprintln!("[info] Using manifest: {} ({})", res.path.display(), res.reason);
+                    } else {
+                        eprintln!(
+                            "[warn] Using manifest without sha/bytes: {} ({})",
+                            res.path.display(),
+                            res.reason
+                        );
+                    }
+                    manifest_json = Some(res.json);
+                }
+                Ok(None) => {
+                    if matches!(autoload_mode, AutoloadMode::Strict) {
+                        return Err("No valid manifest found for input (strict mode)".into());
                     }
                 }
+                Err(e) => return Err(format!("manifest resolution error: {}", e).into()),
             }
         }
     }

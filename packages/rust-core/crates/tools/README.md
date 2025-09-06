@@ -134,7 +134,7 @@ cargo run --release -p tools --bin merge_annotation_results -- \
 ## 追加ドキュメント
 
 - 教師データ生成ガイド: `docs/nnue-training-data-generation.md`
-- 機能要件タスク一覧: `../../docs/tasks/nnue-training-functional-tasks.md`
+- 次タスク計画（本書）: `../../docs/tasks/nnue-training-pipeline-v3.md`
 
 ### ゲート設定サンプル
 - サンプルファイル: `crates/tools/ci_gate.sample.json`

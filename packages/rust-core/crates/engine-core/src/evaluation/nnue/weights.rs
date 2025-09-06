@@ -339,3 +339,64 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 }
+
+/// Try to load SINGLE_CHANNEL (Version 2) weights with text header (trainer format)
+pub fn load_single_weights(
+    path: &str,
+) -> Result<crate::nnue::single::SingleChannelNet, Box<dyn std::error::Error>> {
+    use std::fs;
+    let data = fs::read(path)?;
+    // Find END_HEADER
+    let hdr_tag = b"END_HEADER";
+    let hdr_pos = data
+        .windows(hdr_tag.len())
+        .position(|w| w == hdr_tag)
+        .ok_or_else(|| "SINGLE_CHANNEL header not found".to_string())?;
+    // Find newline after END_HEADER
+    let mut i = hdr_pos + hdr_tag.len();
+    while i < data.len() && data[i] != b'\n' {
+        i += 1;
+    }
+    if i >= data.len() {
+        return Err("Malformed SINGLE_CHANNEL header (no newline)".into());
+    }
+    let bin_off = i + 1;
+
+    use std::io::Read;
+    let mut rdr = std::io::Cursor::new(&data[bin_off..]);
+    let mut u4 = [0u8; 4];
+    rdr.read_exact(&mut u4)?;
+    let input_dim = u32::from_le_bytes(u4) as usize;
+    rdr.read_exact(&mut u4)?;
+    let acc_dim = u32::from_le_bytes(u4) as usize;
+    if input_dim == 0 || acc_dim == 0 {
+        return Err("Invalid SINGLE_CHANNEL dims".into());
+    }
+
+    fn read_f32_vec(
+        r: &mut std::io::Cursor<&[u8]>,
+        n: usize,
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        let mut out = vec![0f32; n];
+        // Safe: transmute bytes for exact size
+        let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
+        r.read_exact(bytes)?;
+        Ok(out)
+    }
+
+    let w0 = read_f32_vec(&mut rdr, input_dim * acc_dim)?;
+    let b0 = Some(read_f32_vec(&mut rdr, acc_dim)?);
+    let w2 = read_f32_vec(&mut rdr, acc_dim)?;
+    rdr.read_exact(&mut u4)?;
+    let b2 = f32::from_le_bytes(u4);
+
+    Ok(crate::nnue::single::SingleChannelNet {
+        n_feat: input_dim,
+        acc_dim,
+        scale: 600.0,
+        w0,
+        b0,
+        w2,
+        b2,
+    })
+}

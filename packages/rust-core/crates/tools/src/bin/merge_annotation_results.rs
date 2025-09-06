@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use tools::common::io::{open_reader, open_writer, Writer};
+use tools::common::manifest::{resolve_manifest, AutoloadMode};
 
 /// Degree of exactness for tie-breaking.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
@@ -143,25 +144,58 @@ fn write_aggregated_manifest(
     for p in inputs {
         let path = PathBuf::from(p);
         let mut src = json!({ "path": p });
-        if let Some(dir) = path.parent() {
-            let cand = dir.join("manifest.json");
-            if cand.exists() {
-                if let Ok(s) = std::fs::read_to_string(&cand) {
-                    if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                        // extract configs
-                        if let Some(mv) = v.get("multipv").and_then(|x| x.as_i64()) {
-                            multipv_vals.push(mv);
+
+        // Preferred: resolve manifest strictly per input file
+        match resolve_manifest(&path, AutoloadMode::Strict) {
+            Ok(Some(res)) => {
+                let v = res.json.clone();
+                if let Some(mv) = v.get("multipv").and_then(|x| x.as_i64()) {
+                    multipv_vals.push(mv);
+                }
+                if let Some(tp) = v.get("teacher_profile").and_then(|x| x.as_str()) {
+                    teacher_vals.push(tp.to_string());
+                }
+                if let Some(hm) = v.get("hash_mb").and_then(|x| x.as_i64()) {
+                    hash_vals.push(hm);
+                }
+                if let Some(ts) = v.get("generated_at").and_then(|x| x.as_str()) {
+                    gen_ats.push(ts.to_string());
+                }
+                src["manifest"] = v;
+                src["resolved_manifest_path"] = json!(res.path);
+                src["resolved_manifest_scope"] = json!(res.scope);
+                src["resolved_manifest_verified"] = json!(res.verified);
+                src["resolved_manifest_reason"] = json!(res.reason);
+                if let Some(b) = res.output_bytes {
+                    src["resolved_output_bytes"] = json!(b);
+                }
+                if let Some(s) = res.output_sha256 {
+                    src["resolved_output_sha256"] = json!(s);
+                }
+            }
+            _ => {
+                // Fallback: keep legacy dir/manifest.json if present
+                if let Some(dir) = path.parent() {
+                    let cand = dir.join("manifest.json");
+                    if cand.exists() {
+                        if let Ok(s) = std::fs::read_to_string(&cand) {
+                            if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                                if let Some(mv) = v.get("multipv").and_then(|x| x.as_i64()) {
+                                    multipv_vals.push(mv);
+                                }
+                                if let Some(tp) = v.get("teacher_profile").and_then(|x| x.as_str())
+                                {
+                                    teacher_vals.push(tp.to_string());
+                                }
+                                if let Some(hm) = v.get("hash_mb").and_then(|x| x.as_i64()) {
+                                    hash_vals.push(hm);
+                                }
+                                if let Some(ts) = v.get("generated_at").and_then(|x| x.as_str()) {
+                                    gen_ats.push(ts.to_string());
+                                }
+                                src["manifest"] = v;
+                            }
                         }
-                        if let Some(tp) = v.get("teacher_profile").and_then(|x| x.as_str()) {
-                            teacher_vals.push(tp.to_string());
-                        }
-                        if let Some(hm) = v.get("hash_mb").and_then(|x| x.as_i64()) {
-                            hash_vals.push(hm);
-                        }
-                        if let Some(ts) = v.get("generated_at").and_then(|x| x.as_str()) {
-                            gen_ats.push(ts.to_string());
-                        }
-                        src["manifest"] = v;
                     }
                 }
             }
