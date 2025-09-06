@@ -6,8 +6,8 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -150,7 +150,7 @@ struct GenShared {
     errors_parse: Arc<AtomicUsize>,
     errors_nonexact_top1: Arc<AtomicUsize>,
     errors_empty_pv: Arc<AtomicUsize>,
-    skipped_file: Arc<Mutex<File>>,
+    skipped_file: Arc<Mutex<BufWriter<File>>>,
 }
 
 struct ProcEnv<'a> {
@@ -215,6 +215,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  - Depth 3: Balanced speed/quality");
         eprintln!("  - Depth 4+: High quality but slower");
         std::process::exit(1);
+    }
+
+    // Optimized line counting (non-UTF8 aware, counts '\n' bytes)
+    fn fast_count_lines(path: &Path) -> std::io::Result<usize> {
+        let mut f = File::open(path)?;
+        let mut buf = [0u8; 1 << 20]; // 1 MiB
+        let mut cnt: usize = 0;
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if b == b'\n' {
+                    cnt += 1;
+                }
+            }
+        }
+        Ok(cnt)
     }
 
     let input_path = PathBuf::from(&args[1]);
@@ -684,7 +703,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opts.amb_gap2_threshold, opts.amb_require_exact, opts.entropy_mate_mode
     );
     if let Some(n) = opts.nodes {
-        println!("Nodes (limit): {} (K=3 cap: max(n/4, 10000))", n);
+        let cap_actual = std::cmp::max(n / 4, 10_000);
+        println!("Nodes (limit): {} (K=3 cap: max(n/4, 10000) = {})", n, cap_actual);
     }
     if let Some(j) = opts.jobs {
         println!("Jobs (outer parallelism): {}", j);
@@ -735,9 +755,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Count existing lines only when writing to a single non-parted file
     if !use_parted_output {
         if output_path.exists() {
-            let file = File::open(&output_path)?;
-            let reader = BufReader::new(file);
-            let count = reader.lines().count();
+            let count = fast_count_lines(&output_path)?;
             if count > 0 {
                 println!("Found existing output file with {count} lines");
                 if resume_from > 0 && resume_from != count {
@@ -776,8 +794,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Open skipped positions file (always append mode to not lose data)
-    let skipped_file =
-        Arc::new(Mutex::new(OpenOptions::new().create(true).append(true).open(&skipped_path)?));
+    let skipped_raw = OpenOptions::new().create(true).append(true).open(&skipped_path)?;
+    let skipped_file = Arc::new(Mutex::new(BufWriter::with_capacity(1 << 20, skipped_raw)));
 
     // Resolve manifest path bound to output file name: <out>.manifest.json
     let manifest_path = {
@@ -786,6 +804,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Split/compress part manager
+    // Best-effort atomic write helper for small text files (progress snapshots)
+    fn write_atomic_best_effort(path: &std::path::Path, s: &str) {
+        let tmp = path.with_extension("tmp");
+        if let Ok(mut f) = std::fs::File::create(&tmp) {
+            if f.write_all(s.as_bytes()).is_ok() && f.sync_all().is_ok() {
+                if std::fs::rename(&tmp, path).is_err() {
+                    let _ = std::fs::remove_file(path);
+                    let _ = std::fs::rename(&tmp, path);
+                }
+                return;
+            }
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     struct PartManifestInfo {
         path: std::path::PathBuf,
         count_in_part: usize,
@@ -918,8 +951,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     #[cfg(not(feature = "zstd"))]
                     {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        return Err(std::io::Error::other(
                             "zstd compression requires 'zstd' feature",
                         ));
                     }
@@ -946,8 +978,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if self.current_part > 0 {
                 let (out_path, prog) = self.make_part_paths(self.current_part);
-                // Write final progress snapshot for the part
-                std::fs::write(&prog, self.lines_in_part.to_string()).ok();
+                // Write final progress snapshot for the part (best effort, atomic)
+                write_atomic_best_effort(&prog, &self.lines_in_part.to_string());
                 self.part_manifests.push(PartManifestInfo {
                     path: out_path,
                     count_in_part: self.lines_in_part,
@@ -960,8 +992,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             let (_out, prog) = self.make_part_paths(self.current_part);
-            std::fs::write(prog, self.lines_in_part.to_string())?;
+            write_atomic_best_effort(&prog, &self.lines_in_part.to_string());
             Ok(())
+        }
+    }
+
+    impl Drop for PartManager {
+        fn drop(&mut self) {
+            let _ = self.finish_part();
         }
     }
 
@@ -1246,7 +1284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 total_attempted.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
 
             // Save progress to file (total positions attempted, including skipped)
-            std::fs::write(&progress_path, new_attempted.to_string())?;
+            write_atomic_best_effort(&progress_path, &new_attempted.to_string());
 
             let batch_time = batch_start.elapsed();
             let positions_per_sec = chunk.len() as f64 / batch_time.as_secs_f64();
