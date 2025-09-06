@@ -2,7 +2,6 @@ use engine_core::engine::controller::{Engine, EngineType};
 use engine_core::search::common::{get_mate_distance, is_mate_score};
 use engine_core::search::limits::SearchLimits;
 use engine_core::search::types::{Bound, TeacherProfile};
-use engine_core::Position;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
@@ -653,28 +652,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Count existing lines if resuming or output file exists
-    let existing_lines = if output_path.exists() {
-        let file = File::open(&output_path)?;
-        let reader = BufReader::new(file);
-        let count = reader.lines().count();
-        if count > 0 {
-            println!("Found existing output file with {count} lines");
-            if resume_from > 0 && resume_from != count {
-                println!(
-                    "Warning: resume_from ({resume_from}) differs from existing lines ({count})"
-                );
-                println!("Using the larger value: {}", resume_from.max(count));
-            }
-        }
-        count
-    } else if resume_from > 0 {
-        println!("Warning: Output file does not exist, but resume_from is set to {resume_from}");
-        println!("Starting from position {resume_from} anyway");
-        0
-    } else {
-        0
-    };
+    // existing_lines will be computed later (only for non-split/non-compress mode)
+    let mut existing_lines: usize = 0;
 
     println!("NNUE Training Data Generator");
     println!("============================");
@@ -705,7 +684,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opts.amb_gap2_threshold, opts.amb_require_exact, opts.entropy_mate_mode
     );
     if let Some(n) = opts.nodes {
-        println!("Nodes (limit): {}", n);
+        println!("Nodes (limit): {} (K=3 cap: max(n/4, 10000))", n);
     }
     if let Some(j) = opts.jobs {
         println!("Jobs (outer parallelism): {}", j);
@@ -755,6 +734,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Decide if we use split/compressed output
     let use_parted_output =
         opts.split_every.is_some() || !matches!(opts.compress, CompressionKind::None);
+
+    // Count existing lines only when writing to a single non-parted file
+    if !use_parted_output {
+        if output_path.exists() {
+            let file = File::open(&output_path)?;
+            let reader = BufReader::new(file);
+            let count = reader.lines().count();
+            if count > 0 {
+                println!("Found existing output file with {count} lines");
+                if resume_from > 0 && resume_from != count {
+                    println!(
+                        "Warning: resume_from ({resume_from}) differs from existing lines ({count})"
+                    );
+                    println!("Using the larger value: {}", resume_from.max(count));
+                }
+            }
+            existing_lines = count;
+        } else if resume_from > 0 {
+            println!(
+                "Warning: Output file does not exist, but resume_from is set to {resume_from}"
+            );
+            println!("Starting from position {resume_from} anyway");
+        }
+    }
 
     // Open files - append mode if resuming (only when not using split/compress)
     let output_file: Option<Arc<Mutex<BufWriter<File>>>> = if !use_parted_output {
@@ -823,7 +826,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(feature = "zstd")]
     struct ZstPartWriter {
-        inner: Option<Box<dyn Write + Send>>,
+        inner: Option<zstd::stream::write::Encoder<'static, BufWriter<File>>>,
     }
     #[cfg(feature = "zstd")]
     impl Write for ZstPartWriter {
@@ -837,7 +840,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "zstd")]
     impl PartWrite for ZstPartWriter {
         fn finalize(&mut self) -> std::io::Result<()> {
-            self.inner.take();
+            if let Some(enc) = self.inner.take() {
+                let _ = enc.finish()?;
+            }
             Ok(())
         }
     }
@@ -903,13 +908,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         let enc = zstd::stream::write::Encoder::new(buf, 0)
                             .map_err(std::io::Error::other)?;
-                        let auto = enc.auto_finish();
-                        let boxed: Box<dyn Write + Send> = Box::new(auto);
-                        Box::new(ZstPartWriter { inner: Some(boxed) })
+                        Box::new(ZstPartWriter { inner: Some(enc) })
                     }
                     #[cfg(not(feature = "zstd"))]
                     {
-                        return Err(std::io::Error::other(
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
                             "zstd compression requires 'zstd' feature",
                         ));
                     }
@@ -1546,7 +1550,7 @@ fn process_position_with_engine(
     env: &ProcEnv<'_>,
     eng: &mut Engine,
 ) -> Option<String> {
-    let position = match Position::from_sfen(sfen) {
+    let position = match engine_core::usi::parse_sfen(sfen) {
         Ok(pos) => pos,
         Err(e) => {
             if idx < 10 || (idx + 1) % 1000 == 0 {
