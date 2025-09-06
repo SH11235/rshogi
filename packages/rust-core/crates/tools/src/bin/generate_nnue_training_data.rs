@@ -690,9 +690,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Jobs (outer parallelism): {}", j);
     }
     println!("CPU cores: {:?}", std::thread::available_parallelism());
-    if resume_from > 0 || existing_lines > 0 {
-        println!("Resuming from position: {}", resume_from.max(existing_lines));
-    }
     println!("Skipped positions will be saved to: {}", skipped_path.display());
     println!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
     println!("Note: TT memory usage scales with jobs: ~ hash_mb × jobs per process");
@@ -759,6 +756,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Now that existing_lines is known (for non-parted mode), print resume info
+    if resume_from > 0 || existing_lines > 0 {
+        println!("Resuming from position: {}", resume_from.max(existing_lines));
+    }
+
     // Open files - append mode if resuming (only when not using split/compress)
     let output_file: Option<Arc<Mutex<BufWriter<File>>>> = if !use_parted_output {
         let f = OpenOptions::new()
@@ -821,7 +823,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     impl PartWrite for GzPartWriter {
         fn finalize(&mut self) -> std::io::Result<()> {
-            self.inner.try_finish()
+            self.inner.try_finish()?;
+            // Ensure underlying BufWriter<File> is flushed to the OS
+            self.inner.get_mut().flush()
         }
     }
     #[cfg(feature = "zstd")]
@@ -841,7 +845,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     impl PartWrite for ZstPartWriter {
         fn finalize(&mut self) -> std::io::Result<()> {
             if let Some(enc) = self.inner.take() {
-                let _ = enc.finish()?;
+                // finish() returns the underlying BufWriter<File>; flush it to the OS
+                let mut bw = enc.finish()?;
+                bw.flush()?;
             }
             Ok(())
         }
@@ -1442,6 +1448,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
+        // Ensure non-parted writer is flushed before measuring
+        if let Some(ref of) = output_file {
+            let mut guard = of.lock().unwrap();
+            let _ = guard.flush();
+        }
         // Compute SHA-256/bytes of the single output file
         let (out_sha256, out_bytes) = (|| -> Option<(String, u64)> {
             use sha2::{Digest, Sha256};
