@@ -30,7 +30,6 @@ use super::{SearchThread, SharedSearchState};
 /// Initial seed strategy parameters for parallel search work distribution
 /// These control how many work items are initially pushed to the global injector
 /// for better work stealing distribution across threads
-const INITIAL_SEED_BATCHES: usize = 2;
 const INITIAL_SEED_HELPERS: usize = 2;
 
 /// Simplified parallel searcher
@@ -209,8 +208,14 @@ impl<E: Evaluator + Send + Sync + 'static> ParallelSearcher<E> {
 
                         // Use main worker's local queue when available, with initial seeding to injector
                         if let Some(worker) = main_worker {
-                            // Initial seeding: push first few batches to injector for better distribution
-                            let seed_batches = INITIAL_SEED_BATCHES.min(self.num_threads);
+                            // Initial seeding: for small thread counts, seed aggressively to injector
+                            // - num_threads <= 2: seed all batches to injector（ローカルデック残留を避ける）
+                            // - otherwise: seed up to threads*2（最大16）
+                            let seed_batches = if self.num_threads <= 2 {
+                                usize::MAX
+                            } else {
+                                (self.num_threads * 2).min(16)
+                            };
                             if batch_idx < seed_batches {
                                 self.queues.injector.push(work);
                             } else {
