@@ -778,7 +778,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exclude_mate = !cli.with_mate;
     let seldef_delta: i32 = cli.seldepth_deficit_delta;
     let manifest_path: Option<String> = cli.manifest.clone();
-    let no_manifest_autoload = cli.no_manifest_autoload;
+    // no_manifest_autoload is already reflected into autoload_mode above
     let limit: Option<usize> = cli.limit;
     let sample_n: Option<usize> = cli.sample;
     let quant_backend: Option<QuantilesBackend> =
