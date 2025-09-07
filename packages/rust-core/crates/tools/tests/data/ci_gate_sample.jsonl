@@ -1,0 +1,1 @@
+{"sfen":"9/9/9/9/9/9/9/9/9 b - 1","lines":[{"bound":"Exact","score_cp":100,"depth":1,"seldepth":1,"pv":["5a5b"]},{"bound":"Exact","score_cp":20,"depth":1,"seldepth":1,"pv":["5a5b"]}],"bound1":"Exact","bound2":"Exact","time_ms":10,"nodes":100}

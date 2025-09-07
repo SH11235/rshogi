@@ -24,6 +24,7 @@ ctrlc = "3.4"
 sha2 = "0.10"
 hex = "0.4"
 smallvec = { workspace = true }
+csv = "1.3"
 
 [features]
 zstd = ["dep:zstd"]
