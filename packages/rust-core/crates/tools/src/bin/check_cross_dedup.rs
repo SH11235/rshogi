@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
 use tools::common::io::open_reader;
+use tools::common::sfen::normalize_4t;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplitKind {
@@ -12,21 +13,12 @@ enum SplitKind {
     Test,
 }
 
-fn normalize_sfen_tokens(sfen: &str) -> Option<String> {
-    let mut it = sfen.split_whitespace();
-    let b = it.next()?;
-    let s = it.next()?;
-    let h = it.next()?;
-    let m = it.next()?;
-    Some(format!("{} {} {} {}", b, s, h, m))
-}
-
-fn fingerprint_sfen(s: &str) -> u64 {
+fn fingerprint_sfen(s: &str) -> u128 {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     let d = hasher.finalize();
-    u64::from_le_bytes(d[0..8].try_into().unwrap())
+    u128::from_le_bytes(d[0..16].try_into().unwrap())
 }
 
 #[derive(Clone)]
@@ -39,7 +31,7 @@ struct FirstSeen {
 fn ingest(
     set: SplitKind,
     path: &str,
-    first: &mut HashMap<u64, FirstSeen>,
+    first: &mut HashMap<u128, FirstSeen>,
     leaks: &mut Vec<(String, SplitKind, String, usize, SplitKind, String, usize)>,
 ) -> std::io::Result<()> {
     let reader = open_reader(path)?;
@@ -60,7 +52,7 @@ fn ingest(
             Some(s) => s,
             None => continue,
         };
-        let key = match normalize_sfen_tokens(sfen) {
+        let key = match normalize_4t(sfen) {
             Some(k) => k,
             None => continue,
         };
@@ -71,7 +63,7 @@ fn ingest(
                 leaks.push((key, fs.set, fs.path.clone(), fs.line, set, path.to_string(), line_no));
             }
         } else {
-            // Only record first occurrence; cross-dedup only
+            // Only record first occurrence
             first.insert(
                 fp,
                 FirstSeen {
@@ -92,18 +84,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(Arg::new("valid").long("valid").value_name("FILE").required(true))
         .arg(Arg::new("test").long("test").value_name("FILE").required(true))
         .arg(Arg::new("report").long("report").value_name("FILE").required(true))
+        .arg(
+            Arg::new("include-intra")
+                .long("include-intra")
+                .action(clap::ArgAction::SetTrue)
+                .help("Also report duplicates within the same split (in addition to cross-set)"),
+        )
         .get_matches();
     let train = matches.get_one::<String>("train").unwrap();
     let valid = matches.get_one::<String>("valid").unwrap();
     let test = matches.get_one::<String>("test").unwrap();
     let report = matches.get_one::<String>("report").unwrap();
+    let include_intra = *matches.get_one::<bool>("include-intra").unwrap_or(&false);
 
-    let mut first: HashMap<u64, FirstSeen> = HashMap::new();
+    let mut first: HashMap<u128, FirstSeen> = HashMap::new();
     let mut leaks: Vec<(String, SplitKind, String, usize, SplitKind, String, usize)> = Vec::new();
 
-    ingest(SplitKind::Train, train, &mut first, &mut leaks)?;
-    ingest(SplitKind::Valid, valid, &mut first, &mut leaks)?;
-    ingest(SplitKind::Test, test, &mut first, &mut leaks)?;
+    if include_intra {
+        // Detect intra duplicates by using separate maps per split
+        let mut map_train: HashMap<u128, FirstSeen> = HashMap::new();
+        ingest(SplitKind::Train, train, &mut map_train, &mut leaks)?;
+        let mut map_valid: HashMap<u128, FirstSeen> = HashMap::new();
+        ingest(SplitKind::Valid, valid, &mut map_valid, &mut leaks)?;
+        let mut map_test: HashMap<u128, FirstSeen> = HashMap::new();
+        ingest(SplitKind::Test, test, &mut map_test, &mut leaks)?;
+        // Cross between sets
+        ingest(SplitKind::Train, train, &mut first, &mut leaks)?;
+        ingest(SplitKind::Valid, valid, &mut first, &mut leaks)?;
+        ingest(SplitKind::Test, test, &mut first, &mut leaks)?;
+    } else {
+        // Cross-only
+        ingest(SplitKind::Train, train, &mut first, &mut leaks)?;
+        ingest(SplitKind::Valid, valid, &mut first, &mut leaks)?;
+        ingest(SplitKind::Test, test, &mut first, &mut leaks)?;
+    }
 
     // Write CSV report
     {
