@@ -4,6 +4,20 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      train:
+        description: 'Path to train JSONL(.gz/.zst)'
+        required: false
+        default: ''
+      valid:
+        description: 'Path to valid JSONL(.gz/.zst)'
+        required: false
+        default: ''
+      test:
+        description: 'Path to test JSONL(.gz/.zst)'
+        required: false
+        default: ''
 
 jobs:
   tools:
@@ -41,3 +55,33 @@ jobs:
         with:
           name: cross-dedup-report
           path: leak_report.csv
+
+  cross-dedup-real:
+    needs: tools
+    if: ${{ github.event.inputs.train != '' && github.event.inputs.valid != '' && github.event.inputs.test != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build tools (locked)
+        run: cargo build -p tools --release --locked
+      - name: Cross-dedup (real datasets)
+        env:
+          TRAIN: ${{ github.event.inputs.train }}
+          VALID: ${{ github.event.inputs.valid }}
+          TEST:  ${{ github.event.inputs.test  }}
+        run: |
+          echo "Running cross-dedup on real datasets"
+          target/release/check_cross_dedup \
+            --train "$TRAIN" \
+            --valid "$VALID" \
+            --test  "$TEST" \
+            --report leak_report_real.csv
+      - name: Upload real cross-dedup report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-dedup-report-real
+          path: leak_report_real.csv
