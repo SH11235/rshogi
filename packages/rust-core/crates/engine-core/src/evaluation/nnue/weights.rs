@@ -343,7 +343,7 @@ mod tests {
 /// Try to load SINGLE_CHANNEL (Version 2) weights with text header (trainer format)
 pub fn load_single_weights(
     path: &str,
-) -> Result<crate::nnue::single::SingleChannelNet, Box<dyn std::error::Error>> {
+) -> Result<super::single::SingleChannelNet, Box<dyn std::error::Error>> {
     use std::fs;
     let data = fs::read(path)?;
     // Find END_HEADER
@@ -373,6 +373,38 @@ pub fn load_single_weights(
         return Err("Invalid SINGLE_CHANNEL dims".into());
     }
 
+    // Determine presence of b0 by remaining length (w0/b0/w2/b2). Fail fast on mismatch.
+    let bytes_after_dims = data[bin_off + 8..].len();
+    let bytes_w0 = input_dim
+        .checked_mul(acc_dim)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or("SINGLE_CHANNEL size overflow")?;
+    let bytes_b0 = acc_dim.checked_mul(4).ok_or("SINGLE_CHANNEL size overflow")?;
+    let bytes_w2 = acc_dim.checked_mul(4).ok_or("SINGLE_CHANNEL size overflow")?;
+    let bytes_b2 = 4usize;
+
+    let need_with_b0 = bytes_w0
+        .checked_add(bytes_b0)
+        .and_then(|v| v.checked_add(bytes_w2))
+        .and_then(|v| v.checked_add(bytes_b2))
+        .ok_or("SINGLE_CHANNEL size overflow")?;
+    let need_without_b0 = bytes_w0
+        .checked_add(bytes_w2)
+        .and_then(|v| v.checked_add(bytes_b2))
+        .ok_or("SINGLE_CHANNEL size overflow")?;
+
+    let has_b0 = if bytes_after_dims == need_with_b0 {
+        true
+    } else if bytes_after_dims == need_without_b0 {
+        false
+    } else {
+        return Err(format!(
+            "SINGLE_CHANNEL size mismatch: rem={} (expect {} with b0 or {} without b0)",
+            bytes_after_dims, need_with_b0, need_without_b0
+        )
+        .into());
+    };
+
     fn read_f32_vec(
         r: &mut std::io::Cursor<&[u8]>,
         n: usize,
@@ -385,12 +417,16 @@ pub fn load_single_weights(
     }
 
     let w0 = read_f32_vec(&mut rdr, input_dim * acc_dim)?;
-    let b0 = Some(read_f32_vec(&mut rdr, acc_dim)?);
+    let b0 = if has_b0 {
+        Some(read_f32_vec(&mut rdr, acc_dim)?)
+    } else {
+        None
+    };
     let w2 = read_f32_vec(&mut rdr, acc_dim)?;
     rdr.read_exact(&mut u4)?;
     let b2 = f32::from_le_bytes(u4);
 
-    Ok(crate::nnue::single::SingleChannelNet {
+    Ok(super::single::SingleChannelNet {
         n_feat: input_dim,
         acc_dim,
         scale: 600.0,
