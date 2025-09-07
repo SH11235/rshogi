@@ -150,6 +150,14 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 - `.gz` 入力は標準対応、`.zst` 入力は `--features zstd` 有効時に対応（`analyze_teaching_quality`/`merge_annotation_results`/`extract_flagged_positions`）。
 - 旧テキスト系スクリプト・CP専用ワークフローはレガシー扱い（ベースライン検証用途に限り維持）。
 
+### Manifest v2（生成ツール）
+- `manifest_version: "2"` を採用。主なプロビナンス:
+  - `teacher_engine { name, version, commit, usi_opts{hash_mb,multipv,threads,teacher_profile,min_depth} }`
+  - `generation_command`, `seed`（`argv[1..]` を SHA-256 で安定生成）
+- `input { path, sha256, bytes }`, `nnue_weights_sha256`（重み使用時）
+- 注意: `generation_command` は CLI 引数全体を含みます。機微情報は引数では渡さない運用を推奨します。
+ - `count` は全体の累計件数、`count_in_part` は当該 part のみの件数です（part出力時）。
+
 ### train_nnue の入力フィルタ（JSONL時）
 - `--exclude-no-legal-move`: 合法手なしの局面を除外
 - `--exclude-fallback`: 探索でフォールバックが発生した局面を除外
@@ -174,3 +182,13 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 ### extract_flagged_positions の仕様補足
 - 入出力: 入力に `-` を指定すると STDIN を読む。出力未指定または `-` 指定で STDOUT に書き出し。
 - 入力圧縮: `.jsonl`, `.jsonl.gz`（標準）、`.jsonl.zst`（`--features zstd`）。
+
+### cross‑dedup（train/valid/test の漏洩チェック）
+- ツール: `check_cross_dedup`
+- 使い方:
+  ```bash
+  cargo run -p tools --bin check_cross_dedup -- \
+    --train runs/train.jsonl --valid runs/valid.jsonl --test runs/test.jsonl \
+    --report runs/leak_report.csv
+  ```
+- 重複（SFEN key の一致）が見つかると `leak_report.csv` に出力し、非ゼロ終了（CI で赤）。

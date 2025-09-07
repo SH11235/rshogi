@@ -1,0 +1,43 @@
+name: tools-ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy (tools)
+        run: cargo clippy -p tools -- -D warnings
+      - name: Build tools
+        run: cargo build -p tools --release
+      - name: Unit tests
+        run: cargo test -p tools --all-features -- --nocapture
+      - name: Run gate
+        run: |
+          target/release/analyze_teaching_quality \
+            crates/tools/tests/data/ci_gate_sample.jsonl \
+            --no-manifest-autoload \
+            --gate crates/tools/ci_gate.sample.json \
+            --gate-mode fail
+      - name: Cross-dedup check
+        run: |
+          target/release/check_cross_dedup \
+            --train crates/tools/tests/data/cross/train.jsonl \
+            --valid crates/tools/tests/data/cross/valid.jsonl \
+            --test  crates/tools/tests/data/cross/test.jsonl \
+            --report leak_report.csv
+      - name: Upload cross-dedup report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-dedup-report
+          path: leak_report.csv

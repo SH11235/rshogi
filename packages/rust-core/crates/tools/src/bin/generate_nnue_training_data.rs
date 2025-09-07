@@ -1169,8 +1169,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let effective_depth =
                         opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
+                    // Prefer v2 SHA match for nnue_weights when available; fallback to path equality for v1
+                    let nnue_match = if let (Some(msha), Some(ref wpath)) =
+                        (man.nnue_weights_sha256.as_ref(), opts.nnue_weights.as_ref())
+                    {
+                        if let Some((h, _)) = compute_sha_and_bytes(std::path::Path::new(wpath)) {
+                            h.as_str() == msha.as_str()
+                        } else {
+                            false
+                        }
+                    } else {
+                        man.nnue_weights == opts.nnue_weights
+                    };
                     let compat = man.engine == engine_name
-                        && man.nnue_weights == opts.nnue_weights
+                        && nnue_match
                         && man.hash_mb == opts.hash_mb
                         && man.multipv == opts.multipv
                         && man.min_depth == effective_depth;
@@ -1988,7 +2000,8 @@ fn process_position_with_engine(
 
     // Metadata for quality tracking
     // Apply timeout mark if either K=2 or K=3 (if run) exceeded the time budget
-    let timed_out_any = is_time_mode && (result_used_time_ms > env.time_limit_ms);
+    let timed_out_any = timed_out
+        || (is_time_mode && used_k3_research && (result_used_time_ms > env.time_limit_ms));
     let mut meta = if timed_out_any {
         format!(" # timeout_d{}", result_used_depth)
     } else {
