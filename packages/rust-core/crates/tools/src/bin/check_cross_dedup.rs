@@ -31,6 +31,7 @@ struct FirstSeen {
 fn ingest(
     set: SplitKind,
     path: &str,
+    report_same_set: bool,
     first: &mut HashMap<u128, FirstSeen>,
     leaks: &mut Vec<(String, SplitKind, String, usize, SplitKind, String, usize)>,
 ) -> std::io::Result<()> {
@@ -58,8 +59,8 @@ fn ingest(
         };
         let fp = fingerprint_sfen(&key);
         if let Some(fs) = first.get(&fp) {
-            // Only cross-set duplicates are reported by default
-            if fs.set != set {
+            // Report cross-set always; report same-set when `report_same_set` is true
+            if fs.set != set || report_same_set {
                 leaks.push((key, fs.set, fs.path.clone(), fs.line, set, path.to_string(), line_no));
             }
         } else {
@@ -79,7 +80,7 @@ fn ingest(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Command::new("check_cross_dedup")
-        .about("Check cross-dedup between train/valid/test JSONL datasets (by SFEN key)")
+        .about("Check cross/intra duplicates between train/valid/test (SFEN normalized to first 4 tokens)")
         .arg(Arg::new("train").long("train").value_name("FILE").required(true))
         .arg(Arg::new("valid").long("valid").value_name("FILE").required(true))
         .arg(Arg::new("test").long("test").value_name("FILE").required(true))
@@ -97,26 +98,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = matches.get_one::<String>("report").unwrap();
     let include_intra = *matches.get_one::<bool>("include-intra").unwrap_or(&false);
 
-    let mut first: HashMap<u128, FirstSeen> = HashMap::new();
     let mut leaks: Vec<(String, SplitKind, String, usize, SplitKind, String, usize)> = Vec::new();
 
     if include_intra {
-        // Detect intra duplicates by using separate maps per split
+        // Intra detection per split (report_same_set = true)
         let mut map_train: HashMap<u128, FirstSeen> = HashMap::new();
-        ingest(SplitKind::Train, train, &mut map_train, &mut leaks)?;
+        ingest(SplitKind::Train, train, true, &mut map_train, &mut leaks)?;
         let mut map_valid: HashMap<u128, FirstSeen> = HashMap::new();
-        ingest(SplitKind::Valid, valid, &mut map_valid, &mut leaks)?;
+        ingest(SplitKind::Valid, valid, true, &mut map_valid, &mut leaks)?;
         let mut map_test: HashMap<u128, FirstSeen> = HashMap::new();
-        ingest(SplitKind::Test, test, &mut map_test, &mut leaks)?;
-        // Cross between sets
-        ingest(SplitKind::Train, train, &mut first, &mut leaks)?;
-        ingest(SplitKind::Valid, valid, &mut first, &mut leaks)?;
-        ingest(SplitKind::Test, test, &mut first, &mut leaks)?;
+        ingest(SplitKind::Test, test, true, &mut map_test, &mut leaks)?;
+        // Cross detection (report_same_set = false)
+        let mut first: HashMap<u128, FirstSeen> = HashMap::new();
+        ingest(SplitKind::Train, train, false, &mut first, &mut leaks)?;
+        ingest(SplitKind::Valid, valid, false, &mut first, &mut leaks)?;
+        ingest(SplitKind::Test, test, false, &mut first, &mut leaks)?;
     } else {
         // Cross-only
-        ingest(SplitKind::Train, train, &mut first, &mut leaks)?;
-        ingest(SplitKind::Valid, valid, &mut first, &mut leaks)?;
-        ingest(SplitKind::Test, test, &mut first, &mut leaks)?;
+        let mut first: HashMap<u128, FirstSeen> = HashMap::new();
+        ingest(SplitKind::Train, train, false, &mut first, &mut leaks)?;
+        ingest(SplitKind::Valid, valid, false, &mut first, &mut leaks)?;
+        ingest(SplitKind::Test, test, false, &mut first, &mut leaks)?;
     }
 
     // Write CSV report
@@ -155,10 +157,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         out.flush()?;
     }
 
+    // Pairwise summary for CI logs
+    let mut tv = 0usize; // train<->valid
+    let mut tt = 0usize; // train<->test
+    let mut vt = 0usize; // valid<->test
+    let mut tr_in = 0usize; // train intra
+    let mut va_in = 0usize; // valid intra
+    let mut te_in = 0usize; // test intra
+    for (_, fset, _, _, dset, _, _) in &leaks {
+        match (fset, dset) {
+            (SplitKind::Train, SplitKind::Valid) | (SplitKind::Valid, SplitKind::Train) => tv += 1,
+            (SplitKind::Train, SplitKind::Test) | (SplitKind::Test, SplitKind::Train) => tt += 1,
+            (SplitKind::Valid, SplitKind::Test) | (SplitKind::Test, SplitKind::Valid) => vt += 1,
+            (SplitKind::Train, SplitKind::Train) => tr_in += 1,
+            (SplitKind::Valid, SplitKind::Valid) => va_in += 1,
+            (SplitKind::Test, SplitKind::Test) => te_in += 1,
+        }
+    }
+    println!(
+        "SUMMARY: cross tv={} tt={} vt={} | intra tr={} va={} te={} | total={}",
+        tv,
+        tt,
+        vt,
+        tr_in,
+        va_in,
+        te_in,
+        leaks.len()
+    );
+
     if !leaks.is_empty() {
-        eprintln!("Found {} cross-set duplicates; see {}", leaks.len(), report);
+        if include_intra {
+            let (cross, intra) =
+                leaks.iter().fold((0usize, 0usize), |(c, i), (_, fset, _, _, dset, _, _)| {
+                    if fset == dset {
+                        (c, i + 1)
+                    } else {
+                        (c + 1, i)
+                    }
+                });
+            eprintln!(
+                "Found {} duplicates (cross={}, intra={}); see {}",
+                leaks.len(),
+                cross,
+                intra,
+                report
+            );
+        } else {
+            eprintln!("Found {} cross-set duplicates; see {}", leaks.len(), report);
+        }
         std::process::exit(2);
     }
-    println!("No cross-set duplicates detected");
+    println!(
+        "{}",
+        if include_intra {
+            "No duplicates detected"
+        } else {
+            "No cross-set duplicates detected"
+        }
+    );
     Ok(())
 }
