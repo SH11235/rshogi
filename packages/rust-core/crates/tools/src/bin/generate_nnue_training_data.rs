@@ -1111,16 +1111,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = BufReader::new(input_file);
     let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
 
-    fn normalize_sfen_tokens(sfen: &str) -> Option<String> {
-        // Reconstruct first 4 tokens (board, side, hands, move count)
-        let mut it = sfen.split_whitespace();
-        let b = it.next()?;
-        let s = it.next()?;
-        let h = it.next()?;
-        let m = it.next()?;
-        Some(format!("{} {} {} {}", b, s, h, m))
-    }
-
     fn extract_sfen(line: &str) -> Option<String> {
         let start = line.find("sfen ")? + 5;
         // normalize tabs to spaces to robustly detect " moves"
@@ -1134,7 +1124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if sfen.is_empty() {
             return None;
         }
-        normalize_sfen_tokens(sfen)
+        tools::common::sfen::normalize_4t(sfen)
     }
     let sfen_positions: Vec<(usize, String)> = lines
         .into_iter()
@@ -1529,10 +1519,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 teacher_profile: format!("{:?}", opts.teacher_profile),
                 min_depth: effective_depth,
             };
+            let engine_version = std::env::var("ENGINE_SEMVER")
+                .ok()
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
             let teacher_engine = TeacherEngineInfo {
                 name: engine_name.to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                commit: std::env::var("GIT_COMMIT_HASH").ok(),
+                version: engine_version,
+                commit: std::env::var("ENGINE_COMMIT")
+                    .ok()
+                    .or_else(|| std::env::var("GIT_COMMIT_HASH").ok()),
                 usi_opts: teacher_usi,
             };
             let argv: Vec<String> = std::env::args().collect();
@@ -1664,10 +1659,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             teacher_profile: format!("{:?}", opts.teacher_profile),
             min_depth: effective_depth,
         };
+        let engine_version = std::env::var("ENGINE_SEMVER")
+            .ok()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
         let teacher_engine = TeacherEngineInfo {
             name: engine_name.to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            commit: std::env::var("GIT_COMMIT_HASH").ok(),
+            version: engine_version,
+            commit: std::env::var("ENGINE_COMMIT")
+                .ok()
+                .or_else(|| std::env::var("GIT_COMMIT_HASH").ok()),
             usi_opts: teacher_usi,
         };
         let argv: Vec<String> = std::env::args().collect();

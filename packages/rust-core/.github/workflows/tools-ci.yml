@@ -15,10 +15,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format check
         run: cargo fmt --all -- --check
-      - name: Clippy (tools)
-        run: cargo clippy -p tools -- -D warnings
-      - name: Build tools
-        run: cargo build -p tools --release
+      - name: Clippy (tools, all features)
+        run: cargo clippy -p tools --all-features -- -D warnings
+      - name: Build tools (locked)
+        run: cargo build -p tools --release --locked
       - name: Unit tests
         run: cargo test -p tools --all-features -- --nocapture
       - name: Run gate

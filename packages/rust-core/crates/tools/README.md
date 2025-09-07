@@ -153,10 +153,12 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 ### Manifest v2（生成ツール）
 - `manifest_version: "2"` を採用。主なプロビナンス:
   - `teacher_engine { name, version, commit, usi_opts{hash_mb,multipv,threads,teacher_profile,min_depth} }`
+    - `version` は原則として教師エンジンのバージョンを指します。環境変数 `ENGINE_SEMVER` が設定されていればそれを使用し、未設定の場合はジェネレータ（本ツール）の `CARGO_PKG_VERSION` を格納します。
+    - `commit` は `ENGINE_COMMIT` が設定されていればそれを使用し、未設定の場合はビルド時に与えられた `GIT_COMMIT_HASH` を格納します。
   - `generation_command`, `seed`（`argv[1..]` を SHA-256 で安定生成）
-- `input { path, sha256, bytes }`, `nnue_weights_sha256`（重み使用時）
+  - `input { path, sha256, bytes }`, `nnue_weights_sha256`（重み使用時）
 - 注意: `generation_command` は CLI 引数全体を含みます。機微情報は引数では渡さない運用を推奨します。
- - `count` は全体の累計件数、`count_in_part` は当該 part のみの件数です（part出力時）。
+- `count` は全体の累計件数、`count_in_part` は当該 part のみの件数です（part出力時）。
 
 ### train_nnue の入力フィルタ（JSONL時）
 - `--exclude-no-legal-move`: 合法手なしの局面を除外
@@ -192,3 +194,8 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
     --report runs/leak_report.csv
   ```
 - 重複（SFEN key の一致）が見つかると `leak_report.csv` に出力し、非ゼロ終了（CI で赤）。
+- オプション: `--include-intra` を指定すると、同一split内の重複も検出対象に加えます（既定はcrossのみ）。
+- 正規化: SFENは「最初の4トークン（board, side, hands, move count）」に正規化して比較します。
+
+### JSONL出力の補足
+- `lines_origin`: `k2` または `k3` を記録（K=3再探索で採用したかの可観測性）。
