@@ -107,9 +107,18 @@ struct Manifest {
     git_commit: Option<String>,
     engine: String,
     // Manifest v2 provenance (required)
+    #[serde(default)]
     teacher_engine: TeacherEngineInfo,
+    #[serde(default)]
     generation_command: String,
+    #[serde(default)]
     seed: u64,
+    #[serde(default)]
+    manifest_version: String,
+    #[serde(default)]
+    input: ManifestInputInfo,
+    #[serde(default)]
+    nnue_weights_sha256: Option<String>,
     nnue_weights: Option<String>,
     preset: Option<String>,
     overrides: Option<ManifestOverrides>,
@@ -141,7 +150,7 @@ struct Manifest {
     ambiguity: Option<ManifestAmbiguity>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TeacherEngineInfo {
     name: String,
     version: String,
@@ -149,13 +158,20 @@ struct TeacherEngineInfo {
     usi_opts: TeacherUsiOpts,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TeacherUsiOpts {
     hash_mb: usize,
     multipv: u8,
     threads: usize,
     teacher_profile: String,
     min_depth: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestInputInfo {
+    path: String,
+    sha256: Option<String>,
+    bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -801,6 +817,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Open files - append mode if resuming (only when not using split/compress)
+    // Ensure trailing newline if we will append to an existing non-parted file
+    fn ensure_trailing_newline(path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut f = OpenOptions::new().read(true).open(path)?;
+        let len = f.seek(SeekFrom::End(0))?;
+        if len == 0 {
+            return Ok(());
+        }
+        f.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        f.read_exact(&mut last)?;
+        drop(f);
+        if last[0] != b'\n' {
+            let mut w = OpenOptions::new().append(true).open(path)?;
+            w.write_all(b"\n")?;
+            w.flush()?;
+        }
+        Ok(())
+    }
+
     let output_file: Option<Arc<Mutex<BufWriter<File>>>> = if !use_parted_output {
         let f = OpenOptions::new()
             .create(true)
@@ -808,6 +847,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .append(resume_from > 0 || existing_lines > 0)
             .truncate(resume_from == 0 && existing_lines == 0)
             .open(&output_path)?;
+        if resume_from > 0 || existing_lines > 0 {
+            // We've opened the file (may be in append mode). Ensure trailing newline before writing more.
+            let _ = ensure_trailing_newline(&output_path);
+        }
         let bw = BufWriter::with_capacity(1 << 20, f);
         Some(Arc::new(Mutex::new(bw)))
     } else {
@@ -838,6 +881,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // Stable 64-bit seed from argv[1..] using SHA-256
+    fn stable_seed_from_args(args: &[String]) -> u64 {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for a in args.iter().skip(1) {
+            hasher.update(a.as_bytes());
+            hasher.update([0]); // delimiter
+        }
+        let digest = hasher.finalize();
+        u64::from_le_bytes(digest[0..8].try_into().unwrap())
+    }
+
+    // Compute SHA-256 and byte size for a path
+    fn compute_sha_and_bytes(path: &std::path::Path) -> Option<(String, u64)> {
+        use sha2::{Digest, Sha256};
+        let mut f = std::fs::File::open(path).ok()?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut total: u64 = 0;
+        loop {
+            let n = std::io::Read::read(&mut f, &mut buf).ok()?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as u64;
+        }
+        let hash = hasher.finalize();
+        Some((hex::encode(hash), total))
     }
 
     struct PartManifestInfo {
@@ -1398,6 +1472,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CompressionKind::Zst => Some("zst".into()),
     };
 
+    // Provenance: compute input file hash/bytes and NNUE weights hash (if provided)
+    let (input_sha256, input_bytes) = compute_sha_and_bytes(&input_path)
+        .map(|(h, b)| (Some(h), Some(b)))
+        .unwrap_or((None, None));
+    let nnue_weights_sha256: Option<String> = opts
+        .nnue_weights
+        .as_ref()
+        .and_then(|p| compute_sha_and_bytes(std::path::Path::new(p)).map(|(h, _)| h));
+
     if let Some(ref mut pm) = part_mgr {
         // Finish the last open part and collect infos
         pm.finish_part().ok();
@@ -1440,14 +1523,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 commit: std::env::var("GIT_COMMIT_HASH").ok(),
                 usi_opts: teacher_usi,
             };
-            let generation_command = std::env::args().collect::<Vec<_>>().join(" ");
-            // Deterministic seed derived from command-line for reproducibility
-            let seed = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                generation_command.hash(&mut h);
-                h.finish()
-            };
+            let argv: Vec<String> = std::env::args().collect();
+            let generation_command = argv.join(" ");
+            // Deterministic seed derived from user-provided args (stable)
+            let seed = stable_seed_from_args(&argv);
 
             let manifest = Manifest {
                 generated_at: chrono::Utc::now().to_rfc3339(),
@@ -1456,6 +1535,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 teacher_engine,
                 generation_command,
                 seed,
+                manifest_version: "2".into(),
+                input: ManifestInputInfo {
+                    path: input_path.display().to_string(),
+                    sha256: input_sha256.clone(),
+                    bytes: input_bytes,
+                },
+                nnue_weights_sha256: nnue_weights_sha256.clone(),
                 nnue_weights: opts.nnue_weights.clone(),
                 preset: preset_name.clone(),
                 overrides: Some(ManifestOverrides {
@@ -1572,13 +1658,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             commit: std::env::var("GIT_COMMIT_HASH").ok(),
             usi_opts: teacher_usi,
         };
-        let generation_command = std::env::args().collect::<Vec<_>>().join(" ");
-        let seed = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            generation_command.hash(&mut h);
-            h.finish()
-        };
+        let argv: Vec<String> = std::env::args().collect();
+        let generation_command = argv.join(" ");
+        let seed = stable_seed_from_args(&argv);
 
         let manifest = Manifest {
             generated_at: chrono::Utc::now().to_rfc3339(),
@@ -1587,6 +1669,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             teacher_engine,
             generation_command,
             seed,
+            manifest_version: "2".into(),
+            input: ManifestInputInfo {
+                path: input_path.display().to_string(),
+                sha256: input_sha256,
+                bytes: input_bytes,
+            },
+            nnue_weights_sha256,
             nnue_weights: opts.nnue_weights.clone(),
             preset: preset_name.clone(),
             overrides: Some(ManifestOverrides {

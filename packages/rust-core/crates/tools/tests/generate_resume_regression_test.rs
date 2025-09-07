@@ -62,6 +62,11 @@ fn resume_twice_no_duplicate_and_manifest_v2_present() {
         "missing generation_command"
     );
     assert!(mv.get("seed").is_some(), "missing seed");
+    assert_eq!(mv.get("manifest_version").and_then(|v| v.as_str()).unwrap_or(""), "2");
+    let input_obj = mv.get("input").and_then(|v| v.as_object()).expect("input provenance");
+    assert!(input_obj.get("path").is_some(), "missing input.path");
+    assert!(input_obj.get("sha256").is_some(), "missing input.sha256");
+    assert!(input_obj.get("bytes").is_some(), "missing input.bytes");
 
     // Count lines after first run
     let c1 = count_lines(&out);
