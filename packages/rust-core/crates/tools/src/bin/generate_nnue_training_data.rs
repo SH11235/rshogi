@@ -106,6 +106,10 @@ struct Manifest {
     generated_at: String,
     git_commit: Option<String>,
     engine: String,
+    // Manifest v2 provenance (required)
+    teacher_engine: TeacherEngineInfo,
+    generation_command: String,
+    seed: u64,
     nnue_weights: Option<String>,
     preset: Option<String>,
     overrides: Option<ManifestOverrides>,
@@ -135,6 +139,23 @@ struct Manifest {
     count_in_part: Option<usize>,
     compression: Option<String>,
     ambiguity: Option<ManifestAmbiguity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeacherEngineInfo {
+    name: String,
+    version: String,
+    commit: Option<String>,
+    usi_opts: TeacherUsiOpts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeacherUsiOpts {
+    hash_mb: usize,
+    multipv: u8,
+    threads: usize,
+    teacher_profile: String,
+    min_depth: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1405,10 +1426,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some((hex::encode(hash), total))
             })()
             .unwrap_or((String::new(), 0));
+            // Build manifest v2 provenance fields
+            let teacher_usi = TeacherUsiOpts {
+                hash_mb: opts.hash_mb,
+                multipv: opts.multipv,
+                threads: 1,
+                teacher_profile: format!("{:?}", opts.teacher_profile),
+                min_depth: effective_depth,
+            };
+            let teacher_engine = TeacherEngineInfo {
+                name: engine_name.to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                commit: std::env::var("GIT_COMMIT_HASH").ok(),
+                usi_opts: teacher_usi,
+            };
+            let generation_command = std::env::args().collect::<Vec<_>>().join(" ");
+            // Deterministic seed derived from command-line for reproducibility
+            let seed = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                generation_command.hash(&mut h);
+                h.finish()
+            };
+
             let manifest = Manifest {
                 generated_at: chrono::Utc::now().to_rfc3339(),
                 git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
                 engine: engine_name.to_string(),
+                teacher_engine,
+                generation_command,
+                seed,
                 nnue_weights: opts.nnue_weights.clone(),
                 preset: preset_name.clone(),
                 overrides: Some(ManifestOverrides {
@@ -1511,10 +1558,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some((hex::encode(hash), total))
         })()
         .unwrap_or((String::new(), 0));
+        // Build manifest v2 provenance fields
+        let teacher_usi = TeacherUsiOpts {
+            hash_mb: opts.hash_mb,
+            multipv: opts.multipv,
+            threads: 1,
+            teacher_profile: format!("{:?}", opts.teacher_profile),
+            min_depth: effective_depth,
+        };
+        let teacher_engine = TeacherEngineInfo {
+            name: engine_name.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: std::env::var("GIT_COMMIT_HASH").ok(),
+            usi_opts: teacher_usi,
+        };
+        let generation_command = std::env::args().collect::<Vec<_>>().join(" ");
+        let seed = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            generation_command.hash(&mut h);
+            h.finish()
+        };
+
         let manifest = Manifest {
             generated_at: chrono::Utc::now().to_rfc3339(),
             git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
             engine: engine_name.to_string(),
+            teacher_engine,
+            generation_command,
+            seed,
             nnue_weights: opts.nnue_weights.clone(),
             preset: preset_name.clone(),
             overrides: Some(ManifestOverrides {
