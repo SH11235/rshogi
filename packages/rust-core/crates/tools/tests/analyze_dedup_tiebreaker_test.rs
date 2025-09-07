@@ -70,6 +70,7 @@ fn test_analyze_dedup_prefers_earlier_file_on_tie() {
     let out = Command::new(bin_path("analyze_teaching_quality"))
         .args([
             in1.to_str().unwrap(),
+            "--no-manifest-autoload",
             "--inputs",
             in2.to_str().unwrap(),
             "--dedup-by-sfen",
@@ -104,7 +105,13 @@ fn test_analyze_dedup_prefers_earlier_line_on_tie() {
     write_text(&in1, &make_jsonl(&[&rec1, &rec2]));
 
     let out = Command::new(bin_path("analyze_teaching_quality"))
-        .args([in1.to_str().unwrap(), "--dedup-by-sfen", "--report", "tt"])
+        .args([
+            in1.to_str().unwrap(),
+            "--no-manifest-autoload",
+            "--dedup-by-sfen",
+            "--report",
+            "tt",
+        ])
         .stdout(Stdio::piped())
         .output()
         .expect("run analyze_teaching_quality same file");
