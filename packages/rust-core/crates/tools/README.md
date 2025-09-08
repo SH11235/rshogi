@@ -231,3 +231,77 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 
 ### JSONL出力の補足
 - `lines_origin`: `k2` または `k3` を記録（K=3再探索で採用したかの可観測性）。
+
+## 曖昧掘りオーケストレーション（抽出→再注釈→マージ）
+
+1コマンドで pass1 の結果から曖昧候補を抽出し、強設定で再注釈（K=3/entropy等）して最終マージまでを行います。マージは常に `--mode depth-first` を明示し、再現性を担保します。中間ファイルと系譜は orchestration manifest に記録されます。
+
+```bash
+# 例: pass1(out_pass1.jsonl)から曖昧抽出→再注釈→マージ
+cargo run --release -p tools --bin orchestrate_ambiguous -- \
+  --pass1 runs/out_pass1.jsonl \
+  --final runs/final.jsonl \
+  --gap-threshold 35 \
+  --engine enhanced --multipv 3 --hash-mb 64 \
+  --split 200000 --compress gz
+
+# ドライラン（実行計画のみ表示）
+cargo run --release -p tools --bin orchestrate_ambiguous -- \
+  --pass1 runs/out_pass1.jsonl --final runs/final.jsonl --dry-run
+```
+
+ドライラン出力は、空白や二重引用符を含むパスも適切に引用されており、そのままコピペ実行できます（PowerShell / cmd いずれでも動作）。
+
+出力例（パスは例示、実環境に合わせて変化します）:
+```text
+[dry-run] "/path/to/target/debug/extract_flagged_positions" "runs/out_pass1.jsonl" - --gap-threshold 35
+[dry-run] normalize+unique (in-mem) -> ".final.ambdig/pass2_input.sfens"
+[dry-run] "/path/to/target/debug/generate_nnue_training_data" ".final.ambdig/pass2_input.sfens" ".final.ambdig/pass2.jsonl" --engine enhanced --output-format jsonl --hash-mb 64 --multipv 3 --teacher-profile balanced --split 200000 --compress gz
+[dry-run] "/path/to/target/debug/merge_annotation_results" --dedup-by-sfen --mode depth-first --manifest-out "runs/final.manifest.json" "runs/out_pass1.jsonl" ".final.ambdig/pass2.jsonl" "runs/final.jsonl"
+[dry-run] "/path/to/target/debug/analyze_teaching_quality" "runs/final.jsonl" --json --expected-multipv 3 --manifest-autoload-mode strict > ".final.ambdig/quality.json"
+[dry-run] would write orchestration manifest to ".final.ambdig/orchestrate_ambiguous.manifest.json"
+```
+
+備考:
+- Windows の場合も、空白や `"` を含むパスは適切に引用されます（`"` は二重化してから全体を `"..."` で囲みます）。
+
+主なオプション:
+- 抽出: `--gap-threshold <cp>`、`--include-non-exact`、`--include-aspiration-failures <N>`、`--include-mate-boundary`
+- 再注釈(generate 委譲): `--engine`、`--nnue-weights`、`--teacher-profile`、`--multipv`、`--min-depth`、`--nodes|--time-limit-ms`、`--jobs`、`--hash-mb`、`--reuse-tt`、`--split`、`--compress`
+- 曖昧/entropy: `--amb-gap2-threshold`、`--amb-allow-inexact`、`--entropy-mate-mode`、`--entropy-scale`
+- マージ: `--merge-mode depth-first`（常に明示）
+- 正規化: `--normalize-sort-unique`（外部ソート＋uniq） / `--normalize-chunk-lines N` / `--normalize-merge-fan-in K`
+- 要約: `--analyze-summary`（JSONを `<out-dir>/quality.json` に保存）
+- 削除: `--prune`（常に削除）/ `--prune-on-success`（成功時のみ削除）
+- 実行制御: `--dry-run` / `--verbose` / `--keep-intermediate`（既定ON） / `--prune`（常に中間物削除） / `--prune-on-success`（成功時のみ削除）
+ - 正規化: `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）/ `--normalize-chunk-lines <N>`（既定 200k 行）/ `--normalize-merge-fan-in <N>`（多段マージの同時オープン上限、既定 256）
+
+出力:
+- `<final>.manifest.json`: マージ結果の aggregated manifest
+- `<out-dir>/orchestrate_ambiguous.manifest.json`: オーケストレーション全体の系譜と整合サマリ（`counts` に `pass1_total` / `extracted` / `pass2_generated` / `final_written` を記録。`pass1_total_by_source` も付与）
+
+補足:
+- マージモードは常に `--mode depth-first` を明示（既定の exact-first と混同しない）。
+- `--analyze-summary` は pass2 の `multipv` を検知して `--expected-multipv` を自動設定します（検出不可時は CLI の `--multipv` を使用）。
+- 詳細設計は `docs/tasks/orchestrate_ambiguous_plan.md` を参照。
+
+### 閾値の使い分け（gap と gap2）
+- 抽出 `--gap-threshold`: 再注釈候補を広く拾うための“粗い”しきい値（例: 30–50cp）。
+- 再注釈 `--amb-gap2-threshold`: K=3 の曖昧度（1位と2位の差）を厳密に測る“細かい”しきい値（例: 15–35cp）。
+- ガイド: `analyze_teaching_quality --summary` の統計（中央値/下位5%）を参考に現場の負荷と精度で調整。
+
+### out-dir の構成（例）
+`.<final-stem>.ambdig/` 配下:
+- `pass2_input.tmp` / `pass2_input.sfens`
+- `pass2.jsonl` または `pass2.part-*.jsonl.{gz|zst}`（+ 各 manifest）
+- `quality.json`（`--analyze-summary` 時）
+- `orchestrate_ambiguous.manifest.json`
+
+複数 `--pass1` を与えた場合のマージ優先は、depth-first + dedup により「`pass1` を与えた順 → `pass2`」です。同一 SFEN の採用元に影響するため、順序は固定して運用してください。
+
+メモリ対策:
+- 大規模抽出時は `--normalize-sort-unique` を指定すると、`pass2_input.tmp` をチャンクに分割してソート＆uniqし、k-wayマージで `pass2_input.sfens` を生成します。メモリ使用を抑えつつ重複除去が可能です（I/O は増加）。FD上限に配慮し、多段マージ（`--normalize-merge-fan-in`）で安全に処理します。
+
+Prune 補足:
+- `--dry-run --prune` / `--dry-run --prune-on-success` では、削除計画（対象件数・合計サイズ）を表示します（`--verbose` で対象ファイル一覧も表示）。
+- 中間 manifest は prune 対象です（`pass2.manifest.json` と各 `pass2.part-*.manifest.json` を含む）。集約情報は orchestrator の manifest に記録されます。
