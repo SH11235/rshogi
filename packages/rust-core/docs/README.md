@@ -29,12 +29,14 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 
 ### 🛠️ Tools
 - [**Opening Book ツール**](tools/opening-book-tools-guide.md) - 定跡データ変換・検証ツール
+- [**NNUE 教師データ生成**](tools/nnue-training-data-guide.md) - generate_nnue_training_data の運用ガイド（構造化ログ/manifest v2）
 
 ### 📝 Implementation Notes
 - [**Rustプリプロセッシング計画**](implementation/rust-preprocessing-scripts-plan.md) - Rust実装の計画文書
 
 ### 📖 Reference
 - [**YaneuraOu SFEN形式**](reference/yaneuraou-sfen-format.md) - SFEN形式の仕様
+- [**Manifest v2（NNUE教師生成）**](reference/manifest_v2.md) - 親/partの責務、summaryのrunスコープ、K=3メトリクス
 
 ### 🔬 Performance Analysis
 - [**NNUE性能分析**](performance/analysis/nnue-performance.md) - NNUE評価関数の性能分析
