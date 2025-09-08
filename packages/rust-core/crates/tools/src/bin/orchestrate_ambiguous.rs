@@ -109,6 +109,18 @@ struct Cli {
     dry_run: bool,
     #[arg(long = "verbose")]
     verbose: bool,
+    /// Use external sort + uniq for normalization instead of in-memory HashSet
+    #[arg(long = "normalize-sort-unique")]
+    normalize_sort_unique: bool,
+    /// Chunk size (lines) for external sort + uniq
+    #[arg(long = "normalize-chunk-lines", default_value_t = 200_000)]
+    normalize_chunk_lines: usize,
+    /// Remove intermediates regardless of success (overrides --keep-intermediate)
+    #[arg(long = "prune")]
+    prune: bool,
+    /// Remove intermediates only when all steps succeed (overrides --keep-intermediate)
+    #[arg(long = "prune-on-success")]
+    prune_on_success: bool,
 }
 
 fn stem_for_artifacts(final_out: &Path) -> String {
@@ -195,6 +207,133 @@ fn write_atomic(path: &Path, s: &str) -> Result<()> {
     Ok(())
 }
 
+fn extract_normalized_sfen_from_line(line: &str) -> Option<String> {
+    let s = line.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let start = match s.find("sfen ") {
+        Some(i) => i + 5,
+        None => return None,
+    };
+    let rest_raw = &s[start..];
+    let rest_norm = rest_raw.replace('\t', " ");
+    let end = rest_norm
+        .find(" moves")
+        .or_else(|| rest_norm.find('#'))
+        .unwrap_or(rest_norm.len());
+    let sfen = rest_norm[..end].trim();
+    if sfen.is_empty() {
+        return None;
+    }
+    normalize_4t(sfen).map(|key| format!("sfen {}", key))
+}
+
+fn normalize_sort_unique(tmp_extract: &Path, sfens_out: &Path, chunk_lines: usize) -> Result<()> {
+    // Phase 1: generate sorted+deduped chunks
+    let mut chunks: Vec<PathBuf> = Vec::new();
+    let mut cur: Vec<String> = Vec::with_capacity(chunk_lines.min(10_000));
+    let inp = File::open(tmp_extract).with_context(|| format!("open {}", tmp_extract.display()))?;
+    for line in BufReader::new(inp).lines() {
+        let l = match line {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if let Some(n) = extract_normalized_sfen_from_line(&l) {
+            cur.push(n);
+            if cur.len() >= chunk_lines {
+                cur.sort();
+                cur.dedup();
+                let idx = chunks.len() + 1;
+                let p = sfens_out
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(format!("normalize_chunk_{:04}.txt", idx));
+                {
+                    let mut w = BufWriter::new(File::create(&p)?);
+                    for s in &cur {
+                        writeln!(w, "{}", s)?;
+                    }
+                    w.flush()?;
+                }
+                chunks.push(p);
+                cur.clear();
+            }
+        }
+    }
+    if !cur.is_empty() {
+        cur.sort();
+        cur.dedup();
+        let idx = chunks.len() + 1;
+        let p = sfens_out
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("normalize_chunk_{:04}.txt", idx));
+        let mut w = BufWriter::new(File::create(&p)?);
+        for s in &cur {
+            writeln!(w, "{}", s)?;
+        }
+        w.flush()?;
+        chunks.push(p);
+    }
+    // Phase 2: k-way merge into sfens_out with global dedup
+    if chunks.is_empty() {
+        let _ = File::create(sfens_out)?;
+        return Ok(());
+    }
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    #[derive(Eq, PartialEq)]
+    struct Item {
+        line: String,
+        idx: usize,
+    }
+    impl Ord for Item {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.line.cmp(&other.line)
+        }
+    }
+    impl PartialOrd for Item {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    let mut readers: Vec<BufReader<File>> = Vec::new();
+    for c in &chunks {
+        readers.push(BufReader::new(File::open(c)?));
+    }
+    fn read_next_line(readers: &mut [BufReader<File>], i: usize) -> Option<String> {
+        let mut s = String::new();
+        match readers[i].read_line(&mut s) {
+            Ok(0) => None,
+            Ok(_) => Some(s.trim_end_matches(['\n', '\r']).to_string()),
+            Err(_) => None,
+        }
+    }
+    let mut heap: BinaryHeap<Reverse<Item>> = BinaryHeap::new();
+    for i in 0..readers.len() {
+        if let Some(l) = read_next_line(&mut readers, i) {
+            heap.push(Reverse(Item { line: l, idx: i }));
+        }
+    }
+    let mut out = BufWriter::new(File::create(sfens_out)?);
+    let mut last: Option<String> = None;
+    while let Some(Reverse(Item { line, idx })) = heap.pop() {
+        if last.as_ref().map(|s| s != &line).unwrap_or(true) {
+            writeln!(out, "{}", line)?;
+            last = Some(line.clone());
+        }
+        if let Some(l) = read_next_line(&mut readers, idx) {
+            heap.push(Reverse(Item { line: l, idx }));
+        }
+    }
+    out.flush()?;
+    for c in chunks {
+        let _ = fs::remove_file(c);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +384,120 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["pass2.jsonl.gz"]);
+    }
+
+    #[test]
+    fn compute_pass1_totals_prefers_manifest_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let pass1 = dir.path().join("p1.jsonl");
+        // file with 2 lines but manifest will claim 5
+        let data = b"{}\n{}\n";
+        std::fs::write(&pass1, data).unwrap();
+        let bytes = data.len() as u64;
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let sha = hex::encode(hasher.finalize());
+        let man = dir.path().join("p1.manifest.json");
+        let manifest = serde_json::json!({
+            "count": 5,
+            "output_bytes": bytes,
+            "output_sha256": sha,
+        });
+        std::fs::write(&man, serde_json::to_string(&manifest).unwrap()).unwrap();
+        let (by_src, total) = compute_pass1_totals(&[pass1.clone()]).unwrap();
+        assert_eq!(by_src, vec![5]);
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn compute_pass1_totals_counts_gz_when_no_manifest() {
+        use flate2::{write::GzEncoder, Compression};
+        let dir = tempfile::tempdir().unwrap();
+        let pass1 = dir.path().join("p1.jsonl.gz");
+        // write 3 lines gz
+        let f = std::fs::File::create(&pass1).unwrap();
+        let mut enc = GzEncoder::new(f, Compression::default());
+        enc.write_all(b"a\n").unwrap();
+        enc.write_all(b"b\n").unwrap();
+        enc.write_all(b"c\n").unwrap();
+        enc.finish().unwrap();
+        let (by_src, total) = compute_pass1_totals(&[pass1.clone()]).unwrap();
+        assert_eq!(by_src, vec![3]);
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn compute_pass1_totals_counts_plain_without_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let pass1 = dir.path().join("p1.jsonl");
+        // two lines, second without trailing newline
+        std::fs::write(&pass1, b"x\ny").unwrap();
+        let (by_src, total) = compute_pass1_totals(&[pass1.clone()]).unwrap();
+        assert_eq!(by_src, vec![2]);
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn normalize_sort_unique_dedups_across_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp_extract = dir.path().join("pass2_input.tmp");
+        // Create duplicate sfens straddling chunk boundaries (chunk=2)
+        let mut f = std::fs::File::create(&tmp_extract).unwrap();
+        // two identical lines
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 1 # a").unwrap();
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 1 # b").unwrap();
+        // another unique
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 2 # c").unwrap();
+        drop(f);
+        let out = dir.path().join("pass2_input.sfens");
+        normalize_sort_unique(&tmp_extract, &out, 2).unwrap();
+        let txt = std::fs::read_to_string(&out).unwrap();
+        let lines: Vec<&str> = txt.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("sfen "));
+        assert!(lines[1].starts_with("sfen "));
+        assert_ne!(lines[0], lines[1]);
+    }
+
+    #[test]
+    fn prune_collects_expected_targets_and_prunes() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path();
+        // Create various files in out-dir
+        let mk = |name: &str| {
+            let p = out_dir.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            p
+        };
+        let f1 = mk("pass2_input.sfens");
+        let f2 = mk("pass2.jsonl.gz");
+        let f3 = mk("pass2.part-0001.jsonl.gz");
+        let f4 = mk("pass2.part-0001.manifest.json");
+        let _keep1 = mk("quality.json");
+        let _keep2 = mk("orchestrate_ambiguous.manifest.json");
+
+        let mut targets = collect_prune_targets(out_dir).unwrap();
+        targets.sort();
+        let names: Vec<String> = targets
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"pass2_input.sfens".to_string()));
+        assert!(names.contains(&"pass2.jsonl.gz".to_string()));
+        assert!(names.contains(&"pass2.part-0001.jsonl.gz".to_string()));
+        assert!(names.contains(&"pass2.part-0001.manifest.json".to_string()));
+        // keep files should not be in targets
+        assert!(!names.contains(&"quality.json".to_string()));
+        assert!(!names.contains(&"orchestrate_ambiguous.manifest.json".to_string()));
+
+        // prune them
+        let (n, _b) = prune_files(&targets);
+        assert_eq!(n, 4);
+        assert!(!f1.exists());
+        assert!(!f2.exists());
+        assert!(!f3.exists());
+        assert!(!f4.exists());
     }
 
     #[cfg(windows)]
@@ -336,6 +589,75 @@ fn count_lines(path: &Path) -> Result<usize> {
     Ok(cnt)
 }
 
+fn count_lines_reader<R: Read>(mut r: R) -> Result<usize> {
+    let mut buf = [0u8; 64 * 1024];
+    let mut cnt = 0usize;
+    let mut last: Option<u8> = None;
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for b in &buf[..n] {
+            if *b == b'\n' {
+                cnt += 1;
+            }
+            last = Some(*b);
+        }
+    }
+    if matches!(last, Some(b) if b != b'\n') {
+        cnt += 1;
+    }
+    Ok(cnt)
+}
+
+fn count_lines_any(path: &Path) -> Result<usize> {
+    let s = path.to_string_lossy();
+    if s.ends_with(".gz") {
+        let f = File::open(path)?;
+        let mut dec = flate2::read::GzDecoder::new(f);
+        count_lines_reader(&mut dec)
+    } else if s.ends_with(".zst") {
+        #[cfg(feature = "zstd")]
+        {
+            let f = File::open(path)?;
+            let mut dec = zstd::stream::read::Decoder::new(f)?;
+            count_lines_reader(&mut dec)
+        }
+        #[cfg(not(feature = "zstd"))]
+        {
+            // zstd not supported in this build; return 0 gracefully
+            Ok(0)
+        }
+    } else {
+        count_lines(path)
+    }
+}
+
+fn compute_pass1_totals(pass1: &[PathBuf]) -> Result<(Vec<usize>, usize)> {
+    let mut by_src: Vec<usize> = Vec::with_capacity(pass1.len());
+    for p in pass1 {
+        // Prefer manifest counts if available
+        let mut count_opt: Option<usize> = None;
+        if let Ok(Some(res)) = resolve_manifest(p, AutoloadMode::Strict) {
+            if let Some(c) = res.json.get("count").and_then(|x| x.as_u64()) {
+                count_opt = Some(c as usize);
+            } else if let Some(c) = res.json.get("count_in_part").and_then(|x| x.as_u64()) {
+                count_opt = Some(c as usize);
+            }
+        }
+        if count_opt.is_none() {
+            match count_lines_any(p) {
+                Ok(c) => count_opt = Some(c),
+                Err(_) => count_opt = Some(0),
+            }
+        }
+        by_src.push(count_opt.unwrap_or(0));
+    }
+    let total = by_src.iter().copied().sum();
+    Ok((by_src, total))
+}
+
 fn glob_pass2_outputs(base: &Path) -> Result<Vec<PathBuf>> {
     // base: <out-dir>/pass2.jsonl, enumerate:
     //   - pass2.jsonl (single-file)
@@ -392,6 +714,86 @@ fn glob_pass2_outputs(base: &Path) -> Result<Vec<PathBuf>> {
         }
     });
     Ok(outs)
+}
+
+fn collect_prune_targets(out_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    // Known single-file intermediates
+    for name in [
+        "pass2_input.tmp",
+        "pass2_input.sfens",
+        "pass2.jsonl",
+        "pass2.jsonl.gz",
+        "pass2.jsonl.zst",
+        "pass2.manifest.json",
+    ] {
+        let p = out_dir.join(name);
+        if p.is_file() {
+            files.push(p);
+        }
+    }
+    // Parts and manifests/progress
+    if let Ok(rd) = fs::read_dir(out_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let fname = p.file_name().and_then(OsStr::to_str).unwrap_or("");
+            let is_part = fname.starts_with("pass2.part-")
+                && (fname.ends_with(".jsonl")
+                    || fname.ends_with(".jsonl.gz")
+                    || fname.ends_with(".jsonl.zst")
+                    || fname.ends_with(".manifest.json")
+                    || fname.ends_with(".progress"));
+            if is_part {
+                files.push(p);
+            }
+        }
+    }
+    // Safety: dedup + constrain to out_dir
+    let out_can = out_dir.canonicalize().unwrap_or_else(|_| out_dir.to_path_buf());
+    let mut uniq = HashSet::new();
+    files.retain(|p| uniq.insert(p.clone()));
+    files.retain(|p| match p.canonicalize() {
+        Ok(cp) => cp.starts_with(&out_can),
+        Err(_) => false,
+    });
+    Ok(files)
+}
+
+fn sum_file_sizes(paths: &[PathBuf]) -> u64 {
+    let mut tot = 0u64;
+    for p in paths {
+        if let Ok(md) = fs::metadata(p) {
+            tot = tot.saturating_add(md.len());
+        }
+    }
+    tot
+}
+
+fn prune_files(paths: &[PathBuf]) -> (usize, u64) {
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    for p in paths {
+        let sz = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        match fs::remove_file(p) {
+            Ok(_) => {
+                removed += 1;
+                bytes = bytes.saturating_add(sz);
+                continue;
+            }
+            Err(_) => {
+                // One short retry (helps on Windows file locks)
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if fs::remove_file(p).is_ok() {
+                    removed += 1;
+                    bytes = bytes.saturating_add(sz);
+                }
+            }
+        }
+    }
+    (removed, bytes)
 }
 
 fn main() -> Result<()> {
@@ -476,10 +878,15 @@ fn main() -> Result<()> {
         append_from_child_stdout(child, &tmp_extract)?;
     }
 
+    // Pre-compute pass1 totals (from manifest or line counts)
+    let (pass1_by_src, pass1_total) = compute_pass1_totals(&cli.pass1)?;
+
     if cli.dry_run {
         println!("[dry-run] normalize+unique -> {}", sh_quote(&sfens_out.display().to_string()));
+    } else if cli.normalize_sort_unique {
+        normalize_sort_unique(&tmp_extract, &sfens_out, cli.normalize_chunk_lines)?;
     } else {
-        // Normalize + unique
+        // Normalize + unique (in-memory)
         let inp =
             File::open(&tmp_extract).with_context(|| format!("open {}", tmp_extract.display()))?;
         let mut out = BufWriter::new(File::create(&sfens_out)?);
@@ -489,27 +896,9 @@ fn main() -> Result<()> {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let s = l.trim();
-            if s.is_empty() {
-                continue;
-            }
-            let start = match s.find("sfen ") {
-                Some(i) => i + 5,
-                None => continue,
-            };
-            let rest_raw = &s[start..];
-            let rest_norm = rest_raw.replace('\t', " ");
-            let end = rest_norm
-                .find(" moves")
-                .or_else(|| rest_norm.find('#'))
-                .unwrap_or(rest_norm.len());
-            let sfen = rest_norm[..end].trim();
-            if sfen.is_empty() {
-                continue;
-            }
-            if let Some(key) = normalize_4t(sfen) {
-                if seen.insert(key.clone()) {
-                    writeln!(out, "sfen {}", key)?;
+            if let Some(n) = extract_normalized_sfen_from_line(&l) {
+                if seen.insert(n.clone()) {
+                    writeln!(out, "{}", n)?;
                 }
             }
         }
@@ -638,10 +1027,7 @@ fn main() -> Result<()> {
         if pass2_outputs.is_empty() {
             eprintln!(
                 "[warn] pass2 outputs not found under {}; merge will use only pass1 inputs",
-                pass2_base
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .display()
+                pass2_base.parent().unwrap_or_else(|| Path::new(".")).display()
             );
         }
     }
@@ -907,6 +1293,8 @@ fn main() -> Result<()> {
         }) } else { Value::Null },
         "analyze": analyze_info,
         "counts": {
+            "pass1_total": pass1_total,
+            "pass1_total_by_source": pass1_by_src,
             "extracted": extracted_count,
             "pass2_generated": pass2_count,
             "final_written": final_written,
@@ -925,9 +1313,53 @@ fn main() -> Result<()> {
         }
     }
 
-    // Optionally prune intermediates (not implemented yet; keep by default)
-    if !cli.keep_intermediate {
-        // Placeholder: leave intermediates for now
+    // Consistency checks (warn only)
+    if pass1_total > 0 {
+        if extracted_count > pass1_total {
+            eprintln!(
+                "[warn] counts: extracted ({}) exceeds pass1_total ({}). Check extract settings and inputs.",
+                extracted_count, pass1_total
+            );
+        }
+        if pass2_count > extracted_count {
+            eprintln!(
+                "[warn] counts: pass2_generated ({}) exceeds extracted ({}). Check generate inputs.",
+                pass2_count, extracted_count
+            );
+        }
+        if final_written > pass2_count {
+            eprintln!(
+                "[warn] counts: final_written ({}) exceeds pass2_generated ({}). Check merge inputs.",
+                final_written, pass2_count
+            );
+        }
+    }
+
+    // Optionally prune intermediates
+    if cli.dry_run && (cli.prune || cli.prune_on_success || !cli.keep_intermediate) {
+        let targets = collect_prune_targets(&out_dir)?;
+        let total = sum_file_sizes(&targets);
+        println!(
+            "[dry-run] prune plan: {} files, total {} bytes under {}",
+            targets.len(),
+            total,
+            sh_quote(&out_dir.display().to_string())
+        );
+        if cli.verbose {
+            for p in targets {
+                println!("[dry-run] rm {}", sh_quote(&p.display().to_string()));
+            }
+        }
+    } else if cli.prune || cli.prune_on_success || !cli.keep_intermediate {
+        let targets = collect_prune_targets(&out_dir)?;
+        if targets.is_empty() {
+            if cli.verbose {
+                eprintln!("[info] no intermediates to prune under {}", out_dir.display());
+            }
+        } else {
+            let (n, b) = prune_files(&targets);
+            eprintln!("[info] pruned {} files ({} bytes) under {}", n, b, out_dir.display());
+        }
     }
 
     Ok(())
