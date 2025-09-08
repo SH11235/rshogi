@@ -7,6 +7,8 @@ use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1283,13 +1285,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if is_stdin {
         let mut tmp = std::env::temp_dir();
         tmp.push(format!("generate_nnue_training_data.stdin.{}.tmp", std::process::id()));
-        if let Ok(f) = File::create(&tmp) {
-            tee_writer = Some(BufWriter::with_capacity(1 << 20, f));
-            tee_tmp_path = Some(tmp);
-        } else {
-            eprintln!(
-                "Warning: failed to create temporary tee file for stdin; proceeding without tee"
-            );
+        // Create with conservative permissions on Unix
+        let mut opts = OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            opts.mode(0o600);
+        }
+        match opts.open(&tmp) {
+            Ok(f) => {
+                tee_writer = Some(BufWriter::with_capacity(1 << 20, f));
+                tee_tmp_path = Some(tmp);
+                if let Some(ref p) = tee_tmp_path {
+                    human_log!("Teeing STDIN to temporary file: {}", p.display());
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Error: failed to create temporary tee file for STDIN: {}. Cannot safely re-read in pass-2.",
+                    e
+                );
+                eprintln!(
+                    "Hint: set TMPDIR to a writable filesystem or provide an input file instead of '-'"
+                );
+                std::process::exit(1);
+            }
         }
     }
     {
