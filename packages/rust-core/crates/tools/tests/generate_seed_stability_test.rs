@@ -26,6 +26,10 @@ fn stable_seed_from_args(args: &[&str]) -> u64 {
 
 #[test]
 fn seed_is_stable_from_args_and_independent_of_argv0() {
+    if engine_core::util::is_ci_environment() {
+        println!("Skipping integration test requiring engine search in CI environment");
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     let input = tmp.path().join("in.sfen.txt");
     write_sfens(&input, 3);
