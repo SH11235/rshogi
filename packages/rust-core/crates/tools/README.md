@@ -270,7 +270,9 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - 再注釈(generate 委譲): `--engine`、`--nnue-weights`、`--teacher-profile`、`--multipv`、`--min-depth`、`--nodes|--time-limit-ms`、`--jobs`、`--hash-mb`、`--reuse-tt`、`--split`、`--compress`
 - 曖昧/entropy: `--amb-gap2-threshold`、`--amb-allow-inexact`、`--entropy-mate-mode`、`--entropy-scale`
 - マージ: `--merge-mode depth-first`（常に明示）
+- 正規化: `--normalize-sort-unique`（外部ソート＋uniq） / `--normalize-chunk-lines N` / `--normalize-merge-fan-in K`
 - 要約: `--analyze-summary`（JSONを `<out-dir>/quality.json` に保存）
+- 削除: `--prune`（常に削除）/ `--prune-on-success`（成功時のみ削除）
 - 実行制御: `--dry-run` / `--verbose` / `--keep-intermediate`（既定ON） / `--prune`（常に中間物削除） / `--prune-on-success`（成功時のみ削除）
  - 正規化: `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）/ `--normalize-chunk-lines <N>`（既定 200k 行）/ `--normalize-merge-fan-in <N>`（多段マージの同時オープン上限、既定 256）
 

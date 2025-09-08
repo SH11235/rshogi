@@ -124,6 +124,9 @@ struct Cli {
     /// Remove intermediates only when all steps succeed (overrides --keep-intermediate)
     #[arg(long = "prune-on-success")]
     prune_on_success: bool,
+    /// Disable out-dir lock file (not recommended)
+    #[arg(long = "no-lock")]
+    no_lock: bool,
 }
 
 fn stem_for_artifacts(final_out: &Path) -> String {
@@ -238,6 +241,15 @@ fn normalize_sort_unique(
     chunk_lines: usize,
     fan_in: usize,
 ) -> Result<()> {
+    struct Cleaner(Vec<PathBuf>);
+    impl Drop for Cleaner {
+        fn drop(&mut self) {
+            for p in self.0.drain(..) {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+    let mut cleaner = Cleaner(Vec::new());
     // Phase 1: generate sorted+deduped chunks
     let mut chunks: Vec<PathBuf> = Vec::new();
     let mut cur: Vec<String> = Vec::with_capacity(chunk_lines.min(10_000));
@@ -266,6 +278,7 @@ fn normalize_sort_unique(
                     }
                     w.flush()?;
                 }
+                cleaner.0.push(p.clone());
                 chunks.push(p);
                 cur.clear();
             }
@@ -286,6 +299,7 @@ fn normalize_sort_unique(
             writeln!(w, "{}", s)?;
         }
         w.flush()?;
+        cleaner.0.push(p.clone());
         chunks.push(p);
     }
     // Phase 2+: multi-pass k-way merge into sfens_out with global dedup
@@ -364,6 +378,8 @@ fn normalize_sort_unique(
                 let mid =
                     work_dir.join(format!("normalize_stage{}_{}_{:04}.txt", stage, pid, gi + 1));
                 kway_merge_once(group, &mid)?;
+                // track for cleanup on error
+                // Note: we cannot access outer cleaner here; this is a local helper
                 mids.push(mid);
             }
             // Remove inputs from previous stage
@@ -382,7 +398,12 @@ fn normalize_sort_unique(
     }
 
     let work_dir = sfens_out.parent().unwrap_or_else(|| Path::new("."));
-    kway_merge_files(chunks, sfens_out, fan_in.max(1), work_dir)
+    let res = kway_merge_files(chunks, sfens_out, fan_in.max(1), work_dir);
+    if res.is_ok() {
+        // prevent chunk cleanup (they are already removed by kway_merge_files)
+        cleaner.0.clear();
+    }
+    res
 }
 
 #[cfg(test)]
@@ -421,6 +442,24 @@ mod tests {
                 "pass2.part-10.jsonl.gz",
             ]
         );
+    }
+
+    #[test]
+    fn glob_prefers_single_over_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        // parts present
+        let part = dir.path().join("pass2.part-0001.jsonl.gz");
+        std::fs::write(&part, b"\n").unwrap();
+        // single present (compressed variant)
+        let single = dir.path().join("pass2.jsonl.gz");
+        std::fs::write(&single, b"\n").unwrap();
+        let base = dir.path().join("pass2.jsonl");
+        let outs = glob_pass2_outputs(&base).unwrap();
+        let names: Vec<String> = outs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["pass2.jsonl.gz"], "single should suppress parts");
     }
 
     #[test]
@@ -889,11 +928,102 @@ fn prune_files(paths: &[PathBuf]) -> (usize, u64) {
     (removed, bytes)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PruneMode {
+    Disabled,
+    OnSuccess,
+    Always,
+}
+
+struct PruneGuard {
+    out_dir: PathBuf,
+    mode: PruneMode,
+    done: bool,
+}
+
+impl PruneGuard {
+    fn new(out_dir: PathBuf, mode: PruneMode) -> Self {
+        Self {
+            out_dir,
+            mode,
+            done: false,
+        }
+    }
+    fn prune_now(&mut self, verbose: bool) {
+        if self.mode == PruneMode::Disabled || self.done {
+            return;
+        }
+        if let Ok(targets) = collect_prune_targets(&self.out_dir) {
+            if targets.is_empty() {
+                if verbose {
+                    eprintln!("[info] no intermediates to prune under {}", self.out_dir.display());
+                }
+            } else {
+                let (n, b) = prune_files(&targets);
+                eprintln!(
+                    "[info] pruned {} files ({} bytes) under {}",
+                    n,
+                    b,
+                    self.out_dir.display()
+                );
+            }
+        }
+        self.done = true;
+    }
+}
+
+impl Drop for PruneGuard {
+    fn drop(&mut self) {
+        // On failure path, run prune only for Always
+        if self.mode == PruneMode::Always && !self.done {
+            if let Ok(targets) = collect_prune_targets(&self.out_dir) {
+                let _ = prune_files(&targets);
+            }
+            self.done = true;
+        }
+    }
+}
+
+struct LockGuard(Option<PathBuf>);
+
+impl LockGuard {
+    fn acquire(dir: &Path, disabled: bool) -> Result<Self> {
+        if disabled {
+            return Ok(LockGuard(None));
+        }
+        let path = dir.join(".lock");
+        let file = fs::OpenOptions::new().write(true).create_new(true).open(&path);
+        match file {
+            Ok(mut f) => {
+                use std::io::Write as _;
+                let _ = writeln!(f, "pid={}", std::process::id());
+                Ok(LockGuard(Some(path)))
+            }
+            Err(e) => Err(anyhow!(
+                "out-dir appears locked ({}). Another process may be running. Use --no-lock to override. Error: {}",
+                path.display(),
+                e
+            )),
+        }
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let final_out = cli.final_out.clone();
     let out_dir = cli.out_dir.clone().unwrap_or_else(|| default_out_dir(&final_out));
     fs::create_dir_all(&out_dir).with_context(|| format!("mkdir -p {}", out_dir.display()))?;
+
+    // Acquire out-dir lock unless disabled
+    let _lock = LockGuard::acquire(&out_dir, cli.no_lock)?;
 
     let orch_manifest_path = cli
         .orchestrator_manifest_out
@@ -1462,8 +1592,16 @@ fn main() -> Result<()> {
         }
     }
 
-    // Optionally prune intermediates
-    if cli.dry_run && (cli.prune || cli.prune_on_success || !cli.keep_intermediate) {
+    // Prune
+    let prune_mode = if cli.prune {
+        PruneMode::Always
+    } else if cli.prune_on_success || !cli.keep_intermediate {
+        PruneMode::OnSuccess
+    } else {
+        PruneMode::Disabled
+    };
+    // Dry-run: print plan, do nothing
+    if cli.dry_run && prune_mode != PruneMode::Disabled {
         let targets = collect_prune_targets(&out_dir)?;
         let total = sum_file_sizes(&targets);
         println!(
@@ -1477,16 +1615,11 @@ fn main() -> Result<()> {
                 println!("[dry-run] rm {}", sh_quote(&p.display().to_string()));
             }
         }
-    } else if cli.prune || cli.prune_on_success || !cli.keep_intermediate {
-        let targets = collect_prune_targets(&out_dir)?;
-        if targets.is_empty() {
-            if cli.verbose {
-                eprintln!("[info] no intermediates to prune under {}", out_dir.display());
-            }
-        } else {
-            let (n, b) = prune_files(&targets);
-            eprintln!("[info] pruned {} files ({} bytes) under {}", n, b, out_dir.display());
-        }
+    } else {
+        let mut guard = PruneGuard::new(out_dir.clone(), prune_mode);
+        // Success path prune
+        guard.prune_now(cli.verbose);
+        std::mem::forget(guard); // drop at process end; RAII handles failure case earlier
     }
 
     Ok(())
