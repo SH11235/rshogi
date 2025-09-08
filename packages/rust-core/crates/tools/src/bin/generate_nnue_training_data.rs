@@ -66,6 +66,7 @@ struct Opts {
     entropy_scale: f64,
     split_every: Option<usize>,
     compress: CompressionKind,
+    structured_log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +91,62 @@ struct ManifestAmbiguity {
     require_exact: bool,
     mate_mode: String,
     entropy_scale: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestErrorsSummary {
+    parse: usize,
+    nonexact_top1: usize,
+    empty_or_missing_pv: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestCountsSummary {
+    attempted: usize,
+    success: usize,
+    skipped_timeout: usize,
+    errors: ManifestErrorsSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestThroughputSummary {
+    attempted_sps: f64,
+    success_sps: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestRatesSummary {
+    timeout: f64,
+    top1_exact: f64,
+    both_exact: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestAmbiguousSummary {
+    threshold_cp: i32,
+    require_exact: bool,
+    count: usize,
+    denom: usize,
+    rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestDepthSummary {
+    histogram: Vec<usize>,
+    min: u8,
+    max: u8,
+    p50: u8,
+    p90: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestSummary {
+    elapsed_sec: f64,
+    throughput: ManifestThroughputSummary,
+    rates: ManifestRatesSummary,
+    ambiguous: ManifestAmbiguousSummary,
+    depth: ManifestDepthSummary,
+    counts: ManifestCountsSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -148,6 +205,8 @@ struct Manifest {
     count_in_part: Option<usize>,
     compression: Option<String>,
     ambiguity: Option<ManifestAmbiguity>,
+    #[serde(default)]
+    summary: Option<ManifestSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -188,6 +247,12 @@ struct GenShared {
     errors_nonexact_top1: Arc<AtomicUsize>,
     errors_empty_pv: Arc<AtomicUsize>,
     skipped_file: Arc<Mutex<BufWriter<File>>>,
+    // extra counters for summary
+    lines_ge2: Arc<AtomicUsize>,
+    both_exact: Arc<AtomicUsize>,
+    ambiguous_k3: Arc<AtomicUsize>,
+    top1_exact: Arc<AtomicUsize>,
+    depth_hist: Arc<Mutex<Vec<usize>>>,
 }
 
 struct ProcEnv<'a> {
@@ -240,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --jobs <n> (outer parallelism for positions; engine threads stay 1)");
         eprintln!("  --split <N> (rotate output every N lines as <out>.part-0001...)");
         eprintln!("  --compress <gz|zst> (compress output parts; zst requires 'zstd' feature)");
+        eprintln!("  --structured-log <PATH|-> (emit JSONL structured logs to file or STDOUT)");
         eprintln!("  --amb-gap2-threshold <cp> (default: 25; ambiguity threshold for gap2)");
         eprintln!(
             "  --amb-allow-inexact (allow non-Exact bounds for ambiguity; default requires Exact)"
@@ -326,6 +392,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entropy_scale: 600.0,
         split_every: None,
         compress: CompressionKind::None,
+        structured_log: None,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -614,6 +681,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--structured-log" => {
+                if let Some(p) = args.get(i + 1) {
+                    opts.structured_log = Some(p.clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --structured-log requires a path or '-' for STDOUT");
+                    std::process::exit(1);
+                }
+            }
             other => {
                 eprintln!("Unknown option: {}", other);
                 std::process::exit(1);
@@ -761,6 +837,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CompressionKind::Zst => "zst",
         }
     );
+    if let Some(ref p) = opts.structured_log {
+        println!("Structured log: {}", p);
+    }
 
     // Early feature guard for zstd compression for better UX
     if matches!(opts.compress, CompressionKind::Zst) {
@@ -1107,6 +1186,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Optional structured JSONL logger
+    struct StructuredLogger {
+        to_stdout: bool,
+        file: Option<Mutex<BufWriter<File>>>,
+    }
+    impl StructuredLogger {
+        fn new(path: &str) -> std::io::Result<Self> {
+            if path == "-" {
+                Ok(Self {
+                    to_stdout: true,
+                    file: None,
+                })
+            } else {
+                let f = OpenOptions::new().create(true).append(true).open(path)?;
+                let bw = BufWriter::with_capacity(1 << 20, f);
+                Ok(Self {
+                    to_stdout: false,
+                    file: Some(Mutex::new(bw)),
+                })
+            }
+        }
+        fn write_json(&self, v: &serde_json::Value) {
+            if self.to_stdout {
+                println!("{}", v);
+            } else if let Some(ref file) = self.file {
+                if let Ok(mut w) = file.lock() {
+                    let _ = writeln!(w, "{}", v);
+                    let _ = w.flush();
+                }
+            }
+        }
+    }
+    let structured_logger: Option<StructuredLogger> = match opts.structured_log.as_deref() {
+        Some(path) => match StructuredLogger::new(path) {
+            Ok(lg) => Some(lg),
+            Err(e) => {
+                eprintln!("Warning: failed to open structured log '{}': {}", path, e);
+                None
+            }
+        },
+        None => None,
+    };
+
     let input_file = File::open(&input_path)?;
     let reader = BufReader::new(input_file);
     let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
@@ -1308,6 +1430,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         errors_nonexact_top1: errors_nonexact_top1.clone(),
         errors_empty_pv: errors_empty_pv.clone(),
         skipped_file: skipped_file.clone(),
+        lines_ge2: Arc::new(AtomicUsize::new(0)),
+        both_exact: Arc::new(AtomicUsize::new(0)),
+        ambiguous_k3: Arc::new(AtomicUsize::new(0)),
+        top1_exact: Arc::new(AtomicUsize::new(0)),
+        depth_hist: Arc::new(Mutex::new(Vec::new())),
     };
 
     let env = ProcEnv {
@@ -1317,6 +1444,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shared: &shared,
         global_stop: global_stop.clone(),
     };
+
+    // Overall timer for elapsed seconds in summary
+    let overall_start = std::time::Instant::now();
 
     // Process in batches (optionally inside a local rayon thread pool)
     let mut run_batches = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1397,6 +1527,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
                 (new_processed as f64 / total_positions as f64) * 100.0
             );
+
+            // Structured log per batch (optional)
+            if let Some(ref lg) = structured_logger {
+                let rec = serde_json::json!({
+                    "kind": "batch",
+                    "batch_index": batch_idx,
+                    "size": chunk.len(),
+                    "success": successful_results.len(),
+                    "elapsed_sec": batch_time.as_secs_f64(),
+                    "sps": positions_per_sec,
+                    "attempted_sps": positions_per_sec,
+                    "processed_total": new_processed,
+                    "attempted_total": new_attempted,
+                    "percent": (new_processed as f64 / total_positions as f64) * 100.0,
+                });
+                lg.write_json(&rec);
+            }
         }
         Ok(())
     };
@@ -1482,6 +1629,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nnue_weights
         .as_ref()
         .and_then(|p| compute_sha_and_bytes(std::path::Path::new(p)).map(|(h, _)| h));
+
+    // Build manifest summary from aggregated counters
+    fn summarize_depth_hist(hist: &[usize]) -> (u8, u8, u8, u8) {
+        let mut min_idx = None;
+        let mut max_idx = None;
+        let mut total = 0usize;
+        for (d, &c) in hist.iter().enumerate() {
+            if c > 0 {
+                if min_idx.is_none() {
+                    min_idx = Some(d);
+                }
+                max_idx = Some(d);
+                total += c;
+            }
+        }
+        if total == 0 {
+            return (0, 0, 0, 0);
+        }
+        let min = min_idx.unwrap();
+        let max = max_idx.unwrap();
+        let p50t = (total as f64 * 0.50).ceil() as usize;
+        let p90t = (total as f64 * 0.90).ceil() as usize;
+        let mut acc = 0usize;
+        let mut p50 = min;
+        let mut p90 = min;
+        for (d, &c) in hist.iter().enumerate() {
+            if c == 0 {
+                continue;
+            }
+            acc += c;
+            if acc >= p50t && p50 == min {
+                p50 = d;
+            }
+            if acc >= p90t {
+                p90 = d;
+                break;
+            }
+        }
+        (min as u8, max as u8, p50 as u8, p90 as u8)
+    }
+
+    let elapsed_sec = overall_start.elapsed().as_secs_f64();
+    let success_total = total_processed; // equals manifest 'count'
+    let lines_ge2 = shared.lines_ge2.load(Ordering::Relaxed);
+    let both_exact_cnt = shared.both_exact.load(Ordering::Relaxed);
+    let ambiguous_cnt = shared.ambiguous_k3.load(Ordering::Relaxed);
+    let depth_hist_vec = shared.depth_hist.lock().unwrap().clone();
+    let (dmin, dmax, dp50, dp90) = summarize_depth_hist(&depth_hist_vec);
+    let summary_obj = ManifestSummary {
+        elapsed_sec,
+        throughput: ManifestThroughputSummary {
+            attempted_sps: if elapsed_sec > 0.0 {
+                attempted_total as f64 / elapsed_sec
+            } else {
+                0.0
+            },
+            success_sps: if elapsed_sec > 0.0 {
+                success_total as f64 / elapsed_sec
+            } else {
+                0.0
+            },
+        },
+        rates: ManifestRatesSummary {
+            timeout: if attempted_total > 0 {
+                total_skipped as f64 / attempted_total as f64
+            } else {
+                0.0
+            },
+            top1_exact: if attempted_total > 0 {
+                success_total as f64 / attempted_total as f64
+            } else {
+                0.0
+            },
+            both_exact: if lines_ge2 > 0 {
+                both_exact_cnt as f64 / lines_ge2 as f64
+            } else {
+                0.0
+            },
+        },
+        ambiguous: ManifestAmbiguousSummary {
+            threshold_cp: opts.amb_gap2_threshold,
+            require_exact: opts.amb_require_exact,
+            count: ambiguous_cnt,
+            denom: lines_ge2,
+            rate: if lines_ge2 > 0 {
+                ambiguous_cnt as f64 / lines_ge2 as f64
+            } else {
+                0.0
+            },
+        },
+        depth: ManifestDepthSummary {
+            histogram: depth_hist_vec.clone(),
+            min: dmin,
+            max: dmax,
+            p50: dp50,
+            p90: dp90,
+        },
+        counts: ManifestCountsSummary {
+            attempted: attempted_total,
+            success: success_total,
+            skipped_timeout: total_skipped,
+            errors: ManifestErrorsSummary {
+                parse: e_parse,
+                nonexact_top1: e_nonexact,
+                empty_or_missing_pv: e_empty_pv,
+            },
+        },
+    };
 
     if let Some(ref mut pm) = part_mgr {
         // Finish the last open part and collect infos
@@ -1577,7 +1832,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hash_mb: opts.hash_mb,
                 threads_per_engine: 1,
                 jobs: opts.jobs,
-                count: total_processed,
+                count: info.count_in_part,
                 cp_to_wdl_scale: opts.wdl_scale,
                 wdl_semantics: "side_to_move".to_string(),
                 calibration: calibration_out.clone(),
@@ -1615,6 +1870,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     entropy_scale: opts.entropy_scale,
                 }),
+                summary: None,
             };
             if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
                 if let Err(e) = std::fs::write(&man_path, txt) {
@@ -1624,6 +1880,109 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         e
                     );
                 }
+            }
+        }
+        // After writing per-part manifests, write parent aggregated manifest with summary
+        let teacher_usi = TeacherUsiOpts {
+            hash_mb: opts.hash_mb,
+            multipv: opts.multipv,
+            threads: 1,
+            teacher_profile: format!("{:?}", opts.teacher_profile),
+            min_depth: effective_depth,
+        };
+        let engine_version = std::env::var("ENGINE_SEMVER")
+            .ok()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let teacher_engine = TeacherEngineInfo {
+            name: engine_name.to_string(),
+            version: engine_version,
+            commit: std::env::var("ENGINE_COMMIT")
+                .ok()
+                .or_else(|| std::env::var("GIT_COMMIT_HASH").ok()),
+            usi_opts: teacher_usi,
+        };
+        let argv: Vec<String> = std::env::args().collect();
+        let generation_command = argv.join(" ");
+        let seed = stable_seed_from_args(&argv);
+        let manifest = Manifest {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
+            engine: engine_name.to_string(),
+            teacher_engine,
+            generation_command,
+            seed,
+            manifest_version: "2".into(),
+            input: ManifestInputInfo {
+                path: input_path.display().to_string(),
+                sha256: input_sha256,
+                bytes: input_bytes,
+            },
+            nnue_weights_sha256,
+            nnue_weights: opts.nnue_weights.clone(),
+            preset: preset_name.clone(),
+            overrides: Some(ManifestOverrides {
+                time: cli_set_time,
+                nodes: cli_set_nodes,
+                hash_mb: cli_set_hash,
+                multipv: cli_set_multipv,
+                min_depth: cli_set_min_depth,
+            }),
+            teacher_profile: format!("{:?}", opts.teacher_profile),
+            multipv: opts.multipv,
+            budget: ManifestBudget {
+                mode: if opts.nodes.is_some() {
+                    "nodes".into()
+                } else {
+                    "time".into()
+                },
+                time_ms: if opts.nodes.is_some() {
+                    None
+                } else {
+                    Some(time_limit_ms)
+                },
+                nodes: opts.nodes,
+            },
+            min_depth: effective_depth,
+            hash_mb: opts.hash_mb,
+            threads_per_engine: 1,
+            jobs: opts.jobs,
+            count: total_processed,
+            cp_to_wdl_scale: opts.wdl_scale,
+            wdl_semantics: "side_to_move".into(),
+            calibration: calibration_out,
+            attempted: attempted_total,
+            skipped_timeout: total_skipped,
+            errors: serde_json::json!({ "parse": e_parse, "nonexact_top1": e_nonexact, "empty_or_missing_pv": e_empty_pv }),
+            reuse_tt: opts.reuse_tt,
+            skip_overrun_factor: opts.skip_overrun_factor,
+            search_depth_arg: search_depth,
+            effective_min_depth: effective_depth,
+            output_sha256: None,
+            output_bytes: None,
+            part_index: None,
+            part_count: Some(total_parts),
+            count_in_part: None,
+            compression: comp_str,
+            ambiguity: Some(ManifestAmbiguity {
+                gap2_threshold_cp: opts.amb_gap2_threshold,
+                require_exact: opts.amb_require_exact,
+                mate_mode: match opts.entropy_mate_mode {
+                    MateEntropyMode::Exclude => "exclude".into(),
+                    MateEntropyMode::Saturate => "saturate".into(),
+                },
+                entropy_scale: opts.entropy_scale,
+            }),
+            summary: Some(summary_obj.clone()),
+        };
+        if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
+            if let Err(e) = std::fs::write(&manifest_path, txt) {
+                eprintln!(
+                    "Warning: failed to write manifest.json ({}): {}",
+                    manifest_path.display(),
+                    e
+                );
+            } else {
+                println!("Manifest written: {}", manifest_path.display());
             }
         }
     } else {
@@ -1750,6 +2109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 entropy_scale: opts.entropy_scale,
             }),
+            summary: Some(summary_obj.clone()),
         };
         if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
             if let Err(e) = std::fs::write(&manifest_path, txt) {
@@ -1762,6 +2122,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Manifest written: {}", manifest_path.display());
             }
         }
+    }
+
+    // Structured final record (optional)
+    if let Some(ref lg) = structured_logger {
+        let rec = serde_json::json!({ "kind": "final", "summary": &summary_obj });
+        lg.write_json(&rec);
     }
 
     Ok(())
@@ -1911,11 +2277,15 @@ fn process_position_with_engine(
     let mut lines_used_opt: Option<Vec<engine_core::search::types::RootLine>> = None;
     if let Some(ref lines0) = result.lines {
         if lines0.len() >= 2 {
+            env.shared.lines_ge2.fetch_add(1, Ordering::Relaxed);
             let l0 = &lines0[0];
             let l1 = &lines0[1];
             let gap = (l0.score_cp - l1.score_cp).abs();
             best2_gap_cp_meta =
                 format!(" best2_gap_cp:{} bound0:{:?} bound1:{:?}", gap, l0.bound, l1.bound);
+            if matches!(l0.bound, Bound::Exact) && matches!(l1.bound, Bound::Exact) {
+                env.shared.both_exact.fetch_add(1, Ordering::Relaxed);
+            }
             if is_ambiguous_for_k3(
                 l0.bound,
                 l1.bound,
@@ -1925,6 +2295,7 @@ fn process_position_with_engine(
                 env.opts.amb_require_exact,
             ) {
                 ambiguous_k3 = true;
+                env.shared.ambiguous_k3.fetch_add(1, Ordering::Relaxed);
                 let mut have_three = lines0.len() >= 3;
                 // lightweight copy: only first 3 lines
                 let mut lines_k: Vec<_> = lines0.iter().take(3).cloned().collect();
@@ -2028,6 +2399,17 @@ fn process_position_with_engine(
         } else {
             fallback_small.map(|sv| sv.as_slice())
         };
+
+    // Success path counters
+    env.shared.top1_exact.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut hist = env.shared.depth_hist.lock().unwrap();
+        let d = result_used_depth as usize;
+        if hist.len() <= d {
+            hist.resize(d + 1, 0);
+        }
+        hist[d] += 1;
+    }
 
     // Output according to selected format
     match env.opts.output_format {
