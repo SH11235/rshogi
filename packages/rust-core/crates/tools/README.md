@@ -271,12 +271,34 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - 曖昧/entropy: `--amb-gap2-threshold`、`--amb-allow-inexact`、`--entropy-mate-mode`、`--entropy-scale`
 - マージ: `--merge-mode depth-first`（常に明示）
 - 要約: `--analyze-summary`（JSONを `<out-dir>/quality.json` に保存）
+- 実行制御: `--dry-run` / `--verbose` / `--keep-intermediate`（既定ON） / `--prune`（常に中間物削除） / `--prune-on-success`（成功時のみ削除）
+ - 正規化: `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）/ `--normalize-chunk-lines <N>`（既定 200k 行）
 
 出力:
 - `<final>.manifest.json`: マージ結果の aggregated manifest
-- `<out-dir>/orchestrate_ambiguous.manifest.json`: オーケストレーション全体の系譜と整合サマリ
+- `<out-dir>/orchestrate_ambiguous.manifest.json`: オーケストレーション全体の系譜と整合サマリ（`counts` に `pass1_total` / `extracted` / `pass2_generated` / `final_written` を記録。`pass1_total_by_source` も付与）
 
 補足:
 - マージモードは常に `--mode depth-first` を明示（既定の exact-first と混同しない）。
 - `--analyze-summary` は pass2 の `multipv` を検知して `--expected-multipv` を自動設定します（検出不可時は CLI の `--multipv` を使用）。
 - 詳細設計は `docs/tasks/orchestrate_ambiguous_plan.md` を参照。
+
+### 閾値の使い分け（gap と gap2）
+- 抽出 `--gap-threshold`: 再注釈候補を広く拾うための“粗い”しきい値（例: 30–50cp）。
+- 再注釈 `--amb-gap2-threshold`: K=3 の曖昧度（1位と2位の差）を厳密に測る“細かい”しきい値（例: 15–35cp）。
+- ガイド: `analyze_teaching_quality --summary` の統計（中央値/下位5%）を参考に現場の負荷と精度で調整。
+
+### out-dir の構成（例）
+`.<final-stem>.ambdig/` 配下:
+- `pass2_input.tmp` / `pass2_input.sfens`
+- `pass2.jsonl` または `pass2.part-*.jsonl.{gz|zst}`（+ 各 manifest）
+- `quality.json`（`--analyze-summary` 時）
+- `orchestrate_ambiguous.manifest.json`
+
+複数 `--pass1` を与えた場合のマージ優先は、depth-first + dedup により「`pass1` を与えた順 → `pass2`」です。同一 SFEN の採用元に影響するため、順序は固定して運用してください。
+
+メモリ対策:
+- 大規模抽出時は `--normalize-sort-unique` を指定すると、`pass2_input.tmp` をチャンクに分割してソート＆uniqし、k-wayマージで `pass2_input.sfens` を生成します。メモリ使用を抑えつつ重複除去が可能です（I/O は増加）。
+
+Prune 補足:
+- `--dry-run --prune` / `--dry-run --prune-on-success` では、削除計画（対象件数・合計サイズ）を表示します（`--verbose` で対象ファイル一覧も表示）。

@@ -22,7 +22,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
   --pass1 runs/out_pass1.jsonl --final runs/final.jsonl --dry-run
 ```
 
-ドライラン出力は、空白や `"` を含むパスも引用され、コピペ実行可能です。出力例:
+ドライラン出力は、空白や `"` を含むパスも引用され、コピペ実行可能です（PowerShell / cmd いずれでも動作）。出力例:
 ```text
 [dry-run] "/path/to/target/debug/extract_flagged_positions" "runs/out_pass1.jsonl" - --gap-threshold 35
 [dry-run] normalize+unique -> ".final.ambdig/pass2_input.sfens"
@@ -30,6 +30,9 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 [dry-run] "/path/to/target/debug/merge_annotation_results" --dedup-by-sfen --mode depth-first --manifest-out "runs/final.manifest.json" "runs/out_pass1.jsonl" ".final.ambdig/pass2.jsonl" "runs/final.jsonl"
 [dry-run] "/path/to/target/debug/analyze_teaching_quality" "runs/final.jsonl" --json --expected-multipv 3 --manifest-autoload-mode strict > ".final.ambdig/quality.json"
 [dry-run] would write orchestration manifest to ".final.ambdig/orchestrate_ambiguous.manifest.json"
+// prune 指定時は削除計画も表示（例）
+[dry-run] prune plan: 7 files, total 1234567 bytes under ".final.ambdig"
+// --verbose なら個別 rm 行も出力
 ```
 
 ## 主なオプション
@@ -53,12 +56,26 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - 要約
   - `--analyze-summary`（JSON は `quality.json` に保存、サマリはコンソールに出力。`--expected-multipv` は最終 manifest の aggregated.multipv → pass2 manifest → CLI の順で推定）
 - 実行制御
-  - `--dry-run`（extract/normalize/generate/merge/analyze の全コマンド計画を表示。空白や `"` を含むパスは引用され、コピペ実行可能）／`--verbose`／`--keep-intermediate`（既定ON）
+  - `--dry-run`（extract/normalize/generate/merge/analyze の全コマンド計画を表示。空白や `"` を含むパスは引用され、コピペ実行可能）／`--verbose`／`--keep-intermediate`（既定ON）／`--prune`（常に中間物削除）／`--prune-on-success`（成功時のみ削除）
+ - 正規化
+   - `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）／`--normalize-chunk-lines <N>`（既定 200k 行）
 
 ## 推奨設定
 - 抽出：`--gap-threshold 35`（広めに拾う）
 - 再注釈：`--multipv 3`, `--teacher-profile balanced`、`--min-depth` は pass1+1 を既定
 - マージ：`--merge-mode depth-first`（オーケストレータが常に明示）
+
+## 閾値の考え方（gap と gap2）
+- `--gap-threshold`（抽出）
+  - 目的: pass1 から「再注釈候補」を広めに拾う粗いフィルタ。
+  - 推奨: “やや広め”から開始（例: 30–50cp）。再注釈コストと相談して調整。
+  - 基準: `analyze_teaching_quality --summary` の分布（中央値/下位5%など）を見て決めると再現しやすい。
+- `--amb-gap2-threshold`（再注釈時の曖昧度判定）
+  - 目的: K=3 再注釈で「曖昧（bestと2位が近い）」を厳密に測るための gap2 閾値。
+  - 推奨: K の設定（例: 3）に合わせ、抽出よりもやや狭め（例: 15–35cp）で運用開始。
+  - 備考: 抽出で広めに拾い、再注釈でより厳しく選別するのが基本方針。
+
+ヒント: まずは `--gap-threshold` を広めに設定して母集団を確保し、`--amb-gap2-threshold` で精度と件数のバランスを取ると効果的です。
 
 ## オーケストレーション manifest
 `<out-dir>/orchestrate_ambiguous.manifest.json` に、系譜・オプション・要約を記録します。
@@ -66,7 +83,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - `extract`: 抽出条件と `pass2_input.sfens` の `sha256/bytes`、抽出件数
 - `reannotate`: generate のコマンドオプション、検出した part/aggregate manifest、生成件数
 - `merge`: マージモード、入力一覧、`final` のパス、`final_written`
-- `counts`: `extracted` / `pass2_generated` / `final_written`
+- `counts`: `pass1_total` / `extracted` / `pass2_generated` / `final_written`（`pass1_total_by_source` も付与）
 - `analyze`（任意）: `quality.json` の参照と `expected_mpv` を記録
 
 整合チェック（期待関係）
@@ -101,10 +118,45 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
     "manifest_out": "runs/final.manifest.json",
     "final_written": 980
   },
-  "counts": {"extracted": 1024, "pass2_generated": 1000, "final_written": 980},
-  "analyze": {"summary_json": ".final.ambdig/quality.json", "expected_mpv": 3}
+  "counts": {"pass1_total": 1500, "extracted": 1024, "pass2_generated": 1000, "final_written": 980},
+"analyze": {"summary_json": ".final.ambdig/quality.json", "expected_mpv": 3}
 }
 ```
+
+## out-dir の構成と処理フロー
+- 典型的な out-dir 配下（`.<final-stem>.ambdig/`）のファイル:
+  - `pass2_input.tmp` / `pass2_input.sfens`（抽出→正規化・重複排除の入力/出力）
+  - `pass2.jsonl`（単一出力の場合のベース）
+  - `pass2.part-0001.jsonl.gz`（分割出力の各 part、拡張子は `gz|zst|jsonl`）
+  - `*.manifest.json`（aggregate と各 part の manifest）
+  - `quality.json`（`--analyze-summary` 指定時の要約 JSON）
+  - `orchestrate_ambiguous.manifest.json`（このツールの系譜・整合サマリ）
+
+フロー（概略）:
+```
+pass1(.jsonl[.gz|.zst]) --extract--> pass2_input.tmp --normalize+unique--> pass2_input.sfens
+      \                                                                  |
+       \-- manifest 解決（件数等）                                       v
+         + provenance 記録                          generate_nnue_training_data --> pass2.jsonl / pass2.part-*.jsonl.* (+ manifest)
+                                                                  |
+                                                                  v
+                                     merge_annotation_results --depth-first--> final.jsonl (+ final.manifest.json)
+                                                                  |
+                                                                  v
+                                      analyze_teaching_quality --summary/json--> quality.json
+```
+
+## 複数 pass1 のマージ例と優先順
+- CLI 例:
+```bash
+cargo run --release -p tools --bin orchestrate_ambiguous -- \
+  --pass1 runs/p1a.jsonl --pass1 runs/p1b.jsonl \
+  --final runs/final.jsonl --merge-mode depth-first --dry-run
+```
+- 優先順（depth-first + dedup-by-sfen）:
+  1) `pass1` を指定順で適用（先に現れたファイルが優先）
+  2) その後に `pass2` の結果を適用
+- 注意: `--pass1` の並び順で同一 SFEN の採用元が変わる場合があります。再現性のため、順序を固定して運用してください。
 
 ## トラブルシュート
 - 抽出 0 件
@@ -115,13 +167,17 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - 解析（`--analyze-summary`）が失敗
   - 解析コマンドが非0終了でも出力がある場合は `quality.json` を保存します。出力が空の場合のみスキップします。
 
-## メモリに関する注意（将来の改善）
-- 大規模な SFEN 入力では、正規化＋重複排除に `HashSet<String>` を用いるためメモリを消費します。
-  - 将来的に、外部ソート＋uniq による on-disk 除重（例: `--normalize-sort-unique`）や Bloom 近似（例: `--bloom-fpp`）のオプション追加を検討中です。
+## メモリに関する注意
+- 大規模な SFEN 入力では、`--normalize-sort-unique` を用いると on-disk の外部ソート＋uniq でメモリ使用を抑えられます（I/O は増加）。
 
 ## 関連
 - 設計ドキュメント: `docs/tasks/orchestrate_ambiguous_plan.md`
 - 生成ツール詳細: `docs/tools/nnue-training-data-guide.md`
+
+## 用語メモ
+- gap: pass1 時点の best と 2 位（best2）評価差（cp）。
+- gap2: 再注釈（MultiPV=K）時点の 1 位と 2 位の評価差（cp）。
+- EXACT / LOWER / UPPER: 探索の詰め判定や境界判定由来のフラグ（詳細は各ツールの README を参照）。
 
 ## CI連携の例（参考）
 ```bash
