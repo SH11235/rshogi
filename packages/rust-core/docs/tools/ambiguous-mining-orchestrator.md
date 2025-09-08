@@ -25,7 +25,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 ドライラン出力は、空白や `"` を含むパスも引用され、コピペ実行可能です（PowerShell / cmd いずれでも動作）。出力例:
 ```text
 [dry-run] "/path/to/target/debug/extract_flagged_positions" "runs/out_pass1.jsonl" - --gap-threshold 35
-[dry-run] normalize+unique -> ".final.ambdig/pass2_input.sfens"
+[dry-run] normalize+unique (in-mem) -> ".final.ambdig/pass2_input.sfens"
 [dry-run] "/path/to/target/debug/generate_nnue_training_data" ".final.ambdig/pass2_input.sfens" ".final.ambdig/pass2.jsonl" --engine enhanced --output-format jsonl --hash-mb 64 --multipv 3 --teacher-profile balanced --split 200000 --compress gz
 [dry-run] "/path/to/target/debug/merge_annotation_results" --dedup-by-sfen --mode depth-first --manifest-out "runs/final.manifest.json" "runs/out_pass1.jsonl" ".final.ambdig/pass2.jsonl" "runs/final.jsonl"
 [dry-run] "/path/to/target/debug/analyze_teaching_quality" "runs/final.jsonl" --json --expected-multipv 3 --manifest-autoload-mode strict > ".final.ambdig/quality.json"
@@ -58,7 +58,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - 実行制御
   - `--dry-run`（extract/normalize/generate/merge/analyze の全コマンド計画を表示。空白や `"` を含むパスは引用され、コピペ実行可能）／`--verbose`／`--keep-intermediate`（既定ON）／`--prune`（常に中間物削除）／`--prune-on-success`（成功時のみ削除）
  - 正規化
-   - `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）／`--normalize-chunk-lines <N>`（既定 200k 行）
+   - `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）／`--normalize-chunk-lines <N>`（既定 200k 行）／`--normalize-merge-fan-in <N>`（k-way マージの同時オープン上限、既定 256）
 
 ## 推奨設定
 - 抽出：`--gap-threshold 35`（広めに拾う）
@@ -80,7 +80,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 ## オーケストレーション manifest
 `<out-dir>/orchestrate_ambiguous.manifest.json` に、系譜・オプション・要約を記録します。
 - `inputs[]`: pass1 入力と manifest 自動解決（B案）の結果
-- `extract`: 抽出条件と `pass2_input.sfens` の `sha256/bytes`、抽出件数
+- `extract`: 抽出条件と `pass2_input.sfens` の `sha256/bytes`、抽出件数、正規化モード（`normalize.mode` が `in-mem` か `sort-unique`、外部モード時は `chunk_lines` と `merge_fan_in` も記録）
 - `reannotate`: generate のコマンドオプション、検出した part/aggregate manifest、生成件数
 - `merge`: マージモード、入力一覧、`final` のパス、`final_written`
 - `counts`: `pass1_total` / `extracted` / `pass2_generated` / `final_written`（`pass1_total_by_source` も付与）
@@ -168,7 +168,10 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
   - 解析コマンドが非0終了でも出力がある場合は `quality.json` を保存します。出力が空の場合のみスキップします。
 
 ## メモリに関する注意
-- 大規模な SFEN 入力では、`--normalize-sort-unique` を用いると on-disk の外部ソート＋uniq でメモリ使用を抑えられます（I/O は増加）。
+- 大規模な SFEN 入力では、`--normalize-sort-unique` を用いると on-disk の外部ソート＋uniq でメモリ使用を抑えられます（I/O は増加）。FD 上限に当たらないよう、多段（multi-pass）k-way マージを採用し、`--normalize-merge-fan-in` で同時に開くファイル数を制御できます（既定 256）。
+
+## Prune の方針
+- 中間 manifest は prune 対象です（`pass2.manifest.json` と `pass2.part-*.manifest.json`）。オーケストレーション manifest に系譜と集約を記録するため、復元は manifest から可能です。
 
 ## 関連
 - 設計ドキュメント: `docs/tasks/orchestrate_ambiguous_plan.md`

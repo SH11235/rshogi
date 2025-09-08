@@ -255,7 +255,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 出力例（パスは例示、実環境に合わせて変化します）:
 ```text
 [dry-run] "/path/to/target/debug/extract_flagged_positions" "runs/out_pass1.jsonl" - --gap-threshold 35
-[dry-run] normalize+unique -> ".final.ambdig/pass2_input.sfens"
+[dry-run] normalize+unique (in-mem) -> ".final.ambdig/pass2_input.sfens"
 [dry-run] "/path/to/target/debug/generate_nnue_training_data" ".final.ambdig/pass2_input.sfens" ".final.ambdig/pass2.jsonl" --engine enhanced --output-format jsonl --hash-mb 64 --multipv 3 --teacher-profile balanced --split 200000 --compress gz
 [dry-run] "/path/to/target/debug/merge_annotation_results" --dedup-by-sfen --mode depth-first --manifest-out "runs/final.manifest.json" "runs/out_pass1.jsonl" ".final.ambdig/pass2.jsonl" "runs/final.jsonl"
 [dry-run] "/path/to/target/debug/analyze_teaching_quality" "runs/final.jsonl" --json --expected-multipv 3 --manifest-autoload-mode strict > ".final.ambdig/quality.json"
@@ -272,7 +272,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - マージ: `--merge-mode depth-first`（常に明示）
 - 要約: `--analyze-summary`（JSONを `<out-dir>/quality.json` に保存）
 - 実行制御: `--dry-run` / `--verbose` / `--keep-intermediate`（既定ON） / `--prune`（常に中間物削除） / `--prune-on-success`（成功時のみ削除）
- - 正規化: `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）/ `--normalize-chunk-lines <N>`（既定 200k 行）
+ - 正規化: `--normalize-sort-unique`（外部ソート＋uniqで省メモリ化）/ `--normalize-chunk-lines <N>`（既定 200k 行）/ `--normalize-merge-fan-in <N>`（多段マージの同時オープン上限、既定 256）
 
 出力:
 - `<final>.manifest.json`: マージ結果の aggregated manifest
@@ -298,7 +298,8 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 複数 `--pass1` を与えた場合のマージ優先は、depth-first + dedup により「`pass1` を与えた順 → `pass2`」です。同一 SFEN の採用元に影響するため、順序は固定して運用してください。
 
 メモリ対策:
-- 大規模抽出時は `--normalize-sort-unique` を指定すると、`pass2_input.tmp` をチャンクに分割してソート＆uniqし、k-wayマージで `pass2_input.sfens` を生成します。メモリ使用を抑えつつ重複除去が可能です（I/O は増加）。
+- 大規模抽出時は `--normalize-sort-unique` を指定すると、`pass2_input.tmp` をチャンクに分割してソート＆uniqし、k-wayマージで `pass2_input.sfens` を生成します。メモリ使用を抑えつつ重複除去が可能です（I/O は増加）。FD上限に配慮し、多段マージ（`--normalize-merge-fan-in`）で安全に処理します。
 
 Prune 補足:
 - `--dry-run --prune` / `--dry-run --prune-on-success` では、削除計画（対象件数・合計サイズ）を表示します（`--verbose` で対象ファイル一覧も表示）。
+- 中間 manifest は prune 対象です（`pass2.manifest.json` と各 `pass2.part-*.manifest.json` を含む）。集約情報は orchestrator の manifest に記録されます。

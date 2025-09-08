@@ -115,6 +115,9 @@ struct Cli {
     /// Chunk size (lines) for external sort + uniq
     #[arg(long = "normalize-chunk-lines", default_value_t = 200_000)]
     normalize_chunk_lines: usize,
+    /// Max files to merge at once during external normalize (fan-in for multi-pass k-way merge)
+    #[arg(long = "normalize-merge-fan-in", default_value_t = 256)]
+    normalize_merge_fan_in: usize,
     /// Remove intermediates regardless of success (overrides --keep-intermediate)
     #[arg(long = "prune")]
     prune: bool,
@@ -229,7 +232,12 @@ fn extract_normalized_sfen_from_line(line: &str) -> Option<String> {
     normalize_4t(sfen).map(|key| format!("sfen {}", key))
 }
 
-fn normalize_sort_unique(tmp_extract: &Path, sfens_out: &Path, chunk_lines: usize) -> Result<()> {
+fn normalize_sort_unique(
+    tmp_extract: &Path,
+    sfens_out: &Path,
+    chunk_lines: usize,
+    fan_in: usize,
+) -> Result<()> {
     // Phase 1: generate sorted+deduped chunks
     let mut chunks: Vec<PathBuf> = Vec::new();
     let mut cur: Vec<String> = Vec::with_capacity(chunk_lines.min(10_000));
@@ -242,13 +250,15 @@ fn normalize_sort_unique(tmp_extract: &Path, sfens_out: &Path, chunk_lines: usiz
         if let Some(n) = extract_normalized_sfen_from_line(&l) {
             cur.push(n);
             if cur.len() >= chunk_lines {
-                cur.sort();
+                cur.sort_unstable();
                 cur.dedup();
                 let idx = chunks.len() + 1;
-                let p = sfens_out
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(format!("normalize_chunk_{:04}.txt", idx));
+                let p = sfens_out.parent().unwrap_or_else(|| Path::new(".")).join(format!(
+                    "normalize_chunk_{}_{}_{:04}.txt",
+                    std::process::id(),
+                    1,
+                    idx
+                ));
                 {
                     let mut w = BufWriter::new(File::create(&p)?);
                     for s in &cur {
@@ -262,13 +272,15 @@ fn normalize_sort_unique(tmp_extract: &Path, sfens_out: &Path, chunk_lines: usiz
         }
     }
     if !cur.is_empty() {
-        cur.sort();
+        cur.sort_unstable();
         cur.dedup();
         let idx = chunks.len() + 1;
-        let p = sfens_out
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(format!("normalize_chunk_{:04}.txt", idx));
+        let p = sfens_out.parent().unwrap_or_else(|| Path::new(".")).join(format!(
+            "normalize_chunk_{}_{}_{:04}.txt",
+            std::process::id(),
+            1,
+            idx
+        ));
         let mut w = BufWriter::new(File::create(&p)?);
         for s in &cur {
             writeln!(w, "{}", s)?;
@@ -276,62 +288,101 @@ fn normalize_sort_unique(tmp_extract: &Path, sfens_out: &Path, chunk_lines: usiz
         w.flush()?;
         chunks.push(p);
     }
-    // Phase 2: k-way merge into sfens_out with global dedup
+    // Phase 2+: multi-pass k-way merge into sfens_out with global dedup
     if chunks.is_empty() {
         let _ = File::create(sfens_out)?;
         return Ok(());
     }
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
-    #[derive(Eq, PartialEq)]
-    struct Item {
-        line: String,
-        idx: usize,
-    }
-    impl Ord for Item {
-        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-            self.line.cmp(&other.line)
+
+    fn kway_merge_once(inputs: &[PathBuf], out: &Path) -> Result<()> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        #[derive(Eq, PartialEq)]
+        struct Item {
+            line: String,
+            idx: usize,
         }
-    }
-    impl PartialOrd for Item {
-        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-            Some(self.cmp(other))
+        impl Ord for Item {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.line.cmp(&other.line)
+            }
         }
-    }
-    let mut readers: Vec<BufReader<File>> = Vec::new();
-    for c in &chunks {
-        readers.push(BufReader::new(File::open(c)?));
-    }
-    fn read_next_line(readers: &mut [BufReader<File>], i: usize) -> Option<String> {
-        let mut s = String::new();
-        match readers[i].read_line(&mut s) {
-            Ok(0) => None,
-            Ok(_) => Some(s.trim_end_matches(['\n', '\r']).to_string()),
-            Err(_) => None,
+        impl PartialOrd for Item {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
         }
-    }
-    let mut heap: BinaryHeap<Reverse<Item>> = BinaryHeap::new();
-    for i in 0..readers.len() {
-        if let Some(l) = read_next_line(&mut readers, i) {
-            heap.push(Reverse(Item { line: l, idx: i }));
+
+        let mut readers: Vec<BufReader<File>> = Vec::new();
+        for c in inputs {
+            readers.push(BufReader::new(File::open(c)?));
         }
-    }
-    let mut out = BufWriter::new(File::create(sfens_out)?);
-    let mut last: Option<String> = None;
-    while let Some(Reverse(Item { line, idx })) = heap.pop() {
-        if last.as_ref().map(|s| s != &line).unwrap_or(true) {
-            writeln!(out, "{}", line)?;
-            last = Some(line.clone());
+        fn read_next_line(readers: &mut [BufReader<File>], i: usize) -> Option<String> {
+            let mut s = String::new();
+            match readers[i].read_line(&mut s) {
+                Ok(0) => None,
+                Ok(_) => Some(s.trim_end_matches(['\n', '\r']).to_string()),
+                Err(_) => None,
+            }
         }
-        if let Some(l) = read_next_line(&mut readers, idx) {
-            heap.push(Reverse(Item { line: l, idx }));
+        let mut heap: BinaryHeap<Reverse<Item>> = BinaryHeap::new();
+        for i in 0..readers.len() {
+            if let Some(l) = read_next_line(&mut readers, i) {
+                heap.push(Reverse(Item { line: l, idx: i }));
+            }
         }
+        let mut out = BufWriter::new(File::create(out)?);
+        let mut last: Option<String> = None;
+        while let Some(Reverse(Item { line, idx })) = heap.pop() {
+            if last.as_ref().map(|s| s != &line).unwrap_or(true) {
+                writeln!(out, "{}", line)?;
+                last = Some(line.clone());
+            }
+            if let Some(l) = read_next_line(&mut readers, idx) {
+                heap.push(Reverse(Item { line: l, idx }));
+            }
+        }
+        out.flush()?;
+        Ok(())
     }
-    out.flush()?;
-    for c in chunks {
-        let _ = fs::remove_file(c);
+
+    fn kway_merge_files(
+        mut inputs: Vec<PathBuf>,
+        out: &Path,
+        fan_in: usize,
+        work_dir: &Path,
+    ) -> Result<()> {
+        if inputs.is_empty() {
+            let _ = File::create(out)?;
+            return Ok(());
+        }
+        let pid = std::process::id();
+        let mut stage: usize = 1;
+        while inputs.len() > fan_in {
+            let mut mids: Vec<PathBuf> = Vec::new();
+            for (gi, group) in inputs.chunks(fan_in).enumerate() {
+                let mid =
+                    work_dir.join(format!("normalize_stage{}_{}_{:04}.txt", stage, pid, gi + 1));
+                kway_merge_once(group, &mid)?;
+                mids.push(mid);
+            }
+            // Remove inputs from previous stage
+            for p in inputs {
+                let _ = fs::remove_file(p);
+            }
+            inputs = mids;
+            stage += 1;
+        }
+        // Final merge
+        kway_merge_once(&inputs, out)?;
+        for p in inputs {
+            let _ = fs::remove_file(p);
+        }
+        Ok(())
     }
-    Ok(())
+
+    let work_dir = sfens_out.parent().unwrap_or_else(|| Path::new("."));
+    kway_merge_files(chunks, sfens_out, fan_in.max(1), work_dir)
 }
 
 #[cfg(test)]
@@ -451,13 +502,36 @@ mod tests {
         writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 2 # c").unwrap();
         drop(f);
         let out = dir.path().join("pass2_input.sfens");
-        normalize_sort_unique(&tmp_extract, &out, 2).unwrap();
+        normalize_sort_unique(&tmp_extract, &out, 2, 16).unwrap();
         let txt = std::fs::read_to_string(&out).unwrap();
         let lines: Vec<&str> = txt.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("sfen "));
         assert!(lines[1].starts_with("sfen "));
         assert_ne!(lines[0], lines[1]);
+    }
+
+    #[test]
+    fn normalize_sort_unique_multi_pass_merge_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp_extract = dir.path().join("pass2_input.tmp");
+        // Create multiple chunks with duplicates across groups to trigger multi-pass (fan_in=2)
+        let mut f = std::fs::File::create(&tmp_extract).unwrap();
+        // Duplicate of 1 across separate chunks (chunk_lines=1 will split every line)
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 1 # a").unwrap();
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 1 # b").unwrap();
+        // Duplicates of 2
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 2 # c").unwrap();
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 2 # d").unwrap();
+        // Unique 3
+        writeln!(f, "sfen 9/9/9/9/9/9/9/9/9 b - 3 # e").unwrap();
+        drop(f);
+        let out = dir.path().join("pass2_input.sfens");
+        normalize_sort_unique(&tmp_extract, &out, 1, 2).unwrap();
+        let txt = std::fs::read_to_string(&out).unwrap();
+        let lines: Vec<&str> = txt.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|l| l.starts_with("sfen ")));
     }
 
     #[test]
@@ -516,6 +590,17 @@ mod tests {
         let s = r#"/tmp/has space/and "quote""#;
         let expected = format!("\"{}\"", s.replace('"', "\\\""));
         assert_eq!(sh_quote(s), expected);
+    }
+
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn count_lines_any_zst_warns_and_returns_zero_without_feature() {
+        // Create a plain text file but with .zst extension
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("dummy.jsonl.zst");
+        std::fs::write(&p, b"a\nb\n").unwrap();
+        let n = count_lines_any(&p).expect("count lines");
+        assert_eq!(n, 0, "zstd disabled build should return 0 for .zst");
     }
 }
 
@@ -626,7 +711,11 @@ fn count_lines_any(path: &Path) -> Result<usize> {
         }
         #[cfg(not(feature = "zstd"))]
         {
-            // zstd not supported in this build; return 0 gracefully
+            // zstd not supported in this build; warn once then return 0 gracefully
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                eprintln!("[warn] zstd feature disabled; line counting for *.zst returns 0");
+            });
             Ok(0)
         }
     } else {
@@ -663,18 +752,22 @@ fn glob_pass2_outputs(base: &Path) -> Result<Vec<PathBuf>> {
     //   - pass2.jsonl (single-file)
     //   - pass2.part-*.jsonl[.gz|.zst]
     let mut outs = Vec::new();
+    let mut singles = Vec::new();
     if base.exists() {
-        outs.push(base.to_path_buf());
+        singles.push(base.to_path_buf());
     } else if let (Some(dir), Some(fname)) = (base.parent(), base.file_name()) {
         let fname = fname.to_string_lossy();
         let gz = dir.join(format!("{}.gz", fname));
         if gz.exists() {
-            outs.push(gz);
+            singles.push(gz);
         }
         let zst = dir.join(format!("{}.zst", fname));
         if zst.exists() {
-            outs.push(zst);
+            singles.push(zst);
         }
+    }
+    if !singles.is_empty() {
+        return Ok(singles);
     }
     if let Some(dir) = base.parent() {
         let stem = base.file_stem().and_then(OsStr::to_str).unwrap_or("pass2");
@@ -821,6 +914,13 @@ fn main() -> Result<()> {
     for p in &cli.pass1 {
         // Record manifest resolution (strict) for provenance
         let mut src_obj = json!({ "path": p.display().to_string() });
+        // Note zstd counting disabled when the binary lacks the feature
+        #[cfg(not(feature = "zstd"))]
+        {
+            if p.to_string_lossy().ends_with(".zst") {
+                src_obj["zstd_counting"] = json!("disabled");
+            }
+        }
         if let Ok(Some(res)) = resolve_manifest(p, AutoloadMode::Strict) {
             src_obj["resolved_manifest_path"] = json!(res.path.display().to_string());
             src_obj["resolved_manifest_scope"] = json!(res.scope);
@@ -882,9 +982,26 @@ fn main() -> Result<()> {
     let (pass1_by_src, pass1_total) = compute_pass1_totals(&cli.pass1)?;
 
     if cli.dry_run {
-        println!("[dry-run] normalize+unique -> {}", sh_quote(&sfens_out.display().to_string()));
+        if cli.normalize_sort_unique {
+            println!(
+                "[dry-run] normalize+unique (external) --chunk-lines {} --fan-in {} -> {}",
+                cli.normalize_chunk_lines,
+                cli.normalize_merge_fan_in,
+                sh_quote(&sfens_out.display().to_string())
+            );
+        } else {
+            println!(
+                "[dry-run] normalize+unique (in-mem) -> {}",
+                sh_quote(&sfens_out.display().to_string())
+            );
+        }
     } else if cli.normalize_sort_unique {
-        normalize_sort_unique(&tmp_extract, &sfens_out, cli.normalize_chunk_lines)?;
+        normalize_sort_unique(
+            &tmp_extract,
+            &sfens_out,
+            cli.normalize_chunk_lines,
+            cli.normalize_merge_fan_in,
+        )?;
     } else {
         // Normalize + unique (in-memory)
         let inp =
@@ -1256,6 +1373,11 @@ fn main() -> Result<()> {
                 "include_aspiration_failures": cli.include_aspiration_failures,
                 "include_mate_boundary": cli.include_mate_boundary,
             },
+            "normalize": {
+                "mode": if cli.normalize_sort_unique { "sort-unique" } else { "in-mem" },
+                "chunk_lines": if cli.normalize_sort_unique { Some(cli.normalize_chunk_lines) } else { None::<usize> },
+                "merge_fan_in": if cli.normalize_sort_unique { Some(cli.normalize_merge_fan_in) } else { None::<usize> },
+            },
             "sfens": { "path": sfens_out.display().to_string(), "sha256": sfens_sha, "bytes": sfens_bytes },
             "extracted_count": extracted_count,
         },
@@ -1327,7 +1449,12 @@ fn main() -> Result<()> {
                 pass2_count, extracted_count
             );
         }
-        if final_written > pass2_count {
+        if pass2_count == 0 {
+            // Skip this comparison when pass2 is empty (expected in pass1-only merge scenarios)
+            if cli.verbose {
+                eprintln!("[info] counts: pass2_generated is zero; skip final_written vs pass2_generated comparison");
+            }
+        } else if final_written > pass2_count {
             eprintln!(
                 "[warn] counts: final_written ({}) exceeds pass2_generated ({}). Check merge inputs.",
                 final_written, pass2_count
