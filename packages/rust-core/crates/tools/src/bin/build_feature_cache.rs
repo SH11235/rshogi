@@ -581,7 +581,7 @@ fn write_cache_file_streaming(
         #[cfg(feature = "zstd")]
         PayloadEncodingKind::Zstd => {
             let level = config.compress_level.unwrap_or(0);
-            let mut sink = BufWriter::with_capacity(config.io_buf_bytes, file);
+            let sink = BufWriter::with_capacity(config.io_buf_bytes, file);
 
             let mut r = reader; // BufRead
             let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -636,7 +636,7 @@ fn write_cache_file_streaming(
                 }
                 num_samples += written as u64;
                 total_features += feats as u64;
-                in_chunk += (written as u32);
+                in_chunk += written as u32;
                 if in_chunk >= config.chunk_size {
                     // close current frame and start a new one
                     let finished_sink = enc.finish()?; // returns BufWriter<File>
