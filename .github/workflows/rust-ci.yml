@@ -53,6 +53,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install mold linker
@@ -66,7 +67,7 @@ jobs:
         with:
           workspaces: packages/rust-core
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --release -- --test-threads=2
 
   test-large-stack:
     name: Test (Large Stack) - Release Mode
