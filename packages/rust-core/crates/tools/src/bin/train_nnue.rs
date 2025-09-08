@@ -100,6 +100,8 @@ struct Config {
     stream_cache: bool,
     // Optional cap for prefetch memory usage (bytes). 0 or None = unlimited
     prefetch_bytes: Option<usize>,
+    // Estimated active feature count per sample (for memory cap estimation)
+    estimated_features_per_sample: usize,
     // Data filters (align with build_feature_cache)
     exclude_no_legal_move: bool,
     exclude_fallback: bool,
@@ -657,7 +659,10 @@ impl StreamCacheLoader {
                 let n_features = u32::from_le_bytes(nb) as usize;
                 const MAX_FEATURES_PER_SAMPLE: usize = SHOGI_BOARD_SIZE * FE_END;
                 if n_features > MAX_FEATURES_PER_SAMPLE {
-                    eprintln!("n_features={} exceeds limit in {}", n_features, path);
+                    let _ = tx.send(BatchMsg::Err(format!(
+                        "n_features={} exceeds sane limit {} in {}",
+                        n_features, MAX_FEATURES_PER_SAMPLE, path
+                    )));
                     return;
                 }
                 let mut features: Vec<u32> = vec![0u32; n_features];
@@ -759,9 +764,7 @@ impl StreamCacheLoader {
                     batch = Vec::with_capacity(batch_size);
                 }
 
-                if loaded % 100000 == 0 {
-                    println!("  Loaded {}/{} samples...", loaded, num_samples);
-                }
+                // Progress log is omitted in worker to avoid log interleaving with training side
             }
 
             if !batch.is_empty() {
@@ -889,6 +892,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             arg!(--"prefetch-bytes" <BYTES> "Approximate memory cap for prefetched batches (bytes)")
                 .value_parser(clap::value_parser!(usize))
         )
+        .arg(
+            arg!(--"estimated-features-per-sample" <N> "Estimated active features per sample (for prefetch memory cap)")
+                .default_value("64")
+                .value_parser(clap::value_parser!(usize))
+        )
         .arg(arg!(--quantized "Save quantized (int8) version of the model"))
         .arg(arg!(--seed <SEED> "Random seed for reproducibility"))
         .arg(arg!(-o --out <DIR> "Output directory"))
@@ -910,6 +918,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         throughput_interval_sec: *app.get_one::<f32>("throughput-interval").unwrap(),
         stream_cache: app.get_flag("stream-cache"),
         prefetch_bytes: app.get_one::<usize>("prefetch-bytes").copied(),
+        estimated_features_per_sample: *app
+            .get_one::<usize>("estimated-features-per-sample")
+            .unwrap(),
         exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
         exclude_fallback: app.get_flag("exclude-fallback"),
     };
@@ -1665,9 +1676,8 @@ fn train_model_stream_cache(
                     }
                     // n_features
                     let mut nb = [0u8; 4];
-                    if r.read_exact(&mut nb).is_err() {
-                        loaded = num_samples;
-                        break;
+                    if let Err(e) = r.read_exact(&mut nb) {
+                        return Err(format!("Read error at sample {}: {}", loaded, e).into());
                     }
                     let n_features = u32::from_le_bytes(nb) as usize;
                     const MAX_FEATURES_PER_SAMPLE: usize = SHOGI_BOARD_SIZE * FE_END;
@@ -1678,30 +1688,44 @@ fn train_model_stream_cache(
                     #[cfg(target_endian = "little")]
                     {
                         use bytemuck::cast_slice_mut;
-                        r.read_exact(cast_slice_mut::<u32, u8>(&mut features))?;
+                        if let Err(e) = r.read_exact(cast_slice_mut::<u32, u8>(&mut features)) {
+                            return Err(format!("Read features failed at {}: {}", loaded, e).into());
+                        }
                     }
                     #[cfg(target_endian = "big")]
                     {
                         let mut buf = vec![0u8; n_features * 4];
-                        r.read_exact(&mut buf)?;
+                        if let Err(e) = r.read_exact(&mut buf) {
+                            return Err(format!("Read features failed at {}: {}", loaded, e).into());
+                        }
                         for (dst, chunk) in features.iter_mut().zip(buf.chunks_exact(4)) {
                             *dst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         }
                     }
                     let mut lb = [0u8; 4];
-                    r.read_exact(&mut lb)?;
+                    if let Err(e) = r.read_exact(&mut lb) {
+                        return Err(format!("Read label failed at {}: {}", loaded, e).into());
+                    }
                     let label = f32::from_le_bytes(lb);
                     let mut gapb = [0u8; 2];
-                    r.read_exact(&mut gapb)?;
+                    if let Err(e) = r.read_exact(&mut gapb) {
+                        return Err(format!("Read gap failed at {}: {}", loaded, e).into());
+                    }
                     let gap = u16::from_le_bytes(gapb);
                     let mut depth = [0u8; 1];
-                    r.read_exact(&mut depth)?;
+                    if let Err(e) = r.read_exact(&mut depth) {
+                        return Err(format!("Read depth failed at {}: {}", loaded, e).into());
+                    }
                     let depth = depth[0];
                     let mut seldepth = [0u8; 1];
-                    r.read_exact(&mut seldepth)?;
+                    if let Err(e) = r.read_exact(&mut seldepth) {
+                        return Err(format!("Read seldepth failed at {}: {}", loaded, e).into());
+                    }
                     let seldepth = seldepth[0];
                     let mut flags = [0u8; 1];
-                    r.read_exact(&mut flags)?;
+                    if let Err(e) = r.read_exact(&mut flags) {
+                        return Err(format!("Read flags failed at {}: {}", loaded, e).into());
+                    }
                     let flags = flags[0];
                     let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
                     let mut weight = 1.0f32;
@@ -1790,14 +1814,16 @@ fn train_model_stream_cache(
     // Optionally cap prefetch by bytes (rough estimate)
     let mut effective_prefetch = config.prefetch_batches.max(1);
     if let Some(bytes_cap) = config.prefetch_bytes {
-        const ESTIMATED_SAMPLE_BYTES: usize = 256; // rough estimate
-        let est_batch_bytes = config.batch_size.saturating_mul(ESTIMATED_SAMPLE_BYTES);
+        // Estimate per-sample bytes: header/meta (~32B) + 4B * estimated_features
+        let est_sample_bytes =
+            32usize.saturating_add(4usize.saturating_mul(config.estimated_features_per_sample));
+        let est_batch_bytes = config.batch_size.saturating_mul(est_sample_bytes);
         if est_batch_bytes > 0 {
             let max_batches = (bytes_cap / est_batch_bytes).max(1);
             if effective_prefetch > max_batches {
                 println!(
-                    "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch)",
-                    effective_prefetch, max_batches, bytes_cap, est_batch_bytes
+                    "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                    effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
                 );
                 effective_prefetch = max_batches;
             }
@@ -2682,6 +2708,7 @@ mod tests {
             throughput_interval_sec: 10_000.0,
             stream_cache: false,
             prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };
@@ -2770,6 +2797,7 @@ mod tests {
             throughput_interval_sec: 10_000.0,
             stream_cache: false,
             prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };
@@ -2816,6 +2844,7 @@ mod tests {
             throughput_interval_sec: 10_000.0,
             stream_cache: false,
             prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };
@@ -2920,6 +2949,7 @@ mod tests {
             throughput_interval_sec: 10_000.0,
             stream_cache: false,
             prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };
@@ -3005,6 +3035,7 @@ mod tests {
             throughput_interval_sec: 10_000.0,
             stream_cache: false,
             prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };

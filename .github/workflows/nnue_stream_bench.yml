@@ -78,6 +78,7 @@ jobs:
 
       - name: Summarize
         run: |
+          set -e
           P0=$(grep -Eo "sps=[0-9]+" bench_pref0.log | tail -n1 | sed -E 's/.*sps=([0-9]+)/\1/')
           L0=$(grep -Eo "loader_ratio=[0-9]+\.[0-9]+%" bench_pref0.log | tail -n1 | sed -E 's/.*loader_ratio=([0-9]+\.[0-9]+)%.*/\1/')
           P8=$(grep -Eo "sps=[0-9]+" bench_pref8.log | tail -n1 | sed -E 's/.*sps=([0-9]+)/\1/')
@@ -85,12 +86,7 @@ jobs:
           echo "prefetch=0 sps=$P0 loader_ratio=${L0}%"
           echo "prefetch=8 sps=$P8 loader_ratio=${L8}%"
           if [ -n "$P0" ] && [ -n "$P8" ]; then \
-            IMP=$(python3 - << 'PY'
-import os
-p0=int(os.environ['P0']); p8=int(os.environ['P8'])
-print(f"{(p8-p0)/max(1,p0)*100:.1f}")
-PY
-            ); \
+            IMP=$(awk -v p0="$P0" -v p8="$P8" 'BEGIN{ if(p0<1){print 0.0} else {printf "%.1f", (p8-p0)/p0*100} }'); \
             echo "Improvement: ${IMP}%"; \
             echo "### NNUE stream-cache bench" >> $GITHUB_STEP_SUMMARY; \
             echo "- prefetch=0: sps=$P0, loader_ratio=${L0}%" >> $GITHUB_STEP_SUMMARY; \
