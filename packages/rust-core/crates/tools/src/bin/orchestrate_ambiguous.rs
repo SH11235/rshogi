@@ -233,13 +233,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn glob_pass2_outputs_single_file_compressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("pass2.jsonl");
+        let gz = dir.path().join("pass2.jsonl.gz");
+        std::fs::write(&gz, b"\n").unwrap();
+        let outs = glob_pass2_outputs(&base).unwrap();
+        let names: Vec<String> = outs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["pass2.jsonl.gz"]);
+    }
+
     #[cfg(windows)]
     #[test]
     fn sh_quote_windows_doubles_quotes() {
-        let s = r#"C:\\Program Files\\X \"Y\""#;
-        // literal above equals: C:\Program Files\X "Y"
+        // Use a normal string so that the runtime content has single backslashes
+        let s = "C:\\Program Files\\X \"Y\""; // C:\Program Files\X "Y"
         let quoted = sh_quote(s);
-        assert_eq!(quoted, r#""C:\Program Files\X ""Y"""#);
+        let expected = format!("\"{}\"", s.replace('"', "\"\""));
+        assert_eq!(quoted, expected);
     }
 
     #[cfg(not(windows))]
@@ -253,11 +268,7 @@ mod tests {
 
 fn default_final_manifest_path(final_out: &Path) -> PathBuf {
     let parent = final_out.parent().unwrap_or_else(|| Path::new("."));
-    let name = final_out.file_name().and_then(|s| s.to_str()).unwrap_or("final");
-    let name = name.strip_suffix(".zst").unwrap_or(name);
-    let name = name.strip_suffix(".gz").unwrap_or(name);
-    let stem = name.strip_suffix(".jsonl").unwrap_or(name);
-    parent.join(format!("{}.manifest.json", stem))
+    parent.join(format!("{}.manifest.json", stem_for_artifacts(final_out)))
 }
 
 #[cfg(windows)]
@@ -624,6 +635,15 @@ fn main() -> Result<()> {
             return Err(anyhow!("generate_nnue_training_data failed"));
         }
         pass2_outputs = glob_pass2_outputs(&pass2_base)?;
+        if pass2_outputs.is_empty() {
+            eprintln!(
+                "[warn] pass2 outputs not found under {}; merge will use only pass1 inputs",
+                pass2_base
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .display()
+            );
+        }
     }
 
     // Resolve pass2 count from aggregated manifest if present
