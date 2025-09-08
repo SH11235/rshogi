@@ -1,6 +1,5 @@
 use assert_cmd::prelude::*;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;

@@ -1,0 +1,99 @@
+##
+## NNUE ストリームローダ ベンチ（手動）
+##
+## 目的
+## - stream-cache ローダとプリフェッチの効果を手動で検証します。
+## - prefetch=0（同期）と prefetch=8（非同期）で examples/sec（sps）と loader_ratio を比較し、
+##   ジョブサマリに要約を出力します。
+## - CI のゲートには使わず、手元確認・回帰検知の補助を目的としています。
+##
+## 実行方法
+## - GitHub Actions 画面: Actions -> 「NNUE Stream Loader Bench (manual)」-> 「Run workflow」。
+## - 処理内容: tools をビルド → 小規模 JSONL 生成 → gzip キャッシュ作成 → 1 epoch 学習 →
+##   sps / loader_ratio をジョブサマリに出力します。
+##
+## 注意
+## - ランナー依存を減らすため gzip を使用（zstd 機能は不要）。
+## - ランタイム短縮のため小さなデータセットを使用。詳細な比較は batch / acc-dim / データ量を調整してください。
+## - 閾値での自動失敗は行っていません（必要に応じてしきい値チェックを追加してください）。
+##
+name: NNUE Stream Loader Bench (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/rust-core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/rust-core
+
+      - name: Build tools (release)
+        run: |
+          cargo build --release -p tools
+
+      - name: Create small JSONL dataset
+        run: |
+          mkdir -p runs
+          DATA=runs/gha_small.jsonl
+          # Two simple positions, repeated to ~10k samples after orientation split
+          echo '{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1","eval":100,"depth":10,"seldepth":12,"bound1":"Exact","bound2":"Exact","best2_gap_cp":25}' > $DATA
+          echo '{"sfen":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1","eval":-50,"depth":11,"seldepth":14,"bound1":"Exact","bound2":"Exact","best2_gap_cp":20}' >> $DATA
+          for i in $(seq 1 13); do cat $DATA >> $DATA.tmp; cat $DATA >> $DATA.tmp; mv $DATA.tmp $DATA; done
+          wc -l $DATA
+
+      - name: Build gzip cache
+        run: |
+          cargo run --release -p tools --bin build_feature_cache -- \
+            -i runs/gha_small.jsonl -o runs/gha_small.cache.gz -l wdl --scale 600 \
+            --compress --compressor gz --compress-level 9
+
+      - name: Bench prefetch=0 (stream-sync)
+        run: |
+          set -e
+          cargo run --release -p tools --bin train_nnue -- \
+            -i runs/gha_small.cache.gz -e 1 -b 8192 --acc-dim 8 --stream-cache --prefetch-batches 0 --throughput-interval 1.0 \
+            | tee bench_pref0.log
+          grep -n "^Epoch 1/1:" bench_pref0.log || true
+
+      - name: Bench prefetch=8 (stream)
+        run: |
+          set -e
+          cargo run --release -p tools --bin train_nnue -- \
+            -i runs/gha_small.cache.gz -e 1 -b 8192 --acc-dim 8 --stream-cache --prefetch-batches 8 --throughput-interval 1.0 \
+            | tee bench_pref8.log
+          grep -n "^Epoch 1/1:" bench_pref8.log || true
+
+      - name: Summarize
+        run: |
+          P0=$(grep -Eo "sps=[0-9]+" bench_pref0.log | tail -n1 | sed -E 's/.*sps=([0-9]+)/\1/')
+          L0=$(grep -Eo "loader_ratio=[0-9]+\.[0-9]+%" bench_pref0.log | tail -n1 | sed -E 's/.*loader_ratio=([0-9]+\.[0-9]+)%.*/\1/')
+          P8=$(grep -Eo "sps=[0-9]+" bench_pref8.log | tail -n1 | sed -E 's/.*sps=([0-9]+)/\1/')
+          L8=$(grep -Eo "loader_ratio=[0-9]+\.[0-9]+%" bench_pref8.log | tail -n1 | sed -E 's/.*loader_ratio=([0-9]+\.[0-9]+)%.*/\1/')
+          echo "prefetch=0 sps=$P0 loader_ratio=${L0}%"
+          echo "prefetch=8 sps=$P8 loader_ratio=${L8}%"
+          if [ -n "$P0" ] && [ -n "$P8" ]; then \
+            IMP=$(python3 - << 'PY'
+import os
+p0=int(os.environ['P0']); p8=int(os.environ['P8'])
+print(f"{(p8-p0)/max(1,p0)*100:.1f}")
+PY
+            ); \
+            echo "Improvement: ${IMP}%"; \
+            echo "### NNUE stream-cache bench" >> $GITHUB_STEP_SUMMARY; \
+            echo "- prefetch=0: sps=$P0, loader_ratio=${L0}%" >> $GITHUB_STEP_SUMMARY; \
+            echo "- prefetch=8: sps=$P8, loader_ratio=${L8}%" >> $GITHUB_STEP_SUMMARY; \
+            echo "- improvement: ${IMP}%" >> $GITHUB_STEP_SUMMARY; \
+          fi

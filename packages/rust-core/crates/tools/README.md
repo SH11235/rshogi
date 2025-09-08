@@ -54,6 +54,24 @@ cargo run --release -p tools --bin train_nnue -- \
 # 量子化モデルの保存
 cargo run --release -p tools --bin train_nnue -- \
   -i runs/out_pass1.cache -e 1 --quantized -o runs/my_nnue_q
+
+# スループット表示と非同期プリフェッチ（キャッシュ入力時）
+cargo run --release -p tools --bin train_nnue -- \
+  -i runs/out_pass1.cache -e 1 -b 16384 --prefetch-batches 4 --throughput-interval 2.0
+  # => [throughput] sps(=samples/sec), bps(=batches/sec), avg_batch を定期表示
+  #    prefetch-batches=0 を指定すると同期モード（mode=sync）で動作
+
+## ストリーミング学習モード（大規模/圧縮キャッシュ向け）
+
+学習前に全量をメモリ化せず、キャッシュをバックグラウンドで逐次読み込みます。
+シャッフルは無効化（現状）。ローダ待ち比率（loader_ratio）と sps の改善を比較できます。
+
+```bash
+cargo run --release -p tools --bin train_nnue -- \
+  -i runs/out_pass1.cache -e 1 -b 16384 \
+  --stream-cache --prefetch-batches 4 --throughput-interval 2.0
+# ログ: [throughput] mode=stream ... loader_ratio=...%
+```
 ```
 
 4) 品質解析（ゲート/要約/複数入力の比較）
