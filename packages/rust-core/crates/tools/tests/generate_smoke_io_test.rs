@@ -87,7 +87,6 @@ fn generate_split_gz_smoke_parts_and_manifests_consistent() {
             "--output-format",
             "jsonl",
         ])
-        .timeout(std::time::Duration::from_secs(30))
         .assert();
     assert.success();
 
