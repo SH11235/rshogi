@@ -1,0 +1,115 @@
+# 曖昧掘りオーケストレーション（orchestrate_ambiguous）
+
+`orchestrate_ambiguous` は、初回注釈（pass1）から曖昧局面を抽出し、強設定で再注釈（K=3/entropy）して最終マージまでを 1 コマンドで実行するツールです。マージは常に depth-first を明示し、系譜（provenance）と整合性を orchestration manifest に記録します。
+
+## 概要
+- 入力: pass1 の JSONL（複数可、.gz/.zst 対応）
+- 処理: 抽出（gap, 非Exact など）→ 正規化・ユニーク化 → 再注釈（generate）→ マージ
+- 出力: 最終 JSONL と最終 manifest（aggregated）、オーケストレーション manifest
+
+## すぐ使う
+```bash
+cargo run --release -p tools --bin orchestrate_ambiguous -- \
+  --pass1 runs/out_pass1.jsonl \
+  --final runs/final.jsonl \
+  --gap-threshold 35 \
+  --engine enhanced --teacher-profile balanced --multipv 3 --hash-mb 64 \
+  --split 200000 --compress gz
+```
+- ドライラン（実行計画のみ表示）
+```bash
+cargo run --release -p tools --bin orchestrate_ambiguous -- \
+  --pass1 runs/out_pass1.jsonl --final runs/final.jsonl --dry-run
+```
+
+## 主なオプション
+- 入出力
+  - `--pass1 <FILE>`（複数可）: 初回注釈の JSONL
+  - `--final <FILE>`: マージ後の最終 JSONL
+  - `--out-dir <DIR>`: 中間物の保存先（既定: `<final>` と同階層に `.<stem>.ambdig/`）
+  - `--manifest-out <FILE>`: オーケストレーション manifest の保存先（既定: `<out-dir>/orchestrate_ambiguous.manifest.json`）
+- 抽出（extract_flagged_positions）
+  - `--gap-threshold <cp>`（既定35）／`--include-non-exact`／`--include-aspiration-failures <N>`／`--include-mate-boundary`
+- 再注釈（generate_nnue_training_data）
+  - `--engine`／`--nnue-weights`／`--teacher-profile`（既定 balanced。orchestrator から generate に委譲）
+  - `--multipv <k>`（既定3）／`--min-depth <d>`（既定は pass1 の `effective_min_depth + 1` 推定）
+  - `--nodes <N>` または `--time-limit-ms <ms>`／`--jobs`／`--hash-mb`／`--reuse-tt`
+  - `--split <N>`／`--compress {gz|zst}`（zstは `--features zstd`）
+  - 曖昧/entropy: `--amb-gap2-threshold`／`--amb-allow-inexact`／`--entropy-mate-mode`／`--entropy-scale`
+- マージ（merge_annotation_results）
+  - `--merge-mode depth-first`（常に明示）／`--dedup-by-sfen`（常に有効）
+- 要約
+  - `--analyze-summary`（JSON は `quality.json` に保存、サマリはコンソールに出力。pass2 の `multipv` を検知して `--expected-multipv` を自動設定）
+- 実行制御
+  - `--dry-run`（extract/normalize/generate/merge/analyze の全コマンド計画を表示）／`--verbose`／`--keep-intermediate`（既定ON）
+
+## 推奨設定
+- 抽出：`--gap-threshold 35`（広めに拾う）
+- 再注釈：`--multipv 3`, `--teacher-profile balanced`、`--min-depth` は pass1+1 を既定
+- マージ：`--merge-mode depth-first`（オーケストレータが常に明示）
+
+## オーケストレーション manifest
+`<out-dir>/orchestrate_ambiguous.manifest.json` に、系譜・オプション・要約を記録します。
+- `inputs[]`: pass1 入力と manifest 自動解決（B案）の結果
+- `extract`: 抽出条件と `pass2_input.sfens` の `sha256/bytes`、抽出件数
+- `reannotate`: generate のコマンドオプション、検出した part/aggregate manifest、生成件数
+- `merge`: マージモード、入力一覧、`final` のパス、`final_written`
+- `counts`: `extracted` / `pass2_generated` / `final_written`
+- `analyze`（任意）: `quality.json` の参照
+
+整合チェック（期待関係）
+- `final.manifest.aggregated.written_lines == counts.final_written`
+- `pass1_total >= extracted >= pass2_generated >= final_written`（成立しない場合は警告）
+
+### 例（抜粋）
+```json
+{
+  "tool": "orchestrate_ambiguous",
+  "generated_at": "2025-09-08T12:34:56Z",
+  "inputs": [
+    {"path": "runs/p1.jsonl", "resolved_manifest_verified": true}
+  ],
+  "extract": {
+    "opts": {"gap_threshold": 35},
+    "sfens": {"path": ".final.ambdig/pass2_input.sfens", "sha256": "...", "bytes": 12345},
+    "extracted_count": 1024
+  },
+  "reannotate": {
+    "base": ".final.ambdig/pass2.jsonl",
+    "outputs": [
+      ".final.ambdig/pass2.part-0001.jsonl.gz",
+      ".final.ambdig/pass2.part-0002.jsonl.gz"
+    ],
+    "opts": {"engine": "enhanced", "multipv": 3, "min_depth": 3, "hash_mb": 64},
+    "pass2_generated": 1000
+  },
+  "merge": {
+    "mode": "depth-first",
+    "final": "runs/final.jsonl",
+    "manifest_out": "runs/final.manifest.json",
+    "final_written": 980
+  },
+  "counts": {"extracted": 1024, "pass2_generated": 1000, "final_written": 980},
+  "analyze": {"summary_json": ".final.ambdig/quality.json"}
+}
+```
+
+## トラブルシュート
+- 抽出 0 件
+  - 正常動作です。再注釈/マージはスキップされ、orchestration manifest のみ出力されます。
+- `--compress zst` で失敗
+  - `tools` クレートを `--features zstd` でビルドしてください。
+- 解析（`--analyze-summary`）が失敗
+  - 解析コマンドが非0終了でも出力がある場合は `quality.json` を保存します。出力が空の場合のみスキップします。
+
+## 関連
+- 設計ドキュメント: `docs/tasks/orchestrate_ambiguous_plan.md`
+- 生成ツール詳細: `docs/tools/nnue-training-data-guide.md`
+
+## CI連携の例（参考）
+```bash
+# 生成済み final.jsonl に対して Gate 実行（例）
+cargo run --release -p tools --bin analyze_teaching_quality -- \
+  runs/final.jsonl --summary --gate crates/tools/ci_gate.sample.json --gate-mode fail \
+  --manifest-autoload-mode strict
+```

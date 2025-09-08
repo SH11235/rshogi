@@ -7,6 +7,9 @@
 - 出力: 学習用 JSONL（またはテキスト）と `manifest.json`（v2）。
 - 目的: NNUE 学習に用いる教師データの安定生成・再現性確保・実行状況の可視化。
 
+関連ツール:
+- 曖昧掘りを自動化する一括オーケストレーションは [orchestrate_ambiguous](./ambiguous-mining-orchestrator.md) を参照（抽出→再注釈→マージ）。
+
 ## 主要オプション
 - 予算: `--time-limit-ms <ms>` もしくは `--nodes <n>` のいずれか（同時指定は nodes 優先）。
 - エンジン: `--engine {material|enhanced|nnue|enhanced-nnue}`、`--teacher-profile {safe|balanced|aggressive}`。
@@ -98,4 +101,3 @@
 
 ## 互換性
 - スキーマは後方互換: 新規項目は Optional。`manifest_version=2` のまま拡張。
-
