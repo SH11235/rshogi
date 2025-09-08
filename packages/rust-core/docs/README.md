@@ -30,6 +30,7 @@ Shogi AIエンジン (rust-core) の技術ドキュメント集です。
 ### 🛠️ Tools
 - [**Opening Book ツール**](tools/opening-book-tools-guide.md) - 定跡データ変換・検証ツール
 - [**NNUE 教師データ生成**](tools/nnue-training-data-guide.md) - generate_nnue_training_data の運用ガイド（構造化ログ/manifest v2）
+- [**曖昧掘りオーケストレーション**](tools/ambiguous-mining-orchestrator.md) - 抽出→再注釈→マージを1コマンドで実行（系譜/整合性を記録）
 
 ### 📝 Implementation Notes
 - [**Rustプリプロセッシング計画**](implementation/rust-preprocessing-scripts-plan.md) - Rust実装の計画文書

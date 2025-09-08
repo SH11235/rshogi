@@ -231,3 +231,37 @@ cargo run --release -p tools --bin analyze_teaching_quality -- \
 
 ### JSONL出力の補足
 - `lines_origin`: `k2` または `k3` を記録（K=3再探索で採用したかの可観測性）。
+
+## 曖昧掘りオーケストレーション（抽出→再注釈→マージ）
+
+1コマンドで pass1 の結果から曖昧候補を抽出し、強設定で再注釈（K=3/entropy等）して最終マージまでを行います。マージは常に `--mode depth-first` を明示し、再現性を担保します。中間ファイルと系譜は orchestration manifest に記録されます。
+
+```bash
+# 例: pass1(out_pass1.jsonl)から曖昧抽出→再注釈→マージ
+cargo run --release -p tools --bin orchestrate_ambiguous -- \
+  --pass1 runs/out_pass1.jsonl \
+  --final runs/final.jsonl \
+  --gap-threshold 35 \
+  --engine enhanced --multipv 3 --hash-mb 64 \
+  --split 200000 --compress gz
+
+# ドライラン（実行計画のみ表示）
+cargo run --release -p tools --bin orchestrate_ambiguous -- \
+  --pass1 runs/out_pass1.jsonl --final runs/final.jsonl --dry-run
+```
+
+主なオプション:
+- 抽出: `--gap-threshold <cp>`、`--include-non-exact`、`--include-aspiration-failures <N>`、`--include-mate-boundary`
+- 再注釈(generate 委譲): `--engine`、`--nnue-weights`、`--teacher-profile`、`--multipv`、`--min-depth`、`--nodes|--time-limit-ms`、`--jobs`、`--hash-mb`、`--reuse-tt`、`--split`、`--compress`
+- 曖昧/entropy: `--amb-gap2-threshold`、`--amb-allow-inexact`、`--entropy-mate-mode`、`--entropy-scale`
+- マージ: `--merge-mode depth-first`（常に明示）
+- 要約: `--analyze-summary`（JSONを `<out-dir>/quality.json` に保存）
+
+出力:
+- `<final>.manifest.json`: マージ結果の aggregated manifest
+- `<out-dir>/orchestrate_ambiguous.manifest.json`: オーケストレーション全体の系譜と整合サマリ
+
+補足:
+- マージモードは常に `--mode depth-first` を明示（既定の exact-first と混同しない）。
+- `--analyze-summary` は pass2 の `multipv` を検知して `--expected-multipv` を自動設定します（検出不可時は CLI の `--multipv` を使用）。
+- 詳細設計は `docs/tasks/orchestrate_ambiguous_plan.md` を参照。
