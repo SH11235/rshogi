@@ -29,6 +29,12 @@
 - WASM tests: `wasm-pack test --chrome --headless` in `crates/engine-wasm`.
 - Run focused tests: `cargo test module_name` or `cargo test path::to::test -- --nocapture`.
 
+### Focused Test Naming Rules
+- zstd-related tests: name with `test_zstd_` prefix to enable focused runs.
+  - Example names: `test_zstd_merge_input`, `test_zstd_input_merge_and_extract`.
+  - Run only zstd tests: `cargo test --release -p tools --features zstd -- test_zstd`.
+  - Always include `--features zstd` when running these tests.
+
 ## Commit & Pull Request Guidelines
 - Commits: prefer Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `perf:`, `test:`). Keep messages imperative and scoped (e.g., `feat(movegen): optimize drops`).
 - PRs: include clear description, rationale, benchmarks if performance-related, and link issues. Add screenshots/logs for USI behavior when relevant. Ensure `fmt`, `clippy`, and tests pass.

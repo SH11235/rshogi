@@ -20,10 +20,7 @@
     "format": "biome format --write .",
     "format:check": "biome check .",
     "clean": "turbo clean && rm -rf node_modules packages/*/node_modules packages/*/dist",
-    "pre-commit": "lint-staged",
-    "build:wasm": "cd packages/rust-core && make build",
-    "build:wasm:dev": "cd packages/rust-core && make build-dev",
-    "postinstall": "echo 'Note: WASM files need to be built. Run: npm run build:wasm'"
+    "pre-commit": "lint-staged"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
@@ -41,9 +38,6 @@
   "lint-staged": {
     "**/*.{ts,tsx,js,jsx,css}": [
       "biome check --write --files-ignore-unknown=true"
-    ],
-    "packages/rust-core/**/*.rs": [
-      "packages/rust-core/scripts/pre-commit-rust.sh"
     ]
   }
 }

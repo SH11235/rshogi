@@ -1,69 +1,76 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use clap::Parser;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use serde_json::Value;
 
+use tools::common::io::{open_reader, open_writer, Writer};
+
+// open_reader moved to tools::common::io
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "extract_flagged_positions",
+    about = "Extract SFENs from JSONL by flags/thresholds.",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    /// Input JSONL path or '-' for STDIN
+    input: String,
+    /// Optional output path for SFENs or '-' for STDOUT (default: STDOUT)
+    output: Option<String>,
+    /// Include when best2_gap_cp <= threshold (alias: --max-gap-cp)
+    #[arg(long = "gap-threshold", alias = "max-gap-cp")]
+    gap_threshold: Option<i64>,
+    /// Include non-exact records
+    #[arg(long)]
+    include_non_exact: bool,
+    /// Include when aspiration_retries >= N
+    #[arg(long = "include-aspiration-failures", value_name = "N")]
+    include_aspiration_failures: Option<i64>,
+    /// Include when any line has mate_distance
+    #[arg(long)]
+    include_mate_boundary: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: {} <input.jsonl> <output.sfens> [--gap-threshold <cp>] [--include-non-exact] [--include-aspiration-failures <n>] [--include-mate-boundary]", args[0]);
-        std::process::exit(1);
-    }
+    let cli = Cli::parse();
+    let input = PathBuf::from(&cli.input);
+    let output_opt = cli.output.as_ref().map(PathBuf::from);
+    let gap_threshold = cli.gap_threshold;
+    let include_non_exact = cli.include_non_exact;
+    let include_asp_fail = cli.include_aspiration_failures;
+    let include_mate_boundary = cli.include_mate_boundary;
 
-    let input = PathBuf::from(&args[1]);
-    let output = PathBuf::from(&args[2]);
+    let reader = open_reader(&input)?;
+    // Choose output: file or stdout (compressed if extension suggests)
+    let mut out: Writer = match output_opt {
+        Some(path) => open_writer(&path)?,
+        None => open_writer("-")?,
+    };
 
-    let mut gap_threshold: Option<i64> = None;
-    let mut include_non_exact = false;
-    let mut include_asp_fail: Option<i64> = None;
-    let mut include_mate_boundary = false;
-
-    let mut i = 3;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--gap-threshold" => {
-                gap_threshold = args.get(i + 1).and_then(|s| s.parse::<i64>().ok());
-                i += 2;
-            }
-            "--include-non-exact" => {
-                include_non_exact = true;
-                i += 1;
-            }
-            "--include-aspiration-failures" => {
-                include_asp_fail = args.get(i + 1).and_then(|s| s.parse::<i64>().ok());
-                i += 2;
-            }
-            "--include-mate-boundary" => {
-                include_mate_boundary = true;
-                i += 1;
-            }
-            other => {
-                eprintln!("Unknown option: {}", other);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let f = File::open(input)?;
-    let reader = BufReader::new(f);
-    let mut out = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(output)?;
-
-    for line in reader.lines() {
+    for (line_idx, line) in reader.lines().enumerate() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("[warn] read error at {}:{} -> {}", input.display(), line_idx + 1, e);
+                continue;
+            }
         };
         if line.trim().is_empty() {
             continue;
         }
         let v: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!(
+                    "[warn] json parse error at {}:{} -> {}",
+                    input.display(),
+                    line_idx + 1,
+                    e
+                );
+                continue;
+            }
         };
 
         let sfen = v.get("sfen").and_then(|x| x.as_str());
@@ -81,12 +88,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        // Non-exact condition
+        // Non-exact condition (+ fallback to lines[0..1].bound)
         if include_non_exact {
             let b1 = v.get("bound1").and_then(|x| x.as_str());
             let b2 = v.get("bound2").and_then(|x| x.as_str());
-            if matches!(b1, Some(b) if b != "Exact") || matches!(b2, Some(b) if b != "Exact") {
+            let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
+            if matches!(b1, Some(b) if !is_exact(b)) || matches!(b2, Some(b) if !is_exact(b)) {
                 flag = true;
+            } else if !flag {
+                // fallback: inspect lines[0..1].bound when bound1/2 are absent
+                let lines_non_exact = v.get("lines").and_then(|x| x.as_array()).is_some_and(|ls| {
+                    let b = |i| {
+                        ls.get(i)
+                            .and_then(|l: &serde_json::Value| l.get("bound"))
+                            .and_then(|x| x.as_str())
+                    };
+                    matches!(b(0), Some(s) if !is_exact(s))
+                        || matches!(b(1), Some(s) if !is_exact(s))
+                });
+                if lines_non_exact {
+                    flag = true;
+                }
             }
         }
         // Aspiration failures
@@ -97,9 +119,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        // Mate boundary
+        // Mate boundary (record-level flag or any line has mate_distance)
         if include_mate_boundary {
-            if let Some(lines) = v.get("lines").and_then(|x| x.as_array()) {
+            if v.get("mate_boundary").and_then(|x| x.as_bool()) == Some(true) {
+                flag = true;
+            } else if let Some(lines) = v.get("lines").and_then(|x| x.as_array()) {
                 if lines.iter().any(|l| l.get("mate_distance").and_then(|m| m.as_i64()).is_some()) {
                     flag = true;
                 }
@@ -111,5 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Ensure output is finalized
+    out.close()?;
     Ok(())
 }

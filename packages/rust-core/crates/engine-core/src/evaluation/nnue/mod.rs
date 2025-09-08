@@ -38,6 +38,7 @@ pub mod error;
 pub mod features;
 pub mod network;
 pub mod simd;
+pub mod single;
 pub mod weights;
 
 use crate::shogi::Move;
@@ -49,7 +50,7 @@ use error::{NNUEError, NNUEResult};
 use network::Network;
 use std::error::Error;
 use std::sync::Arc;
-use weights::load_weights;
+use weights::{load_single_weights, load_weights};
 
 #[cfg(debug_assertions)]
 use log::warn;
@@ -124,95 +125,130 @@ impl NNUEEvaluator {
 }
 
 /// Wrapper for integration with Phase 1 Evaluator trait
+enum Backend {
+    Classic {
+        evaluator: NNUEEvaluator,
+        accumulator_stack: Vec<Accumulator>,
+    },
+    Single {
+        net: std::sync::Arc<single::SingleChannelNet>,
+    },
+}
+
 pub struct NNUEEvaluatorWrapper {
-    evaluator: NNUEEvaluator,
-    accumulator_stack: Vec<Accumulator>,
+    backend: Backend,
 }
 
 impl NNUEEvaluatorWrapper {
     /// Create new wrapper from weights file
-    pub fn new(weights_path: &str) -> Result<Self, Box<dyn Error>> {
-        let evaluator = NNUEEvaluator::from_file(weights_path)?;
-        let mut initial_acc = Accumulator::new();
-
-        // Initialize with empty position
-        let empty_pos = Position::empty();
-        initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
-
-        Ok(NNUEEvaluatorWrapper {
-            evaluator,
-            accumulator_stack: vec![initial_acc],
-        })
+    pub fn new(weights_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        if let Ok((ft, net)) = load_weights(weights_path) {
+            let evaluator = NNUEEvaluator {
+                feature_transformer: std::sync::Arc::new(ft),
+                network: std::sync::Arc::new(net),
+            };
+            let mut initial_acc = Accumulator::new();
+            let empty_pos = Position::empty();
+            initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
+            return Ok(NNUEEvaluatorWrapper {
+                backend: Backend::Classic {
+                    evaluator,
+                    accumulator_stack: vec![initial_acc],
+                },
+            });
+        }
+        if let Ok(net) = load_single_weights(weights_path) {
+            return Ok(NNUEEvaluatorWrapper {
+                backend: Backend::Single {
+                    net: std::sync::Arc::new(net),
+                },
+            });
+        }
+        Err("Failed to load NNUE weights (unsupported format)".into())
     }
 
     /// Update accumulator when making a move
     pub fn do_move(&mut self, pos: &Position, mv: Move) -> NNUEResult<()> {
-        let current_acc = self.accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
-        let mut new_acc = current_acc.clone();
-
-        // Calculate differential update
-        let update = accumulator::calculate_update(pos, mv)?;
-
-        // Update both perspectives
-        new_acc.update(&update, Color::Black, &self.evaluator.feature_transformer);
-        new_acc.update(&update, Color::White, &self.evaluator.feature_transformer);
-
-        self.accumulator_stack.push(new_acc);
-        Ok(())
+        match &mut self.backend {
+            Backend::Classic {
+                evaluator,
+                accumulator_stack,
+            } => {
+                let current_acc =
+                    accumulator_stack.last().ok_or(NNUEError::EmptyAccumulatorStack)?;
+                let mut new_acc = current_acc.clone();
+                let update = accumulator::calculate_update(pos, mv)?;
+                new_acc.update(&update, Color::Black, &evaluator.feature_transformer);
+                new_acc.update(&update, Color::White, &evaluator.feature_transformer);
+                accumulator_stack.push(new_acc);
+                Ok(())
+            }
+            Backend::Single { .. } => Ok(()),
+        }
     }
 
     /// Undo last move
     pub fn undo_move(&mut self) {
-        if self.accumulator_stack.len() > 1 {
-            self.accumulator_stack.pop();
+        if let Backend::Classic {
+            accumulator_stack, ..
+        } = &mut self.backend
+        {
+            if accumulator_stack.len() > 1 {
+                accumulator_stack.pop();
+            }
         }
     }
 
     /// Reset to position
     pub fn set_position(&mut self, pos: &Position) {
-        self.accumulator_stack.clear();
-
-        let mut acc = Accumulator::new();
-        acc.refresh(pos, &self.evaluator.feature_transformer);
-
-        self.accumulator_stack.push(acc);
+        if let Backend::Classic {
+            evaluator,
+            accumulator_stack,
+        } = &mut self.backend
+        {
+            accumulator_stack.clear();
+            let mut acc = Accumulator::new();
+            acc.refresh(pos, &evaluator.feature_transformer);
+            accumulator_stack.push(acc);
+        }
     }
 
     /// Create zero-initialized evaluator (for testing)
     pub fn zero() -> Self {
         let evaluator = NNUEEvaluator::zero();
         let mut initial_acc = Accumulator::new();
-
-        // Initialize with empty position
         let empty_pos = Position::empty();
         initial_acc.refresh(&empty_pos, &evaluator.feature_transformer);
-
         NNUEEvaluatorWrapper {
-            evaluator,
-            accumulator_stack: vec![initial_acc],
+            backend: Backend::Classic {
+                evaluator,
+                accumulator_stack: vec![initial_acc],
+            },
         }
     }
 }
 
 impl Evaluator for NNUEEvaluatorWrapper {
     fn evaluate(&self, pos: &Position) -> i32 {
-        // Since Evaluator trait doesn't support Result, we need to handle errors internally
-        let accumulator = match self.accumulator_stack.last() {
-            Some(acc) => acc,
-            None => {
-                // This should never happen in normal usage - accumulator stack should always have at least one entry
-                #[cfg(debug_assertions)]
-                warn!("[NNUE] Empty accumulator stack in evaluation, returning 0");
-
-                // Return 0 evaluation as fallback
-                // In production, this error is silent to avoid performance impact
-                return 0;
+        match &self.backend {
+            Backend::Classic {
+                evaluator,
+                accumulator_stack,
+            } => {
+                let accumulator = match accumulator_stack.last() {
+                    Some(acc) => acc,
+                    None => {
+                        #[cfg(debug_assertions)]
+                        warn!("[NNUE] Empty accumulator stack");
+                        return 0;
+                    }
+                };
+                evaluator.evaluate_with_accumulator(pos, accumulator)
             }
-        };
-        self.evaluator.evaluate_with_accumulator(pos, accumulator)
+            Backend::Single { net } => net.evaluate(pos),
+        }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use crate::{shogi::Move, usi::parse_usi_square, Piece, PieceType};

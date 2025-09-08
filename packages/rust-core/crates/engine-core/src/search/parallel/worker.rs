@@ -61,6 +61,38 @@ impl Drop for WorkerGuard {
     }
 }
 
+/// RAII guard to ensure pending work counter is decremented exactly once
+struct PendingWorkGuard {
+    counter: Arc<AtomicU64>,
+    active: bool,
+}
+
+impl PendingWorkGuard {
+    fn new(counter: Arc<AtomicU64>) -> Self {
+        Self {
+            counter,
+            active: true,
+        }
+    }
+
+    /// Prevent decrement (if ownership of accounting was transferred)
+    #[allow(dead_code)]
+    fn disarm(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PendingWorkGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+            if log::log_enabled!(log::Level::Trace) {
+                log::trace!("PendingWorkGuard: pending work decremented");
+            }
+        }
+    }
+}
+
 /// Start a worker thread with a pre-created worker
 pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
     config: WorkerConfig<E>,
@@ -105,6 +137,9 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                     // IMPORTANT: Guard must be created here (after work is obtained, before processing)
                     // to ensure proper active worker count even with early returns or panics
                     let _guard = WorkerGuard::new(active_workers.clone());
+
+                    // Ensure pending work is decremented even if this thread panics while processing
+                    let _pending_guard = PendingWorkGuard::new(pending_work_items.clone());
 
                     match work {
                         WorkItem::RootBatch {
@@ -167,9 +202,6 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
                         debug!("Worker {log_id} work completed");
                     }
 
-                    // Decrement pending work counter
-                    pending_work_items.fetch_sub(1, Ordering::AcqRel);
-
                     // Note: WorkerGuard will automatically decrement active_workers when dropped
                     // Note: SearchThread internally handles node counting and reporting to shared_state
 
@@ -204,6 +236,28 @@ pub fn start_worker_with<E: Evaluator + Send + Sync + 'static>(
 
             // SearchThread automatically flushes nodes when work is completed
             // No need for manual node reporting here
+
+            // After stop or normal loop exit, drain any remaining enqueued work items
+            // without processing them to keep pending_work_items consistent.
+            // This prevents leftover pending counts when stop is requested while work remains queued.
+            loop {
+                let pending_left = pending_work_items.load(Ordering::Acquire);
+                if pending_left == 0 {
+                    break;
+                }
+                match get_job(&worker, &queues, my_stealer_index, &steal_success, &steal_failure) {
+                    Some(_item) => {
+                        // Cancel the work item by accounting only
+                        pending_work_items.fetch_sub(1, Ordering::AcqRel);
+                        if log::log_enabled!(log::Level::Trace) {
+                            log::trace!("Worker {log_id} drained one pending work item (remaining before: {pending_left})");
+                        }
+                        // Continue draining until queues appear empty or counter reaches zero
+                        continue;
+                    }
+                    None => break,
+                }
+            }
 
             if log::log_enabled!(log::Level::Debug) {
                 debug!("Worker {log_id} stopped");

@@ -2,8 +2,6 @@ use clap::Parser;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
-use std::fs::File;
-use std::io::BufReader;
 
 use rand::Rng;
 use rand::SeedableRng;
@@ -11,6 +9,8 @@ use rand_xoshiro::Xoshiro256StarStar;
 use serde::Deserialize;
 use serde_json::de::Deserializer;
 use serde_json::{json, Value};
+use tools::common::io::open_reader;
+use tools::common::manifest::{resolve_manifest, AutoloadMode};
 use tools::stats::{compute_stats_exact, quantile_sorted, OnlineP2, OnlineTDigest};
 
 // Phase 1-1: 型定義とストリーミング基盤
@@ -175,11 +175,14 @@ impl Agg {
             .as_deref()
             .or_else(|| rec.lines.get(1).and_then(|l| l.bound.as_deref()))
             .unwrap_or("");
+        // Case-insensitive checks for Exact and bound synonyms
+        let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
+        let norm = |s: &str| s.to_ascii_lowercase();
 
-        if b1 == "Exact" {
+        if is_exact(b1) {
             self.top1_exact += 1;
         }
-        if b1 == "Exact" && b2 == "Exact" {
+        if is_exact(b1) && is_exact(b2) {
             self.both_exact += 1;
         }
         if rec.lines.len() >= 2 {
@@ -188,16 +191,16 @@ impl Agg {
         }
 
         // bound distribution
-        match b1 {
-            "Exact" => self.b1_exact += 1,
-            "LowerBound" => self.b1_lower += 1,
-            "UpperBound" => self.b1_upper += 1,
+        match norm(b1).as_str() {
+            "exact" => self.b1_exact += 1,
+            "lower" | "lowerbound" => self.b1_lower += 1,
+            "upper" | "upperbound" => self.b1_upper += 1,
             _ => self.b1_other += 1,
         }
-        match b2 {
-            "Exact" => self.b2_exact += 1,
-            "LowerBound" => self.b2_lower += 1,
-            "UpperBound" => self.b2_upper += 1,
+        match norm(b2).as_str() {
+            "exact" => self.b2_exact += 1,
+            "lower" | "lowerbound" => self.b2_lower += 1,
+            "upper" | "upperbound" => self.b2_upper += 1,
             _ => self.b2_other += 1,
         }
 
@@ -222,8 +225,12 @@ impl Agg {
         if rec.lines.len() >= 2 {
             let l0 = &rec.lines[0];
             let l1 = &rec.lines[1];
-            let bound_ok =
-                l0.bound.as_deref() == Some("Exact") && l1.bound.as_deref() == Some("Exact");
+            let bound_ok = l0
+                .bound
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("Exact"))
+                .unwrap_or(false)
+                && l1.bound.as_deref().map(|s| s.eq_ignore_ascii_case("Exact")).unwrap_or(false);
             let mate_free = l0.mate_distance.is_none() && l1.mate_distance.is_none();
             let mut inserted_nm = false;
             if bound_ok && (mate_free || !exclude_mate) {
@@ -244,7 +251,8 @@ impl Agg {
                 }
             }
             // Invariant: mate_boundary==true なのに gap_no_mate に混入
-            if inserted_nm && rec.mate_boundary.unwrap_or(false) {
+            // ただし --with-mate（= exclude_mate == false）の時は混入を許容する
+            if exclude_mate && inserted_nm && rec.mate_boundary.unwrap_or(false) {
                 self.inv_mate_mixed_into_no_mate += 1;
             }
         }
@@ -286,7 +294,7 @@ impl Agg {
         if expected_mpv >= 2 && rec.lines.len() < expected_mpv {
             self.inv_mpv_lt_expected += 1;
         }
-        if rec.best2_gap_cp.is_some() && !(b1 == "Exact" && b2 == "Exact") {
+        if rec.best2_gap_cp.is_some() && !(is_exact(b1) && is_exact(b2)) {
             self.inv_gap_with_non_exact += 1;
         }
         // Invariant: no_legal_move==false なのに lines が空
@@ -325,7 +333,7 @@ impl Agg {
         }
 
         // non-exact reason hint aggregation (only when non-exact)
-        let is_non_exact = !(b1 == "Exact" && b2 == "Exact");
+        let is_non_exact = !(is_exact(b1) && is_exact(b2));
         if is_non_exact {
             self.non_exact_total += 1;
             let mut budget = false;
@@ -394,11 +402,12 @@ fn wilson_ci(k: usize, n: usize, z: f64) -> (f64, f64) {
     if n == 0 {
         return (0.0, 0.0);
     }
-    let p = k as f64 / n as f64;
+    let nf = n as f64;
+    let p = k as f64 / nf;
     let z2 = z * z;
-    let denom = 1.0 + z2 / (n as f64);
-    let center = p + z2 / (2.0 * n as f64);
-    let spread = (p * (1.0 - p) / (n as f64) + z2 / (4.0 * (n * n) as f64)).sqrt();
+    let denom = 1.0 + z2 / nf;
+    let center = p + z2 / (2.0 * nf);
+    let spread = (p * (1.0 - p) / nf + z2 / (4.0 * nf * nf)).sqrt();
     let low = (center - z * spread) / denom;
     let high = (center + z * spread) / denom;
     (low.clamp(0.0, 1.0), high.clamp(0.0, 1.0))
@@ -421,37 +430,6 @@ fn csv_escape(s: &str) -> String {
         s.to_string()
     }
 }
-
-fn open_reader(path: &str) -> std::io::Result<BufReader<Box<dyn std::io::Read>>> {
-    let file = File::open(path)?;
-    if path.ends_with(".gz") {
-        let dec = flate2::read::GzDecoder::new(file);
-        Ok(BufReader::new(Box::new(dec)))
-    } else if path.ends_with(".zst") {
-        #[cfg(feature = "zstd")]
-        {
-            let dec = zstd::stream::read::Decoder::new(file)?;
-            Ok(BufReader::new(Box::new(dec)))
-        }
-        #[cfg(not(feature = "zstd"))]
-        {
-            eprintln!(".zst input requires building tools with feature 'zstd'");
-            std::process::exit(1);
-        }
-    } else {
-        Ok(BufReader::new(Box::new(file)))
-    }
-}
-
-// moved: crate::stats::quantile_sorted
-
-// moved: crate::stats::StatsI64
-
-// removed legacy in-file P2/compute_stats (moved to tools::stats)
-
-// (removed: OnlineP2 moved to crate::stats)
-
-// (removed: TDigest/OnlineTDigest moved to crate::stats)
 
 fn ensure_p2(slot: &mut Option<OnlineP2>) -> &mut OnlineP2 {
     if slot.is_none() {
@@ -488,41 +466,46 @@ fn build_agg_for(
     seed: Option<u64>,
 ) -> Agg {
     let mut a = Agg::default();
-    if let Ok(reader) = open_reader(path) {
-        let cap = sample_n.unwrap_or(0);
-        let use_res = cap > 0;
-        let mut rng = make_rng(seed);
-        let stream = Deserializer::from_reader(reader).into_iter::<Record>();
-        if !use_res {
-            let mut ing = 0usize;
-            for rec in stream {
-                let Ok(rec) = rec else { continue };
-                a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
-                ing += 1;
-                if let Some(m) = limit {
-                    if ing >= m {
-                        break;
-                    }
+    let reader = match open_reader(path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("analyze_teaching_quality: failed to open {}: {}", path, e);
+            return a;
+        }
+    };
+    let cap = sample_n.unwrap_or(0);
+    let use_res = cap > 0;
+    let mut rng = make_rng(seed);
+    let stream = Deserializer::from_reader(reader).into_iter::<Record>();
+    if !use_res {
+        let mut ing = 0usize;
+        for rec in stream {
+            let Ok(rec) = rec else { continue };
+            a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
+            ing += 1;
+            if let Some(m) = limit {
+                if ing >= m {
+                    break;
                 }
             }
-        } else {
-            let mut seen = 0usize;
-            let mut reservoir: Vec<Record> = Vec::new();
-            for rec in stream {
-                let Ok(rec) = rec else { continue };
-                seen += 1;
-                if reservoir.len() < cap {
-                    reservoir.push(rec);
-                } else {
-                    let j = rng.random_range(0..seen);
-                    if j < cap {
-                        reservoir[j] = rec;
-                    }
+        }
+    } else {
+        let mut seen = 0usize;
+        let mut reservoir: Vec<Record> = Vec::new();
+        for rec in stream {
+            let Ok(rec) = rec else { continue };
+            seen += 1;
+            if reservoir.len() < cap {
+                reservoir.push(rec);
+            } else {
+                let j = rng.random_range(0..seen);
+                if j < cap {
+                    reservoir[j] = rec;
                 }
             }
-            for rec in reservoir.into_iter() {
-                a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
-            }
+        }
+        for rec in reservoir.into_iter() {
+            a.ingest(&rec, expected_mpv, exclude_mate, seldef_delta, qbackend);
         }
     }
     a
@@ -683,12 +666,22 @@ enum QuantilesBackendArg {
     TDigest,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestAutoloadModeArg {
+    #[value(name = "strict")]
+    Strict,
+    #[value(name = "permissive")]
+    Permissive,
+    #[value(name = "off")]
+    Off,
+}
+
 #[derive(Parser)]
 #[command(
     name = "analyze_teaching_quality",
     about = "Teacher data quality analyzer",
     disable_help_subcommand = true,
-    after_help = "Reports: exact-rate, gap-distribution, gap2, time-distribution, nodes-distribution, bound-distribution, tt, null-lmr, invariants, fallback, seldepth-deficit, non-exact-reason, ambiguous"
+    after_help = "Reports: exact-rate, gap-distribution, gap2, time-distribution, nodes-distribution, bound-distribution, tt, null-lmr, invariants, fallback, seldepth-deficit, non-exact-reason, ambiguous\nExample: --gate crates/tools/ci_gate.sample.json --gate-mode fail"
 )]
 struct Cli {
     /// Primary input JSONL file
@@ -729,6 +722,9 @@ struct Cli {
     /// Disable manifest auto-detection
     #[arg(long = "no-manifest-autoload")]
     no_manifest_autoload: bool,
+    /// Manifest autoload mode (strict|permissive|off)
+    #[arg(long = "manifest-autoload-mode", value_enum)]
+    manifest_autoload_mode: Option<ManifestAutoloadModeArg>,
     /// Limit processed records
     #[arg(long = "limit")]
     limit: Option<usize>,
@@ -739,7 +735,7 @@ struct Cli {
     #[arg(long = "quantiles-backend", value_enum)]
     quantiles_backend: Option<QuantilesBackendArg>,
     /// Shorthand for --quantiles-backend p2
-    #[arg(long = "approx-quantiles")]
+    #[arg(long = "approx-quantiles", conflicts_with = "quantiles_backend")]
     approx_quantiles: bool,
     /// Gate config (file path or inline JSON)
     #[arg(long = "gate")]
@@ -782,7 +778,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exclude_mate = !cli.with_mate;
     let seldef_delta: i32 = cli.seldepth_deficit_delta;
     let manifest_path: Option<String> = cli.manifest.clone();
-    let no_manifest_autoload = cli.no_manifest_autoload;
+    // no_manifest_autoload is already reflected into autoload_mode above
     let limit: Option<usize> = cli.limit;
     let sample_n: Option<usize> = cli.sample;
     let quant_backend: Option<QuantilesBackend> =
@@ -813,23 +809,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load manifest (explicit or auto-detect near primary input)
     let mut manifest_json: Option<Value> = None;
+    // Determine autoload mode
+    let autoload_mode = if let Some(m) = cli.manifest_autoload_mode {
+        match m {
+            ManifestAutoloadModeArg::Strict => AutoloadMode::Strict,
+            ManifestAutoloadModeArg::Permissive => AutoloadMode::Permissive,
+            ManifestAutoloadModeArg::Off => AutoloadMode::Off,
+        }
+    } else if cli.no_manifest_autoload {
+        AutoloadMode::Off
+    } else {
+        AutoloadMode::Strict
+    };
+
+    // Explicit manifest path has precedence; verify if possible
     if let Some(mp) = manifest_path.as_ref() {
         if let Ok(s) = fs::read_to_string(mp) {
             if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                if let Some(primary) = inputs.first() {
+                    let input_path = std::path::Path::new(primary);
+                    match tools::common::manifest::verify_manifest_json_against_input(
+                        &v, input_path,
+                    ) {
+                        Ok(tools::common::manifest::VerifyOutcome::Mismatch) => {
+                            return Err(
+                                "Explicit --manifest does not match input (sha/bytes mismatch)"
+                                    .into(),
+                            );
+                        }
+                        Ok(tools::common::manifest::VerifyOutcome::Undecidable) => {
+                            eprintln!("[warn] explicit --manifest has no sha/bytes; accepting");
+                        }
+                        _ => {}
+                    }
+                }
                 manifest_json = Some(v);
             }
         }
-    } else if !no_manifest_autoload {
+    } else if autoload_mode != AutoloadMode::Off {
         if let Some(primary) = inputs.first() {
-            if let Some(dir) = std::path::Path::new(primary).parent() {
-                let candidate = dir.join("manifest.json");
-                if candidate.exists() {
-                    if let Ok(s) = fs::read_to_string(&candidate) {
-                        if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                            manifest_json = Some(v);
-                        }
+            let p = std::path::Path::new(primary);
+            match resolve_manifest(p, autoload_mode) {
+                Ok(Some(res)) => {
+                    if res.verified {
+                        eprintln!("[info] Using manifest: {} ({})", res.path.display(), res.reason);
+                    } else {
+                        eprintln!(
+                            "[warn] Using manifest without sha/bytes: {} ({})",
+                            res.path.display(),
+                            res.reason
+                        );
+                    }
+                    manifest_json = Some(res.json);
+                }
+                Ok(None) => {
+                    if matches!(autoload_mode, AutoloadMode::Strict) {
+                        return Err("No valid manifest found for input (strict mode)".into());
                     }
                 }
+                Err(e) => return Err(format!("manifest resolution error: {}", e).into()),
             }
         }
     }
@@ -898,11 +936,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .bound2
                 .as_deref()
                 .or_else(|| rec.lines.get(1).and_then(|l| l.bound.as_deref()));
-            let exact_score = match (b1 == Some("Exact"), b2 == Some("Exact")) {
-                (true, true) => 2,
-                (true, false) => 1,
-                _ => 0,
-            };
+            let is_exact = |s: &str| s.eq_ignore_ascii_case("exact");
+            let exact_score =
+                match (b1.map(is_exact).unwrap_or(false), b2.map(is_exact).unwrap_or(false)) {
+                    (true, true) => 2,
+                    (true, false) => 1,
+                    _ => 0,
+                };
             let nodes = rec.nodes.unwrap_or(0);
             let time_ms = rec.time_ms.unwrap_or(0);
             Key {
@@ -923,8 +963,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .then(a.exact_score.cmp(&b.exact_score))
                 .then(a.nodes.cmp(&b.nodes))
                 .then(a.time_ms.cmp(&b.time_ms))
-                .then(a.file_idx.cmp(&b.file_idx))
-                .then(a.line_idx.cmp(&b.line_idx))
+                // 「先勝ち」: file_idx/line_idx は小さい方を優先
+                .then_with(|| b.file_idx.cmp(&a.file_idx))
+                .then_with(|| b.line_idx.cmp(&a.line_idx))
         }
 
         let mut best: HashMap<String, (Record, Key)> = HashMap::new();
@@ -2417,6 +2458,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.gap_with_non_exact_max {
@@ -2427,6 +2473,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.gap_with_non_exact_rate_max {
@@ -2439,6 +2490,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.no_legal_but_empty_max {
@@ -2449,6 +2505,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.no_legal_but_empty_rate_max {
@@ -2461,6 +2522,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.fallback_true_no_reason_max {
@@ -2471,6 +2537,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.fallback_true_no_reason_rate_max {
@@ -2483,6 +2554,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.mate_mixed_into_no_mate_max {
@@ -2493,6 +2569,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
             if let Some(th) = g.mate_mixed_into_no_mate_rate_max {
@@ -2505,6 +2586,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     th,
                     if ok { "PASS" } else { "FAIL" }
                 );
+                if ok {
+                    pass_cnt += 1;
+                } else {
+                    fail_cnt += 1;
+                }
                 failed |= !ok;
             }
 

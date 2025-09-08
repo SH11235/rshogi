@@ -1,0 +1,141 @@
+name: tools-ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      train:
+        description: 'Path to train JSONL(.gz/.zst)'
+        required: false
+        default: ''
+      valid:
+        description: 'Path to valid JSONL(.gz/.zst)'
+        required: false
+        default: ''
+      test:
+        description: 'Path to test JSONL(.gz/.zst)'
+        required: false
+        default: ''
+      include_intra:
+        description: 'Report duplicates within the same split'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+
+jobs:
+  tools:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/rust-core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+      - name: Format check
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+      - name: Clippy (tools, all features)
+        run: |
+          set -euo pipefail
+          cargo clippy -p tools --all-features -- -D warnings
+      - name: Build tools (locked)
+        run: |
+          set -euo pipefail
+          cargo build -p tools --release --locked
+      - name: Run gate
+        run: |
+          set -euo pipefail
+          ./target/release/analyze_teaching_quality \
+            ./crates/tools/tests/data/ci_gate_sample.jsonl \
+            --no-manifest-autoload \
+            --gate ./crates/tools/ci_gate.sample.json \
+            --gate-mode fail
+      - name: Cross-dedup check
+        run: |
+          set -euo pipefail
+          ./target/release/check_cross_dedup \
+            --train ./crates/tools/tests/data/cross/train.jsonl \
+            --valid ./crates/tools/tests/data/cross/valid.jsonl \
+            --test  ./crates/tools/tests/data/cross/test.jsonl \
+            --report leak_report.csv
+      - name: Upload cross-dedup report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-dedup-report
+          path: packages/rust-core/leak_report.csv
+
+  cross-dedup-real:
+    needs: tools
+    if: ${{ github.event.inputs.train != '' && github.event.inputs.valid != '' && github.event.inputs.test != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/rust-core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mold clang
+          mold --version || true
+          clang --version || true
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+      - name: Build tools with zstd support (locked)
+        run: |
+          set -euo pipefail
+          cargo build -p tools --release --locked --features zstd
+      - name: Cross-dedup (real datasets)
+        env:
+          TRAIN: ${{ github.event.inputs.train }}
+          VALID: ${{ github.event.inputs.valid }}
+          TEST:  ${{ github.event.inputs.test  }}
+        run: |
+          set -euo pipefail
+          echo "Running cross-dedup on real datasets"
+          
+          # Check if files exist and log their extensions
+          for file in "$TRAIN" "$VALID" "$TEST"; do
+            if [[ -f "$file" ]]; then
+              echo "Found file: $file (extension: ${file##*.})"
+            else
+              echo "ERROR: File not found: $file"
+              exit 1
+            fi
+          done
+          
+          ./target/release/check_cross_dedup \
+            --train "$TRAIN" \
+            --valid "$VALID" \
+            --test  "$TEST" \
+            --report leak_report_real.csv \
+            $([[ "${{ github.event.inputs.include_intra }}" == "true" ]] && echo --include-intra || true)
+      - name: Upload real cross-dedup report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-dedup-report-real
+          path: packages/rust-core/leak_report_real.csv

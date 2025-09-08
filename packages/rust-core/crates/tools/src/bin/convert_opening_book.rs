@@ -25,7 +25,7 @@ struct Args {
     output: PathBuf,
 
     /// Maximum moves from initial position (default: 50)
-    #[clap(long, default_value = "50")]
+    #[arg(long, default_value_t = 50)]
     max_moves: usize,
 
     /// Minimum analysis depth (default: 0)
@@ -45,7 +45,7 @@ struct Args {
     compress: bool,
 
     /// Show progress every N positions (default: 10000)
-    #[clap(long, default_value = "10000")]
+    #[arg(long, default_value_t = 10000)]
     progress_interval: usize,
 
     /// Validate conversion by reading back the output
@@ -55,6 +55,21 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.min_eval > args.max_eval {
+        anyhow::bail!(
+            "Invalid evaluation range: min_eval ({}) > max_eval ({})",
+            args.min_eval,
+            args.max_eval
+        );
+    }
+
+    if args.max_moves < 1 {
+        anyhow::bail!("--max-moves must be >= 1");
+    }
+    if args.progress_interval < 1 {
+        anyhow::bail!("--progress-interval must be >= 1");
+    }
 
     println!("Converting {} to {}", args.input.display(), args.output.display());
     println!("Filter settings:");
