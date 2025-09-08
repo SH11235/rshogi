@@ -1231,10 +1231,14 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
     weight
 }
 
-fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+// Type alias to keep function signatures simple
+type CachePayload = (BufReader<Box<dyn Read>>, u64, u32);
+
+// Common helper: open a v1 cache file and return a BufReader over the payload,
+// along with (num_samples, flags_mask). Handles raw/gzip/zstd based on header.
+fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::error::Error>> {
     let mut f = File::open(path)?;
 
-    // Read header - matches build_feature_cache.rs v1 extended header
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != b"NNFC" {
@@ -1244,7 +1248,7 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     let mut u32b = [0u8; 4];
     let mut u64b = [0u8; 8];
 
-    // Version (v1 only)
+    // version
     f.read_exact(&mut u32b)?;
     let version = u32::from_le_bytes(u32b);
     if version != 1 {
@@ -1254,8 +1258,7 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         )
         .into());
     }
-
-    // feature set id, num samples, chunk size
+    // feature_set_id
     f.read_exact(&mut u32b)?;
     let feature_set_id = u32::from_le_bytes(u32b);
     const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
@@ -1266,14 +1269,10 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         )
         .into());
     }
-
+    // num_samples, chunk_size, header_size
     f.read_exact(&mut u64b)?;
     let num_samples = u64::from_le_bytes(u64b);
-
-    f.read_exact(&mut u32b)?;
-    let _chunk_size = u32::from_le_bytes(u32b);
-
-    // header_size
+    f.read_exact(&mut u32b)?; // chunk_size (unused)
     f.read_exact(&mut u32b)?; // header_size
     let header_size = u32::from_le_bytes(u32b);
     if !(40..=4096).contains(&header_size) {
@@ -1282,8 +1281,7 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     // endianness
     let mut b = [0u8; 1];
     f.read_exact(&mut b)?;
-    let endianness = b[0];
-    if endianness != 0 {
+    if b[0] != 0 {
         return Err(format!(
             "Unsupported endianness in cache header (expected LE=0) for file {}",
             path
@@ -1299,7 +1297,6 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     // payload_offset
     f.read_exact(&mut u64b)?;
     let payload_offset = u64::from_le_bytes(u64b);
-    // Validate payload_offset against header end (magic(4) + header_size)
     let header_end = 4u64 + header_size as u64;
     if payload_offset < header_end {
         return Err(format!(
@@ -1308,16 +1305,17 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         )
         .into());
     }
-    // sample_flags_mask
+    // flags_mask
     f.read_exact(&mut u32b)?;
     let flags_mask = u32::from_le_bytes(u32b);
-    // Skip to payload_offset if header had extra bytes
+
+    // seek to payload
     let current = f.stream_position()?;
     if current < payload_offset {
         f.seek(SeekFrom::Start(payload_offset))?;
     }
 
-    // Prepare reader for payload (gzip/zstd)
+    // wrap reader
     let reader: Box<dyn Read> = match payload_encoding {
         0 => Box::new(f),
         1 => {
@@ -1343,7 +1341,11 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         }
     };
 
-    let mut r = BufReader::new(reader);
+    Ok((BufReader::new(reader), num_samples, flags_mask))
+}
+
+fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+    let (mut r, num_samples, flags_mask) = open_cache_payload_reader(path)?;
 
     println!("Loading cache: {num_samples} samples");
 
