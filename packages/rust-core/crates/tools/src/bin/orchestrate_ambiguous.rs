@@ -111,10 +111,16 @@ struct Cli {
     verbose: bool,
 }
 
+fn stem_for_artifacts(final_out: &Path) -> String {
+    let name = final_out.file_name().and_then(|s| s.to_str()).unwrap_or("final");
+    let name = name.strip_suffix(".zst").unwrap_or(name);
+    let name = name.strip_suffix(".gz").unwrap_or(name);
+    name.strip_suffix(".jsonl").unwrap_or(name).to_string()
+}
+
 fn default_out_dir(final_out: &Path) -> PathBuf {
     let dir = final_out.parent().unwrap_or_else(|| Path::new("."));
-    let stem = final_out.file_stem().and_then(OsStr::to_str).unwrap_or("final");
-    dir.join(format!(".{}.ambdig", stem))
+    dir.join(format!(".{}.ambdig", stem_for_artifacts(final_out)))
 }
 
 fn find_tool(name: &str) -> PathBuf {
@@ -123,9 +129,18 @@ fn find_tool(name: &str) -> PathBuf {
     if let Ok(p) = std::env::var(&key) {
         return PathBuf::from(p);
     }
-    // 2) Same dir as current exe: allow hash-suffixed names (e.g., deps/<name>-<hash>)
+    // 2) Same dir as current exe: prefer exact, then prefix match
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
+            // 2a) exact
+            #[cfg(windows)]
+            let exact = dir.join(format!("{}.exe", name));
+            #[cfg(not(windows))]
+            let exact = dir.join(name);
+            if exact.exists() {
+                return exact;
+            }
+            // 2b) prefix scan
             if let Ok(rd) = fs::read_dir(dir) {
                 for e in rd.flatten() {
                     let p = e.path();
@@ -140,18 +155,6 @@ fn find_tool(name: &str) -> PathBuf {
                     if wanted {
                         return p;
                     }
-                }
-            }
-            // Also probe exact match
-            let cand = dir.join(name);
-            if cand.exists() {
-                return cand;
-            }
-            #[cfg(windows)]
-            {
-                let exe = dir.join(format!("{}.exe", name));
-                if exe.exists() {
-                    return exe;
                 }
             }
         }
@@ -192,6 +195,89 @@ fn write_atomic(path: &Path, s: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_out_dir_strips_multi_extensions() {
+        let p = Path::new("runs/final.jsonl.gz");
+        let got = default_out_dir(p);
+        assert_eq!(got, Path::new("runs/.final.ambdig"));
+    }
+
+    #[test]
+    fn glob_pass2_outputs_sorts_naturally() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b"\n").unwrap();
+            p
+        };
+        let _a = make("pass2.part-1.jsonl.gz");
+        let _b = make("pass2.part-10.jsonl.gz");
+        let _c = make("pass2.part-2.jsonl.gz");
+        let base = dir.path().join("pass2.jsonl");
+        let outs = glob_pass2_outputs(&base).unwrap();
+        let names: Vec<String> = outs
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "pass2.part-1.jsonl.gz",
+                "pass2.part-2.jsonl.gz",
+                "pass2.part-10.jsonl.gz",
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sh_quote_windows_doubles_quotes() {
+        let s = r#"C:\\Program Files\\X \"Y\""#;
+        // literal above equals: C:\Program Files\X "Y"
+        let quoted = sh_quote(s);
+        assert_eq!(quoted, r#""C:\Program Files\X ""Y"""#);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn sh_quote_unix_backslashes_quotes() {
+        let s = r#"/tmp/has space/and "quote""#;
+        let expected = format!("\"{}\"", s.replace('"', "\\\""));
+        assert_eq!(sh_quote(s), expected);
+    }
+}
+
+fn default_final_manifest_path(final_out: &Path) -> PathBuf {
+    let parent = final_out.parent().unwrap_or_else(|| Path::new("."));
+    let name = final_out.file_name().and_then(|s| s.to_str()).unwrap_or("final");
+    let name = name.strip_suffix(".zst").unwrap_or(name);
+    let name = name.strip_suffix(".gz").unwrap_or(name);
+    let stem = name.strip_suffix(".jsonl").unwrap_or(name);
+    parent.join(format!("{}.manifest.json", stem))
+}
+
+#[cfg(windows)]
+fn sh_quote(s: &str) -> String {
+    if s.contains(' ') || s.contains('"') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(not(windows))]
+fn sh_quote(s: &str) -> String {
+    if s.contains(' ') || s.contains('"') {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
+}
+
 fn append_from_child_stdout(mut child: std::process::Child, out_path: &Path) -> Result<()> {
     let mut out = fs::OpenOptions::new()
         .create(true)
@@ -220,6 +306,7 @@ fn count_lines(path: &Path) -> Result<usize> {
     let mut r = BufReader::new(f);
     let mut buf = [0u8; 64 * 1024];
     let mut cnt = 0usize;
+    let mut last: Option<u8> = None;
     loop {
         let n = r.read(&mut buf)?;
         if n == 0 {
@@ -229,7 +316,11 @@ fn count_lines(path: &Path) -> Result<usize> {
             if *b == b'\n' {
                 cnt += 1;
             }
+            last = Some(*b);
         }
+    }
+    if matches!(last, Some(b) if b != b'\n') {
+        cnt += 1;
     }
     Ok(cnt)
 }
@@ -244,9 +335,13 @@ fn glob_pass2_outputs(base: &Path) -> Result<Vec<PathBuf>> {
     } else if let (Some(dir), Some(fname)) = (base.parent(), base.file_name()) {
         let fname = fname.to_string_lossy();
         let gz = dir.join(format!("{}.gz", fname));
-        if gz.exists() { outs.push(gz); }
+        if gz.exists() {
+            outs.push(gz);
+        }
         let zst = dir.join(format!("{}.zst", fname));
-        if zst.exists() { outs.push(zst); }
+        if zst.exists() {
+            outs.push(zst);
+        }
     }
     if let Some(dir) = base.parent() {
         let stem = base.file_stem().and_then(OsStr::to_str).unwrap_or("pass2");
@@ -265,7 +360,26 @@ fn glob_pass2_outputs(base: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
-    outs.sort();
+    // Deduplicate any accidental duplicates, then sort by natural part index if present
+    let mut uniq: HashSet<PathBuf> = HashSet::new();
+    outs.retain(|p| uniq.insert(p.clone()));
+
+    fn part_index(fname: &str) -> Option<u64> {
+        let pat = "part-";
+        let i = fname.find(pat)?;
+        let rest = &fname[i + pat.len()..];
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        rest[..end].parse::<u64>().ok()
+    }
+
+    outs.sort_by(|a, b| {
+        let fa = a.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let fb = b.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        match (part_index(fa), part_index(fb)) {
+            (Some(ia), Some(ib)) => ia.cmp(&ib),
+            _ => fa.cmp(fb),
+        }
+    });
     Ok(outs)
 }
 
@@ -295,7 +409,7 @@ fn main() -> Result<()> {
         // Record manifest resolution (strict) for provenance
         let mut src_obj = json!({ "path": p.display().to_string() });
         if let Ok(Some(res)) = resolve_manifest(p, AutoloadMode::Strict) {
-            src_obj["resolved_manifest_path"] = json!(res.path);
+            src_obj["resolved_manifest_path"] = json!(res.path.display().to_string());
             src_obj["resolved_manifest_scope"] = json!(res.scope);
             src_obj["resolved_manifest_verified"] = json!(res.verified);
             src_obj["resolved_manifest_reason"] = json!(res.reason);
@@ -311,8 +425,8 @@ fn main() -> Result<()> {
         if cli.dry_run {
             println!(
                 "[dry-run] {} {} - --gap-threshold {}{}{}{}",
-                extract_bin.display(),
-                p.display(),
+                sh_quote(&extract_bin.display().to_string()),
+                sh_quote(&p.display().to_string()),
                 cli.gap_threshold,
                 if cli.include_non_exact {
                     " --include-non-exact"
@@ -352,7 +466,7 @@ fn main() -> Result<()> {
     }
 
     if cli.dry_run {
-        println!("[dry-run] normalize+unique -> {}", sfens_out.display());
+        println!("[dry-run] normalize+unique -> {}", sh_quote(&sfens_out.display().to_string()));
     } else {
         // Normalize + unique
         let inp =
@@ -496,7 +610,8 @@ fn main() -> Result<()> {
         gen_args.push(s.to_string());
     }
     if cli.dry_run {
-        println!("[dry-run] {} {}", gen_bin.display(), gen_args.join(" "));
+        let joined = gen_args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+        println!("[dry-run] {} {}", sh_quote(&gen_bin.display().to_string()), joined);
     } else if extracted_count > 0 {
         let status = Command::new(&gen_bin)
             .args(&gen_args)
@@ -564,12 +679,10 @@ fn main() -> Result<()> {
     }
 
     // Step C: merge pass1 + pass2 into final
-    let final_manifest_path = cli.final_manifest_out.clone().unwrap_or_else(|| {
-        cli.final_out.parent().unwrap_or_else(|| Path::new(".")).join(
-            cli.final_out.file_stem().and_then(OsStr::to_str).unwrap_or("final").to_string()
-                + ".manifest.json",
-        )
-    });
+    let final_manifest_path = cli
+        .final_manifest_out
+        .clone()
+        .unwrap_or_else(|| default_final_manifest_path(&cli.final_out));
 
     let mut final_written: usize = 0;
     if cli.dry_run {
@@ -587,7 +700,8 @@ fn main() -> Result<()> {
         // In dry-run, we don't know actual parts; show base path
         margs.push(pass2_base.display().to_string());
         margs.push(cli.final_out.display().to_string());
-        println!("[dry-run] {} {}", merge_bin.display(), margs.join(" "));
+        let joined = margs.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+        println!("[dry-run] {} {}", sh_quote(&merge_bin.display().to_string()), joined);
     } else if extracted_count > 0 {
         let merge_bin = find_tool("merge_annotation_results");
         let mut args: Vec<String> = vec![
@@ -641,8 +755,14 @@ fn main() -> Result<()> {
         } else {
             String::new()
         };
+        if extracted_count == 0 {
+            eprintln!(
+                "[info] analyze input = {} (no extracted positions; fallback to pass1[0])",
+                analyze_input
+            );
+        }
         // Prefer multipv from pass2 manifest when available; else use CLI; if no extraction, keep CLI
-        let expected_mpv = if extracted_count > 0 {
+        let mut expected_mpv = if extracted_count > 0 {
             pass2_manifests
                 .iter()
                 .filter_map(|m| m.get("multipv").and_then(|x| x.as_u64()))
@@ -652,13 +772,25 @@ fn main() -> Result<()> {
         } else {
             cli.multipv as usize
         };
+        // If final manifest has aggregated.multipv, prefer it
+        if !cli.dry_run && final_manifest_path.exists() {
+            if let Ok(txt) = fs::read_to_string(&final_manifest_path) {
+                if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                    if let Some(mv) =
+                        v.get("aggregated").and_then(|a| a.get("multipv")).and_then(|x| x.as_u64())
+                    {
+                        expected_mpv = mv as usize;
+                    }
+                }
+            }
+        }
         if cli.dry_run {
             println!(
                 "[dry-run] {} {} --json --expected-multipv {} --manifest-autoload-mode strict > {}",
-                analyze_bin.display(),
-                analyze_input,
+                sh_quote(&analyze_bin.display().to_string()),
+                sh_quote(&analyze_input),
                 expected_mpv,
-                analyze_out.display()
+                sh_quote(&analyze_out.display().to_string())
             );
         } else {
             // 1) JSON -> file
@@ -697,6 +829,7 @@ fn main() -> Result<()> {
                 .status();
             analyze_info = Some(json!({
                 "summary_json": analyze_out.display().to_string(),
+                "expected_mpv": expected_mpv,
             }));
         }
     }
@@ -717,15 +850,15 @@ fn main() -> Result<()> {
                 "include_aspiration_failures": cli.include_aspiration_failures,
                 "include_mate_boundary": cli.include_mate_boundary,
             },
-            "sfens": { "path": sfens_out, "sha256": sfens_sha, "bytes": sfens_bytes },
+            "sfens": { "path": sfens_out.display().to_string(), "sha256": sfens_sha, "bytes": sfens_bytes },
             "extracted_count": extracted_count,
         },
         "reannotate": if extracted_count>0 { json!({
-            "base": pass2_base,
-            "outputs": pass2_outputs,
+            "base": pass2_base.display().to_string(),
+            "outputs": pass2_outputs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "opts": {
                 "engine": cli.engine,
-                "nnue_weights": cli.nnue_weights,
+                "nnue_weights": cli.nnue_weights.as_ref().map(|p| p.display().to_string()),
                 "teacher_profile": cli.teacher_profile,
                 "multipv": cli.multipv,
                 "min_depth": cli.min_depth,
@@ -736,7 +869,7 @@ fn main() -> Result<()> {
                 "reuse_tt": cli.reuse_tt,
                 "split_every": cli.split_every,
                 "compress": cli.compress,
-                "structured_log": cli.structured_log,
+                "structured_log": cli.structured_log.as_ref().map(|p| p.display().to_string()),
                 "amb_gap2_threshold": cli.amb_gap2_threshold,
                 "amb_allow_inexact": cli.amb_allow_inexact,
                 "entropy_mate_mode": cli.entropy_mate_mode,
@@ -747,9 +880,9 @@ fn main() -> Result<()> {
         }) } else { Value::Null },
         "merge": if extracted_count>0 { json!({
             "mode": cli.merge_mode,
-            "inputs": cli.pass1,
-            "final": cli.final_out,
-            "manifest_out": final_manifest_path,
+            "inputs": cli.pass1.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "final": cli.final_out.display().to_string(),
+            "manifest_out": final_manifest_path.display().to_string(),
             "final_written": final_written,
         }) } else { Value::Null },
         "analyze": analyze_info,
@@ -763,7 +896,7 @@ fn main() -> Result<()> {
     if cli.dry_run {
         println!(
             "[dry-run] would write orchestration manifest to {}",
-            orch_manifest_path.display()
+            sh_quote(&orch_manifest_path.display().to_string())
         );
     } else {
         write_atomic(&orch_manifest_path, &serde_json::to_string_pretty(&orch)?)?;

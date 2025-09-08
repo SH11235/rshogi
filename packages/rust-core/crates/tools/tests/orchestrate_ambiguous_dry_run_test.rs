@@ -6,9 +6,13 @@ use tempfile::TempDir;
 #[test]
 fn orchestrate_ambiguous_dry_run_prints_full_plan() {
     let tmp = TempDir::new().unwrap();
-    let pass1 = tmp.path().join("p1.jsonl");
+    // create a subdir with space in path to check quoting
+    let spaced = tmp.path().join("dir with space");
+    std::fs::create_dir_all(&spaced).unwrap();
+    let pass1 = spaced.join("p1.jsonl");
     // note: pass1 does not need to exist for dry-run
-    let final_out = tmp.path().join("final.jsonl");
+    // set final to compressed name to verify default manifest naming
+    let final_out = spaced.join("final.jsonl.gz");
 
     let mut cmd = Command::cargo_bin("orchestrate_ambiguous").expect("binary exists");
     let assert = cmd
@@ -25,14 +29,16 @@ fn orchestrate_ambiguous_dry_run_prints_full_plan() {
         .assert();
 
     // Expect extract, normalize, generate, merge, analyze plan lines
-    assert
-        .success()
-        .stdout(predicate::str::contains("[dry-run]")
-            .and(predicate::str::contains("extract_flagged_positions"))
-            .and(predicate::str::contains("normalize+unique"))
-            .and(predicate::str::contains("generate_nnue_training_data"))
-            .and(predicate::str::contains("merge_annotation_results"))
-            .and(predicate::str::contains("analyze_teaching_quality"))
-        );
+    let outp = assert.get_output().stdout.clone();
+    let s = String::from_utf8_lossy(&outp);
+    assert!(s.contains("[dry-run]"));
+    assert!(s.contains("extract_flagged_positions"));
+    assert!(s.contains("normalize+unique"));
+    assert!(s.contains("generate_nnue_training_data"));
+    assert!(s.contains("merge_annotation_results"));
+    assert!(s.contains("analyze_teaching_quality"));
+    // expect quotes around spaced path in generate/merge lines
+    assert!(s.contains("\""));
+    // expect default final manifest is final.manifest.json
+    assert!(s.contains("--manifest-out") && s.contains("final.manifest.json"));
 }
-
