@@ -4,7 +4,7 @@
 //! with pre-extracted HalfKP features for faster training.
 
 use std::fs::{create_dir_all, File};
-use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -15,17 +15,13 @@ use engine_core::{
     Color, Position,
 };
 use serde::Deserialize;
+use tools::io_detect::open_maybe_compressed_reader;
+use tools::nnfc_v1::{
+    write_header_v1_at, HeaderV1, PayloadEncoding, CACHE_VERSION_V1, FEATURE_SET_ID_HALF,
+    HEADER_SIZE_V1,
+};
 
-// Cache format version (v1)
-// - Two-sample (black + white perspectives) per position
-// - Oriented labels (black baseline)
-// - No meta padding
-// - Extended header with header_size/payload fields for forward compatibility
-const CACHE_VERSION: u32 = 1;
-const FEATURE_SET_ID: u32 = 0x48414C46; // "HALF" for HalfKP
-
-// Header constants (v1). Bytes after magic ("NNFC").
-const HEADER_SIZE_V1: u32 = 48;
+// Cache header constants are provided by nnfc_v1
 
 // Flags (shared across versions)
 const FLAG_BOTH_EXACT: u8 = 1 << 0;
@@ -50,16 +46,7 @@ enum PayloadEncodingKind {
     Zstd,
 }
 
-impl PayloadEncodingKind {
-    fn code(self) -> u8 {
-        match self {
-            PayloadEncodingKind::None => 0,
-            PayloadEncodingKind::Gzip => 1,
-            #[cfg(feature = "zstd")]
-            PayloadEncodingKind::Zstd => 2,
-        }
-    }
-}
+// no methods; mapping handled via nnfc_v1::PayloadEncoding when writing header
 
 #[derive(Debug)]
 struct CacheConfig {
@@ -321,7 +308,7 @@ fn write_samples_stream<R: BufRead, W: Write>(
 
         processed += 1;
         if processed % config.metrics_interval == 0 {
-            print!("\rProcessed {} positions...", processed);
+            print!("\r[metrics] processed={}", processed);
             #[cfg(target_os = "linux")]
             if config.report_rss {
                 if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
@@ -455,7 +442,10 @@ fn write_samples_stream<R: BufRead, W: Write>(
                 #[cfg(target_endian = "big")]
                 {
                     u8_buf.clear();
-                    u8_buf.reserve(features_buf.len() * 4);
+                    let need = features_buf.len() * 4;
+                    if u8_buf.capacity() < need {
+                        u8_buf.reserve(need - u8_buf.capacity());
+                    }
                     for &feat in &features_buf {
                         u8_buf.extend_from_slice(&feat.to_le_bytes());
                     }
@@ -497,8 +487,8 @@ fn write_cache_file_streaming(
     // Payload starts here
     let payload_offset = file.stream_position()?;
 
-    // Prepare input reader (supports .jsonl, .jsonl.gz, .jsonl.zst[feature])
-    let reader = open_input_reader(input_path, config.io_buf_bytes)?;
+    // Prepare input reader (supports .jsonl, .jsonl.gz, .jsonl.zst[feature] via magic/extension)
+    let reader = open_maybe_compressed_reader(input_path, config.io_buf_bytes)?;
 
     // Write samples either raw or compressed
     // Writer with optional chunked compression
@@ -543,7 +533,7 @@ fn write_cache_file_streaming(
 
                 processed += 1;
                 if processed % config.metrics_interval == 0 {
-                    print!("\rProcessed {} positions...", processed);
+                    print!("\r[metrics] processed={}", processed);
                     #[cfg(target_os = "linux")]
                     if config.report_rss {
                         if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
@@ -616,7 +606,7 @@ fn write_cache_file_streaming(
 
                 processed += 1;
                 if processed % config.metrics_interval == 0 {
-                    print!("\rProcessed {} positions...", processed);
+                    print!("\r[metrics] processed={}", processed);
                     #[cfg(target_os = "linux")]
                     if config.report_rss {
                         if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
@@ -665,31 +655,31 @@ fn write_cache_file_streaming(
 
     println!("\rProcessed {} positions (skipped {})", processed, skipped);
 
-    // Reopen file for header update if not available (always reopen for simplicity)
+    // Reopen file for header update and write via shared helper
     let mut f_header = File::options().write(true).open(output_path)?;
-    f_header.seek(SeekFrom::Start(header_pos))?;
-
-    // Write v1 extended header fields
-    f_header.write_all(&CACHE_VERSION.to_le_bytes())?; // version
-    f_header.write_all(&FEATURE_SET_ID.to_le_bytes())?; // feature_set_id
-    f_header.write_all(&num_samples.to_le_bytes())?; // num_samples
-    f_header.write_all(&config.chunk_size.to_le_bytes())?; // chunk_size
-    f_header.write_all(&HEADER_SIZE_V1.to_le_bytes())?; // header_size
-    f_header.write_all(&[0u8])?; // endianness (0 = LE)
-    f_header.write_all(&[config.payload_encoding.code()])?; // payload_encoding
-    f_header.write_all(&[0u8; 2])?; // reserved16
-    f_header.write_all(&payload_offset.to_le_bytes())?; // payload_offset
+    // Map local encoding to shared enum
+    let pe = match config.payload_encoding {
+        PayloadEncodingKind::None => PayloadEncoding::None,
+        PayloadEncodingKind::Gzip => PayloadEncoding::Gzip,
+        #[cfg(feature = "zstd")]
+        PayloadEncodingKind::Zstd => PayloadEncoding::Zstd,
+    };
     let sample_flags_mask: u32 = (FLAG_BOTH_EXACT as u32)
         | (FLAG_MATE_BOUNDARY as u32)
         | (FLAG_PERSPECTIVE_BLACK as u32)
         | (FLAG_STM_BLACK as u32);
-    f_header.write_all(&sample_flags_mask.to_le_bytes())?; // flags mask
-                                                           // pad reserved to HEADER_SIZE
-    let written = 4 + 4 + 8 + 4 + 4 + 1 + 1 + 2 + 8 + 4; // 40
-    let reserved_tail = (HEADER_SIZE_V1 as usize).saturating_sub(written);
-    if reserved_tail > 0 {
-        f_header.write_all(&vec![0u8; reserved_tail])?;
-    }
+    let header = HeaderV1 {
+        version: CACHE_VERSION_V1,
+        feature_set_id: FEATURE_SET_ID_HALF,
+        num_samples,
+        chunk_size: config.chunk_size,
+        header_size: HEADER_SIZE_V1,
+        endianness: 0,
+        payload_encoding: pe,
+        payload_offset,
+        flags_mask: sample_flags_mask,
+    };
+    write_header_v1_at(&mut f_header, header_pos, &header)?;
 
     Ok((num_samples, total_features))
 }
@@ -813,29 +803,7 @@ fn write_position_samples<W: Write>(
     Ok((samples_written, features_total))
 }
 
-fn open_input_reader(
-    input_path: &str,
-    io_buf_bytes: usize,
-) -> Result<Box<dyn BufRead>, Box<dyn std::error::Error>> {
-    let file = File::open(input_path)?;
-    if input_path.ends_with(".gz") {
-        use flate2::read::MultiGzDecoder;
-        let gz = MultiGzDecoder::new(file);
-        Ok(Box::new(BufReader::with_capacity(io_buf_bytes, gz)))
-    } else if input_path.ends_with(".zst") {
-        #[cfg(feature = "zstd")]
-        {
-            let dec = zstd::Decoder::new(file)?;
-            Ok(Box::new(BufReader::with_capacity(io_buf_bytes, dec)))
-        }
-        #[cfg(not(feature = "zstd"))]
-        {
-            Err("zst input requires building 'tools' with feature 'zstd'".into())
-        }
-    } else {
-        Ok(Box::new(BufReader::with_capacity(io_buf_bytes, file)))
-    }
-}
+// input reader moved to tools::io_detect::open_maybe_compressed_reader
 
 #[cfg(target_os = "linux")]
 fn read_linux_rss_kb() -> Option<(u64, u64)> {
@@ -896,7 +864,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(u32b), 1);
         // feature_set_id
         f.read_exact(&mut u32b).unwrap();
-        assert_eq!(u32::from_le_bytes(u32b), FEATURE_SET_ID);
+        assert_eq!(u32::from_le_bytes(u32b), FEATURE_SET_ID_HALF);
         // num_samples
         f.read_exact(&mut u64b).unwrap();
         let num_samples = u64::from_le_bytes(u64b);
