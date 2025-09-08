@@ -250,7 +250,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
   --pass1 runs/out_pass1.jsonl --final runs/final.jsonl --dry-run
 ```
 
-ドライラン出力は、空白や二重引用符を含むパスも適切に引用されており、そのままコピペ実行できます。
+ドライラン出力は、空白や二重引用符を含むパスも適切に引用されており、そのままコピペ実行できます（PowerShell / cmd いずれでも動作）。
 
 出力例（パスは例示、実環境に合わせて変化します）:
 ```text
