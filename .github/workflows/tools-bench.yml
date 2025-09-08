@@ -34,8 +34,6 @@ jobs:
         working-directory: packages/rust-core
         run: |
           cargo build -p tools --features zstd --release
-          cargo build -p tools --bin parse_bench_metrics --release
-          cargo build -p tools --bin compare_bench_metrics --release
       - name: Generate mini JSONL
         run: |
           python3 - <<'PY'
@@ -69,8 +67,6 @@ jobs:
         run: |
           cd base/packages/rust-core
           cargo build -p tools --features zstd --release
-          cargo build -p tools --bin parse_bench_metrics --release
-          cargo build -p tools --bin compare_bench_metrics --release
       - name: Bench base (gzip, chunked)
         if: ${{ github.event_name == 'pull_request' }}
         run: |
