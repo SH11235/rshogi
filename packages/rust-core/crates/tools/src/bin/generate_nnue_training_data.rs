@@ -1788,6 +1788,8 @@ fn process_position_with_engine(
     // Reset per position only when not reusing TT
     if !env.opts.reuse_tt {
         eng.reset_for_position();
+        // Reapply teacher profile after reset since reset_for_position() resets it to default
+        eng.set_teacher_profile(env.opts.teacher_profile);
     }
     // Use global stop flag for graceful cancellation
     let stop_flag = env.global_stop.clone();
