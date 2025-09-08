@@ -66,6 +66,7 @@ struct Opts {
     entropy_scale: f64,
     split_every: Option<usize>,
     compress: CompressionKind,
+    structured_log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +94,66 @@ struct ManifestAmbiguity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestErrorsSummary {
+    parse: usize,
+    nonexact_top1: usize,
+    empty_or_missing_pv: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestCountsSummary {
+    attempted: usize,
+    success: usize,
+    skipped_timeout: usize,
+    errors: ManifestErrorsSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestThroughputSummary {
+    attempted_sps: f64,
+    success_sps: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestRatesSummary {
+    timeout: f64,
+    top1_exact: f64,
+    both_exact: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestAmbiguousSummary {
+    threshold_cp: i32,
+    require_exact: bool,
+    count: usize,
+    denom: usize,
+    rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reran: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    with_entropy: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestDepthSummary {
+    histogram: Vec<usize>,
+    min: u8,
+    max: u8,
+    p50: u8,
+    p90: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManifestSummary {
+    elapsed_sec: f64,
+    throughput: ManifestThroughputSummary,
+    rates: ManifestRatesSummary,
+    ambiguous: ManifestAmbiguousSummary,
+    depth: ManifestDepthSummary,
+    counts: ManifestCountsSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ManifestOverrides {
     time: bool,
     nodes: bool,
@@ -106,6 +167,8 @@ struct Manifest {
     generated_at: String,
     git_commit: Option<String>,
     engine: String,
+    #[serde(default)]
+    manifest_scope: Option<String>,
     // Manifest v2 provenance (required)
     #[serde(default)]
     teacher_engine: TeacherEngineInfo,
@@ -148,6 +211,8 @@ struct Manifest {
     count_in_part: Option<usize>,
     compression: Option<String>,
     ambiguity: Option<ManifestAmbiguity>,
+    #[serde(default)]
+    summary: Option<ManifestSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -188,6 +253,13 @@ struct GenShared {
     errors_nonexact_top1: Arc<AtomicUsize>,
     errors_empty_pv: Arc<AtomicUsize>,
     skipped_file: Arc<Mutex<BufWriter<File>>>,
+    // extra counters for summary
+    lines_ge2: Arc<AtomicUsize>,
+    both_exact: Arc<AtomicUsize>,
+    ambiguous_k3: Arc<AtomicUsize>,
+    depth_hist: Arc<Mutex<Vec<usize>>>,
+    k3_reran: Arc<AtomicUsize>,
+    k3_entropy: Arc<AtomicUsize>,
 }
 
 struct ProcEnv<'a> {
@@ -240,6 +312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  --jobs <n> (outer parallelism for positions; engine threads stay 1)");
         eprintln!("  --split <N> (rotate output every N lines as <out>.part-0001...)");
         eprintln!("  --compress <gz|zst> (compress output parts; zst requires 'zstd' feature)");
+        eprintln!("  --structured-log <PATH|-> (emit JSONL structured logs to file or STDOUT)");
         eprintln!("  --amb-gap2-threshold <cp> (default: 25; ambiguity threshold for gap2)");
         eprintln!(
             "  --amb-allow-inexact (allow non-Exact bounds for ambiguity; default requires Exact)"
@@ -326,6 +399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entropy_scale: 600.0,
         split_every: None,
         compress: CompressionKind::None,
+        structured_log: None,
     };
 
     // Flags start after positional args (2 mandatory + up to 3 optional numerics)
@@ -614,6 +688,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            "--structured-log" => {
+                if let Some(p) = args.get(i + 1) {
+                    opts.structured_log = Some(p.clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --structured-log requires a path or '-' for STDOUT");
+                    std::process::exit(1);
+                }
+            }
             other => {
                 eprintln!("Unknown option: {}", other);
                 std::process::exit(1);
@@ -711,49 +794,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // existing_lines will be computed later (only for non-split/non-compress mode)
     let mut existing_lines: usize = 0;
 
-    println!("NNUE Training Data Generator");
-    println!("============================");
-    let effective_depth = opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
-    println!("Search depth: {effective_depth}");
-    if let Some(ref s) = preset_log {
-        println!("Preset: {s}");
-    }
-    println!("Batch size: {batch_size}");
-    println!("Engine: {:?}", opts.engine);
-    if let Some(ref w) = opts.nnue_weights {
-        println!("NNUE weights: {w}");
-    }
-    println!("Label: {:?}", opts.label);
-    if matches!(opts.label, LabelKind::Wdl | LabelKind::Hybrid) {
-        println!("WDL scale: {:.3}", opts.wdl_scale);
-        if matches!(opts.label, LabelKind::Hybrid) {
-            println!("Hybrid cutoff ply: {}", opts.hybrid_ply_cutoff);
+    // Route human-readable logs to STDERR when structured JSON goes to STDOUT
+    let human_to_stderr = matches!(opts.structured_log.as_deref(), Some("-"));
+    macro_rules! human_log {
+        ($($arg:tt)*) => {
+            if human_to_stderr { eprintln!($($arg)*); } else { println!($($arg)*); }
         }
     }
-    println!("Entropy scale: {:.3}", opts.entropy_scale);
-    println!("Hash size (MB): {}", opts.hash_mb);
-    println!("MultiPV: {}", opts.multipv);
-    println!("Teacher profile: {:?}", opts.teacher_profile);
-    println!("Reuse TT: {}", opts.reuse_tt);
-    println!(
+
+    human_log!("NNUE Training Data Generator");
+    human_log!("============================");
+    let effective_depth = opts.min_depth.map(|m| m.max(search_depth)).unwrap_or(search_depth);
+    human_log!("Search depth: {effective_depth}");
+    if let Some(ref s) = preset_log {
+        human_log!("Preset: {s}");
+    }
+    human_log!("Batch size: {batch_size}");
+    human_log!("Engine: {:?}", opts.engine);
+    if let Some(ref w) = opts.nnue_weights {
+        human_log!("NNUE weights: {w}");
+    }
+    human_log!("Label: {:?}", opts.label);
+    if matches!(opts.label, LabelKind::Wdl | LabelKind::Hybrid) {
+        human_log!("WDL scale: {:.3}", opts.wdl_scale);
+        if matches!(opts.label, LabelKind::Hybrid) {
+            human_log!("Hybrid cutoff ply: {}", opts.hybrid_ply_cutoff);
+        }
+    }
+    human_log!("Entropy scale: {:.3}", opts.entropy_scale);
+    human_log!("Hash size (MB): {}", opts.hash_mb);
+    human_log!("MultiPV: {}", opts.multipv);
+    human_log!("Teacher profile: {:?}", opts.teacher_profile);
+    human_log!("Reuse TT: {}", opts.reuse_tt);
+    human_log!(
         "Ambiguity: gap2_th={}cp, require_exact={}, mate_mode={:?}",
-        opts.amb_gap2_threshold, opts.amb_require_exact, opts.entropy_mate_mode
+        opts.amb_gap2_threshold,
+        opts.amb_require_exact,
+        opts.entropy_mate_mode
     );
     if let Some(n) = opts.nodes {
         let cap_actual = std::cmp::max(n / 4, 10_000);
-        println!("Nodes (limit): {} (K=3 cap: max(n/4, 10000) = {})", n, cap_actual);
+        human_log!("Nodes (limit): {} (K=3 cap: max(n/4, 10000) = {})", n, cap_actual);
     }
     if let Some(j) = opts.jobs {
-        println!("Jobs (outer parallelism): {}", j);
+        human_log!("Jobs (outer parallelism): {}", j);
     }
-    println!("CPU cores: {:?}", std::thread::available_parallelism());
-    println!("Skipped positions will be saved to: {}", skipped_path.display());
-    println!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
-    println!("Note: TT memory usage scales with jobs: ~ hash_mb × jobs per process");
+    human_log!("CPU cores: {:?}", std::thread::available_parallelism());
+    human_log!("Skipped positions will be saved to: {}", skipped_path.display());
+    human_log!("Note: skipped file contains timeouts and search errors (nonexact/empty PV)");
+    human_log!("Note: TT memory usage scales with jobs: ~ hash_mb × jobs per process");
     if let Some(n) = opts.split_every {
-        println!("Split every: {} lines", n);
+        human_log!("Split every: {} lines", n);
     }
-    println!(
+    human_log!(
         "Compression: {}",
         match opts.compress {
             CompressionKind::None => "none",
@@ -761,6 +854,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CompressionKind::Zst => "zst",
         }
     );
+    if let Some(ref p) = opts.structured_log {
+        human_log!("Structured log: {}", p);
+    }
 
     // Early feature guard for zstd compression for better UX
     if matches!(opts.compress, CompressionKind::Zst) {
@@ -780,9 +876,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => 800,
     });
     if opts.nodes.is_none() {
-        println!("Time limit per position: {time_limit_ms}ms");
+        human_log!("Time limit per position: {time_limit_ms}ms");
     } else {
-        println!("Nodes-based budget active; time limit ignored for search.");
+        human_log!("Nodes-based budget active; time limit ignored for search.");
     }
 
     // Decide if we use split/compressed output
@@ -794,26 +890,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if output_path.exists() {
             let count = fast_count_lines(&output_path)?;
             if count > 0 {
-                println!("Found existing output file with {count} lines");
+                human_log!("Found existing output file with {count} lines");
                 if resume_from > 0 && resume_from != count {
-                    println!(
+                    human_log!(
                         "Warning: resume_from ({resume_from}) differs from existing lines ({count})"
                     );
-                    println!("Using the larger value: {}", resume_from.max(count));
+                    human_log!("Using the larger value: {}", resume_from.max(count));
                 }
             }
             existing_lines = count;
         } else if resume_from > 0 {
-            println!(
+            human_log!(
                 "Warning: Output file does not exist, but resume_from is set to {resume_from}"
             );
-            println!("Starting from position {resume_from} anyway");
+            human_log!("Starting from position {resume_from} anyway");
         }
     }
 
     // Now that existing_lines is known (for non-parted mode), print resume info
     if resume_from > 0 || existing_lines > 0 {
-        println!("Resuming from position: {}", resume_from.max(existing_lines));
+        human_log!("Resuming from position: {}", resume_from.max(existing_lines));
     }
 
     // Open files - append mode if resuming (only when not using split/compress)
@@ -1107,6 +1203,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Optional structured JSONL logger
+    struct StructuredLogger {
+        to_stdout: bool,
+        file: Option<Mutex<BufWriter<File>>>,
+    }
+    impl StructuredLogger {
+        fn new(path: &str) -> std::io::Result<Self> {
+            if path == "-" {
+                Ok(Self {
+                    to_stdout: true,
+                    file: None,
+                })
+            } else {
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let f = OpenOptions::new().create(true).append(true).open(path)?;
+                let bw = BufWriter::with_capacity(1 << 20, f);
+                Ok(Self {
+                    to_stdout: false,
+                    file: Some(Mutex::new(bw)),
+                })
+            }
+        }
+        fn write_json(&self, v: &serde_json::Value) {
+            if self.to_stdout {
+                println!("{}", v);
+            } else if let Some(ref file) = self.file {
+                if let Ok(mut w) = file.lock() {
+                    let _ = writeln!(w, "{}", v);
+                    let _ = w.flush();
+                }
+            }
+        }
+    }
+    let structured_logger: Option<StructuredLogger> = match opts.structured_log.as_deref() {
+        Some(path) => match StructuredLogger::new(path) {
+            Ok(lg) => Some(lg),
+            Err(e) => {
+                eprintln!("Warning: failed to open structured log '{}': {}", path, e);
+                None
+            }
+        },
+        None => None,
+    };
+
     let input_file = File::open(&input_path)?;
     let reader = BufReader::new(input_file);
     let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
@@ -1133,7 +1275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let total_positions = sfen_positions.len();
-    println!("\nFound {total_positions} positions in input file");
+    human_log!("\nFound {total_positions} positions in input file");
 
     // Optional: calibrate nodes from NPS if requested and nodes not explicitly set
     let mut manifest_existing: Option<Manifest> = None;
@@ -1180,20 +1322,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(ref calib) = man.calibration {
                             if let Some(tn) = calib.target_nodes {
                                 opts.nodes = Some(tn);
-                                println!(
+                                human_log!(
                                     "Reusing calibration from manifest: target_nodes={} (samples={:?}, min_depth={:?})",
                                     tn, calib.samples, calib.min_depth_used
                                 );
                             }
                         }
                     } else {
-                        println!("Existing calibration found but incompatible with current settings; recalibrating.");
+                        human_log!("Existing calibration found but incompatible with current settings; recalibrating.");
                     }
                 }
             }
 
             if opts.nodes.is_none() {
-                println!("Starting nodes auto-calibration: target {} ms", target_ms);
+                human_log!("Starting nodes auto-calibration: target {} ms", target_ms);
                 let sample_n = opts.calibrate_sample.min(total_positions).max(10);
                 // Prepare a reusable engine for calibration
                 let mut engine = Engine::new(opts.engine);
@@ -1214,7 +1356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
                     }
                     if i % 25 == 0 {
-                        println!("  calibrating {}/{}", i + 1, sample_n);
+                        human_log!("  calibrating {}/{}", i + 1, sample_n);
                     }
                     // Build position
                     let mut pos = match engine_core::usi::parse_sfen(sfen) {
@@ -1242,9 +1384,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let target_nodes = (nps * (target_ms as f64) / 1000.0) as u64;
                     let target_nodes = target_nodes.max(10_000);
                     opts.nodes = Some(target_nodes);
-                    println!(
+                    human_log!(
                         "Auto-calibration done: NPS≈{:.0}, nodes target={} ({} ms)",
-                        nps, target_nodes, target_ms
+                        nps,
+                        target_nodes,
+                        target_ms
                     );
                     calibration_to_write = Some(ManifestCalibration {
                         nps: Some(nps),
@@ -1254,7 +1398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         timestamp: Some(chrono::Utc::now().to_rfc3339()),
                     });
                 } else {
-                    println!("Auto-calibration failed (zero ms or nodes). Using time budget.");
+                    human_log!("Auto-calibration failed (zero ms or nodes). Using time budget.");
                 }
             }
         }
@@ -1271,9 +1415,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(&progress_path)?;
         let progress: usize = content.trim().parse().unwrap_or(skip_count);
         if progress > skip_count {
-            println!("Progress file shows {progress} positions attempted (including skipped)");
-            println!("Output file has {skip_count} successful results");
-            println!("Difference of {} positions were skipped/failed", progress - skip_count);
+            human_log!("Progress file shows {progress} positions attempted (including skipped)");
+            human_log!("Output file has {skip_count} successful results");
+            human_log!("Difference of {} positions were skipped/failed", progress - skip_count);
         }
         progress
     } else {
@@ -1283,14 +1427,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Skip based on the maximum of skip_count and actual_progress to avoid double-skip
     let positions_to_skip = skip_count.max(actual_progress);
     let sfen_positions = if positions_to_skip > 0 {
-        println!("Skipping first {positions_to_skip} positions (already attempted)");
+        human_log!("Skipping first {positions_to_skip} positions (already attempted)");
         sfen_positions.into_iter().skip(positions_to_skip).collect()
     } else {
         sfen_positions
     };
 
     let remaining_positions = sfen_positions.len();
-    println!("Processing {remaining_positions} remaining positions");
+    human_log!("Processing {remaining_positions} remaining positions");
 
     // Statistics - include already processed count
     let processed_count = Arc::new(AtomicUsize::new(skip_count));
@@ -1308,6 +1452,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         errors_nonexact_top1: errors_nonexact_top1.clone(),
         errors_empty_pv: errors_empty_pv.clone(),
         skipped_file: skipped_file.clone(),
+        lines_ge2: Arc::new(AtomicUsize::new(0)),
+        both_exact: Arc::new(AtomicUsize::new(0)),
+        ambiguous_k3: Arc::new(AtomicUsize::new(0)),
+        depth_hist: Arc::new(Mutex::new(Vec::new())),
+        k3_reran: Arc::new(AtomicUsize::new(0)),
+        k3_entropy: Arc::new(AtomicUsize::new(0)),
     };
 
     let env = ProcEnv {
@@ -1318,6 +1468,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         global_stop: global_stop.clone(),
     };
 
+    // Overall timer for elapsed seconds in summary
+    let overall_start = std::time::Instant::now();
+
     // Process in batches (optionally inside a local rayon thread pool)
     let mut run_batches = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for (batch_idx, chunk) in sfen_positions.chunks(batch_size).enumerate() {
@@ -1326,7 +1479,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let batch_start = std::time::Instant::now();
 
-            println!(
+            human_log!(
                 "\nBatch {}/{}: Processing {} positions...",
                 batch_idx + 1,
                 remaining_positions.div_ceil(batch_size),
@@ -1387,16 +1540,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_time = batch_start.elapsed();
             let positions_per_sec = chunk.len() as f64 / batch_time.as_secs_f64();
 
-            println!(
+            human_log!(
                 "Batch complete: {} results in {:.1}s ({:.0} pos/sec)",
                 successful_results.len(),
                 batch_time.as_secs_f32(),
                 positions_per_sec
             );
-            println!(
+            human_log!(
                 "Overall progress: {new_processed}/{total_positions} ({:.1}%)",
                 (new_processed as f64 / total_positions as f64) * 100.0
             );
+
+            // Structured log per batch (optional)
+            if let Some(ref lg) = structured_logger {
+                let rec = serde_json::json!({
+                    "kind": "batch",
+                    "version": 1,
+                    "batch_index": batch_idx,
+                    "size": chunk.len(),
+                    "success": successful_results.len(),
+                    "elapsed_sec": batch_time.as_secs_f64(),
+                    "sps": positions_per_sec,
+                    "attempted_sps": positions_per_sec,
+                    "processed_total": new_processed,
+                    "attempted_total": new_attempted,
+                    "percent": (new_processed as f64 / total_positions as f64) * 100.0,
+                });
+                lg.write_json(&rec);
+            }
         }
         Ok(())
     };
@@ -1421,30 +1592,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let e_empty_pv = errors_empty_pv.load(Ordering::Relaxed);
     let newly_processed = total_processed - skip_count;
 
-    println!("\n{}", "=".repeat(60));
-    println!("NNUE Training Data Generation Complete!");
-    println!("Total positions in file: {total_positions}");
-    println!("Previously processed: {skip_count}");
-    println!("Newly processed: {newly_processed}");
-    println!("Total processed: {total_processed}");
-    println!("Errors (hard): {total_errors}");
-    println!("  - parse: {e_parse}");
-    println!("  - nonexact_top1: {e_nonexact}");
-    println!("  - empty_or_missing_pv: {e_empty_pv}");
-    println!("Skipped (timeout_overruns): {total_skipped}");
+    human_log!("\n{}", "=".repeat(60));
+    human_log!("NNUE Training Data Generation Complete!");
+    human_log!("Total positions in file: {total_positions}");
+    human_log!("Previously processed: {skip_count}");
+    human_log!("Newly processed: {newly_processed}");
+    human_log!("Total processed: {total_processed}");
+    human_log!("Errors (hard): {total_errors}");
+    human_log!("  - parse: {e_parse}");
+    human_log!("  - nonexact_top1: {e_nonexact}");
+    human_log!("  - empty_or_missing_pv: {e_empty_pv}");
+    human_log!("Skipped (timeout_overruns): {total_skipped}");
 
     if newly_processed > 0 {
         let success_rate = (newly_processed as f64
             / (newly_processed + total_errors + total_skipped) as f64)
             * 100.0;
-        println!("Success rate (this run): {success_rate:.1}%");
+        human_log!("Success rate (this run): {success_rate:.1}%");
     }
 
     if total_skipped > 0 {
-        println!("\nSkipped positions saved to: {}", skipped_path.display());
-        println!("Progress tracked in: {}", progress_path.display());
-        println!("You can reprocess skipped positions with:");
-        println!(
+        human_log!("\nSkipped positions saved to: {}", skipped_path.display());
+        human_log!("Progress tracked in: {}", progress_path.display());
+        human_log!("You can reprocess skipped positions with:");
+        human_log!(
             "  cargo run --release --bin generate_nnue_training_data -- {} output_retry.txt {} {}",
             skipped_path.display(),
             search_depth + 1,
@@ -1482,6 +1653,124 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nnue_weights
         .as_ref()
         .and_then(|p| compute_sha_and_bytes(std::path::Path::new(p)).map(|(h, _)| h));
+
+    // Build manifest summary from aggregated counters
+    fn summarize_depth_hist(hist: &[usize]) -> (u8, u8, u8, u8) {
+        let mut min_idx = None;
+        let mut max_idx = None;
+        let mut total = 0usize;
+        for (d, &c) in hist.iter().enumerate() {
+            if c > 0 {
+                if min_idx.is_none() {
+                    min_idx = Some(d);
+                }
+                max_idx = Some(d);
+                total += c;
+            }
+        }
+        if total == 0 {
+            return (0, 0, 0, 0);
+        }
+        let min = min_idx.unwrap();
+        let max = max_idx.unwrap();
+        let p50t = (total as f64 * 0.50).ceil() as usize;
+        let p90t = (total as f64 * 0.90).ceil() as usize;
+        let mut acc = 0usize;
+        let mut p50 = min;
+        let mut p90 = min;
+        for (d, &c) in hist.iter().enumerate() {
+            if c == 0 {
+                continue;
+            }
+            acc += c;
+            if acc >= p50t && p50 == min {
+                p50 = d;
+            }
+            if acc >= p90t {
+                p90 = d;
+                break;
+            }
+        }
+        (min as u8, max as u8, p50 as u8, p90 as u8)
+    }
+
+    let elapsed_sec = overall_start.elapsed().as_secs_f64();
+    let success_total = total_processed; // equals manifest 'count'
+    let lines_ge2 = shared.lines_ge2.load(Ordering::Relaxed);
+    let both_exact_cnt = shared.both_exact.load(Ordering::Relaxed);
+    let ambiguous_cnt = shared.ambiguous_k3.load(Ordering::Relaxed);
+    let k3_reran_cnt = shared.k3_reran.load(Ordering::Relaxed);
+    let k3_entropy_cnt = shared.k3_entropy.load(Ordering::Relaxed);
+    let depth_hist_vec = shared.depth_hist.lock().unwrap().clone();
+    let (dmin, dmax, dp50, dp90) = summarize_depth_hist(&depth_hist_vec);
+    // Run-scoped deltas
+    let attempted_run = attempted_total.saturating_sub(positions_to_skip);
+    let success_run = success_total.saturating_sub(skip_count);
+    let timeout_rate = if attempted_run > 0 {
+        (total_skipped as f64 / attempted_run as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let top1_exact_rate = if attempted_run > 0 {
+        (success_run as f64 / attempted_run as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let both_exact_rate = if lines_ge2 > 0 {
+        (both_exact_cnt as f64 / lines_ge2 as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let summary_obj = ManifestSummary {
+        elapsed_sec,
+        throughput: ManifestThroughputSummary {
+            attempted_sps: if elapsed_sec > 0.0 {
+                attempted_run as f64 / elapsed_sec
+            } else {
+                0.0
+            },
+            success_sps: if elapsed_sec > 0.0 {
+                success_run as f64 / elapsed_sec
+            } else {
+                0.0
+            },
+        },
+        rates: ManifestRatesSummary {
+            timeout: timeout_rate,
+            top1_exact: top1_exact_rate,
+            both_exact: both_exact_rate,
+        },
+        ambiguous: ManifestAmbiguousSummary {
+            threshold_cp: opts.amb_gap2_threshold,
+            require_exact: opts.amb_require_exact,
+            count: ambiguous_cnt,
+            denom: lines_ge2,
+            rate: if lines_ge2 > 0 {
+                (ambiguous_cnt as f64 / lines_ge2 as f64).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            reran: Some(k3_reran_cnt),
+            with_entropy: Some(k3_entropy_cnt),
+        },
+        depth: ManifestDepthSummary {
+            histogram: depth_hist_vec.clone(),
+            min: dmin,
+            max: dmax,
+            p50: dp50,
+            p90: dp90,
+        },
+        counts: ManifestCountsSummary {
+            attempted: attempted_run,
+            success: success_run,
+            skipped_timeout: total_skipped,
+            errors: ManifestErrorsSummary {
+                parse: e_parse,
+                nonexact_top1: e_nonexact,
+                empty_or_missing_pv: e_empty_pv,
+            },
+        },
+    };
 
     if let Some(ref mut pm) = part_mgr {
         // Finish the last open part and collect infos
@@ -1539,6 +1828,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 generated_at: chrono::Utc::now().to_rfc3339(),
                 git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
                 engine: engine_name.to_string(),
+                manifest_scope: Some("part".to_string()),
                 teacher_engine,
                 generation_command,
                 seed,
@@ -1577,7 +1867,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hash_mb: opts.hash_mb,
                 threads_per_engine: 1,
                 jobs: opts.jobs,
-                count: total_processed,
+                count: info.count_in_part,
                 cp_to_wdl_scale: opts.wdl_scale,
                 wdl_semantics: "side_to_move".to_string(),
                 calibration: calibration_out.clone(),
@@ -1615,6 +1905,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     entropy_scale: opts.entropy_scale,
                 }),
+                summary: None,
             };
             if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
                 if let Err(e) = std::fs::write(&man_path, txt) {
@@ -1624,6 +1915,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         e
                     );
                 }
+            }
+        }
+        // After writing per-part manifests, write parent aggregated manifest with summary
+        let teacher_usi = TeacherUsiOpts {
+            hash_mb: opts.hash_mb,
+            multipv: opts.multipv,
+            threads: 1,
+            teacher_profile: format!("{:?}", opts.teacher_profile),
+            min_depth: effective_depth,
+        };
+        let engine_version = std::env::var("ENGINE_SEMVER")
+            .ok()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let teacher_engine = TeacherEngineInfo {
+            name: engine_name.to_string(),
+            version: engine_version,
+            commit: std::env::var("ENGINE_COMMIT")
+                .ok()
+                .or_else(|| std::env::var("GIT_COMMIT_HASH").ok()),
+            usi_opts: teacher_usi,
+        };
+        let argv: Vec<String> = std::env::args().collect();
+        let generation_command = argv.join(" ");
+        let seed = stable_seed_from_args(&argv);
+        let manifest = Manifest {
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
+            engine: engine_name.to_string(),
+            manifest_scope: Some("aggregate".to_string()),
+            teacher_engine,
+            generation_command,
+            seed,
+            manifest_version: "2".into(),
+            input: ManifestInputInfo {
+                path: input_path.display().to_string(),
+                sha256: input_sha256,
+                bytes: input_bytes,
+            },
+            nnue_weights_sha256,
+            nnue_weights: opts.nnue_weights.clone(),
+            preset: preset_name.clone(),
+            overrides: Some(ManifestOverrides {
+                time: cli_set_time,
+                nodes: cli_set_nodes,
+                hash_mb: cli_set_hash,
+                multipv: cli_set_multipv,
+                min_depth: cli_set_min_depth,
+            }),
+            teacher_profile: format!("{:?}", opts.teacher_profile),
+            multipv: opts.multipv,
+            budget: ManifestBudget {
+                mode: if opts.nodes.is_some() {
+                    "nodes".into()
+                } else {
+                    "time".into()
+                },
+                time_ms: if opts.nodes.is_some() {
+                    None
+                } else {
+                    Some(time_limit_ms)
+                },
+                nodes: opts.nodes,
+            },
+            min_depth: effective_depth,
+            hash_mb: opts.hash_mb,
+            threads_per_engine: 1,
+            jobs: opts.jobs,
+            count: total_processed,
+            cp_to_wdl_scale: opts.wdl_scale,
+            wdl_semantics: "side_to_move".into(),
+            calibration: calibration_out,
+            attempted: attempted_total,
+            skipped_timeout: total_skipped,
+            errors: serde_json::json!({ "parse": e_parse, "nonexact_top1": e_nonexact, "empty_or_missing_pv": e_empty_pv }),
+            reuse_tt: opts.reuse_tt,
+            skip_overrun_factor: opts.skip_overrun_factor,
+            search_depth_arg: search_depth,
+            effective_min_depth: effective_depth,
+            output_sha256: None,
+            output_bytes: None,
+            part_index: None,
+            part_count: Some(total_parts),
+            count_in_part: None,
+            compression: comp_str,
+            ambiguity: Some(ManifestAmbiguity {
+                gap2_threshold_cp: opts.amb_gap2_threshold,
+                require_exact: opts.amb_require_exact,
+                mate_mode: match opts.entropy_mate_mode {
+                    MateEntropyMode::Exclude => "exclude".into(),
+                    MateEntropyMode::Saturate => "saturate".into(),
+                },
+                entropy_scale: opts.entropy_scale,
+            }),
+            summary: Some(summary_obj.clone()),
+        };
+        if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
+            if let Err(e) = std::fs::write(&manifest_path, txt) {
+                eprintln!(
+                    "Warning: failed to write manifest.json ({}): {}",
+                    manifest_path.display(),
+                    e
+                );
+            } else {
+                human_log!("Manifest written: {}", manifest_path.display());
             }
         }
     } else {
@@ -1678,6 +2073,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             generated_at: chrono::Utc::now().to_rfc3339(),
             git_commit: std::env::var("GIT_COMMIT_HASH").ok(),
             engine: engine_name.to_string(),
+            manifest_scope: Some("aggregate".to_string()),
             teacher_engine,
             generation_command,
             seed,
@@ -1750,6 +2146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 entropy_scale: opts.entropy_scale,
             }),
+            summary: Some(summary_obj.clone()),
         };
         if let Ok(txt) = serde_json::to_string_pretty(&manifest) {
             if let Err(e) = std::fs::write(&manifest_path, txt) {
@@ -1759,9 +2156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     e
                 );
             } else {
-                println!("Manifest written: {}", manifest_path.display());
+                human_log!("Manifest written: {}", manifest_path.display());
             }
         }
+    }
+
+    // Structured final record (optional)
+    if let Some(ref lg) = structured_logger {
+        let rec = serde_json::json!({ "kind": "final", "version": 1, "summary": &summary_obj });
+        lg.write_json(&rec);
     }
 
     Ok(())
@@ -1809,6 +2212,10 @@ fn process_position_with_engine(
     let mut pos_clone = position.clone();
     let result = eng.search(&mut pos_clone, limits);
     let elapsed_stats_ms = result.stats.elapsed.as_millis() as u64;
+    let k2_time_ms = elapsed_stats_ms;
+    let k2_nodes = result.stats.nodes;
+    let mut k3_time_ms_opt: Option<u64> = None;
+    let mut k3_nodes_opt: Option<u64> = None;
     // Track which search stats we will report (K=2 by default; may switch to K=3)
     let mut result_used_time_ms = elapsed_stats_ms;
     let mut result_used_depth = result.stats.depth;
@@ -1925,6 +2332,7 @@ fn process_position_with_engine(
                 env.opts.amb_require_exact,
             ) {
                 ambiguous_k3 = true;
+                env.shared.ambiguous_k3.fetch_add(1, Ordering::Relaxed);
                 let mut have_three = lines0.len() >= 3;
                 // lightweight copy: only first 3 lines
                 let mut lines_k: Vec<_> = lines0.iter().take(3).cloned().collect();
@@ -1945,19 +2353,23 @@ fn process_position_with_engine(
                         } else {
                             // Keep within remaining budget conservatively: at most 1/4 of time_limit
                             let rem = env.time_limit_ms.saturating_sub(elapsed_stats_ms);
-                            let cap = rem.min(env.time_limit_ms / 4);
+                            let cap = rem.min(env.time_limit_ms / 4).max(20);
                             builder2 = builder2.fixed_time_ms(cap);
                         }
                         let limits2 = builder2.build();
+                        // Count actual K=3 re-search executions
+                        env.shared.k3_reran.fetch_add(1, Ordering::Relaxed);
                         let res2 = eng.search(&mut pos2, limits2);
                         if let Some(ref lines2) = res2.lines {
                             lines_k = lines2.iter().take(3).cloned().collect();
                             have_three = lines_k.len() >= 3;
                             if have_three {
                                 // Adopt K=3 stats/lines (compute entropy once after this block)
+                                k3_time_ms_opt = Some(res2.stats.elapsed.as_millis() as u64);
                                 result_used_time_ms = res2.stats.elapsed.as_millis() as u64;
                                 result_used_depth = res2.stats.depth;
                                 result_used_seldepth = res2.stats.seldepth;
+                                k3_nodes_opt = Some(res2.stats.nodes);
                                 result_used_nodes = res2.stats.nodes;
                                 result_used_qnodes = res2.stats.qnodes;
                                 result_used_tt_hits = res2.stats.tt_hits;
@@ -1979,8 +2391,26 @@ fn process_position_with_engine(
                         env.opts.entropy_scale,
                         env.opts.entropy_mate_mode,
                     );
+                    if entropy_k3_opt.is_some() {
+                        env.shared.k3_entropy.fetch_add(1, Ordering::Relaxed);
+                    }
                     // no extra clone
                     lines_used_opt = Some(lines_k);
+                }
+            }
+            // Update both_exact/lines_ge2 using adopted lines (K=3 if present)
+            let lines_for_stats: &[engine_core::search::types::RootLine] =
+                if let Some(ref v) = lines_used_opt {
+                    v.as_slice()
+                } else {
+                    lines0.as_slice()
+                };
+            if lines_for_stats.len() >= 2 {
+                env.shared.lines_ge2.fetch_add(1, Ordering::Relaxed);
+                if matches!(lines_for_stats[0].bound, Bound::Exact)
+                    && matches!(lines_for_stats[1].bound, Bound::Exact)
+                {
+                    env.shared.both_exact.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -2028,6 +2458,16 @@ fn process_position_with_engine(
         } else {
             fallback_small.map(|sv| sv.as_slice())
         };
+
+    // Success path counters
+    {
+        let mut hist = env.shared.depth_hist.lock().unwrap();
+        let d = result_used_depth as usize;
+        if hist.len() <= d {
+            hist.resize(d + 1, 0);
+        }
+        hist[d] += 1;
+    }
 
     // Output according to selected format
     match env.opts.output_format {
@@ -2114,6 +2554,12 @@ fn process_position_with_engine(
                 "nodes": result_used_nodes,
                 "nodes_q": result_used_qnodes,
                 "time_ms": result_used_time_ms,
+                "time_ms_k2": k2_time_ms,
+                "time_ms_k3": k3_time_ms_opt,
+                "search_time_ms_total": k2_time_ms + k3_time_ms_opt.unwrap_or(0),
+                "nodes_k2": k2_nodes,
+                "nodes_k3": k3_nodes_opt,
+                "nodes_total": k2_nodes + k3_nodes_opt.unwrap_or(0),
                 "aspiration_retries": result_used_re_searches,
                 "pv_changed": result_used_pv_changed,
                 "best2_gap_cp": gap2,

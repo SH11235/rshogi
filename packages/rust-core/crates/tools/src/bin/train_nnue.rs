@@ -32,12 +32,15 @@
 //! speed for sparse feature sets like HalfKP.
 
 use std::fs::{create_dir_all, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime};
+use tools::nnfc_v1::{
+    open_payload_reader as open_cache_payload_reader_shared, FEATURE_SET_ID_HALF,
+};
 
 use clap::{arg, Command};
 use engine_core::{
@@ -48,6 +51,7 @@ use engine_core::{
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use tools::nnfc_v1::flags as fc_flags;
 
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
@@ -458,186 +462,24 @@ impl StreamCacheLoader {
         let (tx, rx) = sync_channel::<BatchMsg>(self.prefetch_batches.max(1));
 
         let handle = std::thread::spawn(move || {
-            // Open cache and parse header (v1)
-            let file = match File::open(&path) {
-                Ok(f) => f,
+            // Use shared nnfc_v1 reader
+            let (reader, header) = match tools::nnfc_v1::open_payload_reader(&path) {
+                Ok(v) => v,
                 Err(e) => {
                     let _ = tx.send(BatchMsg::Err(format!("Failed to open cache {}: {}", path, e)));
                     return;
                 }
             };
-            let mut f = BufReader::new(file);
-
-            let mut magic = [0u8; 4];
-            if let Err(e) = f.read_exact(&mut magic) {
-                let _ =
-                    tx.send(BatchMsg::Err(format!("Failed to read magic from {}: {}", path, e)));
-                return;
-            }
-            if &magic != b"NNFC" {
-                let _ = tx
-                    .send(BatchMsg::Err(format!("Invalid cache file: bad magic (file {})", path)));
-                return;
-            }
-
-            let mut u32b = [0u8; 4];
-            let mut u64b = [0u8; 8];
-
-            // Version
-            if let Err(e) = f.read_exact(&mut u32b) {
-                let _ =
-                    tx.send(BatchMsg::Err(format!("Failed to read version from {}: {}", path, e)));
-                return;
-            }
-            let version = u32::from_le_bytes(u32b);
-            if version != 1 {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Unsupported cache version: {} (file {})",
-                    version, path
-                )));
-                return;
-            }
-
-            // feature_set_id
-            if let Err(e) = f.read_exact(&mut u32b) {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Failed to read feature_set_id from {}: {}",
-                    path, e
-                )));
-                return;
-            }
-            let feature_set_id = u32::from_le_bytes(u32b);
-            if feature_set_id != FEATURE_SET_ID_HALF {
+            if header.feature_set_id != tools::nnfc_v1::FEATURE_SET_ID_HALF {
                 let _ = tx.send(BatchMsg::Err(format!(
                     "Unsupported feature_set_id: 0x{:08x} (file {})",
-                    feature_set_id, path
+                    header.feature_set_id, path
                 )));
                 return;
             }
-
-            if let Err(e) = f.read_exact(&mut u64b) {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Failed to read num_samples from {}: {}",
-                    path, e
-                )));
-                return;
-            }
-            let num_samples = u64::from_le_bytes(u64b);
-
-            if let Err(e) = f.read_exact(&mut u32b) {
-                let _ = tx
-                    .send(BatchMsg::Err(format!("Failed to read chunk_size from {}: {}", path, e)));
-                return;
-            }
-            let _chunk_size = u32::from_le_bytes(u32b);
-
-            if let Err(e) = f.read_exact(&mut u32b) {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Failed to read header_size from {}: {}",
-                    path, e
-                )));
-                return;
-            }
-            let header_size = u32::from_le_bytes(u32b);
-            if !(40..=4096).contains(&header_size) {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Unreasonable header_size: {} (file {})",
-                    header_size, path
-                )));
-                return;
-            }
-
-            let mut b = [0u8; 1];
-            if let Err(e) = f.read_exact(&mut b) {
-                let _ = tx
-                    .send(BatchMsg::Err(format!("Failed to read endianness from {}: {}", path, e)));
-                return;
-            }
-            if b[0] != 0 {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Unsupported endianness (expected LE) for {}",
-                    path
-                )));
-                return;
-            }
-
-            if let Err(e) = f.read_exact(&mut b) {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Failed to read payload_encoding from {}: {}",
-                    path, e
-                )));
-                return;
-            }
-            let payload_encoding = b[0];
-            // reserved16
-            let mut _r16 = [0u8; 2];
-            if let Err(e) = f.read_exact(&mut _r16) {
-                let _ = tx
-                    .send(BatchMsg::Err(format!("Failed to read reserved16 from {}: {}", path, e)));
-                return;
-            }
-            if let Err(e) = f.read_exact(&mut u64b) {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "Failed to read payload_offset from {}: {}",
-                    path, e
-                )));
-                return;
-            }
-            let payload_offset = u64::from_le_bytes(u64b);
-            // sample_flags_mask
-            if let Err(e) = f.read_exact(&mut u32b) {
-                let _ = tx
-                    .send(BatchMsg::Err(format!("Failed to read flags_mask from {}: {}", path, e)));
-                return;
-            }
-            let flags_mask = u32::from_le_bytes(u32b);
-
-            // Seek to payload
-            let header_end = 4u64 + header_size as u64;
-            if payload_offset < header_end {
-                let _ = tx.send(BatchMsg::Err(format!(
-                    "payload_offset ({}) < header_end ({}) for {}",
-                    payload_offset, header_end, path
-                )));
-                return;
-            }
-            if let Err(e) = f.seek(SeekFrom::Start(payload_offset)) {
-                let _ =
-                    tx.send(BatchMsg::Err(format!("Failed to seek to payload in {}: {}", path, e)));
-                return;
-            }
-
-            // Wrap payload reader if needed
-            let inner_reader: Box<dyn Read> = match payload_encoding {
-                0 => Box::new(f),
-                1 => {
-                    use flate2::read::GzDecoder;
-                    Box::new(GzDecoder::new(f))
-                }
-                2 => {
-                    #[cfg(feature = "zstd")]
-                    {
-                        Box::new(zstd::Decoder::new(f).expect("zstd decoder"))
-                    }
-                    #[cfg(not(feature = "zstd"))]
-                    {
-                        let _ = tx.send(BatchMsg::Err(format!(
-                            "zstd payload requires building with 'zstd' feature (file {})",
-                            path
-                        )));
-                        return;
-                    }
-                }
-                other => {
-                    let _ = tx.send(BatchMsg::Err(format!(
-                        "Unknown payload encoding: {} (file {})",
-                        other, path
-                    )));
-                    return;
-                }
-            };
-
-            let mut r = BufReader::new(inner_reader);
+            let num_samples = header.num_samples;
+            let flags_mask = header.flags_mask;
+            let mut r = reader; // BufReader<Box<dyn Read>>
 
             let mut loaded: u64 = 0;
             let mut batch = Vec::with_capacity(batch_size);
@@ -740,9 +582,9 @@ impl StreamCacheLoader {
                 // weight policy
                 let mut weight = 1.0f32;
                 weight *= (gap as f32 / 50.0).min(1.0);
-                let both_exact = (flags & 1) != 0;
+                let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                 weight *= if both_exact { 1.0 } else { 0.7 };
-                if (flags & 2) != 0 {
+                if (flags & fc_flags::MATE_BOUNDARY) != 0 {
                     weight *= 0.5;
                 }
                 if seldepth < depth.saturating_add(6) {
@@ -1019,13 +861,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize RNG with seed if provided
     let mut rng: StdRng = if let Some(seed_str) = app.get_one::<String>("seed") {
-        let seed: u64 = seed_str.parse().expect("Invalid seed value");
-        println!("Using random seed: {}", seed);
+        let seed: u64 = seed_str.parse().expect("Invalid seed value (expected u64)");
+        println!("Using random seed (u64): {}", seed);
         StdRng::seed_from_u64(seed)
     } else {
         let seed_bytes: [u8; 32] = rand::rng().random();
-        let seed_str = seed_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
-        println!("Generated random seed: {}", seed_str);
+        let seed_hex = seed_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        let u64_proj = u64::from_le_bytes(seed_bytes[0..8].try_into().unwrap());
+        println!("Generated random seed (32B hex): {} | (u64 proj): {}", seed_hex, u64_proj);
         StdRng::from_seed(seed_bytes)
     };
 
@@ -1086,19 +929,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn open_jsonl_reader(path: &str) -> Result<Box<dyn BufRead>, Box<dyn std::error::Error>> {
+    const BUF_MB: usize = 4;
+    tools::io_detect::open_maybe_compressed_reader(path, BUF_MB * 1024 * 1024)
+}
+
 fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = open_jsonl_reader(path)?;
     let mut samples = Vec::new();
     let mut skipped = 0;
+    let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    loop {
+        line_buf.clear();
+        let n = reader.read_until(b'\n', &mut line_buf)?;
+        if n == 0 {
+            break;
+        }
+        if line_buf.iter().all(|b| b.is_ascii_whitespace()) {
             continue;
         }
 
-        let pos_data: TrainingPosition = match serde_json::from_str(&line) {
+        let pos_data: TrainingPosition = match serde_json::from_slice(&line_buf) {
             Ok(data) => data,
             Err(_) => {
                 skipped += 1;
@@ -1185,14 +1037,15 @@ fn load_samples(path: &str, config: &Config) -> Result<Vec<Sample>, Box<dyn std:
     }
 
     if skipped > 0 {
-        println!("Skipped {} positions", skipped);
+        eprintln!("Skipped {} positions (invalid/filtered)", skipped);
     }
 
     Ok(samples)
 }
 
 fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
-    1.0 / (1.0 + (-cp as f32 / scale).exp())
+    let x = (cp as f32 / scale).clamp(-20.0, 20.0);
+    1.0 / (1.0 + (-x).exp())
 }
 
 #[inline]
@@ -1232,116 +1085,19 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
 
 // Type alias to keep function signatures simple
 type CachePayload = (BufReader<Box<dyn Read>>, u64, u32);
-// Feature set id for HALF (HalfKP) cache
-const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
 
 // Common helper: open a v1 cache file and return a BufReader over the payload,
 // along with (num_samples, flags_mask). Handles raw/gzip/zstd based on header.
 fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::error::Error>> {
-    let mut f = File::open(path)?;
-
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
-    if &magic != b"NNFC" {
-        return Err(format!("Invalid cache file: bad magic (file {})", path).into());
-    }
-
-    let mut u32b = [0u8; 4];
-    let mut u64b = [0u8; 8];
-
-    // version
-    f.read_exact(&mut u32b)?;
-    let version = u32::from_le_bytes(u32b);
-    if version != 1 {
-        return Err(format!(
-            "Unsupported cache version: {} (v1 required) for file {}",
-            version, path
-        )
-        .into());
-    }
-    // feature_set_id
-    f.read_exact(&mut u32b)?;
-    let feature_set_id = u32::from_le_bytes(u32b);
-    if feature_set_id != FEATURE_SET_ID_HALF {
+    let (r, header) = open_cache_payload_reader_shared(path)?;
+    if header.feature_set_id != FEATURE_SET_ID_HALF {
         return Err(format!(
             "Unsupported feature_set_id: 0x{:08x} for file {}",
-            feature_set_id, path
+            header.feature_set_id, path
         )
         .into());
     }
-    // num_samples, chunk_size, header_size
-    f.read_exact(&mut u64b)?;
-    let num_samples = u64::from_le_bytes(u64b);
-    f.read_exact(&mut u32b)?; // chunk_size (unused)
-    f.read_exact(&mut u32b)?; // header_size
-    let header_size = u32::from_le_bytes(u32b);
-    if !(40..=4096).contains(&header_size) {
-        return Err(format!("Unreasonable header_size: {} for file {}", header_size, path).into());
-    }
-    // endianness
-    let mut b = [0u8; 1];
-    f.read_exact(&mut b)?;
-    if b[0] != 0 {
-        return Err(format!(
-            "Unsupported endianness in cache header (expected LE=0) for file {}",
-            path
-        )
-        .into());
-    }
-    // payload_encoding
-    f.read_exact(&mut b)?;
-    let payload_encoding = b[0];
-    // reserved16
-    let mut _r16 = [0u8; 2];
-    f.read_exact(&mut _r16)?;
-    // payload_offset
-    f.read_exact(&mut u64b)?;
-    let payload_offset = u64::from_le_bytes(u64b);
-    let header_end = 4u64 + header_size as u64;
-    if payload_offset < header_end {
-        return Err(format!(
-            "payload_offset ({}) is smaller than header end ({}); file {} may be corrupted",
-            payload_offset, header_end, path
-        )
-        .into());
-    }
-    // flags_mask
-    f.read_exact(&mut u32b)?;
-    let flags_mask = u32::from_le_bytes(u32b);
-
-    // seek to payload
-    let current = f.stream_position()?;
-    if current < payload_offset {
-        f.seek(SeekFrom::Start(payload_offset))?;
-    }
-
-    // wrap reader
-    let reader: Box<dyn Read> = match payload_encoding {
-        0 => Box::new(f),
-        1 => {
-            use flate2::read::GzDecoder;
-            Box::new(GzDecoder::new(f))
-        }
-        2 => {
-            #[cfg(feature = "zstd")]
-            {
-                Box::new(zstd::Decoder::new(f)?)
-            }
-            #[cfg(not(feature = "zstd"))]
-            {
-                return Err(format!(
-                    "zstd payload requires building with 'zstd' feature (file {})",
-                    path
-                )
-                .into());
-            }
-        }
-        other => {
-            return Err(format!("Unknown payload encoding: {} for file {}", other, path).into())
-        }
-    };
-
-    Ok((BufReader::new(reader), num_samples, flags_mask))
+    Ok((r, header.num_samples, header.flags_mask))
 }
 
 fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
@@ -1427,11 +1183,11 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         weight *= (gap as f32 / 50.0).min(1.0);
 
         // Exact bound weight
-        let both_exact = (flags & 1) != 0;
+        let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
         weight *= if both_exact { 1.0 } else { 0.7 };
 
         // Mate boundary weight
-        if (flags & 2) != 0 {
+        if (flags & fc_flags::MATE_BOUNDARY) != 0 {
             weight *= 0.5;
         }
 
@@ -1666,9 +1422,9 @@ fn train_model_stream_cache(
                     let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
                     let mut weight = 1.0f32;
                     weight *= (gap as f32 / 50.0).min(1.0);
-                    let both_exact = (flags & 1) != 0;
+                    let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                     weight *= if both_exact { 1.0 } else { 0.7 };
-                    if (flags & 2) != 0 {
+                    if (flags & fc_flags::MATE_BOUNDARY) != 0 {
                         weight *= 0.5;
                     }
                     if seldepth < depth.saturating_add(6) {

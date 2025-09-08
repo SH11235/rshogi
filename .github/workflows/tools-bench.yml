@@ -1,0 +1,95 @@
+name: Tools Bench
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'packages/rust-core/crates/tools/**'
+      - '.github/workflows/tools-bench.yml'
+  pull_request:
+    paths:
+      - 'packages/rust-core/crates/tools/**'
+      - '.github/workflows/tools-bench.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold clang zstd
+          mold --version || true
+          clang --version || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packages/rust-core -> target"
+      - name: Build tools (with zstd)
+        working-directory: packages/rust-core
+        run: |
+          cargo build -p tools --features zstd --release
+      - name: Generate mini JSONL
+        run: |
+          python3 - <<'PY'
+          import json
+          sfen_b="lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
+          sfen_w="lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1"
+          with open('/tmp/in.jsonl','w') as f:
+            for i in range(2000):
+              d={"sfen": sfen_b if i%2==0 else sfen_w, "eval": (i%5)*50, "depth": 12, "seldepth": 16, "bound1":"Exact","bound2":"Exact","best2_gap_cp":30}
+              f.write(json.dumps(d)+'\n')
+          PY
+          gzip -c /tmp/in.jsonl > /tmp/in.jsonl.gz
+          zstd -q -f -3 /tmp/in.jsonl -o /tmp/in.jsonl.zst
+      - name: Bench (gzip, chunked)
+        working-directory: packages/rust-core
+        run: |
+          /usr/bin/time -v target/release/build_feature_cache \
+            -i /tmp/in.jsonl.gz -o /tmp/out.cache \
+            --compress --compressor gz --chunk-size 8192 --io-buf-mb 8 --metrics-interval 5000 --report-rss \
+            2>&1 | tee /tmp/bench.log
+      - name: Parse metrics (head)
+        run: packages/rust-core/target/release/parse_bench_metrics /tmp/bench.log > /tmp/head.json
+      - name: Checkout base
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - name: Build tools at base (with zstd)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          cd base/packages/rust-core
+          cargo build -p tools --features zstd --release
+      - name: Bench base (gzip, chunked)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          /usr/bin/time -v base/packages/rust-core/target/release/build_feature_cache \
+            -i /tmp/in.jsonl.gz -o /tmp/out_base.cache \
+            --compress --compressor gz --chunk-size 8192 --io-buf-mb 8 --metrics-interval 5000 --report-rss \
+            2>&1 | tee /tmp/bench_base.log
+      - name: Parse metrics (base)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: packages/rust-core/target/release/parse_bench_metrics /tmp/bench_base.log > /tmp/base.json
+      - name: Compare metrics (WARN only)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: packages/rust-core/target/release/compare_bench_metrics /tmp/head.json /tmp/base.json
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tools-bench
+          path: |
+            /tmp/bench.log
+            /tmp/out.cache
+            /tmp/head.json
+            /tmp/bench_base.log
+            /tmp/out_base.cache
+            /tmp/base.json
+          if-no-files-found: ignore
