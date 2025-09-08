@@ -1813,7 +1813,7 @@ fn train_model_stream_cache(
     // Async streaming loader path
     // Optionally cap prefetch by bytes (rough estimate)
     let mut effective_prefetch = config.prefetch_batches.max(1);
-    if let Some(bytes_cap) = config.prefetch_bytes {
+    if let Some(bytes_cap) = config.prefetch_bytes.filter(|&b| b > 0) {
         // Estimate per-sample bytes: header/meta (~32B) + 4B * estimated_features
         let est_sample_bytes =
             32usize.saturating_add(4usize.saturating_mul(config.estimated_features_per_sample));
@@ -2032,7 +2032,7 @@ fn train_model_with_loader(
                         0.0
                     };
                     println!(
-                    "[throughput] mode=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                    "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
                     epoch + 1,
                     batch_count,
                     sps,
@@ -2146,7 +2146,7 @@ fn train_model_with_loader(
                     let bps = batches_since as f32 / secs;
                     let avg_bs = samples_since as f32 / batches_since as f32;
                     println!(
-                        "[throughput] mode=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
+                        "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
                         epoch + 1,
                         batch_count,
                         sps,

@@ -72,6 +72,17 @@ cargo run --release -p tools --bin train_nnue -- \
   --stream-cache --prefetch-batches 4 --throughput-interval 2.0
 # ログ: [throughput] mode=stream ... loader_ratio=...%
 ```
+
+オプション補足:
+- `--prefetch-batches N`: stream-cache / cache 入力時のプリフェッチ深さ。
+- `--prefetch-bytes BYTES`: プリフェッチの概算メモリ上限（バイト）。0 または未指定で無制限。
+- `--estimated-features-per-sample N`: サンプル1件あたりの推定活性特徴数（既定 64）。
+  - 概算メモリは `~32 + 4*N` バイト/サンプルとして見積もられ、`--prefetch-bytes` の丸めに使用されます。
+  - 実データで活性数が多い場合は N を増やすと安全です。
+
+ログの意味:
+- `[throughput] mode=stream ... loader_ratio=...%` は、非同期ローダに対する受信待機（I/O/解凍待ち等）が占める割合です。
+- in‑memory 経路は `mode=inmem loader=async|sync` として出力され、`loader_ratio` は概ね 0% になります。
 ```
 
 4) 品質解析（ゲート/要約/複数入力の比較）
