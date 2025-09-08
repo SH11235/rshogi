@@ -23,7 +23,7 @@ jobs:
       - name: Install mold linker
         run: |
           sudo apt-get update
-          sudo apt-get install -y mold clang
+          sudo apt-get install -y mold clang zstd
           mold --version || true
           clang --version || true
       - uses: dtolnay/rust-toolchain@stable
@@ -96,3 +96,4 @@ jobs:
             /tmp/bench_base.log
             /tmp/out_base.cache
             /tmp/base.json
+          if-no-files-found: ignore

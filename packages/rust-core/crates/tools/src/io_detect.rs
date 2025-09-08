@@ -26,13 +26,19 @@ pub fn open_maybe_compressed_reader(
     path: &str,
     buf_bytes: usize,
 ) -> Result<Box<dyn BufRead>, Box<dyn std::error::Error>> {
-    // Prefer extension, fall back to magic
-    let kind = if path.ends_with(".gz") {
-        TextCompressionKind::Gzip
-    } else if path.ends_with(".zst") {
-        TextCompressionKind::Zstd
-    } else {
-        sniff_magic(path)?
+    // Prefer magic; fall back to extension when inconclusive
+    let magic_kind = sniff_magic(path)?;
+    let kind = match magic_kind {
+        TextCompressionKind::Plain => {
+            if path.ends_with(".gz") {
+                TextCompressionKind::Gzip
+            } else if path.ends_with(".zst") {
+                TextCompressionKind::Zstd
+            } else {
+                TextCompressionKind::Plain
+            }
+        }
+        other => other,
     };
 
     let file = File::open(path)?;
