@@ -39,6 +39,7 @@ pub fn canonicalize_position_cmd(startpos: bool, sfen: Option<&str>, moves: &[St
 }
 
 use crate::movegen::MoveGenerator;
+use crate::search::types::NodeType;
 use crate::shogi::{Move, Position};
 use crate::usi::{parse_sfen, parse_usi_move, position_to_sfen};
 use anyhow::{anyhow, Result};
@@ -215,9 +216,51 @@ pub fn rebuild_then_snapshot_fallback(
     }
     Err(anyhow!("rebuild_then_snapshot_fallback: both rebuild and snapshot failed"))
 }
+
+/// Normalized USI score view (cp or signed mate distance)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreView {
+    /// Centipawn score from side-to-move perspective
+    Cp(i32),
+    /// Signed mate distance in plies (positive = giving mate, negative = getting mated)
+    Mate(i32),
+}
+
+/// Append normalized `score ... [lowerbound|upperbound]` tokens to `out`.
+/// - Places bound tag immediately after the score in accordance with common USI practice.
+pub fn append_usi_score_and_bound(out: &mut String, view: ScoreView, bound: NodeType) {
+    match view {
+        ScoreView::Cp(cp) => {
+            out.push_str(&format!(" score cp {}", cp));
+        }
+        ScoreView::Mate(d) => {
+            out.push_str(&format!(" score mate {}", d));
+        }
+    }
+
+    match bound {
+        NodeType::UpperBound => out.push_str(" upperbound"),
+        NodeType::LowerBound => out.push_str(" lowerbound"),
+        _ => {}
+    }
+}
+
+/// Convert an engine-internal score into a ScoreView
+/// - Mate scores become signed mate distances (plies)
+/// - Others are passed through as cp (assumed side-to-move perspective)
+pub fn score_view_from_internal(raw: i32) -> ScoreView {
+    if crate::search::common::is_mate_score(raw) {
+        let d = crate::search::common::extract_mate_distance(raw).unwrap_or(0) as i32;
+        let sign = if raw >= 0 { 1 } else { -1 };
+        ScoreView::Mate(sign * d)
+    } else {
+        ScoreView::Cp(raw)
+    }
+}
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_position_cmd;
+    use super::*;
+    use crate::search::common::{extract_mate_distance, is_mate_score, mate_score};
 
     #[test]
     fn test_canonicalize_position_cmd_startpos() {
@@ -252,5 +295,42 @@ mod tests {
         let moves = vec![" 7g7f ".to_string(), "3c3d  ".to_string()];
         let cmd = canonicalize_position_cmd(true, None, &moves);
         assert_eq!(cmd, "position startpos moves 7g7f 3c3d");
+    }
+
+    #[test]
+    fn test_append_usi_score_cp_exact() {
+        let mut s = String::from("info");
+        append_usi_score_and_bound(&mut s, ScoreView::Cp(123), NodeType::Exact);
+        assert!(s.contains(" score cp 123"));
+        assert!(!s.contains("upperbound"));
+        assert!(!s.contains("lowerbound"));
+    }
+
+    #[test]
+    fn test_append_usi_score_cp_with_bounds() {
+        let mut s1 = String::from("info");
+        append_usi_score_and_bound(&mut s1, ScoreView::Cp(-50), NodeType::UpperBound);
+        assert!(s1.contains(" score cp -50 upperbound"));
+
+        let mut s2 = String::from("info");
+        append_usi_score_and_bound(&mut s2, ScoreView::Cp(80), NodeType::LowerBound);
+        assert!(s2.contains(" score cp 80 lowerbound"));
+    }
+
+    #[test]
+    fn test_append_usi_score_mate_signed() {
+        let mut s = String::from("info");
+        append_usi_score_and_bound(&mut s, ScoreView::Mate(3), NodeType::Exact);
+        assert!(s.contains(" score mate 3"));
+    }
+
+    #[test]
+    fn test_mate_detection_helpers() {
+        let win2 = mate_score(2, true);
+        assert!(is_mate_score(win2));
+        assert_eq!(extract_mate_distance(win2), Some(2));
+        let lose1 = mate_score(1, false);
+        assert!(is_mate_score(lose1));
+        assert_eq!(extract_mate_distance(lose1), Some(1));
     }
 }
