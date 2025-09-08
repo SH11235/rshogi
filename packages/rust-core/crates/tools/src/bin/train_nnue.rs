@@ -34,7 +34,9 @@
 use std::fs::{create_dir_all, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime};
 
 use clap::{arg, Command};
@@ -91,6 +93,15 @@ struct Config {
     accumulator_dim: usize,
     relu_clip: i32,
     shuffle: bool,
+    // Prefetch/metrics
+    prefetch_batches: usize,
+    throughput_interval_sec: f32,
+    // Streaming cache mode (no preloading)
+    stream_cache: bool,
+    // Optional cap for prefetch memory usage (bytes). 0 or None = unlimited
+    prefetch_bytes: Option<usize>,
+    // Estimated active feature count per sample (for memory cap estimation)
+    estimated_features_per_sample: usize,
     // Data filters (align with build_feature_cache)
     exclude_no_legal_move: bool,
     exclude_fallback: bool,
@@ -328,6 +339,477 @@ impl BatchLoader {
     }
 }
 
+// Async prefetching batch loader (indices only)
+struct AsyncBatchLoader {
+    num_samples: usize,
+    batch_size: usize,
+    prefetch_batches: usize,
+    rx: Option<Receiver<Vec<usize>>>,
+    worker: Option<JoinHandle<()>>,
+    epoch: usize,
+}
+
+impl AsyncBatchLoader {
+    fn new(num_samples: usize, batch_size: usize, prefetch_batches: usize) -> Self {
+        Self {
+            num_samples,
+            batch_size,
+            prefetch_batches,
+            rx: None,
+            worker: None,
+            epoch: 0,
+        }
+    }
+
+    fn start_epoch(&mut self, shuffle: bool, seed: u64) {
+        // Ensure previous worker has finished
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+        self.epoch += 1;
+
+        let (tx, rx) = sync_channel::<Vec<usize>>(self.prefetch_batches);
+        let num_samples = self.num_samples;
+        let batch_size = self.batch_size;
+
+        let handle = std::thread::spawn(move || {
+            // Prepare indices
+            let mut indices: Vec<usize> = (0..num_samples).collect();
+            if shuffle {
+                let mut srng = StdRng::seed_from_u64(seed);
+                indices.shuffle(&mut srng);
+            }
+            // Stream batches into the channel
+            let mut pos = 0;
+            while pos < indices.len() {
+                let end = (pos + batch_size).min(indices.len());
+                // Copy indices slice (small object)
+                let batch = indices[pos..end].to_vec();
+                if tx.send(batch).is_err() {
+                    break; // receiver dropped
+                }
+                pos = end;
+            }
+        });
+
+        self.rx = Some(rx);
+        self.worker = Some(handle);
+    }
+
+    fn next_batch_with_wait(&self) -> (Option<Vec<usize>>, std::time::Duration) {
+        if let Some(rx) = &self.rx {
+            let t0 = Instant::now();
+            match rx.recv() {
+                Ok(v) => (Some(v), t0.elapsed()),
+                Err(_) => (None, t0.elapsed()),
+            }
+        } else {
+            (None, std::time::Duration::ZERO)
+        }
+    }
+
+    fn finish(&mut self) {
+        // Drain and join worker if any
+        self.rx.take();
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for AsyncBatchLoader {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+// Streaming cache loader: reads cache file on a worker thread and sends Vec<Sample>
+enum BatchMsg {
+    Ok(Vec<Sample>),
+    Err(String),
+}
+
+struct StreamCacheLoader {
+    path: String,
+    batch_size: usize,
+    prefetch_batches: usize,
+    rx: Option<Receiver<BatchMsg>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl StreamCacheLoader {
+    fn new(path: String, batch_size: usize, prefetch_batches: usize) -> Self {
+        Self {
+            path,
+            batch_size,
+            prefetch_batches,
+            rx: None,
+            worker: None,
+        }
+    }
+
+    fn start_epoch(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Join any previous worker
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+        let path = self.path.clone();
+        let batch_size = self.batch_size;
+        let (tx, rx) = sync_channel::<BatchMsg>(self.prefetch_batches.max(1));
+
+        let handle = std::thread::spawn(move || {
+            // Open cache and parse header (v1)
+            let file = match File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tx.send(BatchMsg::Err(format!("Failed to open cache {}: {}", path, e)));
+                    return;
+                }
+            };
+            let mut f = BufReader::new(file);
+
+            let mut magic = [0u8; 4];
+            if let Err(e) = f.read_exact(&mut magic) {
+                let _ =
+                    tx.send(BatchMsg::Err(format!("Failed to read magic from {}: {}", path, e)));
+                return;
+            }
+            if &magic != b"NNFC" {
+                let _ = tx
+                    .send(BatchMsg::Err(format!("Invalid cache file: bad magic (file {})", path)));
+                return;
+            }
+
+            let mut u32b = [0u8; 4];
+            let mut u64b = [0u8; 8];
+
+            // Version
+            if let Err(e) = f.read_exact(&mut u32b) {
+                let _ =
+                    tx.send(BatchMsg::Err(format!("Failed to read version from {}: {}", path, e)));
+                return;
+            }
+            let version = u32::from_le_bytes(u32b);
+            if version != 1 {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Unsupported cache version: {} (file {})",
+                    version, path
+                )));
+                return;
+            }
+
+            // feature_set_id
+            if let Err(e) = f.read_exact(&mut u32b) {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Failed to read feature_set_id from {}: {}",
+                    path, e
+                )));
+                return;
+            }
+            let feature_set_id = u32::from_le_bytes(u32b);
+            if feature_set_id != FEATURE_SET_ID_HALF {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Unsupported feature_set_id: 0x{:08x} (file {})",
+                    feature_set_id, path
+                )));
+                return;
+            }
+
+            if let Err(e) = f.read_exact(&mut u64b) {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Failed to read num_samples from {}: {}",
+                    path, e
+                )));
+                return;
+            }
+            let num_samples = u64::from_le_bytes(u64b);
+
+            if let Err(e) = f.read_exact(&mut u32b) {
+                let _ = tx
+                    .send(BatchMsg::Err(format!("Failed to read chunk_size from {}: {}", path, e)));
+                return;
+            }
+            let _chunk_size = u32::from_le_bytes(u32b);
+
+            if let Err(e) = f.read_exact(&mut u32b) {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Failed to read header_size from {}: {}",
+                    path, e
+                )));
+                return;
+            }
+            let header_size = u32::from_le_bytes(u32b);
+            if !(40..=4096).contains(&header_size) {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Unreasonable header_size: {} (file {})",
+                    header_size, path
+                )));
+                return;
+            }
+
+            let mut b = [0u8; 1];
+            if let Err(e) = f.read_exact(&mut b) {
+                let _ = tx
+                    .send(BatchMsg::Err(format!("Failed to read endianness from {}: {}", path, e)));
+                return;
+            }
+            if b[0] != 0 {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Unsupported endianness (expected LE) for {}",
+                    path
+                )));
+                return;
+            }
+
+            if let Err(e) = f.read_exact(&mut b) {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Failed to read payload_encoding from {}: {}",
+                    path, e
+                )));
+                return;
+            }
+            let payload_encoding = b[0];
+            // reserved16
+            let mut _r16 = [0u8; 2];
+            if let Err(e) = f.read_exact(&mut _r16) {
+                let _ = tx
+                    .send(BatchMsg::Err(format!("Failed to read reserved16 from {}: {}", path, e)));
+                return;
+            }
+            if let Err(e) = f.read_exact(&mut u64b) {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "Failed to read payload_offset from {}: {}",
+                    path, e
+                )));
+                return;
+            }
+            let payload_offset = u64::from_le_bytes(u64b);
+            // sample_flags_mask
+            if let Err(e) = f.read_exact(&mut u32b) {
+                let _ = tx
+                    .send(BatchMsg::Err(format!("Failed to read flags_mask from {}: {}", path, e)));
+                return;
+            }
+            let flags_mask = u32::from_le_bytes(u32b);
+
+            // Seek to payload
+            let header_end = 4u64 + header_size as u64;
+            if payload_offset < header_end {
+                let _ = tx.send(BatchMsg::Err(format!(
+                    "payload_offset ({}) < header_end ({}) for {}",
+                    payload_offset, header_end, path
+                )));
+                return;
+            }
+            if let Err(e) = f.seek(SeekFrom::Start(payload_offset)) {
+                let _ =
+                    tx.send(BatchMsg::Err(format!("Failed to seek to payload in {}: {}", path, e)));
+                return;
+            }
+
+            // Wrap payload reader if needed
+            let inner_reader: Box<dyn Read> = match payload_encoding {
+                0 => Box::new(f),
+                1 => {
+                    use flate2::read::GzDecoder;
+                    Box::new(GzDecoder::new(f))
+                }
+                2 => {
+                    #[cfg(feature = "zstd")]
+                    {
+                        Box::new(zstd::Decoder::new(f).expect("zstd decoder"))
+                    }
+                    #[cfg(not(feature = "zstd"))]
+                    {
+                        let _ = tx.send(BatchMsg::Err(format!(
+                            "zstd payload requires building with 'zstd' feature (file {})",
+                            path
+                        )));
+                        return;
+                    }
+                }
+                other => {
+                    let _ = tx.send(BatchMsg::Err(format!(
+                        "Unknown payload encoding: {} (file {})",
+                        other, path
+                    )));
+                    return;
+                }
+            };
+
+            let mut r = BufReader::new(inner_reader);
+
+            let mut loaded: u64 = 0;
+            let mut batch = Vec::with_capacity(batch_size);
+            let mut unknown_flag_samples: u64 = 0;
+            let mut unknown_flag_bits_accum: u32 = 0;
+
+            while loaded < num_samples {
+                // Read one sample
+                // n_features
+                let mut nb = [0u8; 4];
+                if let Err(e) = r.read_exact(&mut nb) {
+                    let _ = tx.send(BatchMsg::Err(format!(
+                        "Read error at sample {} in {}: {}",
+                        loaded, path, e
+                    )));
+                    return;
+                }
+                let n_features = u32::from_le_bytes(nb) as usize;
+                const MAX_FEATURES_PER_SAMPLE: usize = SHOGI_BOARD_SIZE * FE_END;
+                if n_features > MAX_FEATURES_PER_SAMPLE {
+                    let _ = tx.send(BatchMsg::Err(format!(
+                        "n_features={} exceeds sane limit {} in {}",
+                        n_features, MAX_FEATURES_PER_SAMPLE, path
+                    )));
+                    return;
+                }
+                let mut features: Vec<u32> = vec![0u32; n_features];
+                #[cfg(target_endian = "little")]
+                {
+                    use bytemuck::cast_slice_mut;
+                    if let Err(e) = r.read_exact(cast_slice_mut::<u32, u8>(&mut features)) {
+                        let _ = tx.send(BatchMsg::Err(format!(
+                            "Read features failed at {}: {}",
+                            loaded, e
+                        )));
+                        return;
+                    }
+                }
+                #[cfg(target_endian = "big")]
+                {
+                    let mut buf = vec![0u8; n_features * 4];
+                    if let Err(e) = r.read_exact(&mut buf) {
+                        let _ = tx.send(BatchMsg::Err(format!(
+                            "Read features failed at {}: {}",
+                            loaded, e
+                        )));
+                        return;
+                    }
+                    for (dst, chunk) in features.iter_mut().zip(buf.chunks_exact(4)) {
+                        *dst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    }
+                }
+
+                // label
+                let mut lb = [0u8; 4];
+                if let Err(e) = r.read_exact(&mut lb) {
+                    let _ =
+                        tx.send(BatchMsg::Err(format!("Read label failed at {}: {}", loaded, e)));
+                    return;
+                }
+                let label = f32::from_le_bytes(lb);
+
+                // meta
+                let mut gapb = [0u8; 2];
+                if let Err(e) = r.read_exact(&mut gapb) {
+                    let _ = tx.send(BatchMsg::Err(format!("Read gap failed at {}: {}", loaded, e)));
+                    return;
+                }
+                let gap = u16::from_le_bytes(gapb);
+
+                let mut depth = [0u8; 1];
+                if let Err(e) = r.read_exact(&mut depth) {
+                    let _ =
+                        tx.send(BatchMsg::Err(format!("Read depth failed at {}: {}", loaded, e)));
+                    return;
+                }
+                let depth = depth[0];
+
+                let mut seldepth = [0u8; 1];
+                if let Err(e) = r.read_exact(&mut seldepth) {
+                    let _ = tx
+                        .send(BatchMsg::Err(format!("Read seldepth failed at {}: {}", loaded, e)));
+                    return;
+                }
+                let seldepth = seldepth[0];
+
+                let mut flags = [0u8; 1];
+                if let Err(e) = r.read_exact(&mut flags) {
+                    let _ =
+                        tx.send(BatchMsg::Err(format!("Read flags failed at {}: {}", loaded, e)));
+                    return;
+                }
+                let flags = flags[0];
+                let unknown = (flags as u32) & !flags_mask;
+                if unknown != 0 {
+                    unknown_flag_samples += 1;
+                    unknown_flag_bits_accum |= unknown;
+                }
+
+                // weight policy
+                let mut weight = 1.0f32;
+                weight *= (gap as f32 / 50.0).min(1.0);
+                let both_exact = (flags & 1) != 0;
+                weight *= if both_exact { 1.0 } else { 0.7 };
+                if (flags & 2) != 0 {
+                    weight *= 0.5;
+                }
+                if seldepth < depth.saturating_add(6) {
+                    weight *= 0.8;
+                }
+
+                batch.push(Sample {
+                    features,
+                    label,
+                    weight,
+                });
+                loaded += 1;
+
+                if batch.len() >= batch_size {
+                    if tx.send(BatchMsg::Ok(std::mem::take(&mut batch))).is_err() {
+                        break;
+                    }
+                    batch = Vec::with_capacity(batch_size);
+                }
+
+                // Progress log is omitted in worker to avoid log interleaving with training side
+            }
+
+            if !batch.is_empty() {
+                let _ = tx.send(BatchMsg::Ok(batch));
+            }
+
+            if unknown_flag_samples > 0 {
+                eprintln!(
+                    "Warning: {} samples contained unknown flag bits (mask=0x{:08x}, seen=0x{:08x})",
+                    unknown_flag_samples, flags_mask, unknown_flag_bits_accum
+                );
+            }
+        });
+
+        self.rx = Some(rx);
+        self.worker = Some(handle);
+        Ok(())
+    }
+
+    fn next_batch_with_wait(&self) -> (Option<Result<Vec<Sample>, String>>, std::time::Duration) {
+        if let Some(rx) = &self.rx {
+            let t0 = Instant::now();
+            match rx.recv() {
+                Ok(BatchMsg::Ok(v)) => (Some(Ok(v)), t0.elapsed()),
+                Ok(BatchMsg::Err(msg)) => (Some(Err(msg)), t0.elapsed()),
+                Err(_) => (None, t0.elapsed()),
+            }
+        } else {
+            (None, std::time::Duration::ZERO)
+        }
+    }
+
+    fn finish(&mut self) {
+        self.rx.take();
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for StreamCacheLoader {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 // Adam optimizer state
 struct AdamState {
     m_w0: Vec<f32>,
@@ -394,6 +876,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(arg!(--"exclude-no-legal-move" "Exclude positions with no legal moves (JSONL input)"))
         .arg(arg!(--"exclude-fallback" "Exclude positions where fallback was used (JSONL input)"))
         .arg(arg!(--"save-every" <N> "Save checkpoint every N batches"))
+        .arg(arg!(--"stream-cache" "Stream cache input without preloading (disables shuffle)"))
+        .arg(
+            arg!(--"prefetch-batches" <N> "Async prefetch queue depth (cache/stream-cache input)")
+                .default_value("2")
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(
+            arg!(--"throughput-interval" <SECS> "Seconds between throughput reports")
+                .default_value("2.0")
+                .value_parser(clap::value_parser!(f32)),
+        )
+        .arg(
+            arg!(--"prefetch-bytes" <BYTES> "Approximate memory cap for prefetched batches (bytes)")
+                .value_parser(clap::value_parser!(usize))
+        )
+        .arg(
+            arg!(--"estimated-features-per-sample" <N> "Estimated active features per sample (for prefetch memory cap)")
+                .default_value("64")
+                .value_parser(clap::value_parser!(usize))
+        )
         .arg(arg!(--quantized "Save quantized (int8) version of the model"))
         .arg(arg!(--seed <SEED> "Random seed for reproducibility"))
         .arg(arg!(-o --out <DIR> "Output directory"))
@@ -411,12 +913,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         accumulator_dim: app.get_one::<String>("acc-dim").unwrap().parse()?,
         relu_clip: app.get_one::<String>("relu-clip").unwrap().parse()?,
         shuffle: app.get_flag("shuffle"),
+        prefetch_batches: *app.get_one::<usize>("prefetch-batches").unwrap(),
+        throughput_interval_sec: *app.get_one::<f32>("throughput-interval").unwrap(),
+        stream_cache: app.get_flag("stream-cache"),
+        prefetch_bytes: app.get_one::<usize>("prefetch-bytes").copied(),
+        estimated_features_per_sample: *app
+            .get_one::<usize>("estimated-features-per-sample")
+            .unwrap(),
         exclude_no_legal_move: app.get_flag("exclude-no-legal-move"),
         exclude_fallback: app.get_flag("exclude-fallback"),
     };
 
     if config.scale <= 0.0 {
         return Err("Invalid --scale: must be > 0".into());
+    }
+    if config.throughput_interval_sec <= 0.0 {
+        return Err("Invalid --throughput-interval: must be > 0".into());
+    }
+    if config.prefetch_batches > 1024 {
+        return Err("Invalid --prefetch-batches: must be <= 1024".into());
     }
 
     let input_path = app.get_one::<String>("input").unwrap();
@@ -440,31 +955,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Feature dimension (input): {} (HalfKP)", SHOGI_BOARD_SIZE * FE_END);
     println!("  Network: {} -> {} -> 1", SHOGI_BOARD_SIZE * FE_END, config.accumulator_dim);
 
-    // Load training data
-    let start_time = Instant::now();
-    println!("\nLoading training data...");
+    // Decide input mode
+    fn is_cache_file(path: &str) -> bool {
+        if let Ok(mut f) = File::open(path) {
+            let mut magic = [0u8; 4];
+            if f.read_exact(&mut magic).is_ok() {
+                return &magic == b"NNFC";
+            }
+        }
+        false
+    }
 
-    // Check if input is cache file or JSONL
-    let is_cache = input_path.ends_with(".bin") || input_path.ends_with(".cache");
-    let mut train_samples = if is_cache {
-        println!("Loading from cache file...");
-        load_samples_from_cache(input_path)?
+    let is_cache = is_cache_file(input_path);
+    if config.stream_cache && !is_cache {
+        eprintln!("Warning: --stream-cache was set but input is not a cache file; ignoring.");
+    }
+
+    // Load training data only when not streaming
+    let mut train_samples: Vec<Sample> = Vec::new();
+    if !(is_cache && config.stream_cache) {
+        let start_time = Instant::now();
+        println!("\nLoading training data...");
+        train_samples = if is_cache {
+            println!("Loading from cache file...");
+            load_samples_from_cache(input_path)?
+        } else {
+            load_samples(input_path, &config)?
+        };
+        println!(
+            "Loaded {} samples in {:.2}s",
+            train_samples.len(),
+            start_time.elapsed().as_secs_f32()
+        );
     } else {
-        load_samples(input_path, &config)?
-    };
-
-    println!(
-        "Loaded {} samples in {:.2}s",
-        train_samples.len(),
-        start_time.elapsed().as_secs_f32()
-    );
+        println!("\nStreaming training data from cache (no preloading)...");
+        if config.shuffle {
+            eprintln!("Note: shuffle is disabled in --stream-cache mode.");
+        }
+    }
 
     // Load validation data if provided
     let validation_samples = if let Some(val_path) = validation_path {
         println!("\nLoading validation data...");
         let start_val = Instant::now();
 
-        let is_val_cache = val_path.ends_with(".bin") || val_path.ends_with(".cache");
+        let is_val_cache = is_cache_file(val_path);
         let samples = if is_val_cache {
             println!("Loading validation from cache file...");
             load_samples_from_cache(val_path)?
@@ -501,8 +1036,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nTraining...");
     create_dir_all(&out_dir)?;
 
-    // Use BatchLoader if training with cache files
-    if is_cache {
+    // Training mode dispatch
+    if is_cache && config.stream_cache {
+        train_model_stream_cache(
+            &mut network,
+            input_path,
+            &validation_samples,
+            &config,
+            &out_dir,
+            save_every,
+            &mut rng,
+        )?;
+    } else if is_cache {
         train_model_with_loader(
             &mut network,
             train_samples,
@@ -685,10 +1230,16 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
     weight
 }
 
-fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+// Type alias to keep function signatures simple
+type CachePayload = (BufReader<Box<dyn Read>>, u64, u32);
+// Feature set id for HALF (HalfKP) cache
+const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
+
+// Common helper: open a v1 cache file and return a BufReader over the payload,
+// along with (num_samples, flags_mask). Handles raw/gzip/zstd based on header.
+fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::error::Error>> {
     let mut f = File::open(path)?;
 
-    // Read header - matches build_feature_cache.rs v1 extended header
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
     if &magic != b"NNFC" {
@@ -698,7 +1249,7 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     let mut u32b = [0u8; 4];
     let mut u64b = [0u8; 8];
 
-    // Version (v1 only)
+    // version
     f.read_exact(&mut u32b)?;
     let version = u32::from_le_bytes(u32b);
     if version != 1 {
@@ -708,11 +1259,9 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         )
         .into());
     }
-
-    // feature set id, num samples, chunk size
+    // feature_set_id
     f.read_exact(&mut u32b)?;
     let feature_set_id = u32::from_le_bytes(u32b);
-    const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
     if feature_set_id != FEATURE_SET_ID_HALF {
         return Err(format!(
             "Unsupported feature_set_id: 0x{:08x} for file {}",
@@ -720,14 +1269,10 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         )
         .into());
     }
-
+    // num_samples, chunk_size, header_size
     f.read_exact(&mut u64b)?;
     let num_samples = u64::from_le_bytes(u64b);
-
-    f.read_exact(&mut u32b)?;
-    let _chunk_size = u32::from_le_bytes(u32b);
-
-    // header_size
+    f.read_exact(&mut u32b)?; // chunk_size (unused)
     f.read_exact(&mut u32b)?; // header_size
     let header_size = u32::from_le_bytes(u32b);
     if !(40..=4096).contains(&header_size) {
@@ -736,8 +1281,7 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     // endianness
     let mut b = [0u8; 1];
     f.read_exact(&mut b)?;
-    let endianness = b[0];
-    if endianness != 0 {
+    if b[0] != 0 {
         return Err(format!(
             "Unsupported endianness in cache header (expected LE=0) for file {}",
             path
@@ -753,7 +1297,6 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
     // payload_offset
     f.read_exact(&mut u64b)?;
     let payload_offset = u64::from_le_bytes(u64b);
-    // Validate payload_offset against header end (magic(4) + header_size)
     let header_end = 4u64 + header_size as u64;
     if payload_offset < header_end {
         return Err(format!(
@@ -762,16 +1305,17 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         )
         .into());
     }
-    // sample_flags_mask
+    // flags_mask
     f.read_exact(&mut u32b)?;
     let flags_mask = u32::from_le_bytes(u32b);
-    // Skip to payload_offset if header had extra bytes
+
+    // seek to payload
     let current = f.stream_position()?;
     if current < payload_offset {
         f.seek(SeekFrom::Start(payload_offset))?;
     }
 
-    // Prepare reader for payload (gzip/zstd)
+    // wrap reader
     let reader: Box<dyn Read> = match payload_encoding {
         0 => Box::new(f),
         1 => {
@@ -797,7 +1341,11 @@ fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error
         }
     };
 
-    let mut r = BufReader::new(reader);
+    Ok((BufReader::new(reader), num_samples, flags_mask))
+}
+
+fn load_samples_from_cache(path: &str) -> Result<Vec<Sample>, Box<dyn std::error::Error>> {
+    let (mut r, num_samples, flags_mask) = open_cache_payload_reader(path)?;
 
     println!("Loading cache: {num_samples} samples");
 
@@ -940,6 +1488,9 @@ fn train_model(
         let mut total_weight = 0.0;
 
         // Training
+        let mut last_report = Instant::now();
+        let mut samples_since = 0usize;
+        let mut batches_since = 0usize;
         for batch_idx in 0..n_batches {
             let start = batch_idx * config.batch_size;
             let end = (start + config.batch_size).min(n_samples);
@@ -953,6 +1504,29 @@ fn train_model(
             total_weight += batch_weight;
 
             total_batches += 1;
+            samples_since += batch.len();
+            batches_since += 1;
+
+            // Periodic throughput report
+            if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
+                && batches_since > 0
+            {
+                let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                let sps = samples_since as f32 / secs;
+                let bps = batches_since as f32 / secs;
+                let avg_bs = samples_since as f32 / batches_since as f32;
+                println!(
+                    "[throughput] mode=inmem epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1}",
+                    epoch + 1,
+                    batch_idx + 1,
+                    sps,
+                    bps,
+                    avg_bs
+                );
+                last_report = Instant::now();
+                samples_since = 0;
+                batches_since = 0;
+            }
 
             // Save checkpoint if requested
             if let Some(interval) = save_every {
@@ -978,64 +1552,293 @@ fn train_model(
             0.0
         };
 
+        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+        let epoch_sps = (n_samples as f32) / epoch_secs;
         println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={:.4} time={:.2}s",
+            "Epoch {}/{}: train_loss={:.4} val_loss={:.4} time={:.2}s sps={:.0}",
             epoch + 1,
             config.epochs,
             avg_loss,
             val_loss,
-            epoch_start.elapsed().as_secs_f32()
+            epoch_secs,
+            epoch_sps
         );
     }
 
     Ok(())
 }
 
-fn train_model_with_loader(
+fn train_model_stream_cache(
     network: &mut Network,
-    train_samples: Vec<Sample>,
+    cache_path: &str,
     validation_samples: &Option<Vec<Sample>>,
     config: &Config,
     out_dir: &Path,
     save_every: Option<usize>,
-    rng: &mut StdRng,
+    _rng: &mut StdRng,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let train_samples_arc = Arc::new(train_samples);
-    let mut batch_loader =
-        BatchLoader::new(train_samples_arc.clone(), config.batch_size, config.shuffle, rng);
+    // If prefetch=0, run synchronous streaming in the training thread (no background worker)
+    if config.prefetch_batches == 0 {
+        let mut adam_state = if config.optimizer == "adam" {
+            Some(AdamState::new(network))
+        } else {
+            None
+        };
+        // Open and parse header via helper
+        for epoch in 0..config.epochs {
+            let epoch_start = Instant::now();
+            let (mut r, num_samples, flags_mask) = open_cache_payload_reader(cache_path)?;
 
+            // Epoch loop
+            let mut total_loss = 0.0f32;
+            let mut total_weight = 0.0f32;
+            let mut batch_count = 0usize;
+            let mut total_samples_epoch = 0usize;
+
+            let mut last_report = Instant::now();
+            let mut samples_since = 0usize;
+            let mut batches_since = 0usize;
+            let mut read_ns_since: u128 = 0;
+            let mut read_ns_epoch: u128 = 0;
+
+            let mut loaded: u64 = 0;
+            while loaded < num_samples {
+                // Read up to batch_size samples synchronously
+                let mut batch = Vec::with_capacity(config.batch_size);
+                let t_read0 = Instant::now();
+                for _ in 0..config.batch_size {
+                    if loaded >= num_samples {
+                        break;
+                    }
+                    // n_features
+                    let mut nb = [0u8; 4];
+                    if let Err(e) = r.read_exact(&mut nb) {
+                        return Err(format!("Read error at sample {}: {}", loaded, e).into());
+                    }
+                    let n_features = u32::from_le_bytes(nb) as usize;
+                    const MAX_FEATURES_PER_SAMPLE: usize = SHOGI_BOARD_SIZE * FE_END;
+                    if n_features > MAX_FEATURES_PER_SAMPLE {
+                        return Err("n_features exceeds sane limit".into());
+                    }
+                    let mut features: Vec<u32> = vec![0u32; n_features];
+                    #[cfg(target_endian = "little")]
+                    {
+                        use bytemuck::cast_slice_mut;
+                        if let Err(e) = r.read_exact(cast_slice_mut::<u32, u8>(&mut features)) {
+                            return Err(format!("Read features failed at {}: {}", loaded, e).into());
+                        }
+                    }
+                    #[cfg(target_endian = "big")]
+                    {
+                        let mut buf = vec![0u8; n_features * 4];
+                        if let Err(e) = r.read_exact(&mut buf) {
+                            return Err(format!("Read features failed at {}: {}", loaded, e).into());
+                        }
+                        for (dst, chunk) in features.iter_mut().zip(buf.chunks_exact(4)) {
+                            *dst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        }
+                    }
+                    let mut lb = [0u8; 4];
+                    if let Err(e) = r.read_exact(&mut lb) {
+                        return Err(format!("Read label failed at {}: {}", loaded, e).into());
+                    }
+                    let label = f32::from_le_bytes(lb);
+                    let mut gapb = [0u8; 2];
+                    if let Err(e) = r.read_exact(&mut gapb) {
+                        return Err(format!("Read gap failed at {}: {}", loaded, e).into());
+                    }
+                    let gap = u16::from_le_bytes(gapb);
+                    let mut depth = [0u8; 1];
+                    if let Err(e) = r.read_exact(&mut depth) {
+                        return Err(format!("Read depth failed at {}: {}", loaded, e).into());
+                    }
+                    let depth = depth[0];
+                    let mut seldepth = [0u8; 1];
+                    if let Err(e) = r.read_exact(&mut seldepth) {
+                        return Err(format!("Read seldepth failed at {}: {}", loaded, e).into());
+                    }
+                    let seldepth = seldepth[0];
+                    let mut flags = [0u8; 1];
+                    if let Err(e) = r.read_exact(&mut flags) {
+                        return Err(format!("Read flags failed at {}: {}", loaded, e).into());
+                    }
+                    let flags = flags[0];
+                    let _unknown = (flags as u32) & !flags_mask; // ignore warn in sync path
+                    let mut weight = 1.0f32;
+                    weight *= (gap as f32 / 50.0).min(1.0);
+                    let both_exact = (flags & 1) != 0;
+                    weight *= if both_exact { 1.0 } else { 0.7 };
+                    if (flags & 2) != 0 {
+                        weight *= 0.5;
+                    }
+                    if seldepth < depth.saturating_add(6) {
+                        weight *= 0.8;
+                    }
+
+                    batch.push(Sample {
+                        features,
+                        label,
+                        weight,
+                    });
+                    loaded += 1;
+                }
+                let t_read1 = Instant::now();
+                let read_ns = t_read1.duration_since(t_read0).as_nanos();
+                read_ns_since += read_ns;
+                read_ns_epoch += read_ns;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                let indices: Vec<usize> = (0..batch.len()).collect();
+                let loss =
+                    train_batch_by_indices(network, &batch, &indices, config, &mut adam_state);
+                let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
+                total_loss += loss * batch_weight;
+                total_weight += batch_weight;
+
+                total_samples_epoch += batch.len();
+                batch_count += 1;
+                batches_since += 1;
+                samples_since += batch.len();
+
+                if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
+                    && batches_since > 0
+                {
+                    let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                    let sps = samples_since as f32 / secs;
+                    let bps = batches_since as f32 / secs;
+                    let avg_bs = samples_since as f32 / batches_since as f32;
+                    let loader_ratio =
+                        ((read_ns_since as f64) / (secs as f64 * 1e9)).clamp(0.0, 1.0) * 100.0;
+                    println!(
+                        "[throughput] mode=stream-sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                        epoch + 1, batch_count, sps, bps, avg_bs, loader_ratio
+                    );
+                    last_report = Instant::now();
+                    samples_since = 0;
+                    batches_since = 0;
+                    read_ns_since = 0;
+                }
+            }
+
+            let avg_loss = if total_weight > 0.0 {
+                total_loss / total_weight
+            } else {
+                0.0
+            };
+            let val_loss = if let Some(val_samples) = validation_samples {
+                compute_validation_loss(network, val_samples, config)
+            } else {
+                0.0
+            };
+            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+            let loader_ratio_epoch =
+                ((read_ns_epoch as f64) / (epoch_secs as f64 * 1e9)).clamp(0.0, 1.0) * 100.0;
+            let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1, config.epochs, avg_loss, val_loss, batch_count, epoch_secs, epoch_sps, loader_ratio_epoch
+            );
+        }
+
+        return Ok(());
+    }
+
+    // Async streaming loader path
+    // Optionally cap prefetch by bytes (rough estimate)
+    let mut effective_prefetch = config.prefetch_batches.max(1);
+    if let Some(bytes_cap) = config.prefetch_bytes.filter(|&b| b > 0) {
+        // Estimate per-sample bytes: header/meta (~32B) + 4B * estimated_features
+        let est_sample_bytes =
+            32usize.saturating_add(4usize.saturating_mul(config.estimated_features_per_sample));
+        let est_batch_bytes = config.batch_size.saturating_mul(est_sample_bytes);
+        if est_batch_bytes > 0 {
+            let max_batches = (bytes_cap / est_batch_bytes).max(1);
+            if effective_prefetch > max_batches {
+                println!(
+                    "Capping prefetch-batches from {} to {} by --prefetch-bytes={} (~{} bytes/batch; est_feats/sample={})",
+                    effective_prefetch, max_batches, bytes_cap, est_batch_bytes, config.estimated_features_per_sample
+                );
+                effective_prefetch = max_batches;
+            }
+        }
+    }
+    let mut loader =
+        StreamCacheLoader::new(cache_path.to_string(), config.batch_size, effective_prefetch);
     let mut adam_state = if config.optimizer == "adam" {
         Some(AdamState::new(network))
     } else {
         None
     };
 
-    let mut total_batches = 0;
+    let mut total_batches = 0usize;
 
     for epoch in 0..config.epochs {
         let epoch_start = Instant::now();
-        batch_loader.reset(config.shuffle, rng);
+        loader.start_epoch()?;
 
-        let mut total_loss = 0.0;
-        let mut total_weight = 0.0;
-        let mut batch_count = 0;
+        let mut total_loss = 0.0f32;
+        let mut total_weight = 0.0f32;
+        let mut batch_count = 0usize;
+        let mut total_samples_epoch = 0usize;
 
-        while let Some(indices) = batch_loader.next_batch() {
-            let loss = train_batch_by_indices(
-                network,
-                &train_samples_arc,
-                &indices,
-                config,
-                &mut adam_state,
-            );
-            let batch_weight: f32 = indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
+        let mut last_report = Instant::now();
+        let mut samples_since = 0usize;
+        let mut batches_since = 0usize;
+        let mut wait_ns_since: u128 = 0;
+        let mut wait_ns_epoch: u128 = 0;
+
+        loop {
+            let (maybe_batch, wait_dur) = loader.next_batch_with_wait();
+            let Some(batch_res) = maybe_batch else { break };
+            let batch = match batch_res {
+                Ok(b) => b,
+                Err(msg) => return Err(msg.into()),
+            };
+            let indices: Vec<usize> = (0..batch.len()).collect();
+            let loss = train_batch_by_indices(network, &batch, &indices, config, &mut adam_state);
+            let batch_weight: f32 = batch.iter().map(|s| s.weight).sum();
             total_loss += loss * batch_weight;
             total_weight += batch_weight;
 
+            total_samples_epoch += batch.len();
             batch_count += 1;
             total_batches += 1;
+            samples_since += batch.len();
+            batches_since += 1;
+            wait_ns_since += wait_dur.as_nanos();
+            wait_ns_epoch += wait_dur.as_nanos();
 
-            // Save checkpoint if requested
+            if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
+                && batches_since > 0
+            {
+                let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                let sps = samples_since as f32 / secs;
+                let bps = batches_since as f32 / secs;
+                let avg_bs = samples_since as f32 / batches_since as f32;
+                let wait_secs = (wait_ns_since as f64) / 1e9f64;
+                let loader_ratio = if secs > 0.0 {
+                    (wait_secs / secs as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "[throughput] mode=stream epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs,
+                    loader_ratio
+                );
+                last_report = Instant::now();
+                samples_since = 0;
+                batches_since = 0;
+                wait_ns_since = 0;
+            }
+
             if let Some(interval) = save_every {
                 if total_batches % interval == 0 {
                     let checkpoint_path =
@@ -1051,23 +1854,283 @@ fn train_model_with_loader(
         } else {
             0.0
         };
-
-        // Validation
         let val_loss = if let Some(val_samples) = validation_samples {
             compute_validation_loss(network, val_samples, config)
         } else {
             0.0
         };
-
+        let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+        let wait_secs_epoch = (wait_ns_epoch as f64) / 1e9f64;
+        let loader_ratio_epoch = if epoch_secs > 0.0 {
+            ((wait_secs_epoch / epoch_secs as f64) * 100.0) as f32
+        } else {
+            0.0
+        };
+        let epoch_sps = (total_samples_epoch as f32) / epoch_secs;
         println!(
-            "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s",
+            "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
             epoch + 1,
             config.epochs,
             avg_loss,
             val_loss,
             batch_count,
-            epoch_start.elapsed().as_secs_f32()
+            epoch_secs,
+            epoch_sps,
+            loader_ratio_epoch
         );
+
+        loader.finish();
+    }
+
+    Ok(())
+}
+fn train_model_with_loader(
+    network: &mut Network,
+    train_samples: Vec<Sample>,
+    validation_samples: &Option<Vec<Sample>>,
+    config: &Config,
+    out_dir: &Path,
+    save_every: Option<usize>,
+    rng: &mut StdRng,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let train_samples_arc = Arc::new(train_samples);
+    let mut adam_state = if config.optimizer == "adam" {
+        Some(AdamState::new(network))
+    } else {
+        None
+    };
+
+    let mut total_batches = 0;
+
+    if config.prefetch_batches > 0 {
+        // Async prefetch path
+        let mut async_loader = AsyncBatchLoader::new(
+            train_samples_arc.len(),
+            config.batch_size,
+            config.prefetch_batches,
+        );
+
+        for epoch in 0..config.epochs {
+            let epoch_start = Instant::now();
+            let seed: u64 = rng.random();
+            async_loader.start_epoch(config.shuffle, seed);
+
+            let mut total_loss = 0.0;
+            let mut total_weight = 0.0;
+            let mut batch_count = 0usize;
+
+            let mut last_report = Instant::now();
+            let mut samples_since = 0usize;
+            let mut batches_since = 0usize;
+            let mut wait_ns_since: u128 = 0;
+            let mut wait_ns_epoch: u128 = 0;
+
+            loop {
+                let (maybe_indices, wait_dur) = async_loader.next_batch_with_wait();
+                let Some(indices) = maybe_indices else { break };
+                let loss = train_batch_by_indices(
+                    network,
+                    &train_samples_arc,
+                    &indices,
+                    config,
+                    &mut adam_state,
+                );
+                let batch_weight: f32 =
+                    indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
+                total_loss += loss * batch_weight;
+                total_weight += batch_weight;
+
+                let batch_len = indices.len();
+                batch_count += 1;
+                total_batches += 1;
+                samples_since += batch_len;
+                batches_since += 1;
+                wait_ns_since += wait_dur.as_nanos();
+                wait_ns_epoch += wait_dur.as_nanos();
+                // Approximate compute time as time taken by train_batch (dominant)
+                // Note: train_batch_by_indices already executed; we estimate by subtracting wait from interval wall time on print, but here we track per-batch compute as 0.
+                // Instead, measure explicitly around forward+backward: do a local timing.
+                // For minimal invasiveness, we cannot re-run compute; so we estimate compute time using throughput interval wall time at print.
+
+                // Periodic throughput report
+                if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
+                    && batches_since > 0
+                {
+                    let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                    let sps = samples_since as f32 / secs;
+                    let bps = batches_since as f32 / secs;
+                    let avg_bs = samples_since as f32 / batches_since as f32;
+                    // compute_ns_since is not directly tracked; approximate as (secs - wait) * 1e9
+                    let wait_secs = (wait_ns_since as f64) / 1e9f64;
+                    let loader_ratio = if secs > 0.0 {
+                        (wait_secs / secs as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    println!(
+                    "[throughput] mode=inmem loader=async epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio={:.1}%",
+                    epoch + 1,
+                    batch_count,
+                    sps,
+                    bps,
+                    avg_bs,
+                    loader_ratio
+                );
+                    last_report = Instant::now();
+                    samples_since = 0;
+                    batches_since = 0;
+                    wait_ns_since = 0;
+                }
+
+                // Save checkpoint if requested
+                if let Some(interval) = save_every {
+                    if total_batches % interval == 0 {
+                        let checkpoint_path =
+                            out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
+                        save_network(network, &checkpoint_path)?;
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
+                }
+            }
+
+            let avg_loss = if total_weight > 0.0 {
+                total_loss / total_weight
+            } else {
+                0.0
+            };
+
+            // Validation
+            let val_loss = if let Some(val_samples) = validation_samples {
+                compute_validation_loss(network, val_samples, config)
+            } else {
+                0.0
+            };
+
+            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+            let loader_ratio_epoch = if epoch_secs > 0.0 {
+                let wait_secs = (wait_ns_epoch as f64) / 1e9f64;
+                ((wait_secs / epoch_secs as f64) * 100.0) as f32
+            } else {
+                0.0
+            };
+            let epoch_sps = (train_samples_arc.len() as f32) / epoch_secs;
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio={:.1}%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss,
+                batch_count,
+                epoch_secs,
+                epoch_sps,
+                loader_ratio_epoch
+            );
+        }
+        // Ensure worker fully finished at end
+        async_loader.finish();
+    } else {
+        // Original synchronous loader path (still with throughput reporting)
+        let mut batch_loader =
+            BatchLoader::new(train_samples_arc.clone(), config.batch_size, config.shuffle, rng);
+
+        for epoch in 0..config.epochs {
+            let epoch_start = Instant::now();
+            batch_loader.reset(config.shuffle, rng);
+
+            let mut total_loss = 0.0;
+            let mut total_weight = 0.0;
+            let mut batch_count = 0usize;
+
+            let mut last_report = Instant::now();
+            let mut samples_since = 0usize;
+            let mut batches_since = 0usize;
+
+            while let Some(indices) = {
+                let t0 = Instant::now();
+                let next = batch_loader.next_batch();
+                // We treat the time spent fetching indices as loader time in sync path
+                let _wait = t0.elapsed();
+                if let Some(ref _idxs) = next {
+                    // Accumulate local variables by capturing outer mutable state via closures is cumbersome here.
+                    // We will measure throughput window at print time similar to async path.
+                }
+                next
+            } {
+                let loss = train_batch_by_indices(
+                    network,
+                    &train_samples_arc,
+                    &indices,
+                    config,
+                    &mut adam_state,
+                );
+                let batch_weight: f32 =
+                    indices.iter().map(|&idx| train_samples_arc[idx].weight).sum();
+                total_loss += loss * batch_weight;
+                total_weight += batch_weight;
+
+                let batch_len = indices.len();
+                batch_count += 1;
+                total_batches += 1;
+                samples_since += batch_len;
+                batches_since += 1;
+
+                if last_report.elapsed().as_secs_f32() >= config.throughput_interval_sec
+                    && batches_since > 0
+                {
+                    let secs = last_report.elapsed().as_secs_f32().max(1e-6);
+                    let sps = samples_since as f32 / secs;
+                    let bps = batches_since as f32 / secs;
+                    let avg_bs = samples_since as f32 / batches_since as f32;
+                    println!(
+                        "[throughput] mode=inmem loader=sync epoch={} batches={} sps={:.0} bps={:.2} avg_batch={:.1} loader_ratio=~0.0%",
+                        epoch + 1,
+                        batch_count,
+                        sps,
+                        bps,
+                        avg_bs
+                    );
+                    last_report = Instant::now();
+                    samples_since = 0;
+                    batches_since = 0;
+                }
+
+                // Save checkpoint if requested
+                if let Some(interval) = save_every {
+                    if total_batches % interval == 0 {
+                        let checkpoint_path =
+                            out_dir.join(format!("checkpoint_batch_{total_batches}.fp32.bin"));
+                        save_network(network, &checkpoint_path)?;
+                        println!("Saved checkpoint: {}", checkpoint_path.display());
+                    }
+                }
+            }
+
+            let avg_loss = if total_weight > 0.0 {
+                total_loss / total_weight
+            } else {
+                0.0
+            };
+
+            // Validation
+            let val_loss = if let Some(val_samples) = validation_samples {
+                compute_validation_loss(network, val_samples, config)
+            } else {
+                0.0
+            };
+
+            let epoch_secs = epoch_start.elapsed().as_secs_f32().max(1e-6);
+            let epoch_sps = (train_samples_arc.len() as f32) / epoch_secs;
+            println!(
+                "Epoch {}/{}: train_loss={:.4} val_loss={:.4} batches={} time={:.2}s sps={:.0} loader_ratio=~0.0%",
+                epoch + 1,
+                config.epochs,
+                avg_loss,
+                val_loss,
+                batch_count,
+                epoch_secs,
+                epoch_sps
+            );
+        }
     }
 
     Ok(())
@@ -1577,6 +2640,11 @@ mod tests {
             accumulator_dim: 8,
             relu_clip: 127,
             shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10_000.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };
@@ -1661,6 +2729,11 @@ mod tests {
             accumulator_dim: 8,
             relu_clip: 127,
             shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10_000.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };
@@ -1703,6 +2776,11 @@ mod tests {
             accumulator_dim: 8,
             relu_clip: 127,
             shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10_000.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };
@@ -1764,6 +2842,160 @@ mod tests {
         assert!(msg.contains("exceeds"), "unexpected err msg: {}", msg);
     }
 
+    // stream-sync と in-memory 経路での重み一致（決定論）
+    #[test]
+    fn stream_sync_vs_inmem_equivalence() {
+        use tempfile::tempdir;
+        // 小さな cache v1 を作成（3サンプル, n_features=0）
+        let td = tempdir().unwrap();
+        let path = td.path().join("tiny.cache");
+        let mut f = File::create(&path).unwrap();
+        // header: feature_set_id=HALF, num_samples=3, chunk_size=1024, header_size=48, LE, raw payload, flags_mask=0
+        let payload_off = write_v1_header(&mut f, 0x48414C46, 3, 1024, 48, 0, 0, 0);
+        f.seek(SeekFrom::Start(payload_off)).unwrap();
+        for _ in 0..3u32 {
+            // n_features=0
+            f.write_all(&0u32.to_le_bytes()).unwrap();
+            // label
+            f.write_all(&0.0f32.to_le_bytes()).unwrap();
+            // gap=50
+            f.write_all(&(50u16).to_le_bytes()).unwrap();
+            // depth=10, seldepth=12
+            f.write_all(&[10u8]).unwrap();
+            f.write_all(&[12u8]).unwrap();
+            // flags=both_exact
+            f.write_all(&[1u8]).unwrap();
+        }
+        f.flush().unwrap();
+
+        // 共通設定
+        let cfg_inmem = Config {
+            epochs: 1,
+            batch_size: 2,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10_000.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+        let cfg_stream = Config {
+            stream_cache: true,
+            ..cfg_inmem.clone()
+        };
+
+        // サンプルを読み込み（in-mem）
+        let mut samples = load_samples_from_cache(path.to_str().unwrap()).unwrap();
+
+        // 同じseedで2つのネットを初期化
+        let mut rng1 = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng2 = rand::rngs::StdRng::seed_from_u64(42);
+        let mut net_inmem = Network::new(cfg_inmem.accumulator_dim, cfg_inmem.relu_clip, &mut rng1);
+        let mut net_stream =
+            Network::new(cfg_stream.accumulator_dim, cfg_stream.relu_clip, &mut rng2);
+
+        let out_dir = td.path();
+        let mut dummy_rng = rand::rngs::StdRng::seed_from_u64(123);
+
+        // in-mem 学習
+        train_model(&mut net_inmem, &mut samples, &None, &cfg_inmem, out_dir, None, &mut dummy_rng)
+            .unwrap();
+        // stream-sync 学習
+        train_model_stream_cache(
+            &mut net_stream,
+            path.to_str().unwrap(),
+            &None,
+            &cfg_stream,
+            out_dir,
+            None,
+            &mut dummy_rng,
+        )
+        .unwrap();
+
+        // 重み一致（厳密一致 or 近傍）
+        assert_eq!(net_inmem.w0.len(), net_stream.w0.len());
+        assert_eq!(net_inmem.b0.len(), net_stream.b0.len());
+        assert_eq!(net_inmem.w2.len(), net_stream.w2.len());
+        let eps = 1e-7;
+        for (a, b) in net_inmem.w0.iter().zip(net_stream.w0.iter()) {
+            assert!((a - b).abs() <= eps, "w0 diff: {} vs {}", a, b);
+        }
+        for (a, b) in net_inmem.b0.iter().zip(net_stream.b0.iter()) {
+            assert!((a - b).abs() <= eps, "b0 diff: {} vs {}", a, b);
+        }
+        for (a, b) in net_inmem.w2.iter().zip(net_stream.w2.iter()) {
+            assert!((a - b).abs() <= eps, "w2 diff: {} vs {}", a, b);
+        }
+        assert!(
+            (net_inmem.b2 - net_stream.b2).abs() <= eps,
+            "b2 diff: {} vs {}",
+            net_inmem.b2,
+            net_stream.b2
+        );
+    }
+
+    // 非同期ストリーム（prefetch>0）で破損キャッシュのエラーが上位に伝搬すること
+    #[test]
+    fn stream_async_propagates_errors() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("bad_async.cache");
+
+        // 1サンプル、raw（非圧縮）でヘッダを書き、payload に n_features = MAX+1 を書く
+        let mut f = File::create(&path).unwrap();
+        let payload_off = write_v1_header(&mut f, FEATURE_SET_ID_HALF, 1, 1024, 48, 0, 0, 0);
+        f.seek(SeekFrom::Start(payload_off)).unwrap();
+        let max_allowed = (SHOGI_BOARD_SIZE * FE_END) as u32;
+        let n_features = max_allowed + 1;
+        f.write_all(&n_features.to_le_bytes()).unwrap();
+        f.flush().unwrap();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1024,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            prefetch_batches: 2, // async 経路
+            throughput_interval_sec: 10_000.0,
+            stream_cache: true,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+        let out_dir = td.path();
+        let err = train_model_stream_cache(
+            &mut net,
+            path.to_str().unwrap(),
+            &None,
+            &cfg,
+            out_dir,
+            None,
+            &mut rng,
+        )
+        .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("exceeds sane limit"), "unexpected err msg: {}", msg);
+    }
     // n_features=0 のサンプルのみで 1 epoch 学習し、NaN が発生しないことのスモーク
     #[test]
     fn train_one_batch_with_zero_feature_sample_smoke() {
@@ -1788,6 +3020,11 @@ mod tests {
             accumulator_dim: 8,
             relu_clip: 127,
             shuffle: false,
+            prefetch_batches: 0,
+            throughput_interval_sec: 10_000.0,
+            stream_cache: false,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
             exclude_no_legal_move: false,
             exclude_fallback: false,
         };

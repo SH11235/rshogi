@@ -1,4 +1,3 @@
-use assert_cmd::prelude::*;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs;

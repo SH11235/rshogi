@@ -1,6 +1,5 @@
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::json;
 use tempfile::TempDir;
