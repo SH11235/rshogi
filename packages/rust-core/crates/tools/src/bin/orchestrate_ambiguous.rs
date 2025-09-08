@@ -1218,10 +1218,11 @@ fn main() -> Result<()> {
         gen_args.push("--nodes".into());
         gen_args.push(n.to_string());
     }
-    if let Some(ms) = cli.time_limit_ms {
-        gen_args.push("--time-limit-ms".into());
-        gen_args.push(ms.to_string());
-    }
+    // Always pass a time limit to the generator to avoid extremely small defaults.
+    // Default to 100ms if not specified.
+    let tl_ms = cli.time_limit_ms.unwrap_or(100);
+    gen_args.push("--time-limit-ms".into());
+    gen_args.push(tl_ms.to_string());
     if let Some(j) = cli.jobs {
         gen_args.push("--jobs".into());
         gen_args.push(j.to_string());
