@@ -2883,5 +2883,3 @@ enum QuantilesBackend {
     P2,
     TDigest,
 }
-
-// Note: parsing moved to clap ValueEnum `QuantilesBackendArg` + `parse_quantiles_backend`.
