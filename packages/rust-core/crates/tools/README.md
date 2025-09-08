@@ -250,6 +250,21 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
   --pass1 runs/out_pass1.jsonl --final runs/final.jsonl --dry-run
 ```
 
+ドライラン出力は、空白や二重引用符を含むパスも適切に引用されており、そのままコピペ実行できます。
+
+出力例（パスは例示、実環境に合わせて変化します）:
+```text
+[dry-run] "/path/to/target/debug/extract_flagged_positions" "runs/out_pass1.jsonl" - --gap-threshold 35
+[dry-run] normalize+unique -> ".final.ambdig/pass2_input.sfens"
+[dry-run] "/path/to/target/debug/generate_nnue_training_data" ".final.ambdig/pass2_input.sfens" ".final.ambdig/pass2.jsonl" --engine enhanced --output-format jsonl --hash-mb 64 --multipv 3 --teacher-profile balanced --split 200000 --compress gz
+[dry-run] "/path/to/target/debug/merge_annotation_results" --dedup-by-sfen --mode depth-first --manifest-out "runs/final.manifest.json" "runs/out_pass1.jsonl" ".final.ambdig/pass2.jsonl" "runs/final.jsonl"
+[dry-run] "/path/to/target/debug/analyze_teaching_quality" "runs/final.jsonl" --json --expected-multipv 3 --manifest-autoload-mode strict > ".final.ambdig/quality.json"
+[dry-run] would write orchestration manifest to ".final.ambdig/orchestrate_ambiguous.manifest.json"
+```
+
+備考:
+- Windows の場合も、空白や `"` を含むパスは適切に引用されます（`"` は二重化してから全体を `"..."` で囲みます）。
+
 主なオプション:
 - 抽出: `--gap-threshold <cp>`、`--include-non-exact`、`--include-aspiration-failures <N>`、`--include-mate-boundary`
 - 再注釈(generate 委譲): `--engine`、`--nnue-weights`、`--teacher-profile`、`--multipv`、`--min-depth`、`--nodes|--time-limit-ms`、`--jobs`、`--hash-mb`、`--reuse-tt`、`--split`、`--compress`

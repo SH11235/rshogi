@@ -22,12 +22,24 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
   --pass1 runs/out_pass1.jsonl --final runs/final.jsonl --dry-run
 ```
 
+ドライラン出力は、空白や `"` を含むパスも引用され、コピペ実行可能です。出力例:
+```text
+[dry-run] "/path/to/target/debug/extract_flagged_positions" "runs/out_pass1.jsonl" - --gap-threshold 35
+[dry-run] normalize+unique -> ".final.ambdig/pass2_input.sfens"
+[dry-run] "/path/to/target/debug/generate_nnue_training_data" ".final.ambdig/pass2_input.sfens" ".final.ambdig/pass2.jsonl" --engine enhanced --output-format jsonl --hash-mb 64 --multipv 3 --teacher-profile balanced --split 200000 --compress gz
+[dry-run] "/path/to/target/debug/merge_annotation_results" --dedup-by-sfen --mode depth-first --manifest-out "runs/final.manifest.json" "runs/out_pass1.jsonl" ".final.ambdig/pass2.jsonl" "runs/final.jsonl"
+[dry-run] "/path/to/target/debug/analyze_teaching_quality" "runs/final.jsonl" --json --expected-multipv 3 --manifest-autoload-mode strict > ".final.ambdig/quality.json"
+[dry-run] would write orchestration manifest to ".final.ambdig/orchestrate_ambiguous.manifest.json"
+```
+
 ## 主なオプション
 - 入出力
   - `--pass1 <FILE>`（複数可）: 初回注釈の JSONL
   - `--final <FILE>`: マージ後の最終 JSONL
   - `--out-dir <DIR>`: 中間物の保存先（既定: `<final>` と同階層に `.<stem>.ambdig/`）
   - `--manifest-out <FILE>`: オーケストレーション manifest の保存先（既定: `<out-dir>/orchestrate_ambiguous.manifest.json`）
+  - `--final-manifest-out <FILE>`: 最終マージ manifest の保存先（未指定時は `<final>.manifest.json`）。
+    - `--final` が `final.jsonl.gz` や `final.jsonl.zst` でも自動で `final.manifest.json` を採用。
 - 抽出（extract_flagged_positions）
   - `--gap-threshold <cp>`（既定35）／`--include-non-exact`／`--include-aspiration-failures <N>`／`--include-mate-boundary`
 - 再注釈（generate_nnue_training_data）
@@ -39,9 +51,9 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - マージ（merge_annotation_results）
   - `--merge-mode depth-first`（常に明示）／`--dedup-by-sfen`（常に有効）
 - 要約
-  - `--analyze-summary`（JSON は `quality.json` に保存、サマリはコンソールに出力。pass2 の `multipv` を検知して `--expected-multipv` を自動設定）
+  - `--analyze-summary`（JSON は `quality.json` に保存、サマリはコンソールに出力。`--expected-multipv` は最終 manifest の aggregated.multipv → pass2 manifest → CLI の順で推定）
 - 実行制御
-  - `--dry-run`（extract/normalize/generate/merge/analyze の全コマンド計画を表示）／`--verbose`／`--keep-intermediate`（既定ON）
+  - `--dry-run`（extract/normalize/generate/merge/analyze の全コマンド計画を表示。空白や `"` を含むパスは引用され、コピペ実行可能）／`--verbose`／`--keep-intermediate`（既定ON）
 
 ## 推奨設定
 - 抽出：`--gap-threshold 35`（広めに拾う）
@@ -55,7 +67,7 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
 - `reannotate`: generate のコマンドオプション、検出した part/aggregate manifest、生成件数
 - `merge`: マージモード、入力一覧、`final` のパス、`final_written`
 - `counts`: `extracted` / `pass2_generated` / `final_written`
-- `analyze`（任意）: `quality.json` の参照
+- `analyze`（任意）: `quality.json` の参照と `expected_mpv` を記録
 
 整合チェック（期待関係）
 - `final.manifest.aggregated.written_lines == counts.final_written`
@@ -90,17 +102,22 @@ cargo run --release -p tools --bin orchestrate_ambiguous -- \
     "final_written": 980
   },
   "counts": {"extracted": 1024, "pass2_generated": 1000, "final_written": 980},
-  "analyze": {"summary_json": ".final.ambdig/quality.json"}
+  "analyze": {"summary_json": ".final.ambdig/quality.json", "expected_mpv": 3}
 }
 ```
 
 ## トラブルシュート
 - 抽出 0 件
   - 正常動作です。再注釈/マージはスキップされ、orchestration manifest のみ出力されます。
+  - 解析を有効にしている場合、入力は先頭の pass1 に自動フォールバックし、その旨を `[info]` ログに出力します。
 - `--compress zst` で失敗
   - `tools` クレートを `--features zstd` でビルドしてください。
 - 解析（`--analyze-summary`）が失敗
   - 解析コマンドが非0終了でも出力がある場合は `quality.json` を保存します。出力が空の場合のみスキップします。
+
+## メモリに関する注意（将来の改善）
+- 大規模な SFEN 入力では、正規化＋重複排除に `HashSet<String>` を用いるためメモリを消費します。
+  - 将来的に、外部ソート＋uniq による on-disk 除重（例: `--normalize-sort-unique`）や Bloom 近似（例: `--bloom-fpp`）のオプション追加を検討中です。
 
 ## 関連
 - 設計ドキュメント: `docs/tasks/orchestrate_ambiguous_plan.md`
