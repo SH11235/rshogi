@@ -19,6 +19,31 @@ defaults:
     working-directory: packages/rust-core
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust_code: ${{ steps.filter.outputs.rust_code }}
+      tools_code: ${{ steps.filter.outputs.tools_code }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust_code:
+              - 'packages/rust-core/**'
+              - '!packages/rust-core/docs/**'
+              - '!packages/rust-core/runs/**'
+              - '!packages/rust-core/converted_openings/**'
+              - '!packages/rust-core/memo/**'
+              - '!packages/rust-core/target/**'
+              - '!**/*.md'
+              - '!**/*.mdx'
+            tools_code:
+              - 'packages/rust-core/crates/tools/**'
+              - 'packages/rust-core/crates/engine-core/**'
+              - 'packages/rust-core/Cargo.toml'
+              - 'packages/rust-core/Cargo.lock'
   format:
     name: Format Check
     runs-on: ubuntu-latest
@@ -53,6 +78,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust_code == 'true'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +100,8 @@ jobs:
     name: Test (Large Stack) - Release Mode
     runs-on: ubuntu-latest
     continue-on-error: true
+    needs: changes
+    if: needs.changes.outputs.rust_code == 'true'
     env:
       RUST_MIN_STACK: 8388608
     steps:
@@ -102,6 +131,8 @@ jobs:
   test-features:
     name: Test with Features
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.tools_code == 'true'
     strategy:
       matrix:
         feature:
