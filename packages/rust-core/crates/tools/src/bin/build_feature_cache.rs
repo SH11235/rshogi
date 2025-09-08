@@ -278,21 +278,34 @@ fn cp_to_wdl(cp: i32, scale: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-fn write_samples_stream<R: BufRead, W: Write>(
+// (former write_samples_stream merged into process_jsonl_stream paths)
+
+// Shared JSONL processor that drives the common read/parse/metrics loop and writes
+// samples to a restartable encoder. The encoder can be rotated on chunk boundaries
+// via the provided finish and new_encoder closures.
+fn process_jsonl_stream<R, E, W, FFinish, FNew>(
     mut reader: R,
-    mut sink: W,
+    mut enc: E,
+    mut finish: FFinish,
+    mut new_encoder: FNew,
     config: &CacheConfig,
-) -> Result<(u64, u64, u64, u64), Box<dyn std::error::Error>> {
+) -> Result<(u64, u64, u64, u64), Box<dyn std::error::Error>>
+where
+    R: BufRead,
+    E: Write,
+    W: Write,
+    FFinish: FnMut(E) -> std::io::Result<W>,
+    FNew: FnMut(W) -> std::io::Result<E>,
+{
     let mut num_samples: u64 = 0;
     let mut total_features: u64 = 0;
-    let mut skipped = 0;
-    let mut processed = 0;
-    // Reusable feature buffer (typical active features << 256)
-    let mut features_buf: Vec<u32> = Vec::with_capacity(256);
-    // Reusable u8 scratch for big-endian fallback writes
-    #[cfg(target_endian = "big")]
-    let mut u8_buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut skipped: u64 = 0;
+    let mut processed: u64 = 0;
+
     let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut features_buf: Vec<u32> = Vec::with_capacity(256);
+    let mut in_chunk: u32 = 0;
+
     loop {
         line_buf.clear();
         let n = reader.read_until(b'\n', &mut line_buf)?;
@@ -323,7 +336,6 @@ fn write_samples_stream<R: BufRead, W: Write>(
             }
         };
 
-        // Skip based on filters
         if config.exclude_no_legal_move && pos_data.no_legal_move.unwrap_or(false) {
             skipped += 1;
             continue;
@@ -333,139 +345,26 @@ fn write_samples_stream<R: BufRead, W: Write>(
             continue;
         }
 
-        // Get evaluation score
-        let cp = if let Some(eval) = pos_data.eval {
-            eval
-        } else if let Some(line) = pos_data.lines.first() {
-            line.score_cp.unwrap_or(0)
-        } else {
+        let (written, feats) =
+            write_position_samples(&pos_data, &mut enc, config, &mut features_buf)?;
+        if written == 0 {
             skipped += 1;
             continue;
-        };
-
-        // Create position
-        let position = match Position::from_sfen(&pos_data.sfen) {
-            Ok(pos) => pos,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // Extract HalfKP features for both perspectives
-        let black_king = match position.board.king_square(Color::Black) {
-            Some(sq) => sq,
-            None => {
-                skipped += 1;
-                continue;
-            }
-        };
-        let white_king = match position.board.king_square(Color::White) {
-            Some(sq) => sq,
-            None => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // Build common metadata flags
-        let mut base_flags = 0u8;
-        // both_exact (robust to case/whitespace)
-        let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
-        if both_exact {
-            base_flags |= fc_flags::BOTH_EXACT;
-        }
-        // mate boundary
-        if pos_data.mate_boundary.unwrap_or(false) {
-            base_flags |= fc_flags::MATE_BOUNDARY;
         }
 
-        // Side to move (for label orientation and flags)
-        let stm = position.side_to_move;
+        num_samples += written as u64;
+        total_features += feats as u64;
 
-        // Compute oriented CP for each perspective
-        let cp_black = if stm == Color::Black { cp } else { -cp };
-        let cp_white = -cp_black;
-
-        // Helper to write one perspective
-        let mut write_perspective = |perspective: Color, king_sq| -> std::io::Result<usize> {
-            let feats = extract_features(&position, king_sq, perspective);
-            features_buf.clear();
-            features_buf.extend(feats.as_slice().iter().map(|&f| f as u32));
-            if config.dedup_features {
-                features_buf.sort_unstable();
-                features_buf.dedup();
-            }
-
-            #[cfg(debug_assertions)]
-            {
-                let max_dim = (SHOGI_BOARD_SIZE * FE_END) as u32;
-                debug_assert!(
-                    features_buf.iter().all(|&f| f < max_dim),
-                    "feature index OOB: some index >= {}",
-                    max_dim
-                );
-            }
-
-            let cp_oriented = if perspective == Color::Black {
-                cp_black
-            } else {
-                cp_white
-            };
-            let label = match config.label_type.as_str() {
-                "wdl" => cp_to_wdl(cp_oriented, config.scale),
-                "cp" => (cp_oriented.clamp(-config.cp_clip, config.cp_clip) as f32) / 100.0,
-                _ => return Ok(0),
-            };
-
-            let mut flags = base_flags;
-            if perspective == Color::Black {
-                flags |= fc_flags::PERSPECTIVE_BLACK;
-            }
-            if stm == Color::Black {
-                flags |= fc_flags::STM_BLACK;
-            }
-
-            // Write sample (no padding; meta layout fixed)
-            let n_features = features_buf.len() as u32;
-            sink.write_all(&n_features.to_le_bytes())?;
-            // Bulk write features
-            if !features_buf.is_empty() {
-                #[cfg(target_endian = "little")]
-                {
-                    use bytemuck::cast_slice;
-                    sink.write_all(cast_slice::<u32, u8>(&features_buf))?;
-                }
-                #[cfg(target_endian = "big")]
-                {
-                    u8_buf.clear();
-                    let need = features_buf.len() * 4;
-                    if u8_buf.capacity() < need {
-                        u8_buf.reserve(need - u8_buf.capacity());
-                    }
-                    for &feat in &features_buf {
-                        u8_buf.extend_from_slice(&feat.to_le_bytes());
-                    }
-                    sink.write_all(&u8_buf)?;
-                }
-            }
-            sink.write_all(&label.to_le_bytes())?;
-            let gap = pos_data.best2_gap_cp.unwrap_or(0).clamp(0, u16::MAX as i32) as u16;
-            sink.write_all(&gap.to_le_bytes())?;
-            sink.write_all(&[pos_data.depth.unwrap_or(0)])?;
-            sink.write_all(&[pos_data.seldepth.unwrap_or(0)])?;
-            sink.write_all(&[flags])?;
-
-            total_features += features_buf.len() as u64;
-            num_samples += 1;
-            Ok(features_buf.len())
-        };
-
-        // Black perspective sample
-        let _ = write_perspective(Color::Black, black_king)?;
-        // White perspective sample
-        let _ = write_perspective(Color::White, white_king)?;
+        in_chunk += written as u32;
+        if in_chunk >= config.chunk_size {
+            let sink = finish(enc)?;
+            enc = new_encoder(sink)?;
+            in_chunk = 0;
+        }
     }
+
+    let mut sink = finish(enc)?;
+    sink.flush()?;
 
     Ok((num_samples, total_features, skipped, processed))
 }
@@ -487,168 +386,48 @@ fn write_cache_file_streaming(
     // Prepare input reader (supports .jsonl, .jsonl.gz, .jsonl.zst[feature] via magic/extension)
     let reader = open_maybe_compressed_reader(input_path, config.io_buf_bytes)?;
 
-    // Write samples either raw or compressed
-    // Writer with optional chunked compression
-    let mut num_samples: u64 = 0;
-    let mut total_features: u64 = 0;
-    let mut skipped: u64 = 0;
-    let mut processed: u64 = 0;
-
-    match config.payload_encoding {
+    // Write samples either raw or compressed via unified processor
+    let (num_samples, total_features, skipped, processed) = match config.payload_encoding {
         PayloadEncodingKind::None => {
             let sink = BufWriter::with_capacity(config.io_buf_bytes, file);
-            let (ns, tf, sk, pr) = write_samples_stream(reader, sink, config)?;
-            num_samples = ns;
-            total_features = tf;
-            skipped = sk;
-            processed = pr;
+            process_jsonl_stream(
+                reader,
+                sink,
+                |w: BufWriter<File>| Ok(w),
+                |w: BufWriter<File>| Ok(w),
+                config,
+            )?
         }
         PayloadEncodingKind::Gzip => {
             use flate2::write::GzEncoder;
             use flate2::Compression;
             let level = config.compress_level.map(|l| l.clamp(0, 9) as u32).unwrap_or(6);
             let sink = BufWriter::with_capacity(config.io_buf_bytes, file);
+            let enc = GzEncoder::new(sink, Compression::new(level));
 
-            // We'll iterate JSONL manually to control chunk boundaries
-            let mut r = reader; // BufRead
-            let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
-            let mut in_chunk: u32 = 0;
-            let mut enc = GzEncoder::new(sink, Compression::new(level));
-
-            // Reusable buffers
-            let mut features_buf: Vec<u32> = Vec::with_capacity(256);
-
-            loop {
-                line_buf.clear();
-                let n = r.read_until(b'\n', &mut line_buf)?;
-                if n == 0 {
-                    break;
-                }
-                if line_buf.iter().all(|b| b.is_ascii_whitespace()) {
-                    continue;
-                }
-
-                processed += 1;
-                if processed % config.metrics_interval == 0 {
-                    print!("\r[metrics] processed={}", processed);
-                    #[cfg(target_os = "linux")]
-                    if config.report_rss {
-                        if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
-                            print!(" | RSS={}MB HWM={}MB", rss_kb / 1024, hwm_kb / 1024);
-                        }
-                    }
-                    std::io::stdout().flush()?;
-                }
-
-                let pos_data: TrainingPosition = match serde_json::from_slice(&line_buf) {
-                    Ok(data) => data,
-                    Err(_) => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
-                if config.exclude_no_legal_move && pos_data.no_legal_move.unwrap_or(false) {
-                    skipped += 1;
-                    continue;
-                }
-                if config.exclude_fallback && pos_data.fallback_used.unwrap_or(false) {
-                    skipped += 1;
-                    continue;
-                }
-
-                let (written, feats) =
-                    write_position_samples(&pos_data, &mut enc, config, &mut features_buf)?;
-                if written == 0 {
-                    continue;
-                }
-
-                num_samples += written as u64;
-                total_features += feats as u64;
-
-                in_chunk += written as u32;
-                if in_chunk >= config.chunk_size {
-                    // Close current gzip member and start a new one
-                    let finished_sink = enc.finish()?; // returns BufWriter<File>
-                    enc = GzEncoder::new(finished_sink, Compression::new(level));
-                    in_chunk = 0;
-                }
-            }
-
-            // finish open encoder and flush
-            let mut sink = enc.finish()?;
-            sink.flush()?;
+            process_jsonl_stream(
+                reader,
+                enc,
+                |e| e.finish(),
+                |w: BufWriter<File>| Ok(GzEncoder::new(w, Compression::new(level))),
+                config,
+            )?
         }
         #[cfg(feature = "zstd")]
         PayloadEncodingKind::Zstd => {
             let level = config.compress_level.unwrap_or(0);
             let sink = BufWriter::with_capacity(config.io_buf_bytes, file);
+            let enc = zstd::Encoder::new(sink, level)?;
 
-            let mut r = reader; // BufRead
-            let mut line_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
-            let mut in_chunk: u32 = 0;
-            let mut enc = zstd::Encoder::new(sink, level)?;
-
-            // Reusable buffers
-            let mut features_buf: Vec<u32> = Vec::with_capacity(256);
-
-            loop {
-                line_buf.clear();
-                let n = r.read_until(b'\n', &mut line_buf)?;
-                if n == 0 {
-                    break;
-                }
-                if line_buf.iter().all(|b| b.is_ascii_whitespace()) {
-                    continue;
-                }
-
-                processed += 1;
-                if processed % config.metrics_interval == 0 {
-                    print!("\r[metrics] processed={}", processed);
-                    #[cfg(target_os = "linux")]
-                    if config.report_rss {
-                        if let Some((rss_kb, hwm_kb)) = read_linux_rss_kb() {
-                            print!(" | RSS={}MB HWM={}MB", rss_kb / 1024, hwm_kb / 1024);
-                        }
-                    }
-                    std::io::stdout().flush()?;
-                }
-
-                let pos_data: TrainingPosition = match serde_json::from_slice(&line_buf) {
-                    Ok(data) => data,
-                    Err(_) => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
-                if config.exclude_no_legal_move && pos_data.no_legal_move.unwrap_or(false) {
-                    skipped += 1;
-                    continue;
-                }
-                if config.exclude_fallback && pos_data.fallback_used.unwrap_or(false) {
-                    skipped += 1;
-                    continue;
-                }
-
-                let (written, feats) =
-                    write_position_samples(&pos_data, &mut enc, config, &mut features_buf)?;
-                if written == 0 {
-                    continue;
-                }
-                num_samples += written as u64;
-                total_features += feats as u64;
-                in_chunk += written as u32;
-                if in_chunk >= config.chunk_size {
-                    // close current frame and start a new one
-                    let finished_sink = enc.finish()?; // returns BufWriter<File>
-                    enc = zstd::Encoder::new(finished_sink, level)?;
-                    in_chunk = 0;
-                }
-            }
-
-            let mut sink = enc.finish()?;
-            sink.flush()?;
+            process_jsonl_stream(
+                reader,
+                enc,
+                |e| e.finish(),
+                |w: BufWriter<File>| zstd::Encoder::new(w, level),
+                config,
+            )?
         }
-    }
+    };
 
     println!("\rProcessed {} positions (skipped {})", processed, skipped);
 
