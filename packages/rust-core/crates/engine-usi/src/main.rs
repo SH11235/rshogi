@@ -354,11 +354,16 @@ fn finalize_and_send(
     }
 
     // Emit bestmove (+ ponder)
-    let final_usi = final_best
-        .best_move
-        .map(|m| move_to_usi(&m))
-        .unwrap_or_else(|| "resign".to_string());
-    let ponder_mv = if state.opts.ponder {
+    // Stale guard: when stale, always emit resign to avoid mixing results for different positions
+    let final_usi = if stale {
+        "resign".to_string()
+    } else {
+        final_best
+            .best_move
+            .map(|m| move_to_usi(&m))
+            .unwrap_or_else(|| "resign".to_string())
+    };
+    let ponder_mv = if !stale && state.opts.ponder {
         final_best.pv.get(1).map(move_to_usi)
     } else {
         None
@@ -1069,11 +1074,15 @@ fn main() -> Result<()> {
                     None
                 };
 
-                let gp = if cmd == "go" {
+                let mut gp = if cmd == "go" {
                     GoParams::default()
                 } else {
                     parse_go(cmd)
                 };
+                // Guard: if USI_Ponder is disabled, force gp.ponder=false to avoid silent ponder state
+                if gp.ponder && !state.opts.ponder {
+                    gp.ponder = false;
+                }
                 // Save last go params
                 state.last_go_params = Some(gp.clone());
                 // Stochastic Ponder: if go ponder && enabled → search from 1手前
