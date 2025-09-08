@@ -1279,38 +1279,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // When reading from stdin ("-"), we tee the stream into a temporary file during pass-1
     // so that pass-2 can re-read the same data. This keeps memory bounded while preserving
     // the two-pass behavior (counting + processing).
+    struct TeeGuard(Option<PathBuf>);
+    impl Drop for TeeGuard {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
     let is_stdin = input_path.to_string_lossy() == "-";
     let mut tee_tmp_path: Option<PathBuf> = None;
     let mut tee_writer: Option<BufWriter<File>> = None;
+    let mut tee_guard = TeeGuard(None);
     if is_stdin {
-        let mut tmp = std::env::temp_dir();
-        tmp.push(format!("generate_nnue_training_data.stdin.{}.tmp", std::process::id()));
-        // Create with conservative permissions; use create_new(O_EXCL) to avoid symlink/race
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            opts.mode(0o600);
-        }
-        match opts.open(&tmp) {
-            Ok(f) => {
-                tee_writer = Some(BufWriter::with_capacity(1 << 20, f));
-                tee_tmp_path = Some(tmp);
-                if let Some(ref p) = tee_tmp_path {
-                    human_log!("Teeing STDIN to temporary file: {}", p.display());
+        // Try a small number of unique suffixes to avoid leftovers blocking creation
+        let base = format!("generate_nnue_training_data.stdin.{}.tmp", std::process::id());
+        let mut opened: Option<(File, PathBuf)> = None;
+        for attempt in 0..5 {
+            let cand = if attempt == 0 {
+                std::env::temp_dir().join(&base)
+            } else {
+                std::env::temp_dir().join(format!("{base}.{}", attempt))
+            };
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                opts.mode(0o600);
+            }
+            match opts.open(&cand) {
+                Ok(f) => {
+                    opened = Some((f, cand));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Error: failed to create temporary tee file for STDIN: {}. Cannot safely re-read in pass-2.",
+                        e
+                    );
+                    eprintln!(
+                        "Hint: set TMPDIR to a writable filesystem or provide an input file instead of '-'"
+                    );
+                    std::process::exit(1);
                 }
             }
-            Err(e) => {
-                eprintln!(
-                    "Error: failed to create temporary tee file for STDIN: {}. Cannot safely re-read in pass-2.",
-                    e
-                );
-                eprintln!(
-                    "Hint: set TMPDIR to a writable filesystem or provide an input file instead of '-'"
-                );
-                std::process::exit(1);
-            }
         }
+        let (f, path) = opened.unwrap_or_else(|| {
+            eprintln!("Error: failed to create unique temporary tee file after retries.");
+            eprintln!(
+                "Hint: set TMPDIR to a writable filesystem or provide an input file instead of '-'"
+            );
+            std::process::exit(1);
+        });
+        tee_writer = Some(BufWriter::with_capacity(1 << 20, f));
+        tee_tmp_path = Some(path.clone());
+        tee_guard.0 = Some(path.clone());
+        human_log!(
+            "Teeing STDIN to temporary file: {} (writing entire STDIN to disk; ensure TMPDIR has enough free space)",
+            path.display()
+        );
     }
     {
         let mut reader = open_reader(&input_path)?;
@@ -1323,7 +1353,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(w) = tee_writer.as_mut() {
                 // Write original line (includes newline from read_line)
-                use std::io::Write as _;
                 w.write_all(line.as_bytes())?;
             }
             if let Some(s) = extract_sfen(line.trim()) {
@@ -1335,7 +1364,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(mut w) = tee_writer.take() {
-        use std::io::Write as _;
         w.flush()?;
     }
     human_log!("\nFound {total_positions} positions in input file");
@@ -1812,9 +1840,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Provenance: compute input file hash/bytes and NNUE weights hash (if provided)
-    let (input_sha256, input_bytes) = compute_sha_and_bytes(&input_path)
-        .map(|(h, b)| (Some(h), Some(b)))
-        .unwrap_or((None, None));
+    let (input_sha256, input_bytes) = if is_stdin {
+        tee_tmp_path
+            .as_ref()
+            .and_then(|p| compute_sha_and_bytes(p))
+            .map(|(h, b)| (Some(h), Some(b)))
+            .unwrap_or((None, None))
+    } else {
+        compute_sha_and_bytes(&input_path)
+            .map(|(h, b)| (Some(h), Some(b)))
+            .unwrap_or((None, None))
+    };
     let nnue_weights_sha256: Option<String> = opts
         .nnue_weights
         .as_ref()
@@ -2331,10 +2367,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref lg) = structured_logger {
         let rec = serde_json::json!({ "kind": "final", "version": 1, "summary": &summary_obj });
         lg.write_json(&rec);
-    }
-    // Clean up tee temporary file for stdin (if any)
-    if let Some(p) = tee_tmp_path.take() {
-        let _ = std::fs::remove_file(p);
     }
     Ok(())
 }
