@@ -51,6 +51,7 @@ use engine_core::{
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use tools::nnfc_v1::flags as fc_flags;
 
 #[derive(Debug, Deserialize)]
 struct TrainingPosition {
@@ -581,9 +582,9 @@ impl StreamCacheLoader {
                 // weight policy
                 let mut weight = 1.0f32;
                 weight *= (gap as f32 / 50.0).min(1.0);
-                let both_exact = (flags & 1) != 0;
+                let both_exact = (flags & fc_flags::BOTH_EXACT) != 0;
                 weight *= if both_exact { 1.0 } else { 0.7 };
-                if (flags & 2) != 0 {
+                if (flags & fc_flags::MATE_BOUNDARY) != 0 {
                     weight *= 0.5;
                 }
                 if seldepth < depth.saturating_add(6) {

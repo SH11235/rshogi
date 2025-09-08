@@ -23,12 +23,8 @@ use tools::nnfc_v1::{
 
 // Cache header constants are provided by nnfc_v1
 
-// Flags (shared across versions)
-const FLAG_BOTH_EXACT: u8 = 1 << 0;
-const FLAG_MATE_BOUNDARY: u8 = 1 << 1;
-// Additional flags (reader may ignore unknown bits):
-const FLAG_PERSPECTIVE_BLACK: u8 = 1 << 2;
-const FLAG_STM_BLACK: u8 = 1 << 3;
+// Use shared flag definitions
+use tools::nnfc_v1::flags as fc_flags;
 
 #[inline]
 fn is_exact_opt(s: &Option<String>) -> bool {
@@ -376,11 +372,11 @@ fn write_samples_stream<R: BufRead, W: Write>(
         // both_exact (robust to case/whitespace)
         let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
         if both_exact {
-            base_flags |= FLAG_BOTH_EXACT;
+            base_flags |= fc_flags::BOTH_EXACT;
         }
         // mate boundary
         if pos_data.mate_boundary.unwrap_or(false) {
-            base_flags |= FLAG_MATE_BOUNDARY;
+            base_flags |= fc_flags::MATE_BOUNDARY;
         }
 
         // Side to move (for label orientation and flags)
@@ -423,10 +419,10 @@ fn write_samples_stream<R: BufRead, W: Write>(
 
             let mut flags = base_flags;
             if perspective == Color::Black {
-                flags |= FLAG_PERSPECTIVE_BLACK;
+                flags |= fc_flags::PERSPECTIVE_BLACK;
             }
             if stm == Color::Black {
-                flags |= FLAG_STM_BLACK;
+                flags |= fc_flags::STM_BLACK;
             }
 
             // Write sample (no padding; meta layout fixed)
@@ -664,10 +660,10 @@ fn write_cache_file_streaming(
         #[cfg(feature = "zstd")]
         PayloadEncodingKind::Zstd => PayloadEncoding::Zstd,
     };
-    let sample_flags_mask: u32 = (FLAG_BOTH_EXACT as u32)
-        | (FLAG_MATE_BOUNDARY as u32)
-        | (FLAG_PERSPECTIVE_BLACK as u32)
-        | (FLAG_STM_BLACK as u32);
+    let sample_flags_mask: u32 = (fc_flags::BOTH_EXACT as u32)
+        | (fc_flags::MATE_BOUNDARY as u32)
+        | (fc_flags::PERSPECTIVE_BLACK as u32)
+        | (fc_flags::STM_BLACK as u32);
     let header = HeaderV1 {
         version: CACHE_VERSION_V1,
         feature_set_id: FEATURE_SET_ID_HALF,
@@ -719,10 +715,10 @@ fn write_position_samples<W: Write>(
     let mut base_flags = 0u8;
     let both_exact = is_exact_opt(&pos_data.bound1) && is_exact_opt(&pos_data.bound2);
     if both_exact {
-        base_flags |= FLAG_BOTH_EXACT;
+        base_flags |= fc_flags::BOTH_EXACT;
     }
     if pos_data.mate_boundary.unwrap_or(false) {
-        base_flags |= FLAG_MATE_BOUNDARY;
+        base_flags |= fc_flags::MATE_BOUNDARY;
     }
     let stm = position.side_to_move;
     let cp_black = if stm == Color::Black { cp } else { -cp };
@@ -762,10 +758,10 @@ fn write_position_samples<W: Write>(
         };
         let mut flags = base_flags;
         if perspective == Color::Black {
-            flags |= FLAG_PERSPECTIVE_BLACK;
+            flags |= fc_flags::PERSPECTIVE_BLACK;
         }
         if stm == Color::Black {
-            flags |= FLAG_STM_BLACK;
+            flags |= fc_flags::STM_BLACK;
         }
 
         let n_features = features_buf.len() as u32;

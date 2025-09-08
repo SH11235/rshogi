@@ -6,6 +6,14 @@ pub const CACHE_VERSION_V1: u32 = 1;
 pub const HEADER_SIZE_V1: u32 = 48;
 pub const FEATURE_SET_ID_HALF: u32 = 0x4841_4C46; // "HALF"
 
+/// Sample flag bits used in payload samples
+pub mod flags {
+    pub const BOTH_EXACT: u8 = 1 << 0;
+    pub const MATE_BOUNDARY: u8 = 1 << 1;
+    pub const PERSPECTIVE_BLACK: u8 = 1 << 2;
+    pub const STM_BLACK: u8 = 1 << 3;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadEncoding {
     None = 0,
@@ -29,14 +37,21 @@ impl PayloadEncoding {
 
 #[derive(Debug, Clone)]
 pub struct HeaderV1 {
+    /// Cache version. Currently must be 1.
     pub version: u32,
+    /// Feature set identifier. HALF (HalfKP) = 0x48414C46.
     pub feature_set_id: u32,
+    /// Number of samples in payload (after perspective split).
     pub num_samples: u64,
+    /// Chunk size hint (samples per chunk).
     pub chunk_size: u32,
+    /// Header size in bytes (after magic). Minimum 40. Payload starts at 4 + header_size.
     pub header_size: u32,
+    /// Endianness for payload. 0 = little-endian.
     pub endianness: u8,
     pub payload_encoding: PayloadEncoding,
     pub payload_offset: u64,
+    /// Bitmask of known sample flag bits.
     pub flags_mask: u32,
 }
 
