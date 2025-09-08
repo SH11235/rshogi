@@ -2373,7 +2373,7 @@ fn process_position_with_engine(
                 "depth_reached": result.stats.depth,
                 "reason": "time_overrun",
                 "mode": "time",
-                "index": idx + 1,
+                "index": idx,
             });
             let _ = writeln!(file, "{}", obj);
         }
@@ -2404,7 +2404,7 @@ fn process_position_with_engine(
                 "search_error": "empty_or_missing_pv",
                 "depth_reached": depth_reached,
                 "mode": "search",
-                "index": idx + 1,
+                "index": idx,
             });
             let _ = writeln!(file, "{}", obj);
         }
@@ -2419,7 +2419,7 @@ fn process_position_with_engine(
                 "search_error": "nonexact_top1",
                 "depth_reached": depth_reached,
                 "mode": "search",
-                "index": idx + 1,
+                "index": idx,
             });
             let _ = writeln!(file, "{}", obj);
         }
