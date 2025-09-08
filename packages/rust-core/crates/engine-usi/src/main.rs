@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use engine_core::engine::controller::{Engine, EngineType, FinalBestSource};
 use engine_core::search::limits::{SearchLimits, SearchLimitsBuilder};
 use engine_core::shogi::{Color, Position};
 use engine_core::time_management::{TimeControl, TimeParameters, TimeParametersBuilder};
 use engine_core::usi::{
-    append_usi_score_and_bound, move_to_usi, parse_sfen, parse_usi_move, score_view_from_internal,
+    append_usi_score_and_bound, create_position, move_to_usi, score_view_from_internal,
 };
 use log::info;
 use std::io::{self, BufRead, Write};
@@ -402,7 +402,6 @@ fn send_id_and_options(opts: &UsiOptions) {
 fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     // Format: position [startpos | sfen <sfen...>] [moves m1 m2 ...]
     let mut tokens = cmd.split_whitespace().skip(1).peekable();
-    let mut pos = Position::startpos();
     let mut have_pos = false;
     // Reset record of current position components
     state.pos_from_startpos = false;
@@ -413,7 +412,6 @@ fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
         match tok {
             "startpos" => {
                 let _ = tokens.next();
-                pos = Position::startpos();
                 have_pos = true;
                 state.pos_from_startpos = true;
                 state.pos_sfen = None;
@@ -429,21 +427,16 @@ fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
                     sfen_parts.push(tokens.next().unwrap().to_string());
                 }
                 let sfen = sfen_parts.join(" ");
-                pos = parse_sfen(&sfen).map_err(|e| anyhow!("Invalid SFEN: {}", e))?;
+                // Defer parsing to core; just store SFEN parts here
                 have_pos = true;
                 state.pos_from_startpos = false;
                 state.pos_sfen = Some(sfen);
             }
             "moves" => {
                 let _ = tokens.next();
-                // Apply moves
+                // Collect moves only; legality will be validated by core
                 for mstr in tokens.by_ref() {
                     state.pos_moves.push(mstr.to_string());
-                    let mv = parse_usi_move(mstr).map_err(|_| anyhow!("Invalid move: {}", mstr))?;
-                    if !pos.is_legal_move(mv) {
-                        return Err(anyhow!("Illegal move in sequence: {}", mstr));
-                    }
-                    pos.do_move(mv);
                 }
             }
             _ => {
@@ -453,9 +446,13 @@ fn parse_position(cmd: &str, state: &mut EngineState) -> Result<()> {
     }
 
     if !have_pos {
-        pos = Position::startpos();
+        state.pos_from_startpos = true;
+        state.pos_sfen = None;
     }
 
+    // Build via core helper (validates legality and promotions)
+    let pos =
+        create_position(state.pos_from_startpos, state.pos_sfen.as_deref(), &state.pos_moves)?;
     state.position = pos;
     Ok(())
 }
@@ -1191,6 +1188,12 @@ fn main() -> Result<()> {
                                     state.stop_flag = None;
                                     state.ponder_hit_flag = None;
 
+                                    // Ponder中のstopはbestmoveを出さない
+                                    if state.current_is_ponder {
+                                        state.current_is_ponder = false;
+                                        finalized = true;
+                                        continue;
+                                    }
                                     // Finalize centrally using choose_final_bestmove
                                     let stale = state
                                         .current_root_hash
@@ -1241,11 +1244,15 @@ fn main() -> Result<()> {
                             state.stop_flag = None;
                             state.ponder_hit_flag = None;
 
-                            let stale = state
-                                .current_root_hash
-                                .map(|h| h != state.position.zobrist_hash())
-                                .unwrap_or(false);
-                            finalize_and_send(&mut state, "stop_timeout_finalize", None, stale);
+                            if !state.current_is_ponder {
+                                let stale = state
+                                    .current_root_hash
+                                    .map(|h| h != state.position.zobrist_hash())
+                                    .unwrap_or(false);
+                                finalize_and_send(&mut state, "stop_timeout_finalize", None, stale);
+                            } else {
+                                state.current_is_ponder = false;
+                            }
                         }
                     }
                 }
