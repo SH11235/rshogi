@@ -507,7 +507,6 @@ impl StreamCacheLoader {
                 return;
             }
             let feature_set_id = u32::from_le_bytes(u32b);
-            const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
             if feature_set_id != FEATURE_SET_ID_HALF {
                 let _ = tx.send(BatchMsg::Err(format!(
                     "Unsupported feature_set_id: 0x{:08x} (file {})",
@@ -1233,6 +1232,8 @@ fn calculate_weight(pos_data: &TrainingPosition, _config: &Config) -> f32 {
 
 // Type alias to keep function signatures simple
 type CachePayload = (BufReader<Box<dyn Read>>, u64, u32);
+// Feature set id for HALF (HalfKP) cache
+const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
 
 // Common helper: open a v1 cache file and return a BufReader over the payload,
 // along with (num_samples, flags_mask). Handles raw/gzip/zstd based on header.
@@ -1261,7 +1262,6 @@ fn open_cache_payload_reader(path: &str) -> Result<CachePayload, Box<dyn std::er
     // feature_set_id
     f.read_exact(&mut u32b)?;
     let feature_set_id = u32::from_le_bytes(u32b);
-    const FEATURE_SET_ID_HALF: u32 = 0x48414C46; // "HALF"
     if feature_set_id != FEATURE_SET_ID_HALF {
         return Err(format!(
             "Unsupported feature_set_id: 0x{:08x} for file {}",
@@ -1584,76 +1584,10 @@ fn train_model_stream_cache(
         } else {
             None
         };
-        // Open and parse header (similar to StreamCacheLoader::start_epoch)
+        // Open and parse header via helper
         for epoch in 0..config.epochs {
             let epoch_start = Instant::now();
-            let file = File::open(cache_path)?;
-            let mut f = BufReader::new(file);
-
-            let mut magic = [0u8; 4];
-            f.read_exact(&mut magic)?;
-            if &magic != b"NNFC" {
-                return Err("Invalid cache file: bad magic".into());
-            }
-            let mut u32b = [0u8; 4];
-            let mut u64b = [0u8; 8];
-            f.read_exact(&mut u32b)?;
-            let version = u32::from_le_bytes(u32b);
-            if version != 1 {
-                return Err(format!("Unsupported cache version: {}", version).into());
-            }
-            f.read_exact(&mut u32b)?;
-            let feature_set_id = u32::from_le_bytes(u32b);
-            const FEATURE_SET_ID_HALF: u32 = 0x48414C46;
-            if feature_set_id != FEATURE_SET_ID_HALF {
-                return Err(format!("Unsupported feature_set_id: 0x{:08x}", feature_set_id).into());
-            }
-            f.read_exact(&mut u64b)?;
-            let num_samples = u64::from_le_bytes(u64b);
-            f.read_exact(&mut u32b)?; // chunk_size
-            f.read_exact(&mut u32b)?; // header_size
-            let header_size = u32::from_le_bytes(u32b);
-            if !(40..=4096).contains(&header_size) {
-                return Err(format!("Unreasonable header_size: {}", header_size).into());
-            }
-            let mut b = [0u8; 1];
-            f.read_exact(&mut b)?; // endianness
-            if b[0] != 0 {
-                return Err("Unsupported endianness (expected LE)".into());
-            }
-            f.read_exact(&mut b)?; // payload_encoding
-            let payload_encoding = b[0];
-            let mut _r16 = [0u8; 2];
-            f.read_exact(&mut _r16)?; // reserved16
-            f.read_exact(&mut u64b)?; // payload_offset
-            let payload_offset = u64::from_le_bytes(u64b);
-            f.read_exact(&mut u32b)?; // flags_mask
-            let flags_mask = u32::from_le_bytes(u32b);
-            let header_end = 4u64 + header_size as u64;
-            if payload_offset < header_end {
-                return Err("payload_offset < header_end".into());
-            }
-            f.seek(SeekFrom::Start(payload_offset))?;
-            // Payload reader
-            let inner_reader: Box<dyn Read> = match payload_encoding {
-                0 => Box::new(f),
-                1 => {
-                    use flate2::read::GzDecoder;
-                    Box::new(GzDecoder::new(f))
-                }
-                2 => {
-                    #[cfg(feature = "zstd")]
-                    {
-                        Box::new(zstd::Decoder::new(f)?)
-                    }
-                    #[cfg(not(feature = "zstd"))]
-                    {
-                        return Err("zstd payload requires 'zstd' feature".into());
-                    }
-                }
-                _ => return Err("Unknown payload encoding".into()),
-            };
-            let mut r = BufReader::new(inner_reader);
+            let (mut r, num_samples, flags_mask) = open_cache_payload_reader(cache_path)?;
 
             // Epoch loop
             let mut total_loss = 0.0f32;
@@ -3008,6 +2942,59 @@ mod tests {
             net_inmem.b2,
             net_stream.b2
         );
+    }
+
+    // 非同期ストリーム（prefetch>0）で破損キャッシュのエラーが上位に伝搬すること
+    #[test]
+    fn stream_async_propagates_errors() {
+        let td = tempdir().unwrap();
+        let path = td.path().join("bad_async.cache");
+
+        // 1サンプル、raw（非圧縮）でヘッダを書き、payload に n_features = MAX+1 を書く
+        let mut f = File::create(&path).unwrap();
+        let payload_off = write_v1_header(&mut f, FEATURE_SET_ID_HALF, 1, 1024, 48, 0, 0, 0);
+        f.seek(SeekFrom::Start(payload_off)).unwrap();
+        let max_allowed = (SHOGI_BOARD_SIZE * FE_END) as u32;
+        let n_features = max_allowed + 1;
+        f.write_all(&n_features.to_le_bytes()).unwrap();
+        f.flush().unwrap();
+
+        let cfg = Config {
+            epochs: 1,
+            batch_size: 1024,
+            learning_rate: 0.001,
+            optimizer: "sgd".to_string(),
+            l2_reg: 0.0,
+            label_type: "cp".to_string(),
+            scale: 600.0,
+            cp_clip: 1200,
+            accumulator_dim: 8,
+            relu_clip: 127,
+            shuffle: false,
+            prefetch_batches: 2, // async 経路
+            throughput_interval_sec: 10_000.0,
+            stream_cache: true,
+            prefetch_bytes: None,
+            estimated_features_per_sample: 64,
+            exclude_no_legal_move: false,
+            exclude_fallback: false,
+        };
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let mut net = Network::new(cfg.accumulator_dim, cfg.relu_clip, &mut rng);
+        let out_dir = td.path();
+        let err = train_model_stream_cache(
+            &mut net,
+            path.to_str().unwrap(),
+            &None,
+            &cfg,
+            out_dir,
+            None,
+            &mut rng,
+        )
+        .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("exceeds sane limit"), "unexpected err msg: {}", msg);
     }
     // n_features=0 のサンプルのみで 1 epoch 学習し、NaN が発生しないことのスモーク
     #[test]
