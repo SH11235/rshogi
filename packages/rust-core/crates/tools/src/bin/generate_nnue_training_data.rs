@@ -1282,15 +1282,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tee_writer: Option<BufWriter<File>> = None;
     if is_stdin {
         let mut tmp = std::env::temp_dir();
-        tmp.push(format!(
-            "generate_nnue_training_data.stdin.{}.tmp",
-            std::process::id()
-        ));
+        tmp.push(format!("generate_nnue_training_data.stdin.{}.tmp", std::process::id()));
         if let Ok(f) = File::create(&tmp) {
             tee_writer = Some(BufWriter::with_capacity(1 << 20, f));
             tee_tmp_path = Some(tmp);
         } else {
-            eprintln!("Warning: failed to create temporary tee file for stdin; proceeding without tee");
+            eprintln!(
+                "Warning: failed to create temporary tee file for stdin; proceeding without tee"
+            );
         }
     }
     {
@@ -1320,10 +1319,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     human_log!("\nFound {total_positions} positions in input file");
 
     // Effective input path for pass-2 (use tee temp for stdin, else original path)
-    let effective_input_path: PathBuf = tee_tmp_path
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| input_path.clone());
+    let effective_input_path: PathBuf =
+        tee_tmp_path.as_ref().cloned().unwrap_or_else(|| input_path.clone());
 
     // Optional: calibrate nodes from NPS if requested and nodes not explicitly set
     let mut manifest_existing: Option<Manifest> = None;
